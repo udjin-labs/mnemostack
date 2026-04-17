@@ -17,7 +17,8 @@ from pathlib import Path
 
 from . import __version__
 from .embeddings import get_provider, list_providers
-from .recall import BM25Doc, Recaller
+from .llm import get_llm, list_llms
+from .recall import AnswerGenerator, BM25Doc, Recaller
 from .vector import VectorStore
 
 
@@ -88,6 +89,67 @@ def cmd_search(args: argparse.Namespace) -> int:
             sources = ",".join(r.sources) or "?"
             print(f"[{i}] score={r.score:.4f} ({sources})")
             print(f"    {preview}")
+    return 0
+
+
+def cmd_answer(args: argparse.Namespace) -> int:
+    provider = get_provider(args.provider)
+    store = VectorStore(
+        collection=args.collection,
+        dimension=provider.dimension,
+        host=args.qdrant,
+    )
+    if not store.collection_exists():
+        print(
+            f"error: collection '{args.collection}' does not exist. "
+            f"Run `memvault index` first.",
+            file=sys.stderr,
+        )
+        return 2
+
+    recaller = Recaller(embedding_provider=provider, vector_store=store)
+    results = recaller.recall(args.query, limit=args.limit)
+
+    llm = get_llm(args.llm)
+    gen = AnswerGenerator(llm=llm, confidence_threshold=args.min_confidence)
+    answer = gen.generate(args.query, results)
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "query": args.query,
+                    "answer": answer.text,
+                    "confidence": round(answer.confidence, 3),
+                    "sources": answer.sources,
+                    "fallback_recommended": gen.should_fallback(answer),
+                    "error": answer.error,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0 if answer.ok else 1
+
+    if not answer.ok:
+        print(f"error: {answer.error}", file=sys.stderr)
+        return 1
+
+    print(f"ANSWER: {answer.text}")
+    print(f"CONFIDENCE: {answer.confidence:.2f}")
+    if answer.sources:
+        print("SOURCES:")
+        for s in answer.sources:
+            print(f"  - {s}")
+    if gen.should_fallback(answer):
+        print(
+            f"\n⚠ Low confidence ({answer.confidence:.2f}) — consider reviewing raw memories:",
+            file=sys.stderr,
+        )
+        print(
+            f"  memvault search \"{args.query}\" --provider {args.provider}",
+            file=sys.stderr,
+        )
     return 0
 
 
@@ -172,6 +234,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_search.add_argument("--limit", type=int, default=10, help="Max results")
     p_search.add_argument("--json", action="store_true", help="JSON output")
     p_search.set_defaults(func=cmd_search)
+
+    p_answer = sub.add_parser(
+        "answer", parents=[common], help="Synthesize concise answer from memories"
+    )
+    p_answer.add_argument("query", help="Question to answer")
+    p_answer.add_argument("--limit", type=int, default=10, help="Max memories to consider")
+    p_answer.add_argument(
+        "--llm", default="gemini", choices=list_llms(), help="LLM provider for answer generation"
+    )
+    p_answer.add_argument(
+        "--min-confidence",
+        type=float,
+        default=0.5,
+        help="Fallback suggestion threshold",
+    )
+    p_answer.add_argument("--json", action="store_true", help="JSON output")
+    p_answer.set_defaults(func=cmd_answer)
 
     p_index = sub.add_parser("index", parents=[common], help="Index files into vector store")
     p_index.add_argument("path", help="File or directory to index")

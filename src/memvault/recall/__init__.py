@@ -14,6 +14,7 @@ Usage:
     hits = bm25.search("query", limit=10)
 """
 
+from .answer import Answer, AnswerGenerator
 from .bm25 import BM25, BM25Doc, tokenize
 from .fusion import reciprocal_rank_fusion
 from .recaller import Recaller, RecallResult
@@ -25,4 +26,6 @@ __all__ = [
     "reciprocal_rank_fusion",
     "Recaller",
     "RecallResult",
+    "Answer",
+    "AnswerGenerator",
 ]
