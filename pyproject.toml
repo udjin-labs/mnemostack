@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "memvault"
+version = "0.1.0-alpha"
+description = "Memory stack for AI agents: BM25 + Qdrant + Memgraph + RRF retrieval, Gemini Flash inference layer, 8-stage recall pipeline."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "memvault contributors"},
+]
+keywords = ["memory", "ai", "agent", "rag", "qdrant", "memgraph", "retrieval", "bm25", "embeddings"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "qdrant-client>=1.7",
+    "neo4j>=5.15",
+    "pyyaml>=6.0",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+gemini = []
+ollama = []
+huggingface = [
+    "transformers>=4.40",
+    "torch>=2.0",
+]
+mcp = [
+    "fastmcp>=0.2",
+]
+dev = [
+    "pytest>=7.4",
+    "pytest-asyncio>=0.21",
+    "ruff>=0.1",
+    "mypy>=1.7",
+]
+
+[project.scripts]
+memvault = "memvault.cli:main"
+
+[project.urls]
+# Homepage = "https://github.com/YOUR_ORG/memvault"
+# Repository = "https://github.com/YOUR_ORG/memvault"
+# Issues = "https://github.com/YOUR_ORG/memvault/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
