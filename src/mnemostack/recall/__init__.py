@@ -17,6 +17,24 @@ Usage:
 from .answer import Answer, AnswerGenerator
 from .bm25 import BM25, BM25Doc, tokenize
 from .fusion import reciprocal_rank_fusion
+from .pipeline import (
+    ClassifyQuery,
+    CuriosityBoost,
+    ExactTokenRescue,
+    FileStateStore,
+    FreshnessBlend,
+    GravityDampen,
+    HubDampen,
+    InhibitionOfReturn,
+    InMemoryStateStore,
+    Pipeline,
+    PipelineContext,
+    QLearningReranker,
+    Stage,
+    StateStore,
+    build_full_pipeline,
+    build_stateless_pipeline,
+)
 from .recaller import Recaller, RecallResult
 from .reranker import Reranker
 
@@ -30,4 +48,20 @@ __all__ = [
     "Answer",
     "AnswerGenerator",
     "Reranker",
+    "Pipeline",
+    "PipelineContext",
+    "Stage",
+    "StateStore",
+    "InMemoryStateStore",
+    "FileStateStore",
+    "ClassifyQuery",
+    "ExactTokenRescue",
+    "GravityDampen",
+    "HubDampen",
+    "FreshnessBlend",
+    "InhibitionOfReturn",
+    "CuriosityBoost",
+    "QLearningReranker",
+    "build_full_pipeline",
+    "build_stateless_pipeline",
 ]

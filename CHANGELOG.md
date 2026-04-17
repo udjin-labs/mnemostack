@@ -6,6 +6,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0a7] - 2026-04-17
+
+### Added — full 8-stage pipeline ported from the reference enhanced-recall implementation
+
+- `mnemostack.recall.pipeline` subpackage with composable stage architecture
+  - `Pipeline` orchestrator (sequence of Stage instances)
+  - `PipelineContext` shared state (query, query_type, tokens, extras)
+  - `Stage` base class for custom stages
+- `StateStore` abstraction — plug in persistence for stateful stages
+  - `InMemoryStateStore` (thread-safe, lost on restart)
+  - `FileStateStore` (atomic JSON writes)
+- 8 built-in stages:
+  - `ClassifyQuery` — categorize queries (person/project/decision/event/technical/general)
+  - `ExactTokenRescue` — boost exact-match sources for infra queries (IPs, ports, versions)
+  - `GravityDampen` — penalize results where query terms are absent in content
+  - `HubDampen` — penalize top-degree graph hubs (prevents domination by overconnected nodes)
+  - `FreshnessBlend` — blend similarity with recency + echo penalty for sub-10min results
+  - `InhibitionOfReturn` — penalize recently-recalled memories (biological diversity)
+  - `CuriosityBoost` — surface old, rarely-recalled memories
+  - `QLearningReranker` — learn which retrieval sources perform best per query type
+- Presets: `build_full_pipeline()` and `build_stateless_pipeline()` for common configurations
+
+### Tests
+- 25 pipeline tests (stages + orchestrator + presets + integration)
+- Total: 160 passing
+
 ## [0.1.0a6] - 2026-04-17
 
 ### Added
