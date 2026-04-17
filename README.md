@@ -1,5 +1,10 @@
 # mnemostack
 
+[![PyPI](https://img.shields.io/pypi/v/mnemostack.svg)](https://pypi.org/project/mnemostack/)
+[![Python versions](https://img.shields.io/pypi/pyversions/mnemostack.svg)](https://pypi.org/project/mnemostack/)
+[![CI](https://github.com/udjin-labs/mnemostack/actions/workflows/ci.yml/badge.svg)](https://github.com/udjin-labs/mnemostack/actions/workflows/ci.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+
 > Memory stack for AI agents — durable, structured, semantically searchable.
 
 `mnemostack` is a hybrid memory system combining BM25, vector search (Qdrant), and knowledge graph (Memgraph) with a unified recall pipeline, reranker, and optional LLM inference layer.
