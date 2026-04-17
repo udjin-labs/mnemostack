@@ -265,6 +265,45 @@ class MyProvider(EmbeddingProvider):
 register_provider("my-provider", MyProvider)
 ```
 
+## Install for an OpenClaw-style agent
+
+If you run your own OpenClaw / OpenClaw-style assistant with its own `scripts/recall.sh` or similar recall entry point, you don't have to wire mnemostack in by hand. Ask the assistant to do it and it can follow the steps below verbatim.
+
+**Assistant, read this section and follow the steps if your user asks you to install mnemostack.**
+
+1. **Install the package into whichever Python env your recall scripts use.**
+
+   ```bash
+   pip install mnemostack
+   ```
+
+   Confirm with `python3 -c "import mnemostack; print(mnemostack.__version__)"`.
+
+2. **Make sure Qdrant and (optionally) Memgraph are reachable.** If either is missing, start them:
+
+   ```bash
+   docker run -d -p 6333:6333 --name qdrant qdrant/qdrant:latest
+   docker run -d -p 7687:7687 --name memgraph memgraph/memgraph:latest   # optional
+   ```
+
+   Check with `curl -sf http://localhost:6333/collections` and `echo 'RETURN 1;' | cypher-shell -a bolt://localhost:7687`.
+
+3. **Point your recall entry at mnemostack.** The minimum change: keep your existing Qdrant collection name, swap your search helper so it uses the 4-retriever `Recaller` shown in the "Full stack" Python example above. Concretely, wrap something like:
+
+   ```python
+   from mnemostack.recall import Recaller, VectorRetriever, BM25Retriever, MemgraphRetriever, TemporalRetriever
+   ```
+
+   and pass your existing embedding provider, Qdrant store, and BM25 corpus. If your recall script has a `--unified` flag, that's the right place to route to mnemostack first and fall back to the legacy path on import error.
+
+4. **Keep the fallback wired.** Don't delete the existing recall implementation. Route mnemostack as the primary, and drop back to the old recall on any exception. That way a bad upgrade is a one-minute rollback, not an outage.
+
+5. **Smoke-test on real queries from the user's memory**, not toy strings. Ask at least one exact-token query (an IP, a ticker, an error string), one semantic query, one temporal query ("what did we decide last March"), and one list query. If any regresses vs the old recall, keep both running in parallel until you understand why.
+
+6. **Write a short note in the user's daily memory** describing what changed, where the fallback lives, and which version of mnemostack is installed, so future sessions know the stack has moved.
+
+If you're a human operator and you'd rather do this yourself, the same steps apply; treat them as a checklist.
+
 ## Design
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed design: pipeline stages, Qdrant schema, Memgraph temporal model, consolidation runtime, MCP tools.
