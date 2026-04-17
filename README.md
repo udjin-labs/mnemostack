@@ -27,7 +27,9 @@ By question category:
 | `cat_1` single-hop lists | 34.8% |
 | `cat_3` open-domain reasoning | 31.2% |
 
-How that compares with reported numbers from other systems on the same benchmark (caveat: different judges and evaluation protocols):
+> **Honest numbers disclaimer.** The table above is our full-benchmark number across **all 1986 questions and all 5 categories**. Some vendors report their strongest sub-category only; if we did the same we could honestly claim **90.1% on adversarial open-domain** or **69.2% on multi-hop reasoning**. We publish the full aggregate because that's what actually predicts how the system behaves on mixed workloads.
+
+How that compares with reported numbers from other systems on the same benchmark (caveat: different judges, evaluation protocols, and in some cases category cherry-picking):
 
 | System | LoCoMo correct |
 | --- | --- |
