@@ -44,15 +44,18 @@ Reproduce with `python benchmarks/locomo_single.py --samples 10` from a clone; t
 
 ## Features
 
-- 🧠 **Hybrid retrieval** — BM25 (exact tokens) + vector (semantic), fused via Reciprocal Rank Fusion
+- 🧠 **4-source hybrid retrieval** — Vector (Qdrant) + BM25 (exact tokens) + Memgraph (knowledge graph) + Temporal (time-aware vector), all fused via Reciprocal Rank Fusion. Pluggable `Retriever` abstraction — add your own sources.
+- ⚡ **8-stage recall pipeline** — ClassifyQuery → ExactTokenRescue → GravityDampen → HubDampen → FreshnessBlend → InhibitionOfReturn → CuriosityBoost → QLearningReranker. Opt-in, with persistent state store.
+- 🔁 **LLM reranker** — Gemini Flash (or any LLM) reorders top-K by relevance; catches cases where embedding similarity alone is too broad.
 - 🔌 **Pluggable embeddings** — Gemini, Ollama, or HuggingFace (local GPU), via provider registry
 - 🤖 **Pluggable LLM** — Gemini Flash / Ollama for answer generation and reranking
-- 📚 **Temporal knowledge graph** — facts have `valid_from`/`valid_until`, query point-in-time state
+- 📚 **Temporal knowledge graph** — facts have `valid_from`/`valid_until`, query point-in-time state; graph resurrection stage recovers evicted-but-relevant memories.
 - 💬 **Answer mode** — inference layer synthesizes concise factual answers with source citations and confidence
-- 🔁 **Reranker** — LLM-based reordering of top results
+- ✂️ **Chunkers** — plain, fixed-size, and `MessagePairChunker` for chat transcripts (keeps user↔assistant pairs together).
+- 🔎 **Query expansion** — optional `QueryExpander` rewrites short queries for better recall before fusion.
 - ⚙ **Consolidation runtime** — phase orchestrator for nightly memory lifecycle
 - 🔌 **MCP server** — expose memory tools to Claude Desktop, ChatGPT, Cursor, etc.
-- 🛡 **Graceful degradation** — retrieval keeps working if graph is down
+- 🛡 **Graceful degradation** — retrieval keeps working if graph or any retriever is down
 
 ## Installation
 
@@ -120,6 +123,40 @@ results = recaller.recall("what did we decide", limit=10)
 gen = AnswerGenerator(llm=get_llm("gemini"))
 answer = gen.generate("what did we decide", results)
 print(answer.text, answer.confidence, answer.sources)
+```
+
+#### Full stack: 4-source retrieval + 8-stage pipeline + reranker
+
+This is the configuration that produced the 66.4% / 79.2% LoCoMo numbers above.
+
+```python
+from mnemostack.embeddings import get_provider
+from mnemostack.llm import get_llm
+from mnemostack.vector import VectorStore
+from mnemostack.recall import (
+    Recaller, Reranker,
+    VectorRetriever, BM25Retriever,
+    MemgraphRetriever, TemporalRetriever,
+    build_full_pipeline,
+)
+from mnemostack.recall.pipeline import FileStateStore
+
+emb = get_provider("gemini")
+store = VectorStore(collection="my-memory", dimension=emb.dimension)
+
+retrievers = [
+    VectorRetriever(embedding=emb, vector_store=store),
+    BM25Retriever(docs=bm25_docs),                       # your BM25 corpus
+    MemgraphRetriever(uri="bolt://localhost:7687"),      # optional
+    TemporalRetriever(embedding=emb, vector_store=store),
+]
+recaller = Recaller(retrievers=retrievers)
+raw = recaller.recall("what did we decide", limit=30)
+
+pipeline = build_full_pipeline(state_store=FileStateStore("/tmp/mnemo-state.json"))
+reranked = pipeline.apply("what did we decide", raw)
+reranker = Reranker(llm=get_llm("gemini"), max_items=20)
+final = reranker.rerank("what did we decide", reranked)[:10]
 ```
 
 ### Knowledge graph (optional)
