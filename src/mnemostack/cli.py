@@ -15,7 +15,10 @@ import json
 import sys
 from pathlib import Path
 
+from pathlib import Path
+
 from . import __version__
+from .config import Config, DEFAULT_CONFIG_PATHS, generate_example_config
 from .embeddings import get_provider, list_providers
 from .llm import get_llm, list_llms
 from .recall import AnswerGenerator, BM25Doc, Recaller
@@ -258,7 +261,77 @@ def build_parser() -> argparse.ArgumentParser:
     p_index.add_argument("--recreate", action="store_true", help="Drop existing collection")
     p_index.set_defaults(func=cmd_index)
 
+    p_mcp = sub.add_parser(
+        "mcp-serve",
+        parents=[common],
+        help="Run MCP server (stdio). Requires: pip install 'mnemostack[mcp]'",
+    )
+    p_mcp.add_argument(
+        "--llm", default="gemini", help="LLM provider for answer generation"
+    )
+    p_mcp.add_argument(
+        "--memgraph-uri",
+        default=None,
+        help="Memgraph URI to enable graph tools (e.g. bolt://localhost:7687)",
+    )
+    p_mcp.set_defaults(func=cmd_mcp_serve)
+
+    p_init = sub.add_parser(
+        "init", help="Create an example config file at ~/.config/mnemostack/config.yaml"
+    )
+    p_init.add_argument("--path", default=None, help="Custom config path")
+    p_init.add_argument("--force", action="store_true", help="Overwrite existing config")
+    p_init.set_defaults(func=cmd_init)
+
+    p_config = sub.add_parser("config", help="Show currently resolved config")
+    p_config.add_argument(
+        "--config", default=None, help="Explicit config path (overrides defaults)"
+    )
+    p_config.set_defaults(func=cmd_config_show)
+
     return p
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    """Create an example config file at the standard location."""
+    target = Path(args.path).expanduser() if args.path else DEFAULT_CONFIG_PATHS[0]
+    if target.exists() and not args.force:
+        print(f"error: config already exists at {target} (use --force to overwrite)", file=sys.stderr)
+        return 2
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(generate_example_config())
+    print(f"Config written to {target}")
+    print("Edit it and re-run `mnemostack health` to verify.")
+    return 0
+
+
+def cmd_config_show(args: argparse.Namespace) -> int:
+    """Print the currently resolved config (file + env overrides)."""
+    import yaml
+    cfg = Config.load(args.config)
+    print(yaml.safe_dump(cfg.to_dict(), default_flow_style=False, sort_keys=False))
+    return 0
+
+
+def cmd_mcp_serve(args: argparse.Namespace) -> int:
+    try:
+        from .mcp import build_server
+    except ImportError as e:
+        print(
+            f"error: MCP server requires fastmcp. Install with: pip install 'mnemostack[mcp]'\n{e}",
+            file=sys.stderr,
+        )
+        return 2
+
+    mcp = build_server(
+        collection=args.collection,
+        embedding_provider=args.provider,
+        llm_provider=args.llm,
+        qdrant_host=args.qdrant,
+        memgraph_uri=args.memgraph_uri,
+    )
+    mcp.run()
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -11,5 +11,7 @@ Core components:
 See ARCHITECTURE.md for design, README.md for usage.
 """
 
-__version__ = "0.1.0a2"
-__all__ = []
+from .config import Config
+
+__version__ = "0.1.0a4"
+__all__ = ["Config"]

@@ -2,64 +2,124 @@
 
 > Memory stack for AI agents — durable, structured, semantically searchable.
 
-`mnemostack` is a hybrid memory system combining BM25, vector search (Qdrant), and knowledge graph (Memgraph) with a unified recall pipeline, reranker, and optional inference layer.
+`mnemostack` is a hybrid memory system combining BM25, vector search (Qdrant), and knowledge graph (Memgraph) with a unified recall pipeline, reranker, and optional LLM inference layer.
 
-**Status:** 🚧 alpha — under active development.
+**Status:** 🚧 alpha — API may change between 0.1.x releases.
 
 ## Features
 
-- 🧠 **Hybrid retrieval** — BM25 (exact tokens) + vector (semantic) + graph (relationships), fused via Reciprocal Rank Fusion
+- 🧠 **Hybrid retrieval** — BM25 (exact tokens) + vector (semantic), fused via Reciprocal Rank Fusion
 - 🔌 **Pluggable embeddings** — Gemini, Ollama, or HuggingFace (local GPU), via provider registry
-- 📚 **Temporal knowledge graph** — facts have `valid_from`/`valid_until` so you can query point-in-time state
-- 💬 **Answer mode** — inference layer synthesizes concise factual answers with source citations and confidence scores
-- 🔄 **Consolidation lifecycle** — nightly decay, extraction, and promotion of memories
+- 🤖 **Pluggable LLM** — Gemini Flash / Ollama for answer generation and reranking
+- 📚 **Temporal knowledge graph** — facts have `valid_from`/`valid_until`, query point-in-time state
+- 💬 **Answer mode** — inference layer synthesizes concise factual answers with source citations and confidence
+- 🔁 **Reranker** — LLM-based reordering of top results
+- ⚙ **Consolidation runtime** — phase orchestrator for nightly memory lifecycle
+- 🔌 **MCP server** — expose memory tools to Claude Desktop, ChatGPT, Cursor, etc.
 - 🛡 **Graceful degradation** — retrieval keeps working if graph is down
 
 ## Installation
 
 ```bash
-# Clone and install in dev mode
-git clone https://github.com/YOUR_ORG/mnemostack.git
-cd mnemostack
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e .
+# From PyPI
+pip install mnemostack
 
 # Optional extras
-pip install -e ".[huggingface]"  # local GPU embeddings
-pip install -e ".[mcp]"          # MCP server
-pip install -e ".[dev]"          # tests + linters
+pip install 'mnemostack[huggingface]'  # local GPU embeddings
+pip install 'mnemostack[mcp]'          # MCP server
+pip install 'mnemostack[dev]'          # tests + linters
+```
+
+Run a local Qdrant for the vector store:
+
+```bash
+docker run -p 6333:6333 qdrant/qdrant:latest
+```
+
+Optionally a Memgraph for the knowledge graph:
+
+```bash
+docker run -p 7687:7687 memgraph/memgraph:latest
 ```
 
 ## Quick start
 
-### Pick an embedding provider
+### CLI
+
+```bash
+# Health check
+mnemostack health --provider ollama
+
+# Index a directory of notes
+mnemostack index ./my-notes/ --provider gemini --collection my-memory --recreate
+
+# Hybrid recall
+mnemostack search "what did we decide about auth" --provider gemini --collection my-memory
+
+# Synthesize answer
+mnemostack answer "what is the capital of France" --provider gemini --collection my-memory
+
+# MCP server (for Claude Desktop, Cursor, etc.)
+mnemostack mcp-serve --provider gemini --collection my-memory
+```
+
+### Python API
 
 ```python
 from mnemostack.embeddings import get_provider
+from mnemostack.vector import VectorStore
+from mnemostack.recall import Recaller, AnswerGenerator
+from mnemostack.llm import get_llm
 
-# Option A: Gemini (cloud, best quality)
-provider = get_provider("gemini")  # reads GEMINI_API_KEY from env
+emb = get_provider("gemini")
+store = VectorStore(collection="my-memory", dimension=emb.dimension)
+store.ensure_collection()
 
-# Option B: Ollama (local, no API key)
-provider = get_provider("ollama", model="nomic-embed-text")
+# ... index data here ...
 
-# Option C: HuggingFace (local, GPU)
-provider = get_provider("huggingface", model="BAAI/bge-large-en-v1.5")
+recaller = Recaller(embedding_provider=emb, vector_store=store)
+results = recaller.recall("what did we decide", limit=10)
 
-vec = provider.embed("What did we decide about authentication?")
-print(f"{provider.name} — dim {provider.dimension}")
+# Optional: synthesize a concise answer
+gen = AnswerGenerator(llm=get_llm("gemini"))
+answer = gen.generate("what did we decide", results)
+print(answer.text, answer.confidence, answer.sources)
 ```
 
-### Health check
+### Knowledge graph (optional)
 
 ```python
-ok, msg = provider.health_check()
-print("provider ok" if ok else f"down: {msg}")
+from mnemostack.graph import GraphStore
+
+graph = GraphStore(uri="bolt://localhost:7687")
+graph.add_triple("alice", "works_on", "project-x", valid_from="2024-01-01")
+graph.add_triple("alice", "works_on", "project-y", valid_from="2024-07-01")
+
+# Who was alice working on in March?
+march_facts = graph.query_triples(subject="alice", as_of="2024-03-15")
 ```
 
-### Custom provider
+### MCP server for Claude Desktop
 
-Any class that inherits `EmbeddingProvider` can be registered:
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "mnemostack": {
+      "command": "mnemostack",
+      "args": ["mcp-serve", "--provider", "gemini", "--collection", "my-memory"],
+      "env": {
+        "GEMINI_API_KEY": "your-key-here"
+      }
+    }
+  }
+}
+```
+
+Claude will then be able to call `mnemostack_search`, `mnemostack_answer`, and graph tools.
+
+### Custom embedding provider
 
 ```python
 from mnemostack.embeddings import EmbeddingProvider, register_provider
@@ -82,13 +142,19 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed design: pipeline stages, Qdr
 ## Roadmap
 
 - [x] Embedding provider registry (Gemini / Ollama / HuggingFace)
-- [ ] Qdrant wrapper + chunking
-- [ ] BM25 + RRF + reranker pipeline
-- [ ] Answer mode (Gemini Flash inference)
-- [ ] Memgraph wrapper + temporal queries
-- [ ] Consolidation runtime (decay, promote, summarize)
-- [ ] CLI (`mnemostack search`, `mnemostack index`, `mnemostack runtime`)
-- [ ] MCP server (Model Context Protocol for Claude/GPT clients)
+- [x] LLM provider registry (Gemini Flash / Ollama)
+- [x] Qdrant wrapper
+- [x] BM25 + RRF recall pipeline
+- [x] Answer mode with confidence + citations
+- [x] LLM-based reranker
+- [x] Memgraph wrapper with temporal validity
+- [x] Consolidation runtime (phase orchestrator)
+- [x] CLI (`mnemostack health/search/answer/index/mcp-serve`)
+- [x] MCP server (Model Context Protocol)
+- [ ] Text → graph triple extractor helpers
+- [ ] Config file support (YAML/JSON)
+- [ ] Async variants for high-throughput servers
+- [ ] Docker compose examples
 
 ## License
 
