@@ -5,7 +5,7 @@ Much faster iteration loop for prompt tuning. Reuses ingestion per sample
 but only evaluates QA that previously failed (wrong or partial).
 """
 from __future__ import annotations
-import argparse, json, sys
+import argparse, json, os, sys
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,7 +18,10 @@ from mnemostack.llm import get_llm
 from mnemostack.recall import AnswerGenerator, BM25Doc, QueryExpander, Recaller, build_full_pipeline
 from mnemostack.vector import VectorStore
 
-DATASET = Path('./datasets/locomo10.json')
+# LoCoMo dataset path. Download from https://github.com/snap-research/locomo
+# (file: data/locomo10.json) and point LOCOMO_DATASET at it, or place it under
+# ./datasets/locomo10.json next to this script.
+DATASET = Path(os.environ.get("LOCOMO_DATASET", "./datasets/locomo10.json"))
 
 
 def parse_date(s):

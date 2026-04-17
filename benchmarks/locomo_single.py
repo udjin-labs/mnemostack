@@ -21,7 +21,10 @@ from mnemostack.llm import get_llm
 from mnemostack.recall import AnswerGenerator, BM25Doc, Recaller, build_full_pipeline
 from mnemostack.vector import VectorStore
 
-DATASET = "./datasets/locomo10.json"
+# LoCoMo dataset path. Download from https://github.com/snap-research/locomo
+# (file: data/locomo10.json) and point LOCOMO_DATASET at it, or place it under
+# ./datasets/locomo10.json next to this script.
+DATASET = os.environ.get("LOCOMO_DATASET", "./datasets/locomo10.json")
 
 
 def parse_date(s: str) -> datetime:

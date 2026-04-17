@@ -135,7 +135,8 @@ class Reranker:
         """Extract IDs from LLM output like '3 7 1' or 'NONE'.
 
         IDs can be integers, strings, or composite forms (paths with slashes
-        and colons, e.g. `notes/MEMORY.md:45` or `graph:Kairos`).
+        and colons, e.g. `notes/MEMORY.md:45` or `graph:alice-works-on-x`).
+
         The regex captures any run of non-whitespace, non-comma characters,
         which covers all forms we emit from Retrievers.
         """

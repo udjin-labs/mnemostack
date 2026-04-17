@@ -38,7 +38,7 @@ from mnemostack.recall import (
 from mnemostack.vector import VectorStore
 
 DATASET = Path(
-    "./datasets/locomo10.json"
+    os.environ.get("LOCOMO_DATASET", "./datasets/locomo10.json")
 )
 
 
@@ -188,7 +188,7 @@ def main():
     ap.add_argument("--samples", type=int, default=2)
     ap.add_argument("--qa", type=int, default=None)
     ap.add_argument("--pair-chunks", action="store_true", help="Use MessagePairChunker for sliding-window chunks")
-    ap.add_argument("--output", default="./benchmarks/locomo_compare_results.json")
+    ap.add_argument("--output", default="./locomo_compare_results.json")
     args = ap.parse_args()
 
     with open(DATASET) as f:
