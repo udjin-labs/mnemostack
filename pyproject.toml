@@ -53,8 +53,10 @@ dev = [
 mnemostack = "mnemostack.cli:main"
 
 [project.urls]
-# Homepage = "https://github.com/YOUR_ORG/mnemostack"
-# Repository = "https://github.com/YOUR_ORG/mnemostack"
+Homepage = "https://github.com/udjin-labs/mnemostack"
+Repository = "https://github.com/udjin-labs/mnemostack"
+Issues = "https://github.com/udjin-labs/mnemostack/issues"
+Changelog = "https://github.com/udjin-labs/mnemostack/blob/main/CHANGELOG.md"
 # Issues = "https://github.com/YOUR_ORG/mnemostack/issues"
 
 [tool.setuptools.packages.find]
