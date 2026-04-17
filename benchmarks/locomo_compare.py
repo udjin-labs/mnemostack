@@ -26,6 +26,7 @@ from pathlib import Path
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, PayloadSchemaType, VectorParams
 
+from mnemostack.chunking import MessagePairChunker
 from mnemostack.embeddings import get_provider
 from mnemostack.llm import get_llm
 from mnemostack.recall import (
@@ -48,7 +49,7 @@ def parse_date(s: str) -> datetime:
         return datetime(2023, 1, 1, tzinfo=timezone.utc)
 
 
-def ingest_sample(sample, provider, client, collection, log):
+def ingest_sample(sample, provider, client, collection, log, pair_chunks=False):
     try:
         client.delete_collection(collection)
     except Exception:
@@ -64,23 +65,28 @@ def ingest_sample(sample, provider, client, collection, log):
         key=lambda x: int(x.split("_")[1]),
     )
 
-    texts = []
-    records = []
+    raw_texts, raw_records = [], []
     for skey in sess_keys:
         if not isinstance(conv.get(skey), list):
             continue
         date_key = f"{skey}_date_time"
         sess_date = parse_date(conv.get(date_key, ""))
         for msg in conv[skey]:
-            text = f"[{sess_date.strftime('%Y-%m-%d')}] {msg['speaker']}: {msg['text']}"
-            texts.append(text)
-            records.append({
+            raw_texts.append(f"[{sess_date.strftime('%Y-%m-%d')}] {msg['speaker']}: {msg['text']}")
+            raw_records.append({
                 "source": f"{sample['sample_id']}/{skey}",
                 "session": skey,
                 "timestamp": sess_date.isoformat(),
                 "speaker": msg["speaker"],
                 "dia_id": msg.get("dia_id", ""),
             })
+    if pair_chunks:
+        chunker = MessagePairChunker(include_solo=True, window=2)
+        chunks = chunker.chunk_messages(raw_texts, metadata=raw_records)
+        texts = [c.text for c in chunks]
+        records = [c.metadata for c in chunks]
+    else:
+        texts, records = raw_texts, raw_records
 
     log(f"  embedding {len(texts)} messages (batch)...")
     t0 = time.time()
@@ -181,6 +187,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--samples", type=int, default=2)
     ap.add_argument("--qa", type=int, default=None)
+    ap.add_argument("--pair-chunks", action="store_true", help="Use MessagePairChunker for sliding-window chunks")
     ap.add_argument("--output", default="./benchmarks/locomo_compare_results.json")
     args = ap.parse_args()
 
@@ -210,7 +217,7 @@ def main():
         sid = sample["sample_id"]
         collection = f"locomo_cmp_{sid}"
         log(f"\n=== Sample {sidx+1}/{len(dataset)}: {sid} ===")
-        store, bm25_docs = ingest_sample(sample, provider, client, collection, log)
+        store, bm25_docs = ingest_sample(sample, provider, client, collection, log, pair_chunks=args.pair_chunks)
         recaller = Recaller(embedding_provider=provider, vector_store=store, bm25_docs=bm25_docs)
 
         qa = sample["qa"]

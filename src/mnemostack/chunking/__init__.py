@@ -18,6 +18,14 @@ Usage:
 from .base import Chunk, Chunker
 from .char import CharChunker
 from .markdown import MarkdownChunker
+from .messages import MessagePairChunker
 from .paragraph import ParagraphChunker
 
-__all__ = ["Chunk", "Chunker", "CharChunker", "MarkdownChunker", "ParagraphChunker"]
+__all__ = [
+    "Chunk",
+    "Chunker",
+    "CharChunker",
+    "MarkdownChunker",
+    "MessagePairChunker",
+    "ParagraphChunker",
+]
