@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mnemostack"
-version = "0.1.0a1"
+version = "0.1.0a2"
 description = "Memory stack for AI agents: BM25 + Qdrant + Memgraph + RRF retrieval, Gemini Flash inference layer, 8-stage recall pipeline."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -25,10 +25,11 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "qdrant-client>=1.7",
-    "neo4j>=5.15",
-    "pyyaml>=6.0",
-    "requests>=2.31",
+    "qdrant-client>=1.7,<2",
+    "neo4j>=5.15,<7",
+    "pyyaml>=6.0,<7",
+    "requests>=2.31,<3",
+    "httpx>=0.24,<1",
 ]
 
 [project.optional-dependencies]

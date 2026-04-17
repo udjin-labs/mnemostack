@@ -11,5 +11,5 @@ Core components:
 See ARCHITECTURE.md for design, README.md for usage.
 """
 
-__version__ = "0.1.0a1"
+__version__ = "0.1.0a2"
 __all__ = []
