@@ -1,0 +1,317 @@
+"""Retriever abstraction — pluggable ranked-list sources for RRF fusion.
+
+A Retriever takes a query and returns a ranked list of RecallResult-like items
+(id, text, score, payload, sources). Multiple retrievers are fused via RRF in
+Recaller. This matches the legacy enhanced-recall.py architecture where
+Vector / BM25 / Memgraph / Temporal are all first-class ranked sources, not
+post-ranking stages.
+
+Built-in retrievers:
+- VectorRetriever     — Qdrant semantic search (embedding-based)
+- BM25Retriever       — exact token match
+- MemgraphRetriever   — knowledge graph exact/contains match on node names
+- TemporalRetriever   — vector search inside a date range extracted from query
+"""
+from __future__ import annotations
+
+import re
+from abc import ABC, abstractmethod
+from collections import defaultdict
+from datetime import datetime, timezone
+from typing import Any
+
+from ..embeddings.base import EmbeddingProvider
+from ..vector import VectorStore
+from .bm25 import BM25, BM25Doc
+from .recaller import RecallResult
+
+try:
+    from neo4j import GraphDatabase
+    _NEO4J_AVAILABLE = True
+except ImportError:
+    _NEO4J_AVAILABLE = False
+
+
+class Retriever(ABC):
+    """A ranked-list source. Called by Recaller for each query."""
+
+    name: str = "retriever"
+
+    @abstractmethod
+    def search(
+        self,
+        query: str,
+        limit: int = 20,
+        filters: dict[str, Any] | None = None,
+    ) -> list[RecallResult]:
+        """Return ranked results. May be empty. Must not raise on expected misses."""
+        ...
+
+
+class VectorRetriever(Retriever):
+    """Semantic search via embedding + vector store (e.g. Qdrant)."""
+
+    name = "vector"
+
+    def __init__(self, embedding: EmbeddingProvider, vector_store: VectorStore):
+        self.embedding = embedding
+        self.vector_store = vector_store
+
+    def search(self, query, limit=20, filters=None):
+        vec = self.embedding.embed(query)
+        if not vec:
+            return []
+        hits = self.vector_store.search(vec, limit=limit, filters=filters)
+        return [
+            RecallResult(
+                id=h.id,
+                text=h.payload.get("text", ""),
+                score=h.score,
+                payload=h.payload,
+                sources=["vector"],
+            )
+            for h in hits
+        ]
+
+
+class BM25Retriever(Retriever):
+    """Exact token match via BM25."""
+
+    name = "bm25"
+
+    def __init__(self, docs: list[BM25Doc]):
+        self.bm25 = BM25(docs)
+
+    def search(self, query, limit=20, filters=None):
+        hits = self.bm25.search(query, limit=limit)
+        return [
+            RecallResult(
+                id=d.id,
+                text=d.text,
+                score=s,
+                payload=d.payload or {},
+                sources=["bm25"],
+            )
+            for d, s in hits
+        ]
+
+
+class MemgraphRetriever(Retriever):
+    """Knowledge-graph retriever — exact/contains match on node names.
+
+    Mirrors legacy enhanced-recall.py:fetch_memgraph. Each word >=3 chars in
+    the query becomes a probe; nodes matched by multiple probes get higher
+    counts (used as score).
+    """
+
+    name = "memgraph"
+
+    def __init__(
+        self,
+        uri: str = "bolt://localhost:7687",
+        user: str = "",
+        password: str = "",
+        min_word: int = 3,
+        contains_min: int = 5,
+        max_nodes: int = 10,
+        max_rels: int = 5,
+        driver: Any = None,
+    ):
+        self.uri = uri
+        self.user = user
+        self.password = password
+        self.min_word = min_word
+        self.contains_min = contains_min
+        self.max_nodes = max_nodes
+        self.max_rels = max_rels
+        self._driver = driver
+        self._own_driver = driver is None
+
+    def _get_driver(self):
+        if self._driver is not None:
+            return self._driver
+        if not _NEO4J_AVAILABLE:
+            return None
+        try:
+            self._driver = GraphDatabase.driver(
+                self.uri, auth=(self.user, self.password) if self.user else None
+            )
+            return self._driver
+        except Exception:
+            return None
+
+    def close(self) -> None:
+        if self._driver is not None and self._own_driver:
+            try:
+                self._driver.close()
+            except Exception:
+                pass
+            self._driver = None
+
+    def search(self, query, limit=20, filters=None):
+        driver = self._get_driver()
+        if driver is None:
+            return []
+        words = [w.lower() for w in query.split() if len(w) >= self.min_word]
+        if not words:
+            return []
+        counts: dict[str, dict[str, Any]] = defaultdict(
+            lambda: {"count": 0, "type": "", "mc": ""}
+        )
+        try:
+            with driver.session() as session:
+                for w in words:
+                    rows = session.run(
+                        "MATCH (n) WHERE toLower(n.name) = $w "
+                        "AND n.valid_until = 'current' "
+                        "RETURN n.name AS name, labels(n)[0] AS type, "
+                        "n.memory_class AS mc LIMIT 5",
+                        w=w,
+                    ).data()
+                    if not rows and len(w) >= self.contains_min:
+                        rows = session.run(
+                            "MATCH (n) WHERE toLower(n.name) CONTAINS $w "
+                            "AND n.valid_until = 'current' "
+                            "RETURN n.name AS name, labels(n)[0] AS type, "
+                            "n.memory_class AS mc LIMIT 5",
+                            w=w,
+                        ).data()
+                    for n in rows:
+                        name = n.get("name")
+                        if not name:
+                            continue
+                        counts[name]["count"] += 1
+                        counts[name]["type"] = n.get("type", "") or ""
+                        counts[name]["mc"] = n.get("mc", "") or ""
+                # Fetch relationships for top-N
+                ranked = sorted(counts.items(), key=lambda kv: -kv[1]["count"])[: self.max_nodes]
+                results: list[RecallResult] = []
+                for name, info in ranked:
+                    rel_rows = session.run(
+                        "MATCH (n {name: $name})-[r]->(m) "
+                        "WHERE n.valid_until = 'current' "
+                        "RETURN n.name AS from_n, type(r) AS rel, m.name AS to_n "
+                        "LIMIT $lim",
+                        name=name, lim=self.max_rels,
+                    ).data()
+                    rel_text = "; ".join(
+                        f"{r['from_n']}-[{r['rel']}]->{r['to_n']}" for r in rel_rows
+                    )
+                    content = (
+                        f"{info['type']}: {name}. {rel_text}"
+                        if rel_text
+                        else f"{info['type']}: {name}"
+                    )
+                    results.append(
+                        RecallResult(
+                            id=f"graph:{name}",
+                            text=content[:300],
+                            score=float(info["count"]),
+                            payload={
+                                "text": content[:300],
+                                "source": "memgraph",
+                                "memory_class": info.get("mc", ""),
+                                "name": name,
+                                "type": info["type"],
+                            },
+                            sources=["memgraph"],
+                        )
+                    )
+                return results[:limit]
+        except Exception:
+            return []
+
+
+# --- Temporal extraction ---
+# Port of legacy temporal_extractor.extract_temporal (minimal inline version).
+
+_MONTHS = {
+    "январ": 1, "january": 1, "jan": 1,
+    "феврал": 2, "february": 2, "feb": 2,
+    "март": 3, "march": 3, "mar": 3,
+    "апрел": 4, "april": 4, "apr": 4,
+    "май": 5, "may": 5,
+    "июн": 6, "june": 6, "jun": 6,
+    "июл": 7, "july": 7, "jul": 7,
+    "август": 8, "august": 8, "aug": 8,
+    "сентябр": 9, "september": 9, "sep": 9,
+    "октябр": 10, "october": 10, "oct": 10,
+    "ноябр": 11, "november": 11, "nov": 11,
+    "декабр": 12, "december": 12, "dec": 12,
+}
+
+
+def extract_temporal(query: str) -> tuple[str, str] | None:
+    """Best-effort date range extraction. Returns (start_iso, end_iso) or None."""
+    q = query.lower()
+    # "YYYY" — full year
+    m = re.search(r"\b(20[12]\d)\b", q)
+    if m:
+        y = int(m.group(1))
+        return (
+            datetime(y, 1, 1, tzinfo=timezone.utc).isoformat(),
+            datetime(y + 1, 1, 1, tzinfo=timezone.utc).isoformat(),
+        )
+    # "<month> <year>" or Russian stem
+    for stem, month in _MONTHS.items():
+        if stem in q:
+            y_m = re.search(r"\b(20[12]\d)\b", q)
+            y = int(y_m.group(1)) if y_m else datetime.now(timezone.utc).year
+            start = datetime(y, month, 1, tzinfo=timezone.utc)
+            end_month = month + 1
+            end_year = y + (1 if end_month > 12 else 0)
+            end_month = end_month if end_month <= 12 else 1
+            end = datetime(end_year, end_month, 1, tzinfo=timezone.utc)
+            return start.isoformat(), end.isoformat()
+    return None
+
+
+class TemporalRetriever(Retriever):
+    """Vector search filtered by date range extracted from query.
+
+    If no date range can be extracted, returns empty. When a range is found,
+    runs semantic search with a timestamp payload filter.
+    """
+
+    name = "temporal"
+
+    def __init__(
+        self,
+        embedding: EmbeddingProvider,
+        vector_store: VectorStore,
+        extractor=extract_temporal,
+    ):
+        self.embedding = embedding
+        self.vector_store = vector_store
+        self.extractor = extractor
+
+    def search(self, query, limit=10, filters=None):
+        window = self.extractor(query)
+        if not window:
+            return []
+        start, end = window
+        vec = self.embedding.embed(query)
+        if not vec:
+            return []
+        temporal_filter = {
+            "must": [
+                {
+                    "key": "timestamp",
+                    "range": {"gte": start, "lt": end},
+                }
+            ]
+        }
+        try:
+            hits = self.vector_store.search(vec, limit=limit, filters=temporal_filter)
+        except Exception:
+            return []
+        return [
+            RecallResult(
+                id=f"temporal:{h.id}",
+                text=h.payload.get("text", ""),
+                score=h.score,
+                payload={**h.payload, "temporal_match": True},
+                sources=["temporal"],
+            )
+            for h in hits
+        ]

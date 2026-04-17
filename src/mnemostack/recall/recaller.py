@@ -42,15 +42,27 @@ class Recaller:
 
     def __init__(
         self,
-        embedding_provider: EmbeddingProvider,
-        vector_store: VectorStore,
+        embedding_provider: EmbeddingProvider | None = None,
+        vector_store: VectorStore | None = None,
         bm25_docs: list[BM25Doc] | None = None,
         rrf_k: int = 60,
+        retrievers: list["Retriever"] | None = None,
     ):
+        """Two modes:
+
+        1. Legacy constructor (backward compat): embedding_provider + vector_store
+           (+ optional bm25_docs). Fuses Vector + BM25 via RRF.
+        2. Retrievers mode: pass `retrievers=[...]` with any number of
+           Retriever instances (Vector, BM25, Memgraph, Temporal, custom).
+           All are fused via RRF. This matches the legacy enhanced-recall.py
+           architecture where Memgraph and Temporal are first-class RRF
+           sources, not post-stages.
+        """
         self.embedding = embedding_provider
         self.vector = vector_store
         self.bm25 = BM25(bm25_docs) if bm25_docs else None
         self.rrf_k = rrf_k
+        self.retrievers = retrievers or []
 
     def recall(
         self,
@@ -62,6 +74,9 @@ class Recaller:
     ) -> list[RecallResult]:
         """Run hybrid recall and return fused top-K results."""
         counter("mnemostack.recall.calls", 1)
+        # Retrievers mode: fuse N arbitrary ranked lists
+        if self.retrievers:
+            return self._recall_via_retrievers(query, limit, vector_limit, filters)
         with histogram("mnemostack.recall.latency_ms"):
             # Vector search
             vector_hits: list[Hit] = []
@@ -133,3 +148,43 @@ class Recaller:
         if any(d.id == item_id for d, _ in bm25_hits):
             sources.append("bm25")
         return sources
+
+    def _recall_via_retrievers(
+        self,
+        query: str,
+        limit: int,
+        per_source_limit: int,
+        filters: dict[str, Any] | None,
+    ) -> list[RecallResult]:
+        """Fuse N retrievers' ranked lists via RRF. Preserves source tags."""
+        with histogram("mnemostack.recall.latency_ms"):
+            all_lists: list[list[tuple[Any, float]]] = []
+            id_to_result: dict[Any, RecallResult] = {}
+            for retr in self.retrievers:
+                try:
+                    hits = retr.search(query, limit=per_source_limit, filters=filters)
+                except Exception:
+                    hits = []
+                counter(f"mnemostack.recall.{retr.name}_hits", len(hits))
+                ranked: list[tuple[Any, float]] = []
+                for r in hits:
+                    if r.id in id_to_result:
+                        # merge sources
+                        existing = id_to_result[r.id]
+                        for s in r.sources:
+                            if s not in existing.sources:
+                                existing.sources.append(s)
+                    else:
+                        id_to_result[r.id] = r
+                    ranked.append((r.id, r.score))
+                all_lists.append(ranked)
+            fused = reciprocal_rank_fusion(all_lists, k=self.rrf_k, limit=limit)
+            results: list[RecallResult] = []
+            for key, rrf_score in fused:
+                r = id_to_result.get(key)
+                if not r:
+                    continue
+                r.score = rrf_score
+                results.append(r)
+            counter("mnemostack.recall.results", len(results))
+            return results

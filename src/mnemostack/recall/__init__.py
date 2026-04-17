@@ -18,6 +18,14 @@ from .answer import Answer, AnswerGenerator
 from .bm25 import BM25, BM25Doc, tokenize
 from .expansion import QueryExpander
 from .fusion import reciprocal_rank_fusion
+from .retrievers import (
+    BM25Retriever,
+    MemgraphRetriever,
+    Retriever,
+    TemporalRetriever,
+    VectorRetriever,
+    extract_temporal,
+)
 from .pipeline import (
     ClassifyQuery,
     CuriosityBoost,
@@ -47,6 +55,12 @@ __all__ = [
     "Recaller",
     "RecallResult",
     "QueryExpander",
+    "Retriever",
+    "VectorRetriever",
+    "BM25Retriever",
+    "MemgraphRetriever",
+    "TemporalRetriever",
+    "extract_temporal",
     "Answer",
     "AnswerGenerator",
     "Reranker",

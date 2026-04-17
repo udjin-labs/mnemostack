@@ -85,15 +85,36 @@ class Reranker:
             logger.debug("rerank returned no relevant ids, keeping original order")
             return results
 
-        # Build id → result map
+        # Build id → result map. Also keep a prefix-indexed fallback so
+        # LLMs that drop trailing segments (e.g. `MEMORY.md` instead of
+        # `MEMORY.md:45`) still resolve to the right result.
         id_map = {str(r.id): r for r in head}
+
+        def _resolve(rid: str) -> RecallResult | None:
+            if rid in id_map:
+                return id_map[rid]
+            # Fuzzy fallback: longest full-id that starts with the candidate,
+            # or that the candidate starts with. This catches composite ids
+            # (paths / namespaced keys) when the LLM emits a shorter form.
+            matches = [
+                full for full in id_map
+                if full.startswith(rid) or rid.startswith(full)
+            ]
+            if len(matches) == 1:
+                return id_map[matches[0]]
+            if len(matches) > 1:
+                # Prefer the longest match (most specific)
+                matches.sort(key=len, reverse=True)
+                return id_map[matches[0]]
+            return None
 
         reordered: list[RecallResult] = []
         seen: set[str] = set()
         for rid in ranked_ids:
-            if rid in id_map and rid not in seen:
-                reordered.append(id_map[rid])
-                seen.add(rid)
+            r = _resolve(rid)
+            if r is not None and str(r.id) not in seen:
+                reordered.append(r)
+                seen.add(str(r.id))
         # Append results the LLM didn't rank (keeps them available)
         for r in head:
             if str(r.id) not in seen:
@@ -111,12 +132,18 @@ class Reranker:
 
     @staticmethod
     def _parse_ids(raw: str) -> list[str]:
-        """Extract IDs from LLM output like '3 7 1' or 'NONE'."""
+        """Extract IDs from LLM output like '3 7 1' or 'NONE'.
+
+        IDs can be integers, strings, or composite forms (paths with slashes
+        and colons, e.g. `notes/MEMORY.md:45` or `graph:Kairos`).
+        The regex captures any run of non-whitespace, non-comma characters,
+        which covers all forms we emit from Retrievers.
+        """
         text = raw.strip()
         if text.upper().startswith("NONE"):
             return []
         # Take only the first line (LLM might add prose despite instructions)
         first_line = text.split("\n", 1)[0]
-        # Extract alphanumeric tokens (IDs can be strings or numbers)
-        tokens = re.findall(r"\b[\w-]+\b", first_line)
-        return [t for t in tokens if t.upper() not in {"RELEVANT_IDS", "NONE"}]
+        # Split on whitespace / commas; keep composite tokens intact
+        tokens = [t.strip().rstrip(".") for t in re.split(r"[\s,]+", first_line) if t.strip()]
+        return [t for t in tokens if t.upper() not in {"RELEVANT_IDS", "NONE", ""}]

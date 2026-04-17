@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from .base import Pipeline
+from .resurrection import GraphResurrection
 from .stages import (
     ClassifyQuery,
     CuriosityBoost,
@@ -31,6 +32,10 @@ def build_full_pipeline(
     enable_q_learning: bool = True,
     enable_ior: bool = True,
     enable_curiosity: bool = True,
+    graph_uri: str | None = None,
+    graph_user: str = "",
+    graph_password: str = "",
+    graph_limit: int = 3,
 ) -> Pipeline:
     """Build the full 8-stage reranking pipeline.
 
@@ -52,6 +57,10 @@ def build_full_pipeline(
     """
     store = state_store or InMemoryStateStore()
 
+    # Stage order mirrors legacy enhanced-recall.py pipeline:
+    #   Gravity → Hub → Q-learning → Curiosity → Freshness → IOR → Graph
+    # Q-learning applies BEFORE Freshness so BM25/graph results get the
+    # source-utility boost while scores are still in raw RRF range.
     stages = [
         ClassifyQuery(),
         ExactTokenRescue(boost=rescue_boost),
@@ -61,14 +70,22 @@ def build_full_pipeline(
     if hub_degrees:
         stages.append(HubDampen(hub_degrees=hub_degrees))
 
+    if enable_q_learning:
+        stages.append(QLearningReranker(state_store=store))
+
+    if enable_curiosity:
+        stages.append(CuriosityBoost(state_store=store))
+
     stages.append(FreshnessBlend(weight=freshness_weight))
 
     if enable_ior:
         stages.append(InhibitionOfReturn(state_store=store))
-    if enable_curiosity:
-        stages.append(CuriosityBoost(state_store=store))
-    if enable_q_learning:
-        stages.append(QLearningReranker(state_store=store))
+
+    if graph_uri:
+        stages.append(GraphResurrection(
+            uri=graph_uri, user=graph_user, password=graph_password,
+            limit=graph_limit,
+        ))
 
     return Pipeline(stages)
 

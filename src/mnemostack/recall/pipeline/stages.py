@@ -202,11 +202,24 @@ class FreshnessBlend(Stage):
         halflife_days: int = 14,
         echo_window_minutes: int = 10,
         echo_penalty: float = 0.5,
+        always_current_files: tuple[str, ...] = (
+            "MEMORY.md",
+            "TOOLS.md",
+            "AGENTS.md",
+            "USER.md",
+            "IDENTITY.md",
+            "SOUL.md",
+            "RULES.md",
+            "HEALTHCHECK.md",
+        ),
+        always_current_freshness: float = 0.8,
     ):
         self.weight = weight
         self.halflife_days = halflife_days
         self.echo_window_minutes = echo_window_minutes
         self.echo_penalty = echo_penalty
+        self.always_current_files = always_current_files
+        self.always_current_freshness = always_current_freshness
 
     def apply(self, context, results):
         now = datetime.now(timezone.utc)
@@ -220,6 +233,15 @@ class FreshnessBlend(Stage):
                 age_days = max(0.0, (now - ts_dt).total_seconds() / 86400)
                 freshness = math.exp(-math.log(2) * age_days / self.halflife_days)
                 age_minutes = (now - ts_dt).total_seconds() / 60
+            # Always-current files (MEMORY.md, AGENTS.md, etc.) get a high
+            # static freshness so they don't lose to today's transcripts.
+            src = str(
+                (r.payload.get("source") if r.payload else "")
+                or (r.id if isinstance(r.id, str) else "")
+            )
+            if any(name in src for name in self.always_current_files):
+                if freshness < self.always_current_freshness:
+                    freshness = self.always_current_freshness
             if age_minutes is not None and age_minutes < self.echo_window_minutes:
                 freshness *= self.echo_penalty
                 r.payload["echo_penalty"] = True
@@ -387,6 +409,10 @@ class QLearningReranker(Stage):
         q_min: float = 0.05,
         q_max: float = 0.95,
         boost_weight: float = 0.3,
+        min_samples: int = 10,
+        exploration_bonus: float = 0.1,
+        blend_weight: float = 0.2,
+        use_blend: bool = True,
     ):
         self.store = state_store
         self.alpha = alpha
@@ -395,18 +421,54 @@ class QLearningReranker(Stage):
         self.q_min = q_min
         self.q_max = q_max
         self.boost_weight = boost_weight
+        self.min_samples = min_samples
+        self.exploration_bonus = exploration_bonus
+        self.blend_weight = blend_weight
+        self.use_blend = use_blend
+
+    def _q_value_with_ucb(
+        self, q_table: dict, source: str, query_type: str
+    ) -> float:
+        """Get Q-value with UCB1 exploration bonus for under-sampled sources.
+
+        Mirrors legacy enhanced-recall.py:get_q_value so cold-start behaviour
+        matches: sources with < min_samples get an exploration kick so the
+        reranker can move them up instead of leaving them at default_q.
+        """
+        entry = q_table.get(source, {}).get(query_type, {})
+        q = entry.get("q", self.default_q)
+        n = entry.get("n", 0)
+        if n < self.min_samples:
+            total_n = 0
+            for src_entry in q_table.values():
+                qt_entry = src_entry.get(query_type, {})
+                total_n += qt_entry.get("n", 0)
+            if total_n > 0 and n > 0:
+                q += self.exploration_bonus * math.sqrt(
+                    math.log(total_n) / n
+                )
+            else:
+                q += self.exploration_bonus
+        return q
 
     def apply(self, context, results):
         q_table = self.store.get(self.STATE_KEY) or {}
         for r in results:
-            source = r.payload.get("retrieval_source") or (
-                r.sources[0] if r.sources else "unknown"
-            )
-            entry = q_table.get(source, {}).get(context.query_type, {})
-            q_val = entry.get("q", self.default_q)
-            # Additive boost: results from high-Q sources climb up
-            r.score += self.boost_weight * (q_val - self.default_q)
-            r.payload["q_value"] = round(q_val, 3)
+            # Q can mix multiple sources (Vector + BM25 etc.) for one item.
+            source_qs = []
+            for source in (r.sources or ["vector"]):
+                source_qs.append(
+                    self._q_value_with_ucb(q_table, source, context.query_type)
+                )
+            avg_q = sum(source_qs) / len(source_qs) if source_qs else self.default_q
+            if self.use_blend:
+                # Multiplicative blend: mirrors legacy behaviour — raw scores
+                # still matter but a high-Q source gets a material lift even
+                # when score values are tiny (RRF scale ~0.016).
+                r.score = (1 - self.blend_weight) * r.score + self.blend_weight * avg_q
+            else:
+                r.score += self.boost_weight * (avg_q - self.default_q)
+            r.payload["q_value"] = round(avg_q, 3)
         results.sort(key=lambda x: -x.score)
         return results
 

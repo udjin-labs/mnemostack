@@ -212,8 +212,12 @@ def test_curiosity_boosts_old_rarely_recalled():
 
 
 def test_qlearning_reranker_boosts_high_q_source():
+    # Use blend=False (additive mode) so we can reason about absolute ordering.
     store = InMemoryStateStore()
-    qlr = QLearningReranker(state_store=store, default_q=0.5, boost_weight=1.0)
+    qlr = QLearningReranker(
+        state_store=store, default_q=0.5, boost_weight=1.0,
+        use_blend=False, min_samples=3,
+    )
     for _ in range(5):
         qlr.record_feedback("vector", "technical", reward=1.0)
     for _ in range(5):
@@ -223,17 +227,23 @@ def test_qlearning_reranker_boosts_high_q_source():
         _mk_result("from_bm25", "x", score=0.6),
         _mk_result("from_vector", "x", score=0.55),
     ]
-    rs[0].payload["retrieval_source"] = "bm25"
-    rs[1].payload["retrieval_source"] = "vector"
+    rs[0].sources = ["bm25"]
+    rs[1].sources = ["vector"]
     out = qlr.apply(ctx, rs)
     assert out[0].id == "from_vector"
 
 
 def test_qlearning_default_q_no_change():
+    """When n >= min_samples and q == default, score stays the same.
+
+    Populate q_table so UCB1 exploration bonus does not fire (n >= min_samples),
+    and q == default_q so the blend / boost contributes nothing.
+    """
     store = InMemoryStateStore()
-    qlr = QLearningReranker(state_store=store)
+    qlr = QLearningReranker(state_store=store, min_samples=3, use_blend=False)
+    store.set("q_table", {"vector": {"general": {"q": 0.5, "n": 10}}})
     rs = [_mk_result(1, "x", score=0.5)]
-    rs[0].payload["retrieval_source"] = "vector"
+    rs[0].sources = ["vector"]
     ctx = PipelineContext(query="x", query_type="general")
     out = qlr.apply(ctx, rs)
     assert abs(out[0].score - 0.5) < 1e-6

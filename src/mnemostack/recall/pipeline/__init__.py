@@ -21,6 +21,7 @@ Usage:
 
 from .base import Pipeline, PipelineContext, Stage
 from .presets import build_full_pipeline, build_stateless_pipeline
+from .resurrection import GraphResurrection
 from .stages import (
     ClassifyQuery,
     CuriosityBoost,
@@ -43,6 +44,7 @@ __all__ = [
     "FileStateStore",
     "ClassifyQuery",
     "ExactTokenRescue",
+    "GraphResurrection",
     "GravityDampen",
     "HubDampen",
     "FreshnessBlend",
