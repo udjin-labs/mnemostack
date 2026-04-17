@@ -6,11 +6,14 @@ can match any mention of X, but only specific dates are actually relevant).
 """
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 
 from ..llm.base import LLMProvider
 from .recaller import RecallResult
+
+logger = logging.getLogger(__name__)
 
 _RERANK_PROMPT = """Rank these memories by how well they answer a query.
 
@@ -74,10 +77,12 @@ class Reranker:
         prompt = self._build_prompt(query, head)
         resp = self.llm.generate(prompt, max_tokens=self.max_tokens, temperature=0.0)
         if not resp.ok:
+            logger.warning("rerank failed, keeping original order: %s", resp.error)
             return results  # graceful fallback
 
         ranked_ids = self._parse_ids(resp.text)
         if not ranked_ids:
+            logger.debug("rerank returned no relevant ids, keeping original order")
             return results
 
         # Build id → result map

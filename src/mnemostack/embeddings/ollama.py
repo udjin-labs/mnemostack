@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 from .base import EmbeddingProvider
 
@@ -56,5 +57,15 @@ class OllamaProvider(EmbeddingProvider):
         except Exception:  # noqa: BLE001
             return []
 
-    def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        return [self.embed(t) for t in texts]
+    def embed_batch(self, texts: list[str], max_workers: int = 4) -> list[list[float]]:
+        """Parallel embedding via thread pool.
+
+        Ollama has no batch endpoint, but the local server handles concurrent
+        requests well on multi-core hardware. 4 workers is a safe default.
+        """
+        if not texts:
+            return []
+        if len(texts) == 1:
+            return [self.embed(texts[0])]
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            return list(pool.map(self.embed, texts))

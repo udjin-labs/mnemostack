@@ -11,6 +11,7 @@ Usage:
     hits = store.search(query_vector=q, limit=10)
 """
 
-from .qdrant import VectorStore, Hit
+from .async_qdrant import AsyncVectorStore
+from .qdrant import Hit, VectorStore
 
-__all__ = ["VectorStore", "Hit"]
+__all__ = ["VectorStore", "AsyncVectorStore", "Hit"]
