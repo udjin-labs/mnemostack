@@ -108,6 +108,7 @@ def evaluate(q, pred, truth, llm):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--samples", type=int, default=10)
+    ap.add_argument("--skip", type=int, default=0, help="skip the first N samples (resume)")
     ap.add_argument("--qa", type=int, default=None)
     ap.add_argument("--limit", type=int, default=15, help="top-K memories for answer generator")
     ap.add_argument("--output", default="/tmp/locomo_single.json")
@@ -116,6 +117,8 @@ def main():
 
     with open(DATASET) as f:
         dataset = json.load(f)[: args.samples]
+    if args.skip:
+        dataset = dataset[args.skip :]
 
     client = QdrantClient(host="localhost", port=6333)
     provider = get_provider("gemini")
@@ -123,7 +126,8 @@ def main():
     answer_gen = AnswerGenerator(llm=llm, confidence_threshold=0.5, max_memories=args.limit)
     pipeline = build_full_pipeline()  # no graph — dataset ingest makes its own isolated collection
 
-    if os.path.exists(args.log):
+    # Keep existing log when resuming so all samples stay in one file
+    if not args.skip and os.path.exists(args.log):
         os.remove(args.log)
 
     def log(msg):
@@ -155,11 +159,11 @@ def main():
             stats["total"] += 1
             key = f"cat_{cat}"
             stats["by_cat"].setdefault(key, {"correct": 0, "partial": 0, "wrong": 0})
-            if r["correct"]:
+            if r.get("correct"):
                 stats["correct"] += 1
                 stats["by_cat"][key]["correct"] += 1
                 mark = "✓"
-            elif r["partial"]:
+            elif r.get("partial"):
                 stats["partial"] += 1
                 stats["by_cat"][key]["partial"] += 1
                 mark = "~"

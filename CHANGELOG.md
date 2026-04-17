@@ -6,6 +6,65 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0a12] - 2026-04-17
+
+### Documentation
+
+- README: added "Who is this for" and "How it works in one paragraph" sections for new users.
+- README: added `Environment` table listing `GEMINI_API_KEY`, `OLLAMA_HOST`, `MNEMOSTACK_COLLECTION`, `MNEMOSTACK_QDRANT_URL`, `MNEMOSTACK_GRAPH_URI`.
+- README: documented `RecallResult` fields returned by `Recaller.recall()`.
+- README: added full-stack Python API example (4 retrievers + 8-stage pipeline + LLM reranker) — the exact configuration used for the published LoCoMo benchmark.
+- README: added "Building a BM25 corpus" walkthrough so the full-stack example is self-contained.
+- README: added "Pipeline state" and "Graceful degradation" subsections describing `FileStateStore` and failure behaviour across retrievers and reranker.
+- Features list rewritten to reflect the current 4-source retrieval architecture, 8 named pipeline stages, `MessagePairChunker`, and `QueryExpander`.
+- Benchmark section on README now ships in the PyPI page (previous `a11` release had the old README).
+
+### Internal
+
+- No behavioural changes. Functionally identical to `0.1.0a11` / `0.1.0a11.post1`; this release exists so the documentation on PyPI matches the code.
+
+## [0.1.0a11.post1] - 2026-04-17
+
+### Documentation
+
+- README: added full LoCoMo benchmark table for this build (1986 QA, 66.4% correct / 79.2% combined), per-category breakdown, and an honest-numbers disclaimer about the difference between full-benchmark aggregate and sub-category cherry-picking reported by some vendors.
+- No code changes; functional behaviour is identical to `0.1.0a11`.
+
+## [0.1.0a11] - 2026-04-17
+
+### Parity with legacy workspace stack
+
+mnemostack reached parity with the reference `workspace/scripts/enhanced-recall.py` on a head-to-head benchmark over 12 real workspace queries (clean state for both, top-5 keyword coverage).
+
+Scoreboard:
+- Before today: `LEGACY 4 / MNEMOSTACK 0 / 8 ties` (28 vs 21 keywords)
+- After a11:    `LEGACY 0 / MNEMOSTACK 2 / 10 ties` (28 vs 30 keywords)
+
+The gap was a packaging miss, not a missing idea. This release ports the remaining pieces from the legacy pipeline and makes them available as first-class modules.
+
+### New
+
+- **Retriever abstraction** (`mnemostack.recall.retrievers`) with four built-in retrievers: `VectorRetriever`, `BM25Retriever`, `MemgraphRetriever`, `TemporalRetriever`. `Recaller` now accepts `retrievers=[...]` and fuses N ranked lists via RRF, matching the legacy architecture where Memgraph and temporal search are first-class sources instead of post-ranking stages.
+- **`GraphResurrection` pipeline stage** (`mnemostack.recall.pipeline.resurrection`) — spreading activation via Memgraph 1-hop walk, scored by seed overlap, capped at 0.30.
+- **`benchmarks/locomo_single.py`** — single-variant LoCoMo runner (no A/B compare), so full 10-sample runs no longer double the cost.
+
+### Improved
+
+- **Pipeline stage order** now mirrors legacy: `ClassifyQuery → ExactTokenRescue → GravityDampen → HubDampen → QLearningReranker → CuriosityBoost → FreshnessBlend → InhibitionOfReturn → GraphResurrection`. Q-learning runs before Freshness so cold-state boosts land on raw RRF scores.
+- **`QLearningReranker`**: adds UCB1 exploration bonus for under-sampled sources (default `min_samples=10`, `exploration_bonus=0.1`) and switches to multiplicative blend (`(1-w)*score + w*avg_q`) so unseen sources get a measurable lift at defaults. `use_blend=False` keeps the old additive path available.
+- **`FreshnessBlend`**: always-current files (`MEMORY.md`, `AGENTS.md`, `TOOLS.md`, `IDENTITY.md`, `USER.md`, `SOUL.md`, `RULES.md`, `HEALTHCHECK.md`) now receive a static freshness of `0.8` so they are not out-ranked by today's transcripts. Configurable via `always_current_files` / `always_current_freshness`.
+- **`Reranker`**: ID parser now supports composite identifiers (paths, `graph:Kairos`, etc.) and falls back to prefix/substring match when the LLM drops trailing segments (for example emitting `/path/MEMORY.md` instead of `/path/MEMORY.md:45`). The longest full-ID match wins.
+- **`Recaller`**: backward-compatible dual constructor. Existing code using `Recaller(embedding_provider=..., vector_store=..., bm25_docs=...)` continues to work; new code can pass `Recaller(retrievers=[VectorRetriever(...), BM25Retriever(...), MemgraphRetriever(), TemporalRetriever(...)])`.
+
+### Fixed
+
+- `Reranker` silently dropped composite IDs because the previous regex (`\b[\w-]+\b`) could not match slashes. The parser now keeps full tokens and strips only trailing punctuation.
+- Rerank lookups no longer miss the right result when the LLM truncates a composite ID — fuzzy prefix/substring fallback resolves the longest matching entry in the result set.
+
+### Tests
+
+183 passing (up from 170 in a10) — 7 new tests for `GraphResurrection`, 13 total for the new retrievers + rerank fixes + always-current freshness.
+
 ## [0.1.0a10] - 2026-04-17
 
 ### Improved

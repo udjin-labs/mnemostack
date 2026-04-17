@@ -13,5 +13,5 @@ See ARCHITECTURE.md for design, README.md for usage.
 
 from .config import Config
 
-__version__ = "0.1.0a10"
+__version__ = "0.1.0a12"
 __all__ = ["Config"]
