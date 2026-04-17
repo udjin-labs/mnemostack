@@ -85,6 +85,65 @@ class VectorStore:
     def delete(self) -> None:
         self.client.delete_collection(self.collection)
 
+    # ---------- iteration ----------
+
+    def scroll(
+        self,
+        batch_size: int = 256,
+        filters: dict[str, Any] | None = None,
+        with_vectors: bool = False,
+    ):
+        """Iterate over ALL points in the collection lazily.
+
+        Memory-efficient: never loads the whole collection at once. Good for:
+        - Re-indexing after schema changes
+        - Bulk export / migration
+        - Aggregation over entire corpus
+
+        Yields `Hit` objects (score=1.0 since this isn't a similarity query).
+        """
+        qfilter = self._build_filter(filters) if filters else None
+        next_offset: Any = None
+        while True:
+            points, next_offset = self.client.scroll(
+                collection_name=self.collection,
+                limit=batch_size,
+                offset=next_offset,
+                with_payload=True,
+                with_vectors=with_vectors,
+                scroll_filter=qfilter,
+            )
+            if not points:
+                break
+            for pt in points:
+                yield Hit(id=pt.id, score=1.0, payload=pt.payload or {})
+            if next_offset is None:
+                break
+
+    def iter_ids(
+        self,
+        batch_size: int = 1024,
+        filters: dict[str, Any] | None = None,
+    ):
+        """Lightweight iteration returning only point IDs. Faster than scroll()."""
+        qfilter = self._build_filter(filters) if filters else None
+        next_offset: Any = None
+        while True:
+            points, next_offset = self.client.scroll(
+                collection_name=self.collection,
+                limit=batch_size,
+                offset=next_offset,
+                with_payload=False,
+                with_vectors=False,
+                scroll_filter=qfilter,
+            )
+            if not points:
+                break
+            for pt in points:
+                yield pt.id
+            if next_offset is None:
+                break
+
     # ---------- write ----------
 
     def upsert(

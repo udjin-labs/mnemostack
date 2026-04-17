@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0a6] - 2026-04-17
+
+### Added
+- `mnemostack.observability` — metrics infrastructure (counters, histograms, pluggable recorder)
+  - `NullRecorder` (default, zero overhead), `LoggingRecorder`, `InMemoryRecorder`
+  - Integration with Recaller + AnswerGenerator (latency + throughput metrics)
+  - Protocol-based — plug in Prometheus / OpenTelemetry / StatsD via `set_recorder()`
+- `VectorStore.scroll()` and `iter_ids()` — memory-efficient iteration over large collections
+  - Supports optional payload filters
+  - Uses Qdrant native scroll API with cursor-based pagination
+
+### Tests
+- 10 observability tests (counters, histograms, decorators, faulty-recorder safety)
+- 4 new vector tests (scroll, iter_ids, filters on scroll)
+- Total: 135 passing
+
 ## [0.1.0a5] - 2026-04-17
 
 ### Added

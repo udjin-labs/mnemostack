@@ -10,6 +10,7 @@ import re
 from dataclasses import dataclass, field
 
 from ..llm.base import LLMProvider
+from ..observability import counter, histogram
 from .recaller import RecallResult
 
 _DEFAULT_PROMPT = """Answer a question based on retrieved memories.
@@ -82,7 +83,9 @@ class AnswerGenerator:
 
     def generate(self, query: str, memories: list[RecallResult]) -> Answer:
         """Synthesize answer from retrieved memories."""
+        counter("mnemostack.answer.calls", 1)
         if not memories:
+            counter("mnemostack.answer.empty_memory", 1)
             return Answer(
                 text="Not in memory.",
                 confidence=0.0,
@@ -93,8 +96,10 @@ class AnswerGenerator:
         context = self._format_context(memories[: self.max_memories])
         prompt = self.prompt_template.format(context=context, query=query)
 
-        resp = self.llm.generate(prompt, max_tokens=self.max_tokens)
+        with histogram("mnemostack.answer.llm_latency_ms"):
+            resp = self.llm.generate(prompt, max_tokens=self.max_tokens)
         if not resp.ok:
+            counter("mnemostack.answer.errors", 1)
             return Answer(
                 text="",
                 confidence=0.0,
@@ -104,6 +109,8 @@ class AnswerGenerator:
             )
 
         text, confidence = self._parse_response(resp.text)
+        bucket = "high" if confidence >= 0.7 else ("medium" if confidence >= 0.4 else "low")
+        counter("mnemostack.answer.by_confidence", 1, labels={"bucket": bucket})
         return Answer(
             text=text,
             confidence=confidence,

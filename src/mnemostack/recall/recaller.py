@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..embeddings.base import EmbeddingProvider
+from ..observability import counter, histogram
 from ..vector.qdrant import Hit, VectorStore
 from .bm25 import BM25, BM25Doc
 from .fusion import reciprocal_rank_fusion
@@ -60,32 +61,41 @@ class Recaller:
         filters: dict[str, Any] | None = None,
     ) -> list[RecallResult]:
         """Run hybrid recall and return fused top-K results."""
-        # Vector search
-        vector_hits: list[Hit] = []
-        query_vec = self.embedding.embed(query)
-        if query_vec:
-            vector_hits = self.vector.search(
-                query_vec, limit=vector_limit, filters=filters
+        counter("mnemostack.recall.calls", 1)
+        with histogram("mnemostack.recall.latency_ms"):
+            # Vector search
+            vector_hits: list[Hit] = []
+            with histogram("mnemostack.recall.embed_latency_ms"):
+                query_vec = self.embedding.embed(query)
+            if query_vec:
+                with histogram("mnemostack.recall.vector_latency_ms"):
+                    vector_hits = self.vector.search(
+                        query_vec, limit=vector_limit, filters=filters
+                    )
+                counter(
+                    "mnemostack.recall.vector_hits", len(vector_hits)
+                )
+
+            # BM25 search
+            bm25_hits: list[tuple[BM25Doc, float]] = []
+            if self.bm25:
+                with histogram("mnemostack.recall.bm25_latency_ms"):
+                    bm25_hits = self.bm25.search(query, limit=bm25_limit)
+                counter("mnemostack.recall.bm25_hits", len(bm25_hits))
+
+            # Build id→source map and per-list tuples for RRF
+            vector_list = [(hit, hit.score) for hit in vector_hits]
+            bm25_list = [(doc, score) for doc, score in bm25_hits]
+
+            # Two separate fusions — RRF by rank
+            fused = reciprocal_rank_fusion(
+                [vector_list, bm25_list],
+                k=self.rrf_k,
+                limit=limit,
             )
 
-        # BM25 search
-        bm25_hits: list[tuple[BM25Doc, float]] = []
-        if self.bm25:
-            bm25_hits = self.bm25.search(query, limit=bm25_limit)
-
-        # Build id→source map and per-list tuples for RRF
-        vector_list = [(hit, hit.score) for hit in vector_hits]
-        bm25_list = [(doc, score) for doc, score in bm25_hits]
-
-        # Two separate fusions — RRF by rank
-        fused = reciprocal_rank_fusion(
-            [vector_list, bm25_list],
-            k=self.rrf_k,
-            limit=limit,
-        )
-
-        # Convert to unified RecallResult
-        results = []
+            # Convert to unified RecallResult
+            results = []
         for item, rrf_score in fused:
             if isinstance(item, Hit):
                 results.append(
@@ -107,7 +117,8 @@ class Recaller:
                         sources=self._sources_for(item, vector_hits, bm25_hits),
                     )
                 )
-        return results
+            counter("mnemostack.recall.results", len(results))
+            return results
 
     @staticmethod
     def _sources_for(
