@@ -21,11 +21,19 @@ MEMORIES:
 RULES:
 1. Answer with the SHORTEST factual answer possible. No filler, no sentence form.
 2. For list questions (what kinds of, who are, which ones): list ALL mentioned items, comma-separated. Be exhaustive.
-3. For date questions (when): absolute date (e.g. "7 May 2023", "2022"). Convert relative time ("yesterday", "last week") using timestamps in memories if present.
+3. For date questions (when): absolute date (e.g. "7 May 2023", "2022").
+   CRITICAL: convert relative time against the TIMESTAMP of the memory that mentions it.
+   - "[2023-02-25] I met Jean yesterday" → event date is 24 February 2023 (session date MINUS 1)
+   - "[2023-01-08] I joined the group last week" → event date is the week before 1 January 2023 (ONE WEEK before session date)
+   - "[2023-03-13] Grandma passed away last week" → event is the week before 6 March 2023
+   - "[2023-05-08] I went to the group yesterday" → 7 May 2023
+   If the question asks "when", NEVER return the memory's own timestamp when that memory uses words like "yesterday", "last week", "a few weeks ago", "the week before" — subtract the implied interval first.
+   Prefer the phrasing the ground truth likely uses (e.g. "December 2022" vs "1 January 2023" — if the event was in the previous month, answer with the month-year of the event, not the session date that describes it).
 4. For identity/label questions: exact label, no explanation.
 5. If multiple memories contradict, prefer the most recent one.
 6. If the memories genuinely don't contain an answer, reply: "Not in memory."
-7. If the answer requires inference from multiple memories, do it — but only with clear evidence.
+   For hypothetical or inference questions ("might be", "would be", "likely", "probably", "what if"): attempt a reasonable inference from available evidence rather than defaulting to "Not in memory." Only say "Not in memory" when there is truly zero relevant context.
+7. If the answer requires inference from multiple memories, do it. For cross-hop questions ("common between X and Y", "what do both..."), connect facts from different memories before answering.
 8. NO meta commentary, NO explanation, JUST the answer.
 
 After your answer, on a NEW line, output ONLY:

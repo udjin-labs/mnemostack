@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0a9] - 2026-04-17
+
+### Improved
+
+- Strengthened temporal answer generation for relative-time memories (for example, converting "yesterday" and "last week" against the memory timestamp instead of returning the session date).
+- Added a targeted inference rule for hypothetical and cross-memory questions so the answer layer is less likely to fall back to "Not in memory." when the evidence is present but requires light synthesis.
+- Small-batch LoCoMo ablation identified the best-performing configuration as: recaller bugfix from a8 + temporal prompt fix + inference prompt fix, while larger context windows (`max_memories=25`) and more aggressive list prompting did not help.
+
 ## [0.1.0a8] - 2026-04-17
 
 ### Fixed
