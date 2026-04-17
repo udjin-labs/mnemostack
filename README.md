@@ -289,10 +289,13 @@ Any retriever can fail (Memgraph down, Qdrant unreachable, BM25 corpus empty). `
 - [x] Consolidation runtime (phase orchestrator)
 - [x] CLI (`mnemostack health/search/answer/index/mcp-serve`)
 - [x] MCP server (Model Context Protocol)
-- [ ] Text → graph triple extractor helpers
-- [ ] Config file support (YAML/JSON)
-- [ ] Async variants for high-throughput servers
-- [ ] Docker compose examples
+- [x] Text → graph triple extractor helpers (`mnemostack.graph.TripleExtractor`)
+- [x] Config file support YAML/JSON (`mnemostack.config`, `mnemostack init`/`config` CLI)
+- [x] Async variants for high-throughput servers (`mnemostack.vector.AsyncQdrantStore`)
+- [x] Docker compose examples (`examples/docker-compose.yml`)
+- [ ] Reproducible LoCoMo benchmark harness in-tree
+- [ ] First-class FastAPI/Starlette service wrapper
+- [ ] Benchmarks on longer-horizon synthetic corpora
 
 ## License
 
