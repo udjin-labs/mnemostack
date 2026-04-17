@@ -156,3 +156,27 @@ def test_custom_llm_registration():
     llm = get_llm("my-llm")
     resp = llm.generate("test")
     assert resp.text == "hello"
+
+
+def test_prompt_has_temporal_reasoning_rules(sample_memories):
+    """Regression: prompt must teach relative-time subtraction."""
+    llm = FakeLLM(response_text="x\nCONFIDENCE: 0.9")
+    gen = AnswerGenerator(llm=llm)
+    gen.generate("when", sample_memories)
+    prompt = llm.last_prompt
+    assert "yesterday" in prompt.lower()
+    assert "last week" in prompt.lower()
+    # At least one concrete few-shot example
+    assert "session date MINUS" in prompt or "MINUS 1" in prompt
+
+
+def test_prompt_allows_hypothetical_inference(sample_memories):
+    """Regression: prompt must allow 'might be'/'would be' reasoning, not just Not in memory."""
+    llm = FakeLLM(response_text="x\nCONFIDENCE: 0.6")
+    gen = AnswerGenerator(llm=llm)
+    gen.generate("would X happen", sample_memories)
+    prompt = llm.last_prompt
+    p = prompt.lower()
+    # Must instruct to attempt inference for hypothetical questions
+    assert "might be" in p and "would be" in p
+    assert "reasonable inference" in p

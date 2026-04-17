@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0a10] - 2026-04-17
+
+### Improved
+
+Same set of changes as a9, re-released because a9 on PyPI shipped an intermediate snapshot without the final ablation-tested configuration. See a9 notes below.
+
 ## [0.1.0a9] - 2026-04-17
 
 ### Improved
@@ -13,6 +19,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Strengthened temporal answer generation for relative-time memories (for example, converting "yesterday" and "last week" against the memory timestamp instead of returning the session date).
 - Added a targeted inference rule for hypothetical and cross-memory questions so the answer layer is less likely to fall back to "Not in memory." when the evidence is present but requires light synthesis.
 - Small-batch LoCoMo ablation identified the best-performing configuration as: recaller bugfix from a8 + temporal prompt fix + inference prompt fix, while larger context windows (`max_memories=25`) and more aggressive list prompting did not help.
+
+### Benchmark (LoCoMo, 5 samples / 75 QA, full_pipeline)
+
+- correct 61.3% / combined 80.0%
+- By category: cat_2 temporal 88.2%, cat_4 multi-hop 100%, cat_1 list 39%, cat_3 reasoning 27%
+- Compared with workspace `enhanced-recall.py` baseline of 51% correct / 68% combined on 1986 QA.
 
 ## [0.1.0a8] - 2026-04-17
 
