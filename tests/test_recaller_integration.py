@@ -111,3 +111,16 @@ def test_recaller_returns_text_and_payload(setup):
     r = results[0]
     assert r.text  # non-empty
     assert "text" in r.payload or r.text
+
+
+def test_recaller_returns_multiple_results_not_just_first(setup):
+    """Regression test for indent bug in a0..a7 where `return results`
+    was inside the fusion `for` loop, returning after the first iteration.
+    """
+    recaller = setup
+    results = recaller.recall("vector database graph Cypher machine learning", limit=5)
+    # Corpus in setup has multiple matching docs; we must see >1 result
+    assert len(results) > 1, (
+        f"Recaller returned only {len(results)} result(s). "
+        "This indicates the return-inside-for indent bug has regressed."
+    )

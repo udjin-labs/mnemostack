@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0a8] - 2026-04-17
+
+### Fixed
+
+- **Critical indent bug in `Recaller.recall()`**: `return results` was inside the fusion `for` loop, causing recall to return only the first result regardless of `limit`. LoCoMo benchmark correctness on a 60 QA sample went from 28.3% to 56.7% after the fix (combined 38.3% → 73.3%).
+
 ## [0.1.0a7] - 2026-04-17
 
 ### Added — full 8-stage pipeline ported from the reference enhanced-recall implementation

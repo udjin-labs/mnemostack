@@ -1,0 +1,724 @@
+{
+  "raw": {
+    "summary": {
+      "total": 30,
+      "correct": 17,
+      "partial": 5,
+      "wrong": 8
+    },
+    "by_category": {
+      "cat_2": {
+        "correct": 12,
+        "partial": 2,
+        "wrong": 4
+      },
+      "cat_3": {
+        "correct": 1,
+        "partial": 0,
+        "wrong": 1
+      },
+      "cat_1": {
+        "correct": 3,
+        "partial": 2,
+        "wrong": 3
+      },
+      "cat_4": {
+        "correct": 1,
+        "partial": 1,
+        "wrong": 0
+      }
+    }
+  },
+  "full_pipeline": {
+    "summary": {
+      "total": 30,
+      "correct": 17,
+      "partial": 5,
+      "wrong": 8
+    },
+    "by_category": {
+      "cat_2": {
+        "correct": 12,
+        "partial": 2,
+        "wrong": 4
+      },
+      "cat_3": {
+        "correct": 1,
+        "partial": 0,
+        "wrong": 1
+      },
+      "cat_1": {
+        "correct": 3,
+        "partial": 2,
+        "wrong": 3
+      },
+      "cat_4": {
+        "correct": 1,
+        "partial": 1,
+        "wrong": 0
+      }
+    }
+  },
+  "per_qa": [
+    {
+      "question": "When did Caroline go to the LGBTQ support group?",
+      "ground_truth": "7 May 2023",
+      "predicted": "8 May 2023",
+      "confidence": 1.0,
+      "category": 2,
+      "correct": false,
+      "partial": false,
+      "reason": "fallback",
+      "variant": "raw"
+    },
+    {
+      "question": "When did Melanie paint a sunrise?",
+      "ground_truth": "2022",
+      "predicted": "2022",
+      "confidence": 0.7,
+      "category": 2,
+      "correct": true,
+      "partial": false,
+      "reason": "The predicted answer exactly matches the ground truth.",
+      "variant": "raw"
+    },
+    {
+      "question": "What fields would Caroline be likely to pursue in her educaton?",
+      "ground_truth": "Psychology, counseling certification",
+      "predicted": "Counseling, mental health",
+      "confidence": 1.0,
+      "category": 3,
+      "correct": true,
+      "partial": false,
+      "reason": "The predicted answer 'Counseling, mental health' aligns very well with the ground truth 'Psychology, counseling certification'. Mental health is a broad field that encompasses psychology and counseling, and counseling is directly mentioned in both.",
+      "variant": "raw"
+    },
+    {
+      "question": "What did Caroline research?",
+      "ground_truth": "Adoption agencies",
+      "predicted": "counseling and mental health as a career, adoption agencies",
+      "confidence": 1.0,
+      "category": 1,
+      "correct": true,
+      "partial": false,
+      "reason": "The predicted answer includes the ground truth 'adoption agencies' and adds 'counseling and mental health as a career', which is also relevant to Caroline's research according to the source text. Therefore, the prediction is correct and more complete.",
+      "variant": "raw"
+    },
+    {
+      "question": "What is Caroline's identity?",
+      "ground_truth": "Transgender woman",
+      "predicted": "Trans",
+      "confidence": 0.7,
+      "category": 1,
+      "correct": false,
+      "partial": true,
+      "reason": "The predicted answer 'Trans' is a partial answer. While it correctly identifies Caroline as transgender, it omits the 'woman' part of her identity, which is crucial for a complete understanding of her identity as a 'transgender woman'.",
+      "variant": "raw"
+    },
+    {
+      "question": "When did Melanie run a charity race?",
+      "ground_truth": "The sunday before 25 May 2023",
+      "predicted": "2023-05-20",
+      "confidence": 0.8,
+      "category": 2,
+      "correct": false,
+      "partial": false,
+      "reason": "fallback",
+      "variant": "raw"
+    },
+    {
+      "question": "When is Melanie planning on going camping?",
+      "ground_truth": "June 2023",
+      "predicted": "Next month",
+      "confidence": 1.0,
+      "category": 2,
+      "correct": false,
+      "partial": true,
+      "reason": "The predicted answer 'Next month' is too vague and does not provide the specific month and year found in the ground truth. While it implies a future date, it lacks the precision of 'June 2023'.",
+      "variant": "raw"
+    },
+    {
+      "question": "What is Caroline's relationship status?",
+      "ground_truth": "Single",
+      "predicted": "Single parent",
+      "confidence": 0.7,
+      "category": 1,
+      "correct": true,
+      "partial": false,
+      "reason": "fallback",
+      "variant": "raw"
+    },
+    {
+      "question": "When did Caroline give a speech at a school?",
+      "ground_truth": "The week before 9 June 2023",
+      "predicted": "Last week, 9 June 2023",
+      "confidence": 0.9,
+      "category": 2,
+      "correct": false,
+      "partial": false,
+      "reason": "fallback",
+      "variant": "raw"
+    },
+    {
+      "question": "When did Caroline meet up with her friends, family, and mentors?",
+      "ground_truth": "The week before 9 June 2023",
+      "predicted": "Last week",
+      "confidence": 0.5,
+      "category": 2,
+      "correct": true,
+      "partial": false,
+      "reason": "The predicted answer 'Last week' is a reasonable and factually correct interpretation of 'The week before 9 June 2023' given that the current date is after June 9, 2023. It refers to the same timeframe.",
+      "variant": "raw"
+    },
+    {
+      "question": "How long has Caroline had her current group of friends for?",
+      "ground_truth": "4 years",
+      "predicted": "4 years",
+      "confidence": 1.0,
+      "category": 2,
+      "correct": true,
+      "partial": false,
+      "reason": "The predicted answer '4 years' perfectly matches the ground truth '4 years'.",
+      "variant": "raw"
+    },
+    {
+      "question": "Where did Caroline move from 4 years ago?",
+      "ground_truth": "Sweden",
+      "predicted": "her home country",
+      "confidence": 1.0,
+      "category": 1,
+      "correct": false,
+      "partial": false,
+      "reason": "The predicted answer 'her home country' is too vague and does not provide the specific factual information requested, which is 'Sweden'.",
+      "variant": "raw"
+    },
+    {
+      "question": "How long ago was Caroline's 18th birthday?",
+      "ground_truth": "10 years ago",
+      "predicted": "10 years ago",
+      "confidence": 1.0,
+      "category": 2,
+      "correct": true,
+      "partial": false,
+      "reason": "The predicted answer perfectly matches the ground truth.",
+      "variant": "raw"
+    },
+    {
+      "question": "What career path has Caroline decided to persue?",
+      "ground_truth": "counseling or mental health for Transgender people",
+      "predicted": "Counseling and mental health",
+      "confidence": 1.0,
+      "category": 1,
+      "correct": true,
+      "partial": false,
+      "reason": "The predicted answer accurately reflects the ground truth. The core career path of 'counseling and mental health' is present in both, even if the specific focus on 'Transgender people' is omitted in the prediction. For a general query about the career path, the prediction is factually correct.",
+      "variant": "raw"
+    },
+    {
+      "question": "Would Caroline still want to pursue counseling as a career if she hadn't received support growing up?",
+      "ground_truth": "Likely no",
+      "predicted": "Not in memory.",
+      "confidence": 0.0,
+      "category": 3,
+      "correct": false,
+      "partial": false,
+      "reason": "The ground truth provides a direct answer ('Likely no') to the hypothetical question. The predicted answer 'Not in memory' indicates an inability to answer or a lack of information, which does not align with the ground truth's definitive stance. The predicted answer doesn't attempt to answer the query, whereas the ground truth does.",
+      "variant": "raw"
+    },
+    {
+      "question": "When did Caroline go to the LGBTQ support group?",
+      "ground_truth": "7 May 2023",
+      "predicted": "8 May 2023",
+      "confidence": 1.0,
+      "category": 2,
+      "correct": false,
+      "partial": false,
+      "reason": "fallback",
+      "variant": "full_pipeline"
+    },
+    {
+      "question": "When did Melanie paint a sunrise?",
+      "ground_truth": "2022",
+      "predicted": "2022",
+      "confidence": 0.9,
+      "category": 2,
+      "correct": true,
+      "partial": false,
+      "reason": "The predicted answer matches the ground truth exactly.",
+      "variant": "full_pipeline"
+    },
+    {
+      "question": "What fields would Caroline be likely to pursue in her educaton?",
+      "ground_truth": "Psychology, counseling certification",
+      "predicted": "Counseling, mental health",
+      "confidence": 1.0,
+      "category": 3,
+      "correct": true,
+      "partial": false,
+      "reason": "The predicted fields 'Counseling, mental health' are very closely aligned with the ground truth 'Psychology, counseling certification'. Mental health is a broad field that encompasses psychology and counseling, and counseling is directly mentioned in both. Therefore, the prediction is factually correct and comprehensive.",
+      "variant": "full_pipeline"
+    },
+    {
+      "question": "What did Caroline research?",
+      "ground_truth": "Adoption agencies",
+      "predicted": "counseling and mental health as a career, adoption agencies",
+      "confidence": 0.9,
+      "category": 1,
+      "correct": true,
+      "partial": false,
+      "reason": "The predicted answer includes the ground truth 'adoption agencies' and adds 'counseling and mental health as a career', which is also relevant to Caroline's research according to the source text. Therefore, the prediction is correct and more complete.",
+      "variant": "full_pipeline"
+    },
+    {
+      "question": "What is Caroline's identity?",
+      "ground_truth": "Transgender woman",
+      "predicted": "Trans",
+      "confidence": 0.7,
+      "category": 1,
+      "correct": false,
+      "partial": true,
+      "reason": "The predicted answer 'Trans' is a partial answer. While 'Trans' accurately describes a part of Caroline's identity, it is not as complete as 'Transgender woman' which specifies her gender identity more fully.",
+      "variant": "full_pipeline"
+    },
+    {
+      "question": "When did Melanie run a charity race?",
+      "ground_truth": "The sunday before 25 May 2023",
+      "predicted": "2023-05-20",
+      "confidence": 0.7,
+      "category": 2,
+      "correct": false,
+      "partial": false,
+      "reason": "fallback",
+      "variant": "full_pipeline"
+    },
+    {
+      "question": "When is Melanie planning on going camping?",
+      "ground_truth": "June 2023",
+      "predicted": "Next month",
+      "confidence": 1.0,
+      "category": 2,
+      "correct": false,
+      "partial": true,
+      "reason": "The predicted answer 'Next month' is too vague. While it might be correct if the current month is May 2023, it doesn't provide the specific month and year from the ground truth. It's partially correct in that it indicates a future event, but lacks the precision of the ground truth.",
+      "variant": "full_pipeline"
+    },
+    {
+      "question": "What is Caroline's relationship status?",
+      "ground_truth": "Single",
+      "predicted": "Single parent",
+      "confidence": 0.7,
+      "category": 1,
+      "correct": true,
+      "partial": false,
+      "reason": "fallback",
+      "variant": "full_pipeline"
+    },
+    {
+      "question": "When did Caroline give a speech at a school?",
+      "ground_truth": "The week before 9 June 2023",
+      "predicted": "Last week, 9 June 2023",
+      "confidence": 0.9,
+      "category": 2,
+      "correct": false,
+      "partial": false,
+      "reason": "fallback",
+      "variant": "full_pipeline"
+    },
+    {
+      "question": "When did Caroline meet up with her friends, family, and mentors?",
+      "ground_truth": "The week before 9 June 2023",
+      "predicted": "Last week",
+      "confidence": 0.5,
+      "category": 2,
+      "correct": true,
+      "partial": false,
+      "reason": "The predicted answer 'Last week' is a reasonable and factually correct interpretation of 'The week before 9 June 2023' given that the current date is likely after June 9th, 2023. It conveys the same temporal information accurately.",
+      "variant": "full_pipeline"
+    },
+    {
+      "question": "How long has Caroline had her current group of friends for?",
+      "ground_truth": "4 years",
+      "predicted": "4 years",
+      "confidence": 1.0,
+      "category": 2,
+      "correct": true,
+      "partial": false,
+      "reason": "The predicted answer '4 years' perfectly matches the ground truth '4 years'.",
+      "variant": "full_pipeline"
+    },
+    {
+      "question": "Where did Caroline move from 4 years ago?",
+      "ground_truth": "Sweden",
+      "predicted": "her home country",
+      "confidence": 1.0,
+      "category": 1,
+      "correct": false,
+      "partial": false,
+      "reason": "The predicted answer 'her home country' is too vague and does not provide the specific factual information requested, which is 'Sweden'.",
+      "variant": "full_pipeline"
+    },
+    {
+      "question": "How long ago was Caroline's 18th birthday?",
+      "ground_truth": "10 years ago",
+      "predicted": "10 years ago",
+      "confidence": 1.0,
+      "category": 2,
+      "correct": true,
+      "partial": false,
+      "reason": "The predicted answer perfectly matches the ground truth.",
+      "variant": "full_pipeline"
+    },
+    {
+      "question": "What career path has Caroline decided to persue?",
+      "ground_truth": "counseling or mental health for Transgender people",
+      "predicted": "Counseling and mental health",
+      "confidence": 1.0,
+      "category": 1,
+      "correct": true,
+      "partial": false,
+      "reason": "The predicted answer accurately reflects the ground truth. The core career path of 'counseling and mental health' is present in both, even if the specific focus on 'Transgender people' is omitted in the prediction. For a general query about the career path, the prediction is factually correct.",
+      "variant": "full_pipeline"
+    },
+    {
+      "question": "Would Caroline still want to pursue counseling as a career if she hadn't received support growing up?",
+      "ground_truth": "Likely no",
+      "predicted": "Not in memory.",
+      "confidence": 0.0,
+      "category": 3,
+      "correct": false,
+      "partial": false,
+      "reason": "The predicted answer 'Not in memory' does not address the query about Caroline's career choice. It's a statement about the AI's memory, not an evaluation of the hypothetical scenario. The ground truth provides a direct answer to the query.",
+      "variant": "full_pipeline"
+    },
+    {
+      "question": "When Jon has lost his job as a banker?",
+      "ground_truth": "19 January, 2023",
+      "predicted": "20 January 2023",
+      "confidence": 1.0,
+      "category": 2,
+      "correct": false,
+      "partial": true,
+      "reason": "The predicted date is off by one day from the ground truth. It's very close but not exact.",
+      "variant": "raw"
+    },
+    {
+      "question": "When Gina has lost her job at Door Dash?",
+      "ground_truth": "January, 2023",
+      "predicted": "January 2023",
+      "confidence": 1.0,
+      "category": 2,
+      "correct": true,
+      "partial": false,
+      "reason": "The predicted answer 'January 2023' is identical to the ground truth 'January, 2023', with only a minor stylistic difference in the comma, which does not affect factual accuracy.",
+      "variant": "raw"
+    },
+    {
+      "question": "How do Jon and Gina both like to destress?",
+      "ground_truth": "by dancing",
+      "predicted": "Dance",
+      "confidence": 1.0,
+      "category": 4,
+      "correct": true,
+      "partial": false,
+      "reason": "The predicted answer 'Dance' accurately reflects the ground truth 'by dancing' as a way Jon and Gina like to destress. The meaning is preserved.",
+      "variant": "raw"
+    },
+    {
+      "question": "What do Jon and Gina both have in common?",
+      "ground_truth": "They lost their jobs and decided to start their own businesses.",
+      "predicted": "They both root for each other",
+      "confidence": 0.8,
+      "category": 1,
+      "correct": false,
+      "partial": false,
+      "reason": "The predicted answer is a general statement about support, while the ground truth provides specific factual commonalities related to their employment status and entrepreneurial ventures. The predicted answer does not address the factual commonalities described in the ground truth.",
+      "variant": "raw"
+    },
+    {
+      "question": "Why did Jon decide to start his dance studio?",
+      "ground_truth": "He lost his job and decided to start his own business to share his passion.",
+      "predicted": "He is passionate about dancing and wants to share the joy it brings him with others.",
+      "confidence": 0.9,
+      "category": 4,
+      "correct": false,
+      "partial": true,
+      "reason": "The predicted answer correctly identifies Jon's passion for dancing and desire to share it, which is part of the ground truth. However, it misses the crucial initial trigger: losing his job, which led him to decide to start his own business.",
+      "variant": "raw"
+    },
+    {
+      "question": "What Jon thinks the ideal dance studio should look like?",
+      "ground_truth": "By the water, with natural light and Marley flooring",
+      "predicted": "by the water, downtown, great natural light, good dance floor with enough bounce, easy to get to",
+      "confidence": 0.9,
+      "category": 1,
+      "correct": false,
+      "partial": true,
+      "reason": "The ground truth specifies 'Marley flooring' while the predicted answer says 'good dance floor with enough bounce'. While the latter is desirable, it's not the specific type of flooring mentioned. Also, 'downtown' and 'easy to get to' are not mentioned in the ground truth.",
+      "variant": "raw"
+    },
+    {
+      "question": "When is Jon's group performing at a festival?",
+      "ground_truth": "February, 2023",
+      "predicted": "February 2023",
+      "confidence": 0.9,
+      "category": 2,
+      "correct": true,
+      "partial": false,
+      "reason": "The predicted answer 'February 2023' perfectly matches the ground truth 'February, 2023'. The comma in the ground truth is a minor stylistic difference that does not affect the factual correctness.",
+      "variant": "raw"
+    },
+    {
+      "question": "When did Gina launch an ad campaign for her store?",
+      "ground_truth": "29 January, 2023",
+      "predicted": "29 January 2023",
+      "confidence": 1.0,
+      "category": 2,
+      "correct": true,
+      "partial": false,
+      "reason": "The predicted answer perfectly matches the ground truth.",
+      "variant": "raw"
+    },
+    {
+      "question": "When was Jon in Paris?",
+      "ground_truth": "28 January 2023",
+      "predicted": "29 January 2023",
+      "confidence": 1.0,
+      "category": 2,
+      "correct": false,
+      "partial": false,
+      "reason": "The predicted date (29 January 2023) is different from the ground truth date (28 January 2023). Even a single day difference makes the answer factually incorrect.",
+      "variant": "raw"
+    },
+    {
+      "question": "Which city have both Jean and John visited?",
+      "ground_truth": "Rome",
+      "predicted": "Not in memory.",
+      "confidence": 0.0,
+      "category": 1,
+      "correct": false,
+      "partial": false,
+      "reason": "The predicted answer states 'Not in memory', which is factually incorrect given the ground truth 'Rome'. The system failed to retrieve the correct information.",
+      "variant": "raw"
+    },
+    {
+      "question": "When did Gina team up with a local artist for some cool designs?",
+      "ground_truth": "February, 2023",
+      "predicted": "2023-02-08",
+      "confidence": 1.0,
+      "category": 2,
+      "correct": true,
+      "partial": false,
+      "reason": "The predicted answer provides a specific date within the correct month and year, which is more precise than the ground truth while still being accurate.",
+      "variant": "raw"
+    },
+    {
+      "question": "When did Gina get her tattoo?",
+      "ground_truth": "A few years ago",
+      "predicted": "A few years ago",
+      "confidence": 1.0,
+      "category": 2,
+      "correct": true,
+      "partial": false,
+      "reason": "The predicted answer 'A few years ago' is identical to the ground truth 'A few years ago', indicating a perfect match.",
+      "variant": "raw"
+    },
+    {
+      "question": "When did Jon start to go to the gym?",
+      "ground_truth": "March, 2023",
+      "predicted": "2023-03-09",
+      "confidence": 0.7,
+      "category": 2,
+      "correct": true,
+      "partial": false,
+      "reason": "The predicted answer '2023-03-09' is a more specific date within the ground truth 'March, 2023'. It accurately reflects the month and year.",
+      "variant": "raw"
+    },
+    {
+      "question": "When did Gina open her online clothing store?",
+      "ground_truth": "16 March, 2023",
+      "predicted": "16 March 2023",
+      "confidence": 1.0,
+      "category": 2,
+      "correct": true,
+      "partial": false,
+      "reason": "The predicted answer exactly matches the ground truth.",
+      "variant": "raw"
+    },
+    {
+      "question": "When did Jon start expanding his studio's social media presence?",
+      "ground_truth": "April, 2023",
+      "predicted": "3 April 2023",
+      "confidence": 1.0,
+      "category": 2,
+      "correct": true,
+      "partial": false,
+      "reason": "The predicted answer provides the exact date, which is a more specific and accurate representation of the ground truth.",
+      "variant": "raw"
+    },
+    {
+      "question": "When Jon has lost his job as a banker?",
+      "ground_truth": "19 January, 2023",
+      "predicted": "20 January 2023",
+      "confidence": 1.0,
+      "category": 2,
+      "correct": false,
+      "partial": true,
+      "reason": "The predicted date is off by one day from the ground truth. It's close but not exact.",
+      "variant": "full_pipeline"
+    },
+    {
+      "question": "When Gina has lost her job at Door Dash?",
+      "ground_truth": "January, 2023",
+      "predicted": "January 2023",
+      "confidence": 1.0,
+      "category": 2,
+      "correct": true,
+      "partial": false,
+      "reason": "The predicted answer 'January 2023' is identical to the ground truth 'January, 2023', with only a minor stylistic difference in the comma, which does not affect factual accuracy.",
+      "variant": "full_pipeline"
+    },
+    {
+      "question": "How do Jon and Gina both like to destress?",
+      "ground_truth": "by dancing",
+      "predicted": "Dance",
+      "confidence": 1.0,
+      "category": 4,
+      "correct": true,
+      "partial": false,
+      "reason": "The predicted answer 'Dance' accurately reflects the ground truth 'by dancing' as a way Jon and Gina like to destress. The meaning is preserved.",
+      "variant": "full_pipeline"
+    },
+    {
+      "question": "What do Jon and Gina both have in common?",
+      "ground_truth": "They lost their jobs and decided to start their own businesses.",
+      "predicted": "Support each other",
+      "confidence": 0.8,
+      "category": 1,
+      "correct": false,
+      "partial": false,
+      "reason": "The ground truth states they both lost their jobs and started businesses. The predicted answer 'Support each other' is a general action and not a specific commonality from the ground truth. It doesn't address what they *have* in common, but rather what they *do*.",
+      "variant": "full_pipeline"
+    },
+    {
+      "question": "Why did Jon decide to start his dance studio?",
+      "ground_truth": "He lost his job and decided to start his own business to share his passion.",
+      "predicted": "He is passionate about dancing and wants to share the joy it brings him with others.",
+      "confidence": 0.9,
+      "category": 4,
+      "correct": false,
+      "partial": true,
+      "reason": "The predicted answer correctly identifies Jon's passion for dancing and desire to share it, which is part of the ground truth. However, it misses the crucial initial trigger: losing his job, which led him to decide to start his own business.",
+      "variant": "full_pipeline"
+    },
+    {
+      "question": "What Jon thinks the ideal dance studio should look like?",
+      "ground_truth": "By the water, with natural light and Marley flooring",
+      "predicted": "by the water, downtown, great natural light, good dance floor with enough bounce",
+      "confidence": 0.9,
+      "category": 1,
+      "correct": false,
+      "partial": true,
+      "reason": "The ground truth specifies Marley flooring, which is a specific type of dance floor known for its bounce. The predicted answer generalizes to 'good dance floor with enough bounce' and adds 'downtown' which is not in the ground truth.",
+      "variant": "full_pipeline"
+    },
+    {
+      "question": "When is Jon's group performing at a festival?",
+      "ground_truth": "February, 2023",
+      "predicted": "February 2023",
+      "confidence": 0.9,
+      "category": 2,
+      "correct": true,
+      "partial": false,
+      "reason": "The predicted answer 'February 2023' perfectly matches the ground truth 'February, 2023'. The comma in the ground truth is a minor stylistic difference that does not affect the factual correctness.",
+      "variant": "full_pipeline"
+    },
+    {
+      "question": "When did Gina launch an ad campaign for her store?",
+      "ground_truth": "29 January, 2023",
+      "predicted": "29 January 2023",
+      "confidence": 1.0,
+      "category": 2,
+      "correct": true,
+      "partial": false,
+      "reason": "The predicted answer perfectly matches the ground truth, including the date and year.",
+      "variant": "full_pipeline"
+    },
+    {
+      "question": "When was Jon in Paris?",
+      "ground_truth": "28 January 2023",
+      "predicted": "29 January 2023",
+      "confidence": 1.0,
+      "category": 2,
+      "correct": false,
+      "partial": false,
+      "reason": "The predicted date (29 January 2023) is different from the ground truth date (28 January 2023). Even a single day difference makes the answer factually incorrect.",
+      "variant": "full_pipeline"
+    },
+    {
+      "question": "Which city have both Jean and John visited?",
+      "ground_truth": "Rome",
+      "predicted": "Not in memory.",
+      "confidence": 0.0,
+      "category": 1,
+      "correct": false,
+      "partial": false,
+      "reason": "The predicted answer states 'Not in memory', which is factually incorrect given the ground truth 'Rome'. The system failed to retrieve the correct information.",
+      "variant": "full_pipeline"
+    },
+    {
+      "question": "When did Gina team up with a local artist for some cool designs?",
+      "ground_truth": "February, 2023",
+      "predicted": "2023-02-08",
+      "confidence": 1.0,
+      "category": 2,
+      "correct": true,
+      "partial": false,
+      "reason": "The predicted answer provides a specific date within the correct month and year, which is more precise than the ground truth while still being accurate.",
+      "variant": "full_pipeline"
+    },
+    {
+      "question": "When did Gina get her tattoo?",
+      "ground_truth": "A few years ago",
+      "predicted": "A few years ago",
+      "confidence": 1.0,
+      "category": 2,
+      "correct": true,
+      "partial": false,
+      "reason": "The predicted answer 'A few years ago' is identical to the ground truth 'A few years ago', indicating a perfect match.",
+      "variant": "full_pipeline"
+    },
+    {
+      "question": "When did Jon start to go to the gym?",
+      "ground_truth": "March, 2023",
+      "predicted": "2023-03-09",
+      "confidence": 0.7,
+      "category": 2,
+      "correct": true,
+      "partial": false,
+      "reason": "The predicted answer '2023-03-09' is a more specific date within the ground truth 'March, 2023'. It accurately reflects the month and year.",
+      "variant": "full_pipeline"
+    },
+    {
+      "question": "When did Gina open her online clothing store?",
+      "ground_truth": "16 March, 2023",
+      "predicted": "16 March 2023",
+      "confidence": 1.0,
+      "category": 2,
+      "correct": true,
+      "partial": false,
+      "reason": "The predicted answer exactly matches the ground truth.",
+      "variant": "full_pipeline"
+    },
+    {
+      "question": "When did Jon start expanding his studio's social media presence?",
+      "ground_truth": "April, 2023",
+      "predicted": "3 April 2023",
+      "confidence": 1.0,
+      "category": 2,
+      "correct": true,
+      "partial": false,
+      "reason": "The predicted answer provides the exact date, which is a more specific and accurate representation of the ground truth.",
+      "variant": "full_pipeline"
+    }
+  ]
+}

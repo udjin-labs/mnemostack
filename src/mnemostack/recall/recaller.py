@@ -96,27 +96,27 @@ class Recaller:
 
             # Convert to unified RecallResult
             results = []
-        for item, rrf_score in fused:
-            if isinstance(item, Hit):
-                results.append(
-                    RecallResult(
-                        id=item.id,
-                        text=item.payload.get("text", ""),
-                        score=rrf_score,
-                        payload=item.payload,
-                        sources=self._sources_for(item, vector_hits, bm25_hits),
+            for item, rrf_score in fused:
+                if isinstance(item, Hit):
+                    results.append(
+                        RecallResult(
+                            id=item.id,
+                            text=item.payload.get("text", ""),
+                            score=rrf_score,
+                            payload=item.payload,
+                            sources=self._sources_for(item, vector_hits, bm25_hits),
+                        )
                     )
-                )
-            elif isinstance(item, BM25Doc):
-                results.append(
-                    RecallResult(
-                        id=item.id,
-                        text=item.text,
-                        score=rrf_score,
-                        payload=item.payload or {},
-                        sources=self._sources_for(item, vector_hits, bm25_hits),
+                elif isinstance(item, BM25Doc):
+                    results.append(
+                        RecallResult(
+                            id=item.id,
+                            text=item.text,
+                            score=rrf_score,
+                            payload=item.payload or {},
+                            sources=self._sources_for(item, vector_hits, bm25_hits),
+                        )
                     )
-                )
             counter("mnemostack.recall.results", len(results))
             return results
 
