@@ -11,7 +11,7 @@ Usage:
 """
 import argparse
 
-from memvault.embeddings import get_provider, list_providers
+from mnemostack.embeddings import get_provider, list_providers
 
 
 def main() -> None:

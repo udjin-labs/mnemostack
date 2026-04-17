@@ -1,7 +1,7 @@
 """Tests for embedding provider registry."""
 import pytest
 
-from memvault.embeddings import EmbeddingProvider, get_provider, list_providers
+from mnemostack.embeddings import EmbeddingProvider, get_provider, list_providers
 
 
 def test_list_providers_has_builtins():
@@ -30,7 +30,7 @@ def test_gemini_requires_api_key(monkeypatch):
 
 
 def test_custom_provider_registration():
-    from memvault.embeddings import register_provider
+    from mnemostack.embeddings import register_provider
 
     class FakeProvider(EmbeddingProvider):
         def embed(self, text):

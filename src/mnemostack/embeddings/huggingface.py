@@ -1,6 +1,6 @@
 """HuggingFace Transformers embedding provider (local, GPU).
 
-Requires: pip install memvault[huggingface]
+Requires: pip install mnemostack[huggingface]
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ class HuggingFaceProvider(EmbeddingProvider):
     ):
         if not _AVAILABLE:
             raise ImportError(
-                "HuggingFaceProvider requires `pip install memvault[huggingface]`"
+                "HuggingFaceProvider requires `pip install mnemostack[huggingface]`"
             )
         self.model_name = model
         self.pooling = pooling

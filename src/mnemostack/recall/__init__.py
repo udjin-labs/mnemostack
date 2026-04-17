@@ -9,7 +9,7 @@ Components:
 - Answer generator (inference layer)
 
 Usage:
-    from memvault.recall import BM25, reciprocal_rank_fusion
+    from mnemostack.recall import BM25, reciprocal_rank_fusion
     bm25 = BM25(documents)
     hits = bm25.search("query", limit=10)
 """

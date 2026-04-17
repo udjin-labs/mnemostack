@@ -1,8 +1,8 @@
 """Tests for BM25 and RRF fusion."""
 import pytest
 
-from memvault.recall import BM25, reciprocal_rank_fusion, tokenize
-from memvault.recall.bm25 import BM25Doc
+from mnemostack.recall import BM25, reciprocal_rank_fusion, tokenize
+from mnemostack.recall.bm25 import BM25Doc
 
 
 def test_tokenize_basic():

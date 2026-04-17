@@ -1,9 +1,9 @@
-"""memvault CLI — command-line interface for hybrid recall.
+"""mnemostack CLI — command-line interface for hybrid recall.
 
 Commands:
-    memvault health --provider ollama
-    memvault search "query" --collection memvault --provider gemini
-    memvault index <file|dir> --collection memvault --provider gemini
+    mnemostack health --provider ollama
+    mnemostack search "query" --collection mnemostack --provider gemini
+    mnemostack index <file|dir> --collection mnemostack --provider gemini
 
 Most commands need a running Qdrant (default: http://localhost:6333) and a
 configured embedding provider (GEMINI_API_KEY for gemini, or a running Ollama).
@@ -60,7 +60,7 @@ def cmd_search(args: argparse.Namespace) -> int:
     if not store.collection_exists():
         print(
             f"error: collection '{args.collection}' does not exist. "
-            f"Run `memvault index` first.",
+            f"Run `mnemostack index` first.",
             file=sys.stderr,
         )
         return 2
@@ -102,7 +102,7 @@ def cmd_answer(args: argparse.Namespace) -> int:
     if not store.collection_exists():
         print(
             f"error: collection '{args.collection}' does not exist. "
-            f"Run `memvault index` first.",
+            f"Run `mnemostack index` first.",
             file=sys.stderr,
         )
         return 2
@@ -147,7 +147,7 @@ def cmd_answer(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         print(
-            f"  memvault search \"{args.query}\" --provider {args.provider}",
+            f"  mnemostack search \"{args.query}\" --provider {args.provider}",
             file=sys.stderr,
         )
     return 0
@@ -208,8 +208,8 @@ def cmd_index(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="memvault", description="Memory stack for AI agents")
-    p.add_argument("--version", action="version", version=f"memvault {__version__}")
+    p = argparse.ArgumentParser(prog="mnemostack", description="Memory stack for AI agents")
+    p.add_argument("--version", action="version", version=f"mnemostack {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
 
     common = argparse.ArgumentParser(add_help=False)
@@ -220,7 +220,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Embedding provider (default: ollama)",
     )
     common.add_argument(
-        "--collection", default="memvault", help="Qdrant collection name"
+        "--collection", default="mnemostack", help="Qdrant collection name"
     )
     common.add_argument(
         "--qdrant", default="http://localhost:6333", help="Qdrant URL"

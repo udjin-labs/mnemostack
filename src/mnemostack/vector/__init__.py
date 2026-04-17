@@ -1,10 +1,10 @@
 """
-Vector store (Qdrant) operations for memvault.
+Vector store (Qdrant) operations for mnemostack.
 
 Provides indexing, chunking, search with payload filtering, and collection management.
 
 Usage:
-    from memvault.vector import VectorStore
+    from mnemostack.vector import VectorStore
     store = VectorStore(host='http://localhost:6333', collection='my-memory', dimension=3072)
     store.ensure_collection()
     store.upsert(id=1, vector=vec, payload={'text': '...'})

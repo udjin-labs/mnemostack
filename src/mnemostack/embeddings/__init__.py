@@ -1,11 +1,11 @@
 """
-Embedding providers for memvault.
+Embedding providers for mnemostack.
 
 Provider registry pattern — user selects provider via config.
 Recommended: Gemini (best quality, needs API key) or Ollama (local, no key).
 
 Usage:
-    from memvault.embeddings import get_provider
+    from mnemostack.embeddings import get_provider
     provider = get_provider('gemini', model='gemini-embedding-001')
     vec = provider.embed('some text')
 """

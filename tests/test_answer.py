@@ -1,8 +1,8 @@
 """Tests for AnswerGenerator — uses FakeLLM for deterministic behavior."""
 import pytest
 
-from memvault.llm.base import LLMProvider, LLMResponse
-from memvault.recall import AnswerGenerator, RecallResult
+from mnemostack.llm.base import LLMProvider, LLMResponse
+from mnemostack.recall import AnswerGenerator, RecallResult
 
 
 class FakeLLM(LLMProvider):
@@ -132,7 +132,7 @@ def test_context_formatting_includes_timestamps_and_sources(sample_memories):
 
 
 def test_llm_registry():
-    from memvault.llm import list_llms, get_llm
+    from mnemostack.llm import list_llms, get_llm
 
     assert "gemini" in list_llms()
     assert "ollama" in list_llms()
@@ -142,7 +142,7 @@ def test_llm_registry():
 
 
 def test_custom_llm_registration():
-    from memvault.llm import register_llm, get_llm
+    from mnemostack.llm import register_llm, get_llm
 
     class MyLLM(LLMProvider):
         @property

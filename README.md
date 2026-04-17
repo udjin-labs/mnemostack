@@ -1,8 +1,8 @@
-# memvault
+# mnemostack
 
 > Memory stack for AI agents — durable, structured, semantically searchable.
 
-`memvault` is a hybrid memory system combining BM25, vector search (Qdrant), and knowledge graph (Memgraph) with a unified recall pipeline, reranker, and optional inference layer.
+`mnemostack` is a hybrid memory system combining BM25, vector search (Qdrant), and knowledge graph (Memgraph) with a unified recall pipeline, reranker, and optional inference layer.
 
 **Status:** 🚧 alpha — under active development.
 
@@ -19,8 +19,8 @@
 
 ```bash
 # Clone and install in dev mode
-git clone https://github.com/YOUR_ORG/memvault.git
-cd memvault
+git clone https://github.com/YOUR_ORG/mnemostack.git
+cd mnemostack
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
 
@@ -35,7 +35,7 @@ pip install -e ".[dev]"          # tests + linters
 ### Pick an embedding provider
 
 ```python
-from memvault.embeddings import get_provider
+from mnemostack.embeddings import get_provider
 
 # Option A: Gemini (cloud, best quality)
 provider = get_provider("gemini")  # reads GEMINI_API_KEY from env
@@ -62,7 +62,7 @@ print("provider ok" if ok else f"down: {msg}")
 Any class that inherits `EmbeddingProvider` can be registered:
 
 ```python
-from memvault.embeddings import EmbeddingProvider, register_provider
+from mnemostack.embeddings import EmbeddingProvider, register_provider
 
 class MyProvider(EmbeddingProvider):
     @property
@@ -87,7 +87,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed design: pipeline stages, Qdr
 - [ ] Answer mode (Gemini Flash inference)
 - [ ] Memgraph wrapper + temporal queries
 - [ ] Consolidation runtime (decay, promote, summarize)
-- [ ] CLI (`memvault search`, `memvault index`, `memvault runtime`)
+- [ ] CLI (`mnemostack search`, `mnemostack index`, `mnemostack runtime`)
 - [ ] MCP server (Model Context Protocol for Claude/GPT clients)
 
 ## License

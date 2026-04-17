@@ -7,9 +7,9 @@ import pytest
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance
 
-from memvault.embeddings import EmbeddingProvider, register_provider, get_provider
-from memvault.recall import BM25Doc, Recaller, RecallResult
-from memvault.vector import VectorStore
+from mnemostack.embeddings import EmbeddingProvider, register_provider, get_provider
+from mnemostack.recall import BM25Doc, Recaller, RecallResult
+from mnemostack.vector import VectorStore
 
 
 class FakeEmbedder(EmbeddingProvider):

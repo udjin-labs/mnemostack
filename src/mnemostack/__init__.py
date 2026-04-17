@@ -1,5 +1,5 @@
 """
-memvault — Memory stack for AI agents.
+mnemostack — Memory stack for AI agents.
 
 Core components:
 - BM25 + Qdrant + RRF + 8-stage recall pipeline
@@ -11,5 +11,5 @@ Core components:
 See ARCHITECTURE.md for design, README.md for usage.
 """
 
-__version__ = "0.1.0-alpha"
+__version__ = "0.1.0a1"
 __all__ = []

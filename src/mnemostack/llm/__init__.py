@@ -5,7 +5,7 @@ Provider registry pattern — same idea as embeddings module.
 Recommended: Gemini Flash (fast, cheap, strong) or Ollama (local).
 
 Usage:
-    from memvault.llm import get_llm
+    from mnemostack.llm import get_llm
     llm = get_llm('gemini-flash', api_key='...')
     text = llm.generate('What is the capital of France?')
 """

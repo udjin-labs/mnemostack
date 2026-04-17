@@ -2,7 +2,7 @@
 import pytest
 from qdrant_client import QdrantClient
 
-from memvault.vector import Hit, VectorStore
+from mnemostack.vector import Hit, VectorStore
 
 
 @pytest.fixture

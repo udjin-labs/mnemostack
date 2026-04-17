@@ -1,15 +1,15 @@
-# memvault Architecture
+# mnemostack Architecture
 
 ## Overview
 
-**memvault** is a memory stack for AI agents — durable, structured, semantically searchable memory with knowledge graph and consolidation lifecycle.
+**mnemostack** is a memory stack for AI agents — durable, structured, semantically searchable memory with knowledge graph and consolidation lifecycle.
 
 Built around proven patterns: hybrid retrieval (BM25 + vector + graph), RRF fusion, reranker, inference layer. Pluggable embedding providers so you can run local or cloud.
 
 ## Target architecture
 
 ```
-memvault/
+mnemostack/
 ├── embeddings/       # Pluggable providers: Gemini, Ollama, HuggingFace
 ├── vector/           # Qdrant operations (indexing, search)
 ├── graph/            # Memgraph/Neo4j operations (temporal knowledge graph)
@@ -17,7 +17,7 @@ memvault/
 ├── consolidation/    # Memory lifecycle (decay, promote, summarize)
 ├── monitoring/       # Health checks
 ├── mcp/              # Model Context Protocol server (future)
-└── cli.py            # `memvault` command-line tool
+└── cli.py            # `mnemostack` command-line tool
 ```
 
 ## Core modules
@@ -27,7 +27,7 @@ memvault/
 Abstract base class + provider registry:
 
 ```python
-from memvault.embeddings import get_provider
+from mnemostack.embeddings import get_provider
 
 provider = get_provider("gemini", api_key="...")        # Cloud (best quality)
 provider = get_provider("ollama", host="http://localhost:11434")  # Local
@@ -91,7 +91,7 @@ Nightly lifecycle runtime:
 
 ### MCP server (future)
 
-Expose memvault tools over Model Context Protocol so LLM clients (Claude Desktop, etc.) can call:
+Expose mnemostack tools over Model Context Protocol so LLM clients (Claude Desktop, etc.) can call:
 
 - `recall_search(query, limit)`
 - `recall_answer(query)` — with confidence + sources
@@ -107,7 +107,7 @@ embedding:
 
 vector:
   host: http://localhost:6333
-  collection: memvault
+  collection: mnemostack
   chunk_size: 600
   overlap: 100
 
@@ -133,7 +133,7 @@ services:
   memgraph:
     image: memgraph/memgraph:latest
     ports: ["7687:7687"]
-  memvault:
+  mnemostack:
     build: .
     depends_on: [qdrant, memgraph]
 ```

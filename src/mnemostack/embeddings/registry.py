@@ -55,7 +55,7 @@ def _lazy_register_builtins() -> None:
         register_provider("huggingface", HuggingFaceProvider)
         register_provider("hf", HuggingFaceProvider)
     except ImportError:
-        # Optional: needs `pip install memvault[huggingface]`
+        # Optional: needs `pip install mnemostack[huggingface]`
         pass
 
 
