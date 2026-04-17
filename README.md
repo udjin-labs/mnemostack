@@ -6,6 +6,40 @@
 
 **Status:** 🚧 alpha — API may change between 0.1.x releases.
 
+## Benchmarks
+
+Full LoCoMo run (official SNAP-Research dataset, 10 samples / **1986 QA**, clean state, judged by Gemini Flash):
+
+| Metric | mnemostack 0.1.0a11 |
+| --- | --- |
+| **Correct (strict)** | **66.4%** (1319 / 1986) |
+| Partial | 12.8% (254) |
+| Wrong | 20.8% (413) |
+| **Combined (correct + partial)** | **79.2%** |
+
+By question category:
+
+| Category | Correct |
+| --- | --- |
+| `cat_5` adversarial open-domain | **90.1%** |
+| `cat_4` multi-hop reasoning | 69.2% |
+| `cat_2` temporal | 64.5% |
+| `cat_1` single-hop lists | 34.8% |
+| `cat_3` open-domain reasoning | 31.2% |
+
+How that compares with reported numbers from other systems on the same benchmark (caveat: different judges and evaluation protocols):
+
+| System | LoCoMo correct |
+| --- | --- |
+| Hindsight (leader) | 78–85% |
+| Memobase (temporal subset) | 85% |
+| Letta filesystem agent | 74% |
+| Mem0 graph variant | ~68.5% |
+| **mnemostack 0.1.0a11** | **66.4%** |
+| Zep (independently replicated) | 58.4% |
+
+Reproduce with `python benchmarks/locomo_single.py --samples 10` from a clone; the runner only needs a `GEMINI_API_KEY`.
+
 ## Features
 
 - 🧠 **Hybrid retrieval** — BM25 (exact tokens) + vector (semantic), fused via Reciprocal Rank Fusion
