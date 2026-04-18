@@ -266,6 +266,7 @@ Endpoints:
 | `GET`  | `/health`  | Qdrant + Memgraph reachability + config summary |
 | `POST` | `/recall`  | Hybrid recall with optional 8-stage pipeline |
 | `POST` | `/answer`  | Recall + LLM answer synthesis with citations |
+| `GET`  | `/metrics` | Prometheus scrape endpoint (counters + summary histograms) |
 | `GET`  | `/docs`    | Interactive OpenAPI UI |
 
 ```bash

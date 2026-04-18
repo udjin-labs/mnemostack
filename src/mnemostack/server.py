@@ -34,6 +34,11 @@ except ImportError as e:  # pragma: no cover - import guard
 from mnemostack import __version__
 from mnemostack.embeddings import get_provider
 from mnemostack.llm import get_llm
+from mnemostack.observability.recorder import (
+    InMemoryRecorder,
+    get_recorder,
+    set_recorder,
+)
 from mnemostack.recall import (
     AnswerGenerator,
     BM25Retriever,
@@ -179,8 +184,77 @@ def _memory_of(result) -> Memory:
     )
 
 
+def _prometheus_dump(rec: InMemoryRecorder) -> str:
+    """Render an AggregatingRecorder as Prometheus text exposition format.
+
+    We emit one counter per metric name and, for histograms, a count + sum
+    + a small set of summary quantiles (p50/p90/p99/max). No external
+    `prometheus_client` dependency — the exposition format is stable and
+    trivial to produce by hand.
+    """
+
+    def _fmt_labels(labels: dict[str, str] | None) -> str:
+        if not labels:
+            return ""
+        parts = [f'{k}="{v}"' for k, v in labels.items()]
+        return "{" + ",".join(parts) + "}"
+
+    def _from_key(key: tuple):
+        name = key[0]
+        labels = dict(key[1:]) if len(key) > 1 else None
+        return name, labels
+
+    def _safe_name(name: str) -> str:
+        # Prometheus metric names allow [a-zA-Z_:][a-zA-Z0-9_:]*
+        return name.replace(".", "_").replace("-", "_")
+
+    lines: list[str] = []
+    seen_help: set[str] = set()
+
+    for key, val in sorted(rec.counters.items()):
+        name, labels = _from_key(key)
+        prom = _safe_name(name) + "_total"
+        if prom not in seen_help:
+            lines.append(f"# HELP {prom} mnemostack counter: {name}")
+            lines.append(f"# TYPE {prom} counter")
+            seen_help.add(prom)
+        lines.append(f"{prom}{_fmt_labels(labels)} {val}")
+
+    for key, obs in sorted(rec.histograms.items()):
+        name, labels = _from_key(key)
+        prom = _safe_name(name)
+        if not obs:
+            continue
+        obs_sorted = sorted(obs)
+        n = len(obs_sorted)
+
+        def pct(p: float) -> float:
+            idx = min(n - 1, max(0, int(round(p * (n - 1)))))
+            return obs_sorted[idx]
+
+        if prom not in seen_help:
+            lines.append(f"# HELP {prom} mnemostack histogram: {name} (ms)")
+            lines.append(f"# TYPE {prom} summary")
+            seen_help.add(prom)
+        base = _fmt_labels(labels)
+        for quant, label in ((0.5, "0.5"), (0.9, "0.9"), (0.99, "0.99")):
+            combined = _fmt_labels({**(labels or {}), "quantile": label})
+            lines.append(f"{prom}{combined} {pct(quant)}")
+        lines.append(f"{prom}_sum{base} {sum(obs_sorted)}")
+        lines.append(f"{prom}_count{base} {n}")
+
+    return "\n".join(lines) + "\n"
+
+
 def build_app(config: ServerConfig | None = None) -> FastAPI:
     cfg = config or ServerConfig.from_env()
+
+    # Install a process-wide in-memory recorder so /metrics has something
+    # to show. Safe to replace an existing one — the old counters are simply
+    # discarded. For multi-worker deployments, pair this with uvicorn --workers
+    # 1 or a shared aggregator (Redis/Statsd); Prometheus scrape-then-diff
+    # handles single-worker fine.
+    set_recorder(InMemoryRecorder())
 
     provider = get_provider(cfg.provider_name)
     store = VectorStore(collection=cfg.collection, dimension=provider.dimension, host=cfg.qdrant_url)
@@ -257,6 +331,20 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     @app.get("/", include_in_schema=False)
     def root():
         return {"name": "mnemostack", "version": __version__, "docs": "/docs"}
+
+    @app.get("/metrics", include_in_schema=False)
+    def metrics():
+        from fastapi.responses import PlainTextResponse
+
+        rec = get_recorder()
+        if not isinstance(rec, InMemoryRecorder):
+            # Can happen if someone swapped in a null recorder externally.
+            return PlainTextResponse(
+                "# mnemostack: aggregating recorder not installed\n",
+                media_type="text/plain; version=0.0.4",
+            )
+        body = _prometheus_dump(rec)
+        return PlainTextResponse(body, media_type="text/plain; version=0.0.4")
 
     @app.get("/health", response_model=HealthResponse)
     def health():

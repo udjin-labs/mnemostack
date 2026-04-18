@@ -184,3 +184,28 @@ def test_answer_disabled_when_llm_missing(monkeypatch):
     r = client.post("/answer", json={"query": "x"})
     assert r.status_code == 503
     assert "answer generator unavailable" in r.text
+
+
+def test_metrics_endpoint_emits_prometheus_format(monkeypatch):
+    """/metrics must render counters and histograms in Prometheus text format."""
+    from mnemostack.observability.recorder import counter, histogram
+
+    app, _ = _patched_app(monkeypatch)
+    # build_app installed a fresh InMemoryRecorder. Seed it *after* app build
+    # and hit /metrics once so we don't exercise the (mocked) recall path.
+    counter("mnemostack.test.ops", 3)
+    with histogram("mnemostack.test.latency_ms"):
+        pass
+
+    client = TestClient(app)
+    r = client.get("/metrics")
+    assert r.status_code == 200
+    body = r.text
+    assert "# HELP mnemostack_test_ops_total" in body
+    assert "# TYPE mnemostack_test_ops_total counter" in body
+    assert "mnemostack_test_ops_total 3" in body
+    # Histogram: summary type with sum + count + quantiles
+    assert "# TYPE mnemostack_test_latency_ms summary" in body
+    assert "mnemostack_test_latency_ms_sum " in body
+    assert "mnemostack_test_latency_ms_count 1" in body
+    assert 'quantile="0.5"' in body
