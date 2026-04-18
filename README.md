@@ -426,6 +426,7 @@ Any retriever can fail (Memgraph down, Qdrant unreachable, BM25 corpus empty). `
 - [x] Docker compose examples (`examples/docker-compose.yml`)
 - [x] Reproducible LoCoMo benchmark harness in-tree (`benchmarks/run_locomo.sh`)
 - [x] First-class FastAPI/Starlette service wrapper (`pip install 'mnemostack[server]'`, `mnemostack serve`)
+- [x] Async `Recaller.recall_async` and parallel retriever dispatch (proven: 5 concurrent HTTP recalls complete in ~1x single-request wall-clock)
 - [ ] Benchmarks on longer-horizon synthetic corpora
 
 ## License

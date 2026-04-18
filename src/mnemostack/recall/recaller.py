@@ -64,6 +64,28 @@ class Recaller:
         self.rrf_k = rrf_k
         self.retrievers = retrievers or []
 
+    async def recall_async(
+        self,
+        query: str,
+        limit: int = 10,
+        vector_limit: int = 20,
+        bm25_limit: int = 20,
+        filters: dict[str, Any] | None = None,
+    ) -> list[RecallResult]:
+        """Async wrapper around `recall`.
+
+        Default implementation runs the sync path in a worker thread so event
+        loops (FastAPI / asyncio services) are not blocked by embedding calls,
+        Qdrant HTTP, Memgraph Bolt, or CPU-bound BM25. When mnemostack grows
+        native-async retrievers this can switch to real concurrent gathering;
+        the public signature stays stable.
+        """
+        import asyncio
+
+        return await asyncio.to_thread(
+            self.recall, query, limit, vector_limit, bm25_limit, filters
+        )
+
     def recall(
         self,
         query: str,
@@ -156,20 +178,34 @@ class Recaller:
         per_source_limit: int,
         filters: dict[str, Any] | None,
     ) -> list[RecallResult]:
-        """Fuse N retrievers' ranked lists via RRF. Preserves source tags."""
+        """Fuse N retrievers' ranked lists via RRF. Preserves source tags.
+
+        Retrievers run in a threadpool in parallel so a slow one (e.g. a
+        Memgraph bolt roundtrip) doesn't serialise in front of a fast one
+        (BM25). This is the pragmatic path to concurrency while Retriever
+        instances are still synchronous. True per-retriever async support
+        lands later via `Retriever.search_async`.
+        """
+        import concurrent.futures
+
+        def _run(retr):
+            try:
+                return retr, retr.search(query, limit=per_source_limit, filters=filters)
+            except Exception:
+                return retr, []
+
         with histogram("mnemostack.recall.latency_ms"):
             all_lists: list[list[tuple[Any, float]]] = []
             id_to_result: dict[Any, RecallResult] = {}
-            for retr in self.retrievers:
-                try:
-                    hits = retr.search(query, limit=per_source_limit, filters=filters)
-                except Exception:
-                    hits = []
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=max(len(self.retrievers), 1)
+            ) as ex:
+                retriever_hits = list(ex.map(_run, self.retrievers))
+            for retr, hits in retriever_hits:
                 counter(f"mnemostack.recall.{retr.name}_hits", len(hits))
                 ranked: list[tuple[Any, float]] = []
                 for r in hits:
                     if r.id in id_to_result:
-                        # merge sources
                         existing = id_to_result[r.id]
                         for s in r.sources:
                             if s not in existing.sources:

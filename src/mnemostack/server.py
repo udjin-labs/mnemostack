@@ -231,7 +231,9 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         description="Hybrid memory stack for AI agents. See https://github.com/udjin-labs/mnemostack.",
     )
 
-    def _run_recall(query: str, limit: int, full_pipeline: bool):
+    import asyncio
+
+    def _run_recall_sync(query: str, limit: int, full_pipeline: bool):
         raw_limit = max(limit * 3, 30) if full_pipeline else limit
         results = recaller.recall(query, limit=raw_limit)
         if full_pipeline:
@@ -242,6 +244,15 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 except Exception as exc:  # pragma: no cover
                     log.warning("reranker failed (%s) — returning pre-rerank order", exc)
         return results[:limit]
+
+    async def _run_recall(query: str, limit: int, full_pipeline: bool):
+        """Offload the blocking recall stack to a worker thread.
+
+        Recaller/pipeline/reranker all do blocking I/O or CPU work. Running
+        them inline in the event loop would serialise every HTTP request
+        behind the slowest retriever.
+        """
+        return await asyncio.to_thread(_run_recall_sync, query, limit, full_pipeline)
 
     @app.get("/", include_in_schema=False)
     def root():
@@ -265,23 +276,23 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         )
 
     @app.post("/recall", response_model=RecallResponse)
-    def recall_endpoint(req: RecallRequest):
+    async def recall_endpoint(req: RecallRequest):
         try:
-            results = _run_recall(req.query, req.limit, req.full_pipeline)
+            results = await _run_recall(req.query, req.limit, req.full_pipeline)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"recall failed: {exc}") from exc
         return RecallResponse(query=req.query, results=[_memory_of(r) for r in results])
 
     @app.post("/answer", response_model=AnswerResponse)
-    def answer_endpoint(req: AnswerRequest):
+    async def answer_endpoint(req: AnswerRequest):
         if answer_gen is None:
             raise HTTPException(
                 status_code=503,
                 detail="answer generator unavailable (LLM not configured)",
             )
         try:
-            results = _run_recall(req.query, req.limit, req.full_pipeline)
-            ans = answer_gen.generate(req.query, results)
+            results = await _run_recall(req.query, req.limit, req.full_pipeline)
+            ans = await asyncio.to_thread(answer_gen.generate, req.query, results)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"answer failed: {exc}") from exc
         return AnswerResponse(
