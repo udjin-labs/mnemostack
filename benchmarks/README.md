@@ -49,8 +49,22 @@ log in `benchmarks/results/<timestamp>.log`.
   same samples. Uses 2x the budget; only needed for tuning work.
 - `focused_rerun.py` — replays only the QA that failed in a previous run,
   for fast iteration on prompts and pipeline stages.
+- `synthetic_longhorizon.py` — synthetic needle-in-haystack retrieval, no
+  LLM judge. Generates dialogue corpora of configurable size (1k → 100k+
+  turns) with planted marker facts, then measures `recall@K` and MRR against
+  those needles. Useful for seeing where the stack starts to degrade under
+  corpus size, complementing LoCoMo's QA-style evaluation.
 
-All three honour `LOCOMO_DATASET` for the dataset path.
+  ```bash
+  # Single scale
+  python benchmarks/synthetic_longhorizon.py --turns 10000 --needles 30
+
+  # Multiple scales in one run
+  python benchmarks/synthetic_longhorizon.py --scale-steps 5000,10000,25000 \
+      --needles 30 --output /tmp/synth.json
+  ```
+
+The first three honour `LOCOMO_DATASET` for the dataset path.
 
 ## Notes on evaluation protocol
 
@@ -64,3 +78,26 @@ All three honour `LOCOMO_DATASET` for the dataset path.
 - The dataset itself lives at
   <https://github.com/snap-research/locomo> under its own license; this
   repository does not redistribute it.
+
+## Synthetic long-horizon results (representative)
+
+Smoke run with 2000 turns / 10 needles on Gemini embeddings + BM25 + RRF
+(no pipeline, no LLM):
+
+| Metric | Value |
+| --- | --- |
+| recall@1 | 0.40 |
+| recall@5 | 1.00 |
+| recall@20 | 1.00 |
+| MRR | 0.70 |
+| Query p50 latency | ~300 ms |
+
+What this tells us: pure vector similarity places the correct chunk first
+only 40 % of the time because the filler dialogue produces many visually
+similar neighbours. RRF with BM25 catches the exact-token (`N-NNNNNNN`)
+marker in every case inside the top-5. This is exactly the
+"exact-token rescue" pattern we designed for.
+
+Bigger runs (50k+ turns, full pipeline + reranker) are pending; run them
+yourself with the command above to see how the curves look on your hardware.
+
