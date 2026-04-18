@@ -324,7 +324,75 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_config.set_defaults(func=cmd_config_show)
 
+    p_serve = sub.add_parser(
+        "serve",
+        parents=[common],
+        help="Run HTTP API (FastAPI). Requires: pip install 'mnemostack[server]'",
+    )
+    p_serve.add_argument("--host", default="0.0.0.0", help="Bind address (default 0.0.0.0)")
+    p_serve.add_argument("--port", type=int, default=8000, help="Port (default 8000)")
+    p_serve.add_argument(
+        "--llm",
+        default="gemini",
+        help="LLM provider for /answer (optional; disables /answer if missing)",
+    )
+    p_serve.add_argument(
+        "--memgraph-uri",
+        default="bolt://localhost:7687",
+        help="Memgraph bolt URI for the graph retriever",
+    )
+    p_serve.add_argument(
+        "--bm25-path",
+        action="append",
+        default=[],
+        help="Directory/file to index for the BM25 retriever (can be given multiple times)",
+    )
+    p_serve.add_argument(
+        "--state-path",
+        default="/tmp/mnemostack-server-state.json",
+        help="Pipeline state file path",
+    )
+    p_serve.add_argument(
+        "--reload", action="store_true", help="Enable uvicorn auto-reload (dev only)"
+    )
+    p_serve.set_defaults(func=cmd_serve)
+
     return p
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    """Run the FastAPI HTTP server."""
+    try:
+        import uvicorn
+
+        from mnemostack.server import ServerConfig, build_app
+    except ImportError as exc:
+        print(
+            f"error: server extra not installed ({exc}). Install with: "
+            "pip install 'mnemostack[server]'",
+            file=sys.stderr,
+        )
+        return 2
+
+    cfg = ServerConfig(
+        provider_name=args.provider,
+        llm_name=args.llm,
+        collection=args.collection,
+        qdrant_url=args.qdrant,
+        graph_uri=args.memgraph_uri,
+        bm25_paths=list(args.bm25_path) if args.bm25_path else None,
+        state_path=args.state_path,
+    )
+    app = build_app(cfg)
+
+    print(f"mnemostack serve: http://{args.host}:{args.port}")
+    print(f"  provider:   {cfg.provider_name}")
+    print(f"  collection: {cfg.collection}")
+    print(f"  qdrant:     {cfg.qdrant_url}")
+    print(f"  memgraph:   {cfg.graph_uri}")
+    print(f"  docs:       http://{args.host}:{args.port}/docs")
+    uvicorn.run(app, host=args.host, port=args.port, reload=args.reload)
+    return 0
 
 
 def cmd_init(args: argparse.Namespace) -> int:

@@ -61,13 +61,32 @@ services:
       # mnemostack reads these to find services and providers.
       MNEMOSTACK_QDRANT_URL: http://qdrant:6333
       MNEMOSTACK_GRAPH_URI: bolt://memgraph:7687
+      MNEMOSTACK_COLLECTION: ${MNEMOSTACK_COLLECTION:-demo}
+      MNEMOSTACK_PROVIDER: ${MNEMOSTACK_PROVIDER:-gemini}
+      MNEMOSTACK_LLM: ${MNEMOSTACK_LLM:-gemini}
       # Bring your own provider key(s). Only the ones you actually use need to be set.
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       OLLAMA_HOST: ${OLLAMA_HOST:-}
+    ports:
+      - "8000:8000"             # FastAPI HTTP service (docs at /docs)
     volumes:
       - ./notes:/data:ro        # drop your markdown here; indexed into Qdrant
-    # Keep the container alive so `docker compose exec mnemostack ...` is cheap.
-    entrypoint: ["tail", "-f", "/dev/null"]
+    # Runs the HTTP service. Exec into the container for CLI commands
+    # (index, search, health) — the entrypoint in the image is `mnemostack`,
+    # so `docker compose exec mnemostack mnemostack <cmd>` works too.
+    entrypoint: [""]
+    command:
+      - bash
+      - -lc
+      - |
+        pip install --quiet 'mnemostack[server]' >/dev/null
+        exec mnemostack serve \
+          --provider "$$MNEMOSTACK_PROVIDER" \
+          --llm "$$MNEMOSTACK_LLM" \
+          --collection "$$MNEMOSTACK_COLLECTION" \
+          --qdrant "$$MNEMOSTACK_QDRANT_URL" \
+          --memgraph-uri "$$MNEMOSTACK_GRAPH_URI" \
+          --host 0.0.0.0 --port 8000
 
 volumes:
   qdrant_storage:

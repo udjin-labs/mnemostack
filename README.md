@@ -99,22 +99,23 @@ Only the providers you actually use need their keys. HuggingFace local-GPU embed
 
 ## Try it in 30 seconds (Docker)
 
-This is the fastest way to kick the tyres. No Python install, no manual Qdrant / Memgraph setup.
+Fastest way to kick the tyres. No Python install, no manual Qdrant / Memgraph setup.
 
 ```bash
 git clone https://github.com/udjin-labs/mnemostack && cd mnemostack
-mkdir -p examples/notes && cp README.md examples/notes/   # any markdown will do
+cp README.md examples/notes/              # any markdown will do
 GEMINI_API_KEY=your-key docker compose -f examples/docker-compose.yml up -d --build
 
-# Check everything is up
-docker compose -f examples/docker-compose.yml exec mnemostack mnemostack health --provider gemini
-
-# Index your markdown and search it
+# Index the notes volume and ask a question over HTTP
 docker compose -f examples/docker-compose.yml exec mnemostack \
     mnemostack index /data --provider gemini --collection demo
-docker compose -f examples/docker-compose.yml exec mnemostack \
-    mnemostack search "what is this about" --provider gemini --collection demo
+
+curl -s http://localhost:8000/recall \
+    -H 'content-type: application/json' \
+    -d '{"query":"what is this about","limit":5}' | jq
 ```
+
+The mnemostack container runs the HTTP API on port 8000 by default. Interactive docs are at [http://localhost:8000/docs](http://localhost:8000/docs). Use `docker compose exec mnemostack mnemostack <cmd>` for CLI-style operations (`index`, `search`, `health`) against the same stack.
 
 Tear down with `docker compose -f examples/docker-compose.yml down -v` (the `-v` wipes Qdrant + Memgraph state).
 
@@ -247,6 +248,46 @@ for i, path in enumerate(Path("my-notes/").rglob("*.md")):
 ```
 
 For transcript-like inputs (user↔assistant messages), prefer `MessagePairChunker` so a question and its answer stay in the same chunk. See `mnemostack.chunking`.
+
+### HTTP server (optional)
+
+If you want mnemostack available to callers that aren't Python — any service written in Node, Go, Rust, or a plain `curl` from a shell script — install the server extra and expose it over HTTP:
+
+```bash
+pip install 'mnemostack[server]'
+export GEMINI_API_KEY=...
+mnemostack serve --provider gemini --collection memory --port 8000
+```
+
+Endpoints:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET`  | `/health`  | Qdrant + Memgraph reachability + config summary |
+| `POST` | `/recall`  | Hybrid recall with optional 8-stage pipeline |
+| `POST` | `/answer`  | Recall + LLM answer synthesis with citations |
+| `GET`  | `/docs`    | Interactive OpenAPI UI |
+
+```bash
+curl -s http://localhost:8000/recall \
+    -H 'content-type: application/json' \
+    -d '{"query": "what did we decide about auth", "limit": 10}' | jq
+```
+
+Response shape (abridged):
+
+```jsonc
+{
+  "query": "what did we decide about auth",
+  "results": [
+    { "id": "...", "text": "...", "score": 0.72, "source": "notes/...md", "metadata": {} }
+  ]
+}
+```
+
+The `/answer` endpoint adds `{ answer, confidence, sources }` alongside the memories. If the LLM isn't configured, `/answer` returns `503` and `/recall` still works — graceful degradation applies at the HTTP layer too.
+
+For production, front this with whichever reverse proxy you already use (nginx, Caddy, Traefik) and set an auth layer — mnemostack's server does not do auth itself on purpose; the goal is to plug into whatever you already have.
 
 ### Knowledge graph (optional)
 
@@ -384,7 +425,7 @@ Any retriever can fail (Memgraph down, Qdrant unreachable, BM25 corpus empty). `
 - [x] Async variants for high-throughput servers (`mnemostack.vector.AsyncQdrantStore`)
 - [x] Docker compose examples (`examples/docker-compose.yml`)
 - [x] Reproducible LoCoMo benchmark harness in-tree (`benchmarks/run_locomo.sh`)
-- [ ] First-class FastAPI/Starlette service wrapper
+- [x] First-class FastAPI/Starlette service wrapper (`pip install 'mnemostack[server]'`, `mnemostack serve`)
 - [ ] Benchmarks on longer-horizon synthetic corpora
 
 ## License
