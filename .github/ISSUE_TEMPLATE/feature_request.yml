@@ -1,0 +1,38 @@
+name: Feature request
+description: Suggest an enhancement to mnemostack.
+title: "[feat] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, please check the [Roadmap](../../README.md#roadmap)
+        and existing issues to see if this has already been proposed.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem you are trying to solve
+      description: What are you trying to do that mnemostack makes hard today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How would you like it to work? Include proposed API / CLI / HTTP shape if relevant.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Anything you tried or considered and why it did not work.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Extra context
+      description: Who benefits, how often, rough scale, any links.

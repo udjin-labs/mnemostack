@@ -1,0 +1,76 @@
+name: Bug report
+description: Something in mnemostack does not work the way the docs / README say it should.
+title: "[bug] "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. Please include enough detail
+        that someone on the other side of the world can reproduce it without
+        asking you questions.
+
+  - type: input
+    id: version
+    attributes:
+      label: mnemostack version
+      description: Output of `mnemostack --version` or `import mnemostack; print(mnemostack.__version__)`.
+      placeholder: "0.1.0a12"
+    validations:
+      required: true
+
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      description: Output of `python --version`.
+      placeholder: "3.12.3"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Deployment
+      options:
+        - Library (Python API)
+        - CLI
+        - HTTP server (`mnemostack serve`)
+        - MCP server
+        - Docker compose example
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Minimal steps to reproduce. Include the command you ran and the inputs.
+      placeholder: |
+        1. Start Qdrant on :6333
+        2. Run `mnemostack index ./notes --provider gemini`
+        3. Run `mnemostack search "my query"`
+        4. See error
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: Include full error output, tracebacks, or screenshots.
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Qdrant/Memgraph versions, embedding provider, chunk sizes, anything relevant.

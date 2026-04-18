@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Ask a question / discuss usage
+    url: https://github.com/udjin-labs/mnemostack/discussions
+    about: For open-ended questions, integration help, and design discussions, please use Discussions.
+  - name: Security issue
+    url: https://github.com/udjin-labs/mnemostack/security/advisories/new
+    about: Report security vulnerabilities privately here (see SECURITY.md).
