@@ -6,6 +6,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0a13] - 2026-04-18
+
+### Added
+
+- **Streaming `Ingestor` API** (`mnemostack.ingest`): batched, idempotent, LRU-cached streaming ingest from arbitrary Python code. `IngestItem` / `IngestStats` / `stable_chunk_id` are public.
+- **`mnemostack serve` HTTP API** (opt-in via `pip install 'mnemostack[server]'`): `/recall`, `/answer`, `/health`, `/metrics`, `/docs` FastAPI endpoints with pydantic schemas. Docker-compose example runs the server on port 8000 by default.
+- **`/metrics` Prometheus endpoint**: counters and summary histograms in standard text exposition format, no extra dependency.
+- **`Recaller.recall_async`** plus parallel retriever dispatch: retrievers run concurrently in a thread pool, the async wrapper lets HTTP endpoints yield the event loop while embedding / Qdrant / Memgraph work happens. Verified with five concurrent recalls completing in roughly one single-recall wall-clock.
+- **`MemgraphRetriever` probes by `telegram_id`, handle, and `name_lower`**: numeric queries (>=6 digits) resolve to the canonical Person if `n.telegram_id` is set; Cyrillic / non-ASCII names now match correctly via the precomputed `name_lower` property (Memgraph's `toLower()` is ASCII-only).
+- **Reproducible LoCoMo harness** in-tree: `benchmarks/download_locomo.sh` + `benchmarks/run_locomo.sh`, results land under `benchmarks/results/`.
+- **Synthetic long-horizon benchmark** (`benchmarks/synthetic_longhorizon.py`): generates configurable-size corpora with planted needles and measures `recall@K` and MRR.
+- Community health files: `CODE_OF_CONDUCT.md`, `SECURITY.md`, issue and PR templates.
+- `Dockerfile` and an updated `examples/docker-compose.yml` that brings up Qdrant + Memgraph + mnemostack as a working stack.
+
+### Changed
+
+- **`mnemostack index` is now idempotent**: deterministic UUID-5 chunk ids derived from `(source, offset, content)`. Re-runs skip unchanged chunks (no duplicates, no wasted embedding calls).
+- `/health` endpoint uses a ping-level Qdrant check (`get_collections`) so fresh deployments without any ingested points are reported healthy.
+- Server translation layer now reads `RecallResult.payload` / `.sources` correctly — earlier build returned `source=null` in production despite mocks passing.
+
+### Fixed
+
+- `Reranker` composite-id parser (paths with `/` or `:`): ids are preserved intact, lookup falls back to prefix/substring so LLM outputs that truncate ids still resolve.
+- Pyproject URLs now point at the `udjin-labs` GitHub org.
+- README: full per-section rewrite with Quick start, 30-second Docker try-it-out, honest LoCoMo benchmark table, integration walkthrough for markdown-backed assistants, and environment variable reference.
+
+### Internal
+
+- 207 passing tests (up from 183 at `0.1.0a11.post1`), including new Ingestor, async Recaller, and server contract suites.
+
 ## [0.1.0a12] - 2026-04-17
 
 ### Documentation
