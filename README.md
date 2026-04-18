@@ -288,13 +288,41 @@ If you run your own OpenClaw / OpenClaw-style assistant with its own `scripts/re
 
    Check with `curl -sf http://localhost:6333/collections` and `echo 'RETURN 1;' | cypher-shell -a bolt://localhost:7687`.
 
-3. **Point your recall entry at mnemostack.** The minimum change: keep your existing Qdrant collection name, swap your search helper so it uses the 4-retriever `Recaller` shown in the "Full stack" Python example above. Concretely, wrap something like:
+3. **Reuse the existing memory data — no migration, no re-indexing.** This is the part operators usually miss. mnemostack does **not** require a fresh collection or a separate graph. It's schema-agnostic on the retrieval side: point it at the Qdrant collection you already have (all the rich payload your assistant put there — `chat_id`, `memory_class`, `valid_from`, source path — stays intact and is still searchable). Same for Memgraph: mnemostack queries the existing graph, it doesn't overwrite it.
+
+   Concretely:
 
    ```python
-   from mnemostack.recall import Recaller, VectorRetriever, BM25Retriever, MemgraphRetriever, TemporalRetriever
+   from mnemostack.embeddings import get_provider
+   from mnemostack.vector import VectorStore
+   from mnemostack.recall import (
+       Recaller, VectorRetriever, BM25Retriever,
+       MemgraphRetriever, TemporalRetriever,
+   )
+
+   emb = get_provider("gemini")  # whatever you're already using
+   # point at the SAME collection the assistant has been writing to
+   store = VectorStore(collection="memory", dimension=emb.dimension)
+
+   retrievers = [
+       VectorRetriever(embedding=emb, vector_store=store),
+       BM25Retriever(docs=build_bm25_from_workspace_md()),  # your *.md files
+       MemgraphRetriever(uri="bolt://localhost:7687"),       # your existing graph
+       TemporalRetriever(embedding=emb, vector_store=store), # same collection
+   ]
+   recaller = Recaller(retrievers=retrievers)
    ```
 
-   and pass your existing embedding provider, Qdrant store, and BM25 corpus. If your recall script has a `--unified` flag, that's the right place to route to mnemostack first and fall back to the legacy path on import error.
+   **Critical:** use the *same embedding model* the collection was originally indexed with. Mixing embedding models across queries vs stored points silently returns garbage.
+
+   If your recall script has a `--unified` flag, that's the right place to route to mnemostack first and fall back to the legacy path on import error.
+
+   If you'd rather not touch the production collection at all, take a Qdrant snapshot and point mnemostack at the copy:
+
+   ```bash
+   curl -X POST http://localhost:6333/collections/memory/snapshots
+   # then restore under a new collection name (see Qdrant docs)
+   ```
 
 4. **Keep the fallback wired.** Don't delete the existing recall implementation. Route mnemostack as the primary, and drop back to the old recall on any exception. That way a bad upgrade is a one-minute rollback, not an outage.
 
