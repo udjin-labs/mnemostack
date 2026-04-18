@@ -491,14 +491,7 @@ Any retriever can fail (Memgraph down, Qdrant unreachable, BM25 corpus empty). `
 - [x] Prometheus `/metrics` endpoint on the HTTP server
 - [x] Unicode-aware `MemgraphRetriever` probes (`telegram_id`, handle, `name_lower`)
 - [x] Community health: Code of Conduct, Security policy, issue/PR templates
-
-### What's next
-
-- [ ] Redis / Postgres-backed `StateStore` for multi-worker HTTP deployments
-- [ ] Streaming `/answer` responses via Server-Sent Events
-- [ ] Per-retriever latency metric in `/metrics`
-- [ ] Pluggable auth wrapper for the HTTP server (JWT / API key)
-- [ ] Larger and varied public benchmarks (synthetic + replayed real conversation logs)
+- [x] Per-retriever latency in `/metrics` (`mnemostack_recall_<name>_latency_ms`)
 
 ## License
 

@@ -6,6 +6,7 @@ from typing import Any
 
 from ..embeddings.base import EmbeddingProvider
 from ..observability import counter, histogram
+from ..observability.recorder import get_recorder
 from ..vector.qdrant import Hit, VectorStore
 from .bm25 import BM25, BM25Doc
 from .fusion import reciprocal_rank_fusion
@@ -187,12 +188,24 @@ class Recaller:
         lands later via `Retriever.search_async`.
         """
         import concurrent.futures
+        import time
 
         def _run(retr):
+            start = time.monotonic()
             try:
-                return retr, retr.search(query, limit=per_source_limit, filters=filters)
+                hits = retr.search(query, limit=per_source_limit, filters=filters)
             except Exception:
-                return retr, []
+                hits = []
+            elapsed_ms = (time.monotonic() - start) * 1000.0
+            # Per-retriever latency — exposed in /metrics as
+            # mnemostack_recall_<name>_latency_ms{...}.
+            try:
+                get_recorder().record_histogram(
+                    f"mnemostack.recall.{retr.name}_latency_ms", elapsed_ms
+                )
+            except Exception:
+                pass
+            return retr, hits
 
         with histogram("mnemostack.recall.latency_ms"):
             all_lists: list[list[tuple[Any, float]]] = []
