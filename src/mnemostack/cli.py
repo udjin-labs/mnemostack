@@ -156,6 +156,20 @@ def cmd_answer(args: argparse.Namespace) -> int:
     return 0
 
 
+def _stable_chunk_id(source: str, offset: int, text: str) -> str:
+    """Deterministic UUID for an (source, offset, text) triple.
+
+    Same inputs always produce the same id. That makes `mnemostack index` safe
+    to re-run: unchanged chunks upsert onto themselves (no duplicates), and
+    edited chunks produce a different id so old content can be cleaned up.
+    """
+    import hashlib
+    import uuid
+
+    digest = hashlib.sha256(f"{source}|{offset}|{text}".encode("utf-8")).hexdigest()
+    return str(uuid.UUID(digest[:32]))
+
+
 def cmd_index(args: argparse.Namespace) -> int:
     provider = get_provider(args.provider)
     store = VectorStore(
@@ -178,35 +192,56 @@ def cmd_index(args: argparse.Namespace) -> int:
         print(f"error: no .md/.txt files found under {target}", file=sys.stderr)
         return 2
 
-    chunks: list[tuple[str, dict]] = []  # (text, payload) pairs
+    chunks: list[tuple[str, str, dict]] = []  # (id, text, payload) triples
     for f in files:
         text = f.read_text(encoding="utf-8", errors="ignore")
+        source = str(f.relative_to(target if target.is_dir() else target.parent))
         for i in range(0, len(text), args.chunk_size):
             chunk = text[i : i + args.chunk_size]
-            if chunk.strip():
-                chunks.append(
-                    (
-                        chunk,
-                        {
-                            "text": chunk,
-                            "source": str(f.relative_to(target if target.is_dir() else target.parent)),
-                            "offset": i,
-                        },
-                    )
+            if not chunk.strip():
+                continue
+            cid = _stable_chunk_id(source, i, chunk)
+            chunks.append(
+                (
+                    cid,
+                    chunk,
+                    {
+                        "text": chunk,
+                        "source": source,
+                        "offset": i,
+                    },
                 )
+            )
 
-    print(f"Indexing {len(chunks)} chunks from {len(files)} file(s)...")
-    point_id = store.count() + 1  # append after existing
+    # Load existing point IDs once so re-runs skip unchanged chunks without
+    # re-embedding (saves API quota / local GPU time).
+    existing_ids: set[str] = set()
+    if not args.recreate and store.collection_exists():
+        existing_ids = {str(pid) for pid in store.iter_ids()}
+
+    to_embed = [c for c in chunks if c[0] not in existing_ids]
+    skipped = len(chunks) - len(to_embed)
+
+    print(
+        f"Indexing {len(chunks)} chunks from {len(files)} file(s)"
+        f" — {len(to_embed)} new, {skipped} already indexed (skipped)."
+    )
+
     inserted = 0
-    for text, payload in chunks:
+    failed = 0
+    for cid, text, payload in to_embed:
         vec = provider.embed(text)
         if not vec:
+            failed += 1
             continue
-        store.upsert(point_id, vec, payload)
-        point_id += 1
+        store.upsert(cid, vec, payload)
         inserted += 1
 
-    print(f"Done: inserted {inserted}/{len(chunks)} points into '{args.collection}'")
+    print(
+        f"Done: inserted/updated {inserted}, skipped {skipped},"
+        f" failed-embedding {failed}, total chunks seen {len(chunks)}"
+        f" in collection '{args.collection}'."
+    )
     return 0
 
 

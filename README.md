@@ -328,6 +328,8 @@ If you run your own OpenClaw / OpenClaw-style assistant with its own `scripts/re
 
    This walks every `*.md` / `*.txt` under the workspace, chunks them, embeds each chunk with the chosen provider, and upserts into Qdrant. For a typical workspace (a few megabytes of notes) this finishes in a minute or two and stays well inside free-tier embedding quotas.
 
+   **Re-running is safe.** `mnemostack index` uses a deterministic id per `(source, offset, content)` chunk, so a second run skips unchanged chunks (no duplicates, no wasted embedding calls) and only re-embeds chunks whose content changed or moved. Use `--recreate` if you deliberately want to wipe and rebuild from scratch.
+
    Memgraph is optional — skip it for a pure markdown-backed memory and `MemgraphRetriever` just won't be part of the retriever list.
 
    **Case B — user already has Qdrant / Memgraph populated by another plugin or a prior assistant run.** Don't re-index. mnemostack reads existing collections and graphs as-is; payload like `chat_id`, `memory_class`, `valid_from` is preserved. Just point `VectorStore(collection=...)` at the existing collection name and `MemgraphRetriever(uri=...)` at the existing graph.
