@@ -161,18 +161,44 @@ class MemgraphRetriever(Retriever):
         try:
             with driver.session() as session:
                 for w in words:
+                    # Probe 1: numeric-looking tokens may be contact IDs
+                    # (Telegram, Discord, etc). If a canonical Person node has
+                    # a matching contact_id property, surface it directly —
+                    # most reliable entity-resolution signal we have.
+                    rows: list[dict] = []
+                    if w.isdigit() and len(w) >= 6:
+                        rows = session.run(
+                            "MATCH (n) WHERE (n.telegram_id = $w OR n.contact_id = $w) "
+                            "AND n.valid_until = 'current' "
+                            "RETURN n.name AS name, labels(n)[0] AS type, "
+                            "n.memory_class AS mc LIMIT 5",
+                            w=w,
+                        ).data()
+
+                    # Probe 2: exact name match.
                     # `name_lower` is a precomputed lower-case copy of n.name
                     # — Memgraph's toLower() does not handle non-ASCII (Cyrillic
                     # and other scripts), so relying on it silently loses hits.
                     # For graphs that haven't backfilled name_lower yet we fall
                     # back to toLower() so the retriever still works on ASCII.
-                    rows = session.run(
-                        "MATCH (n) WHERE coalesce(n.name_lower, toLower(n.name)) = $w "
-                        "AND n.valid_until = 'current' "
-                        "RETURN n.name AS name, labels(n)[0] AS type, "
-                        "n.memory_class AS mc LIMIT 5",
-                        w=w,
-                    ).data()
+                    if not rows:
+                        rows = session.run(
+                            "MATCH (n) WHERE coalesce(n.name_lower, toLower(n.name)) = $w "
+                            "AND n.valid_until = 'current' "
+                            "RETURN n.name AS name, labels(n)[0] AS type, "
+                            "n.memory_class AS mc LIMIT 5",
+                            w=w,
+                        ).data()
+                    # Probe 3: also match by handle/username (e.g. @alice)
+                    if not rows and len(w) >= 3:
+                        rows = session.run(
+                            "MATCH (n) WHERE toLower(coalesce(n.telegram_username, '')) = $w "
+                            "AND n.valid_until = 'current' "
+                            "RETURN n.name AS name, labels(n)[0] AS type, "
+                            "n.memory_class AS mc LIMIT 5",
+                            w=w,
+                        ).data()
+                    # Probe 4: substring fallback for longer tokens.
                     if not rows and len(w) >= self.contains_min:
                         rows = session.run(
                             "MATCH (n) WHERE coalesce(n.name_lower, toLower(n.name)) CONTAINS $w "
