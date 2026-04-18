@@ -29,7 +29,7 @@ On each `recall(query)`: the four retrievers (Vector, BM25, Memgraph, Temporal) 
 
 Full LoCoMo run (official SNAP-Research dataset, 10 samples / **1986 QA**, clean state, judged by Gemini Flash):
 
-| Metric | mnemostack 0.1.0a11 |
+| Metric | mnemostack |
 | --- | --- |
 | **Correct (strict)** | **66.4%** (1319 / 1986) |
 | Partial | 12.8% (254) |
@@ -56,10 +56,24 @@ How that compares with reported numbers from other systems on the same benchmark
 | Memobase (temporal subset) | 85% |
 | Letta filesystem agent | 74% |
 | Mem0 graph variant | ~68.5% |
-| **mnemostack 0.1.0a11** | **66.4%** |
+| **mnemostack** | **66.4%** |
 | Zep (independently replicated) | 58.4% |
 
-Reproduce from a fresh clone:
+### Real-corpus needle benchmark
+
+LoCoMo measures generic long-term dialogue recall. We also run a private needle-in-haystack benchmark on the production workload that drove the original design — a ~17k-point memory stack indexed from a long-running assistant. Queries mix exact tokens (IP addresses, tickers), telegram IDs, paraphrased facts, and temporal probes.
+
+| Metric | Value |
+| --- | --- |
+| recall@1 | 90% (9/10) |
+| recall@5 | **100%** (10/10) |
+| recall@10 | 100% (10/10) |
+| Query latency p50 | 1.26 s |
+| Query latency max | 1.70 s |
+
+Useful because LoCoMo's failure modes (list exhaustion, open-domain reasoning) are orthogonal to what production memory stacks actually spend time on (find the specific fact the user mentioned weeks ago). This benchmark is not in the public repo; its methodology is in `benchmarks/synthetic_longhorizon.py`, which is the closest reproducible approximation.
+
+### Reproduce LoCoMo from a fresh clone
 
 ```bash
 pip install -e '.[dev]'
@@ -75,6 +89,10 @@ Details, category definitions, and notes on the judge protocol: [benchmarks/READ
 - 🧠 **4-source hybrid retrieval** — Vector (Qdrant) + BM25 (exact tokens) + Memgraph (knowledge graph) + Temporal (time-aware vector), all fused via Reciprocal Rank Fusion. Pluggable `Retriever` abstraction — add your own sources.
 - ⚡ **8-stage recall pipeline** — ClassifyQuery → ExactTokenRescue → GravityDampen → HubDampen → FreshnessBlend → InhibitionOfReturn → CuriosityBoost → QLearningReranker. Opt-in, with persistent state store.
 - 🔁 **LLM reranker** — Gemini Flash (or any LLM) reorders top-K by relevance; catches cases where embedding similarity alone is too broad.
+- ⚡ **Async-friendly** — `Recaller.recall_async` dispatches retrievers in parallel; five concurrent HTTP recalls finish in roughly one single-recall wall-clock.
+- 🌍 **Unicode-aware entity resolution** — Memgraph retriever probes by `telegram_id`, handle, and precomputed `name_lower` so Cyrillic and other non-ASCII names match correctly (Memgraph's `toLower()` is ASCII-only).
+- 📥 **Streaming `Ingestor` API** — batched, idempotent, LRU-cached ingest from any Python code. Same `(source, offset, text)` → same deterministic UUID-5 id, so re-runs are no-ops.
+- 🌐 **HTTP API** (optional) — `pip install 'mnemostack[server]'` gives you `/recall`, `/answer`, `/health`, `/docs`, plus `/metrics` in Prometheus text format. See the HTTP server section below.
 - 🔌 **Pluggable embeddings** — Gemini, Ollama, or HuggingFace (local GPU), via provider registry
 - 🤖 **Pluggable LLM** — Gemini Flash / Ollama for answer generation and reranking
 - 📚 **Temporal knowledge graph** — facts have `valid_from`/`valid_until`, query point-in-time state; graph resurrection stage recovers evicted-but-relevant memories.
@@ -379,7 +397,9 @@ register_provider("my-provider", MyProvider)
 
 ## Install for an OpenClaw-style agent
 
-If you run your own OpenClaw / OpenClaw-style assistant with its own `scripts/recall.sh` or similar recall entry point, you don't have to wire mnemostack in by hand. Ask the assistant to do it and it can follow the steps below verbatim.
+If you run an OpenClaw-style assistant with its own `scripts/recall.sh` or similar recall entry point, you don't have to wire mnemostack in by hand. Ask the assistant to do it and it can follow the steps below verbatim.
+
+(These steps are written against the markdown-backed memory layout popularised by [OpenClaw](https://clawhub.ai) / [OpenClaw](https://github.com/openclaw/openclaw) — the reasoning applies to any assistant whose memory lives in `MEMORY.md` + daily notes.)
 
 **Assistant, read this section and follow the steps if your user asks you to install mnemostack.**
 
@@ -467,6 +487,18 @@ Any retriever can fail (Memgraph down, Qdrant unreachable, BM25 corpus empty). `
 - [x] First-class FastAPI/Starlette service wrapper (`pip install 'mnemostack[server]'`, `mnemostack serve`)
 - [x] Async `Recaller.recall_async` and parallel retriever dispatch (proven: 5 concurrent HTTP recalls complete in ~1x single-request wall-clock)
 - [x] Benchmarks on longer-horizon synthetic corpora (`benchmarks/synthetic_longhorizon.py`)
+- [x] Streaming `Ingestor` API (`mnemostack.ingest`)
+- [x] Prometheus `/metrics` endpoint on the HTTP server
+- [x] Unicode-aware `MemgraphRetriever` probes (`telegram_id`, handle, `name_lower`)
+- [x] Community health: Code of Conduct, Security policy, issue/PR templates
+
+### What's next
+
+- [ ] Redis / Postgres-backed `StateStore` for multi-worker HTTP deployments
+- [ ] Streaming `/answer` responses via Server-Sent Events
+- [ ] Per-retriever latency metric in `/metrics`
+- [ ] Pluggable auth wrapper for the HTTP server (JWT / API key)
+- [ ] Larger and varied public benchmarks (synthetic + replayed real conversation logs)
 
 ## License
 
