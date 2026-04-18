@@ -177,8 +177,8 @@ class MemgraphRetriever(Retriever):
 
                     # Probe 2: exact name match.
                     # `name_lower` is a precomputed lower-case copy of n.name
-                    # — Memgraph's toLower() does not handle non-ASCII (Cyrillic
-                    # and other scripts), so relying on it silently loses hits.
+                    # — Memgraph's toLower() only lower-cases ASCII characters,
+                    # so relying on it silently loses hits on non-ASCII names.
                     # For graphs that haven't backfilled name_lower yet we fall
                     # back to toLower() so the retriever still works on ASCII.
                     if not rows:

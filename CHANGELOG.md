@@ -14,7 +14,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`mnemostack serve` HTTP API** (opt-in via `pip install 'mnemostack[server]'`): `/recall`, `/answer`, `/health`, `/metrics`, `/docs` FastAPI endpoints with pydantic schemas. Docker-compose example runs the server on port 8000 by default.
 - **`/metrics` Prometheus endpoint**: counters and summary histograms in standard text exposition format, no extra dependency.
 - **`Recaller.recall_async`** plus parallel retriever dispatch: retrievers run concurrently in a thread pool, the async wrapper lets HTTP endpoints yield the event loop while embedding / Qdrant / Memgraph work happens. Verified with five concurrent recalls completing in roughly one single-recall wall-clock.
-- **`MemgraphRetriever` probes by `telegram_id`, handle, and `name_lower`**: numeric queries (>=6 digits) resolve to the canonical Person if `n.telegram_id` is set; Cyrillic / non-ASCII names now match correctly via the precomputed `name_lower` property (Memgraph's `toLower()` is ASCII-only).
+- **`MemgraphRetriever` probes by `telegram_id`, handle, and `name_lower`**: numeric queries (>=6 digits) resolve to the canonical Person if `n.telegram_id` is set; non-ASCII names now match correctly via the precomputed `name_lower` property (Memgraph's `toLower()` lower-cases ASCII only).
 - **Reproducible LoCoMo harness** in-tree: `benchmarks/download_locomo.sh` + `benchmarks/run_locomo.sh`, results land under `benchmarks/results/`.
 - **Synthetic long-horizon benchmark** (`benchmarks/synthetic_longhorizon.py`): generates configurable-size corpora with planted needles and measures `recall@K` and MRR.
 - Community health files: `CODE_OF_CONDUCT.md`, `SECURITY.md`, issue and PR templates.

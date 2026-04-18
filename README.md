@@ -90,7 +90,7 @@ Details, category definitions, and notes on the judge protocol: [benchmarks/READ
 - ⚡ **8-stage recall pipeline** — ClassifyQuery → ExactTokenRescue → GravityDampen → HubDampen → FreshnessBlend → InhibitionOfReturn → CuriosityBoost → QLearningReranker. Opt-in, with persistent state store.
 - 🔁 **LLM reranker** — Gemini Flash (or any LLM) reorders top-K by relevance; catches cases where embedding similarity alone is too broad.
 - ⚡ **Async-friendly** — `Recaller.recall_async` dispatches retrievers in parallel; five concurrent HTTP recalls finish in roughly one single-recall wall-clock.
-- 🌍 **Unicode-aware entity resolution** — Memgraph retriever probes by `telegram_id`, handle, and precomputed `name_lower` so Cyrillic and other non-ASCII names match correctly (Memgraph's `toLower()` is ASCII-only).
+- 🌍 **Unicode-aware entity resolution** — Memgraph retriever probes by `telegram_id`, handle, and precomputed `name_lower` so non-ASCII names match correctly (Memgraph's `toLower()` lower-cases ASCII only).
 - 📥 **Streaming `Ingestor` API** — batched, idempotent, LRU-cached ingest from any Python code. Same `(source, offset, text)` → same deterministic UUID-5 id, so re-runs are no-ops.
 - 🌐 **HTTP API** (optional) — `pip install 'mnemostack[server]'` gives you `/recall`, `/answer`, `/health`, `/docs`, plus `/metrics` in Prometheus text format. See the HTTP server section below.
 - 🔌 **Pluggable embeddings** — Gemini, Ollama, or HuggingFace (local GPU), via provider registry
