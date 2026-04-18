@@ -12,6 +12,7 @@ See ARCHITECTURE.md for design, README.md for usage.
 """
 
 from .config import Config
+from .ingest import IngestItem, IngestStats, Ingestor, stable_chunk_id
 
 __version__ = "0.1.0a12"
-__all__ = ["Config"]
+__all__ = ["Config", "IngestItem", "IngestStats", "Ingestor", "stable_chunk_id"]

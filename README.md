@@ -166,6 +166,44 @@ mnemostack answer "what is the capital of France" --provider gemini --collection
 mnemostack mcp-serve --provider gemini --collection my-memory
 ```
 
+### Streaming ingest API
+
+When you want to feed items into mnemostack from code — a chatbot that logs every message, a scraper, a daemon tailing a log — use the `Ingestor`. It handles batching, deduplication, and idempotency for you.
+
+```python
+from mnemostack.embeddings import get_provider
+from mnemostack.vector import VectorStore
+from mnemostack import Ingestor, IngestItem
+
+emb = get_provider("gemini")
+store = VectorStore(collection="my-memory", dimension=emb.dimension)
+store.ensure_collection()
+
+ing = Ingestor(embedding=emb, vector_store=store, batch_size=64)
+
+stats = ing.ingest([
+    IngestItem(text="alice joined acme on 2024-03-01", source="notes/alice.md"),
+    IngestItem(text="alice left acme on 2025-06-15", source="notes/alice.md", offset=100),
+])
+print(stats)  # IngestStats(seen=2, embedded=2, upserted=2, skipped=0, failed=0)
+```
+
+Guarantees:
+
+- **Idempotent.** Each item gets a deterministic UUID5 id computed from `(source, offset, text)`. Re-running with the same input is a no-op: Qdrant upsert replaces the point onto itself, and an in-process LRU cache skips even the embedding call for items already seen in this session.
+- **Batched.** Items are embedded in batches of `batch_size`, so provider HTTP overhead amortises across many items.
+- **Streaming-friendly.** `ing.stream(item_iter)` yields per-batch stats so long feeds can be monitored without waiting for the whole stream to drain.
+- **Graceful.** If a single item fails to embed, it is counted as `failed` but the rest of the batch still lands.
+
+```python
+# Long-lived feed (e.g. inside a FastAPI or Celery worker)
+for item in your_firehose():
+    ing.ingest_one(IngestItem(text=item.body, source=item.channel, metadata={
+        "user_id": item.user_id,
+        "ts": item.ts.isoformat(),
+    }))
+```
+
 ### Python API
 
 ```python
