@@ -161,8 +161,13 @@ class MemgraphRetriever(Retriever):
         try:
             with driver.session() as session:
                 for w in words:
+                    # `name_lower` is a precomputed lower-case copy of n.name
+                    # — Memgraph's toLower() does not handle non-ASCII (Cyrillic
+                    # and other scripts), so relying on it silently loses hits.
+                    # For graphs that haven't backfilled name_lower yet we fall
+                    # back to toLower() so the retriever still works on ASCII.
                     rows = session.run(
-                        "MATCH (n) WHERE toLower(n.name) = $w "
+                        "MATCH (n) WHERE coalesce(n.name_lower, toLower(n.name)) = $w "
                         "AND n.valid_until = 'current' "
                         "RETURN n.name AS name, labels(n)[0] AS type, "
                         "n.memory_class AS mc LIMIT 5",
@@ -170,7 +175,7 @@ class MemgraphRetriever(Retriever):
                     ).data()
                     if not rows and len(w) >= self.contains_min:
                         rows = session.run(
-                            "MATCH (n) WHERE toLower(n.name) CONTAINS $w "
+                            "MATCH (n) WHERE coalesce(n.name_lower, toLower(n.name)) CONTAINS $w "
                             "AND n.valid_until = 'current' "
                             "RETURN n.name AS name, labels(n)[0] AS type, "
                             "n.memory_class AS mc LIMIT 5",
