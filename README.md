@@ -59,7 +59,16 @@ How that compares with reported numbers from other systems on the same benchmark
 | **mnemostack 0.1.0a11** | **66.4%** |
 | Zep (independently replicated) | 58.4% |
 
-Reproduce with `python benchmarks/locomo_single.py --samples 10` from a clone; the runner only needs a `GEMINI_API_KEY`.
+Reproduce from a fresh clone:
+
+```bash
+pip install -e '.[dev]'
+bash benchmarks/download_locomo.sh   # fetches SNAP Research's public dataset
+export GEMINI_API_KEY=...
+bash benchmarks/run_locomo.sh        # full 10-sample run, writes results/ts.{json,log}
+```
+
+Details, category definitions, and notes on the judge protocol: [benchmarks/README.md](benchmarks/README.md).
 
 ## Features
 
@@ -374,7 +383,7 @@ Any retriever can fail (Memgraph down, Qdrant unreachable, BM25 corpus empty). `
 - [x] Config file support YAML/JSON (`mnemostack.config`, `mnemostack init`/`config` CLI)
 - [x] Async variants for high-throughput servers (`mnemostack.vector.AsyncQdrantStore`)
 - [x] Docker compose examples (`examples/docker-compose.yml`)
-- [ ] Reproducible LoCoMo benchmark harness in-tree
+- [x] Reproducible LoCoMo benchmark harness in-tree (`benchmarks/run_locomo.sh`)
 - [ ] First-class FastAPI/Starlette service wrapper
 - [ ] Benchmarks on longer-horizon synthetic corpora
 
