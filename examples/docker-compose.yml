@@ -29,11 +29,15 @@ services:
       - qdrant_storage:/qdrant/storage
     environment:
       QDRANT__LOG_LEVEL: INFO
+    # Qdrant's image is minimal (no curl/wget) so we use a tiny netcat-like
+    # TCP probe that ships with busybox. If this breaks on a future Qdrant
+    # image, replace with: depends_on: service_started + client-side retry.
     healthcheck:
-      test: ["CMD", "sh", "-c", "curl -sf http://localhost:6333/collections"]
+      test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/6333' || exit 1"]
       interval: 5s
       timeout: 3s
-      retries: 10
+      retries: 20
+      start_period: 10s
 
   memgraph:
     image: memgraph/memgraph:latest
@@ -79,7 +83,19 @@ services:
       - bash
       - -lc
       - |
+        # Install the server extra into the pre-baked venv.
         pip install --quiet 'mnemostack[server]' >/dev/null
+        # Wait for dependencies (Qdrant is fast; Memgraph can be slow on first boot).
+        for i in $$(seq 1 30); do
+          if (echo > /dev/tcp/qdrant/6333) 2>/dev/null; then break; fi
+          echo "waiting for qdrant... ($$i/30)"
+          sleep 2
+        done
+        for i in $$(seq 1 30); do
+          if (echo > /dev/tcp/memgraph/7687) 2>/dev/null; then break; fi
+          echo "waiting for memgraph... ($$i/30)"
+          sleep 2
+        done
         exec mnemostack serve \
           --provider "$$MNEMOSTACK_PROVIDER" \
           --llm "$$MNEMOSTACK_LLM" \

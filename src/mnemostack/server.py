@@ -348,9 +348,13 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
 
     @app.get("/health", response_model=HealthResponse)
     def health():
+        # Ping-level reachability. Avoid `store.count()` because it requires
+        # the collection to exist — a fresh deployment before any ingest
+        # would be reported unhealthy. Use the underlying client so we only
+        # check the HTTP endpoint is alive.
         qdrant_ok = False
         try:
-            store.count()
+            store.client.get_collections()
             qdrant_ok = True
         except Exception:
             qdrant_ok = False
