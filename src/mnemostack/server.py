@@ -72,6 +72,10 @@ class Memory(BaseModel):
     text: str
     score: float
     source: str | None = None
+    retrievers: list[str] = Field(
+        default_factory=list,
+        description="Which retrievers produced this hit (vector/bm25/memgraph/temporal).",
+    )
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -148,14 +152,30 @@ def _build_bm25_docs(paths: list[str] | None):
 
 
 def _memory_of(result) -> Memory:
-    md = getattr(result, "metadata", None) or {}
-    source = md.get("source") or getattr(result, "source", None)
+    """Convert a mnemostack.recall.RecallResult into the HTTP response shape.
+
+    Looks in .payload (the real field on RecallResult) first, with a fallback
+    to .metadata for callers that pass a bare dict-like object (used in tests).
+    """
+    payload = getattr(result, "payload", None)
+    if not payload:
+        payload = getattr(result, "metadata", None) or {}
+    # Common source fields populated by our indexers. Order matters: explicit
+    # 'source' wins, then the workspace conventions, finally nothing.
+    source = (
+        payload.get("source")
+        or payload.get("source_file")
+        or payload.get("file")
+        or getattr(result, "source", None)
+    )
+    retrievers = list(getattr(result, "sources", []) or [])
     return Memory(
         id=str(result.id),
         text=result.text,
         score=float(getattr(result, "score", 0.0)),
         source=str(source) if source else None,
-        metadata=md,
+        retrievers=retrievers,
+        metadata=payload,
     )
 
 

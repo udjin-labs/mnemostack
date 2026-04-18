@@ -30,18 +30,33 @@ class FakeResult:
     id: str
     text: str
     score: float = 0.42
-    metadata: dict[str, Any] | None = None
+    payload: dict[str, Any] | None = None
     source: str | None = None
+    sources: list[str] | None = None
 
 
 def test_memory_of_translates_results():
-    r = FakeResult(id="1", text="hello", score=0.5, metadata={"source": "notes/a.md"})
+    r = FakeResult(
+        id="1",
+        text="hello",
+        score=0.5,
+        payload={"source": "notes/a.md"},
+        sources=["vector", "bm25"],
+    )
     m = _memory_of(r)
     assert isinstance(m, Memory)
     assert m.id == "1"
     assert m.text == "hello"
     assert m.score == 0.5
     assert m.source == "notes/a.md"
+    assert m.retrievers == ["vector", "bm25"]
+    assert m.metadata == {"source": "notes/a.md"}
+
+
+def test_memory_of_prefers_source_file_when_source_absent():
+    r = FakeResult(id="2", text="t", payload={"source_file": "transcript:abc.jsonl"})
+    m = _memory_of(r)
+    assert m.source == "transcript:abc.jsonl"
 
 
 def test_recall_response_round_trip():
