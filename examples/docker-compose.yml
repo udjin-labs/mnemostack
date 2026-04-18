@@ -1,13 +1,22 @@
-# docker-compose.yml — minimal stack for mnemostack
+# docker-compose.yml — full mnemostack dev stack (Qdrant + Memgraph + mnemostack).
 #
-# Usage:
-#   docker compose -f examples/docker-compose.yml up -d
+# Fast try-it-out path. Gives you mnemostack CLI inside a container with
+# Qdrant and Memgraph already wired up.
 #
-# After startup:
-#   mnemostack health --provider ollama
+# Build and start:
+#   GEMINI_API_KEY=your-key docker compose -f examples/docker-compose.yml up -d --build
 #
-# Ollama note: if you want Ollama embeddings, run it on the host (or add
-# another service here). This compose file only covers Qdrant + Memgraph.
+# Then, from the host:
+#   docker compose -f examples/docker-compose.yml exec mnemostack mnemostack health --provider gemini
+#   docker compose -f examples/docker-compose.yml exec mnemostack mnemostack index /data --provider gemini --collection demo
+#   docker compose -f examples/docker-compose.yml exec mnemostack mnemostack search "your query" --provider gemini --collection demo
+#
+# Put markdown notes you want indexed into ./notes next to this file; they
+# show up inside the container at /data.
+#
+# Tear down:
+#   docker compose -f examples/docker-compose.yml down         # keep volumes
+#   docker compose -f examples/docker-compose.yml down -v      # wipe Qdrant + Memgraph state too
 
 services:
   qdrant:
@@ -20,6 +29,11 @@ services:
       - qdrant_storage:/qdrant/storage
     environment:
       QDRANT__LOG_LEVEL: INFO
+    healthcheck:
+      test: ["CMD", "sh", "-c", "curl -sf http://localhost:6333/collections"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   memgraph:
     image: memgraph/memgraph:latest
@@ -30,6 +44,30 @@ services:
     volumes:
       - memgraph_data:/var/lib/memgraph
     command: ["--bolt-server-name-for-init=Neo4j/5.11.0"]  # compat for neo4j driver
+
+  mnemostack:
+    # Pulls from the local Dockerfile so you get the source you just cloned.
+    # Swap this for `image: mnemostack:latest` if you already built the image
+    # separately (see ../Dockerfile).
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      memgraph:
+        condition: service_started
+    environment:
+      # mnemostack reads these to find services and providers.
+      MNEMOSTACK_QDRANT_URL: http://qdrant:6333
+      MNEMOSTACK_GRAPH_URI: bolt://memgraph:7687
+      # Bring your own provider key(s). Only the ones you actually use need to be set.
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      OLLAMA_HOST: ${OLLAMA_HOST:-}
+    volumes:
+      - ./notes:/data:ro        # drop your markdown here; indexed into Qdrant
+    # Keep the container alive so `docker compose exec mnemostack ...` is cheap.
+    entrypoint: ["tail", "-f", "/dev/null"]
 
 volumes:
   qdrant_storage:

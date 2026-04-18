@@ -88,6 +88,29 @@ Reproduce with `python benchmarks/locomo_single.py --samples 10` from a clone; t
 
 Only the providers you actually use need their keys. HuggingFace local-GPU embeddings need no keys at all.
 
+## Try it in 30 seconds (Docker)
+
+This is the fastest way to kick the tyres. No Python install, no manual Qdrant / Memgraph setup.
+
+```bash
+git clone https://github.com/udjin-labs/mnemostack && cd mnemostack
+mkdir -p examples/notes && cp README.md examples/notes/   # any markdown will do
+GEMINI_API_KEY=your-key docker compose -f examples/docker-compose.yml up -d --build
+
+# Check everything is up
+docker compose -f examples/docker-compose.yml exec mnemostack mnemostack health --provider gemini
+
+# Index your markdown and search it
+docker compose -f examples/docker-compose.yml exec mnemostack \
+    mnemostack index /data --provider gemini --collection demo
+docker compose -f examples/docker-compose.yml exec mnemostack \
+    mnemostack search "what is this about" --provider gemini --collection demo
+```
+
+Tear down with `docker compose -f examples/docker-compose.yml down -v` (the `-v` wipes Qdrant + Memgraph state).
+
+Prefer Ollama (no cloud key needed)? Run Ollama on the host, set `OLLAMA_HOST=http://host.docker.internal:11434`, and pass `--provider ollama` everywhere instead of `gemini`.
+
 ## Installation
 
 ```bash
