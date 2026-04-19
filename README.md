@@ -87,6 +87,8 @@ Details, category definitions, and notes on the judge protocol: [benchmarks/READ
 ## Features
 
 - 🧠 **4-source hybrid retrieval** — Vector (Qdrant) + BM25 (exact tokens) + Memgraph (knowledge graph) + Temporal (time-aware vector), all fused via Reciprocal Rank Fusion. Pluggable `Retriever` abstraction — add your own sources.
+- ⚖️ **Weighted & adaptive RRF fusion** — `reciprocal_rank_fusion(weights=[...])` lets you lift sources you trust more; `Recaller(adaptive_weights=True)` picks a per-query-shape profile (exact-token / person / temporal / general). See the honest write-up below for where this helps and where it doesn't.
+- 🧪 **HyDE retriever (opt-in)** — embeds a hypothetical answer instead of the query. Useful for query↔document vocabulary gaps in documentation-style corpora; does **not** reliably help on dialogue-backed memory and always costs one extra LLM roundtrip per `search()`. Not included in the default `Recaller`.
 - ⚡ **8-stage recall pipeline** — ClassifyQuery → ExactTokenRescue → GravityDampen → HubDampen → FreshnessBlend → InhibitionOfReturn → CuriosityBoost → QLearningReranker. Opt-in, with persistent state store.
 - 🔁 **LLM reranker** — Gemini Flash (or any LLM) reorders top-K by relevance; catches cases where embedding similarity alone is too broad.
 - ⚡ **Async-friendly** — `Recaller.recall_async` dispatches retrievers in parallel; five concurrent HTTP recalls finish in roughly one single-recall wall-clock.
@@ -102,6 +104,25 @@ Details, category definitions, and notes on the judge protocol: [benchmarks/READ
 - ⚙ **Consolidation runtime** — phase orchestrator for nightly memory lifecycle
 - 🔌 **MCP server** — expose memory tools to Claude Desktop, ChatGPT, Cursor, etc.
 - 🛡 **Graceful degradation** — retrieval keeps working if graph or any retriever is down
+
+### Fusion weights & HyDE — honest notes
+
+Some of the newer knobs help in specific workloads and do nothing (or mildly hurt) in others. Measured, not promised:
+
+**`Recaller(adaptive_weights=True)`** — picks a weight profile per query shape:
+
+| Query shape | Detection | Profile (bm25 / memgraph / vector / temporal) |
+| --- | --- | --- |
+| `exact_token` | IPv4 / port / version / UUID / API-style tokens | 1.4 / 1.4 / 1.0 / 0.9 |
+| `person` | "who is", "кто такой", `@handle`, etc. | 1.0 / 1.5 / 1.0 / 0.9 |
+| `temporal` | "when", "когда", dates | 1.0 / 1.0 / 1.0 / 1.4 |
+| `general` | everything else | classical equal-weight RRF |
+
+Measured on a real production corpus with 10 needle probes: **recall@1 went 50% → 60%, recall@5 stayed at 90%** (zero regression). On LoCoMo (pure dialogue questions, all classified `general`), adaptive weights had no effect — the profile simply isn't triggered. Rule of thumb: turn it on for production ops-style workloads (IPs, tickers, IDs, named entities); leave it off, or don't expect a lift, for dialogue benchmarks. Static `retriever_weights={...}` always wins over adaptive when both are set.
+
+**`HyDERetriever`** — opt-in. Generates a short hypothetical answer via your LLM and embeds that instead of the raw query, then fuses alongside the other retrievers. Useful when the question and the stored answer use very different vocabulary (documentation corpora, FAQ-style content). On our LoCoMo cat_3 smoke (`conv-43`, 14 reasoning questions) it moved accuracy from 14.3% to 21.4% (+1 correct answer); on dialogue-backed memory overall it's roughly a wash. It **always** costs one extra LLM call per `search()`, so budget accordingly and treat it as a tool for specific workloads rather than a default.
+
+Both knobs are opt-in by design — the default `Recaller` stays classical equal-weight RRF over Vector + BM25 (+ Memgraph + Temporal when supplied).
 
 ## Environment
 
@@ -492,6 +513,10 @@ Any retriever can fail (Memgraph down, Qdrant unreachable, BM25 corpus empty). `
 - [x] Unicode-aware `MemgraphRetriever` probes (`telegram_id`, handle, `name_lower`)
 - [x] Community health: Code of Conduct, Security policy, issue/PR templates
 - [x] Per-retriever latency in `/metrics` (`mnemostack_recall_<name>_latency_ms`)
+- [x] Weighted RRF fusion (`reciprocal_rank_fusion(weights=[...])`)
+- [x] Adaptive per-query-shape weights in `Recaller` (`adaptive_weights=True`)
+- [x] `HyDERetriever` (opt-in, not in default `Recaller`)
+- [x] Two-pass graph extraction (full + detail) in the agent's graph-sync pipeline
 
 ## License
 
