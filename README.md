@@ -114,8 +114,8 @@ Some of the newer knobs help in specific workloads and do nothing (or mildly hur
 | Query shape | Detection | Profile (bm25 / memgraph / vector / temporal) |
 | --- | --- | --- |
 | `exact_token` | IPv4 / port / version / UUID / API-style tokens | 1.4 / 1.4 / 1.0 / 0.9 |
-| `person` | "who is", "кто такой", `@handle`, etc. | 1.0 / 1.5 / 1.0 / 0.9 |
-| `temporal` | "when", "когда", dates | 1.0 / 1.0 / 1.0 / 1.4 |
+| `person` | "who is", `@handle`, `username`, `contact`, etc. | 1.0 / 1.5 / 1.0 / 0.9 |
+| `temporal` | "when", "yesterday", "today", dates | 1.0 / 1.0 / 1.0 / 1.4 |
 | `general` | everything else | classical equal-weight RRF |
 
 Measured on a real production corpus with 10 needle probes: **recall@1 went 50% → 60%, recall@5 stayed at 90%** (zero regression). On LoCoMo (pure dialogue questions, all classified `general`), adaptive weights had no effect — the profile simply isn't triggered. Rule of thumb: turn it on for production ops-style workloads (IPs, tickers, IDs, named entities); leave it off, or don't expect a lift, for dialogue benchmarks. Static `retriever_weights={...}` always wins over adaptive when both are set.
