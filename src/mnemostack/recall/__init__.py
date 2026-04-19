@@ -20,6 +20,7 @@ from .expansion import QueryExpander
 from .fusion import reciprocal_rank_fusion
 from .retrievers import (
     BM25Retriever,
+    HyDERetriever,
     MemgraphRetriever,
     Retriever,
     TemporalRetriever,
@@ -58,8 +59,10 @@ __all__ = [
     "Retriever",
     "VectorRetriever",
     "BM25Retriever",
+    "HyDERetriever",
     "MemgraphRetriever",
     "TemporalRetriever",
+
     "extract_temporal",
     "Answer",
     "AnswerGenerator",

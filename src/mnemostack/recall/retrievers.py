@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ..embeddings.base import EmbeddingProvider
+from ..llm.base import LLMProvider
 from ..vector import VectorStore
 from .bm25 import BM25, BM25Doc
 from .recaller import RecallResult
@@ -93,6 +94,97 @@ class BM25Retriever(Retriever):
                 sources=["bm25"],
             )
             for d, s in hits
+        ]
+
+
+class HyDERetriever(Retriever):
+    """Hypothetical Document Embeddings retriever (opt-in).
+
+    Instead of embedding the raw query, we ask an LLM to sketch what a good
+    answer would look like, then embed *that*, then search for memories
+    similar to the hypothetical answer:
+
+        query:  "what fields would she likely pursue in her education?"
+        hypo:   "Caroline is considering psychology, counselling and mental
+                 health degrees, aiming to work with transgender youth."
+
+    When it helps vs when it doesn't (measured, not guessed):
+
+    - **Helps** when the query vocabulary differs a lot from how the answer
+      is stored — typically structured technical corpora (code, API docs,
+      schemas) where questions are abstract and stored content is concrete.
+
+    - **Does not reliably help** on dialogue-backed memory (transcripts,
+      chat logs, markdown notes). Our own LoCoMo smoke showed +1 correct
+      on the hardest cat_3 reasoning sample (14 questions, 14.3% → 21.4%)
+      at the cost of ~1 extra LLM roundtrip per query. On everyday real-
+      corpus probes it traded slightly lower top-1 score for marginal
+      diversity gains — not a clear win.
+
+    - **Always costs** one LLM call per `search()` (latency + $) before
+      the vector search even starts.
+
+    Use this when your workload has a question↔answer vocabulary gap large
+    enough to justify the extra LLM call. For general-purpose dialogue
+    memory, the built-in Vector + BM25 + Memgraph + Temporal combo is
+    usually enough and cheaper.
+
+    Graceful: if the LLM errors or returns empty, returns [] so the rest
+    of the retrieval stack is unaffected.
+    """
+
+    name = "hyde"
+
+    _PROMPT = (
+        "Imagine a short factual answer to this question, written as if it "
+        "were a note in someone's memory. Do not hedge. One or two sentences. "
+        "If you have no information, invent a plausible answer — this is only "
+        "used to seed a vector search, not returned to the user.\n\n"
+        "Question: {query}\n\n"
+        "Answer:"
+    )
+
+    def __init__(
+        self,
+        llm: LLMProvider,
+        embedding: EmbeddingProvider,
+        vector_store: VectorStore,
+        max_tokens: int = 120,
+    ):
+        self.llm = llm
+        self.embedding = embedding
+        self.vector_store = vector_store
+        self.max_tokens = max_tokens
+
+    def _generate_hypothetical(self, query: str) -> str | None:
+        try:
+            resp = self.llm.generate(
+                self._PROMPT.format(query=query),
+                max_tokens=self.max_tokens,
+                temperature=0.0,
+            )
+            text = (getattr(resp, "text", None) or "").strip()
+            return text or None
+        except Exception:
+            return None
+
+    def search(self, query, limit=20, filters=None):
+        hypo = self._generate_hypothetical(query)
+        if not hypo:
+            return []
+        vec = self.embedding.embed(hypo)
+        if not vec:
+            return []
+        hits = self.vector_store.search(vec, limit=limit, filters=filters)
+        return [
+            RecallResult(
+                id=h.id,
+                text=h.payload.get("text", ""),
+                score=h.score,
+                payload=h.payload,
+                sources=["hyde"],
+            )
+            for h in hits
         ]
 
 

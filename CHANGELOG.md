@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`HyDERetriever`** (opt-in, not in the default `Recaller`). Generates a hypothetical answer via an LLM, embeds that, and searches vectors for memories similar to the synthesised answer. Ships with measured limitations in the docstring — on dialogue-backed memory (our LoCoMo smoke) it gave +1 correct on the hardest cat_3 reasoning sample (14.3% → 21.4%) at the cost of one extra LLM roundtrip per query. Ship it when your query↔answer vocabulary gap is large (structured docs, code, schemas); skip it for general dialogue memory. 5 unit tests included.
+
 ## [0.1.0a13] - 2026-04-18
 
 ### Added

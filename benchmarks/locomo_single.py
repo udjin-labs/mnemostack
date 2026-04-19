@@ -18,7 +18,15 @@ from qdrant_client.models import Distance, PayloadSchemaType, VectorParams
 
 from mnemostack.embeddings import get_provider
 from mnemostack.llm import get_llm
-from mnemostack.recall import AnswerGenerator, BM25Doc, Recaller, build_full_pipeline
+from mnemostack.recall import (
+    AnswerGenerator,
+    BM25Doc,
+    BM25Retriever,
+    HyDERetriever,
+    Recaller,
+    VectorRetriever,
+    build_full_pipeline,
+)
 from mnemostack.vector import VectorStore
 
 # LoCoMo dataset path. Download from https://github.com/snap-research/locomo
@@ -116,12 +124,20 @@ def main():
     ap.add_argument("--limit", type=int, default=15, help="top-K memories for answer generator")
     ap.add_argument("--output", default="/tmp/locomo_single.json")
     ap.add_argument("--log", default="/tmp/locomo_single.log")
+    ap.add_argument("--hyde", action="store_true", help="Add HyDERetriever alongside vector + BM25")
+    ap.add_argument("--only-sample", default=None, help="Run only the specified sample_id (e.g. conv-43)")
     args = ap.parse_args()
 
     with open(DATASET) as f:
-        dataset = json.load(f)[: args.samples]
-    if args.skip:
-        dataset = dataset[args.skip :]
+        full = json.load(f)
+    if args.only_sample:
+        dataset = [s for s in full if s.get("sample_id") == args.only_sample]
+        if not dataset:
+            raise SystemExit(f"sample_id {args.only_sample!r} not found in dataset")
+    else:
+        dataset = full[: args.samples]
+        if args.skip:
+            dataset = dataset[args.skip :]
 
     client = QdrantClient(host="localhost", port=6333)
     provider = get_provider("gemini")
@@ -146,7 +162,17 @@ def main():
         collection = f"locomo_single_{sid}"
         log(f"\n=== Sample {si+1}/{len(dataset)}: {sid} ===")
         store, bm25 = ingest_sample(sample, provider, client, collection, log)
-        recaller = Recaller(embedding_provider=provider, vector_store=store, bm25_docs=bm25)
+        if args.hyde:
+            retrievers = [
+                VectorRetriever(embedding=provider, vector_store=store),
+                BM25Retriever(docs=bm25),
+                HyDERetriever(llm=llm, embedding=provider, vector_store=store),
+            ]
+            recaller = Recaller(retrievers=retrievers)
+        else:
+            recaller = Recaller(
+                embedding_provider=provider, vector_store=store, bm25_docs=bm25
+            )
 
         qa_list = sample["qa"] if args.qa is None else sample["qa"][: args.qa]
         for qi, qa in enumerate(qa_list):
