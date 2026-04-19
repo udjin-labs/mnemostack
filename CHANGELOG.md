@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0a14] - 2026-04-19
+
 ### Added
 
 - **Weighted RRF fusion** (`reciprocal_rank_fusion(weights=[...])`). Classical equal-weight RRF stays the default; callers can now lift sources they trust more for a given workload (for example BM25 and graph on exact-token queries).

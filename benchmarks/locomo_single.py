@@ -125,6 +125,11 @@ def main():
     ap.add_argument("--output", default="/tmp/locomo_single.json")
     ap.add_argument("--log", default="/tmp/locomo_single.log")
     ap.add_argument("--hyde", action="store_true", help="Add HyDERetriever alongside vector + BM25")
+    ap.add_argument(
+        "--adaptive-weights",
+        action="store_true",
+        help="Use Recaller(adaptive_weights=True) with per-query-shape weights",
+    )
     ap.add_argument("--only-sample", default=None, help="Run only the specified sample_id (e.g. conv-43)")
     args = ap.parse_args()
 
@@ -162,13 +167,27 @@ def main():
         collection = f"locomo_single_{sid}"
         log(f"\n=== Sample {si+1}/{len(dataset)}: {sid} ===")
         store, bm25 = ingest_sample(sample, provider, client, collection, log)
-        if args.hyde:
+        # Three modes:
+        # 1. Neither --hyde nor --adaptive-weights: classic legacy
+        #    2-retriever Recaller (Vector + BM25, equal weight RRF).
+        # 2. Just --adaptive-weights: retrievers mode, Vector + BM25,
+        #    but with per-query-shape weight profiles from Recaller.
+        # 3. --hyde (with or without --adaptive-weights): adds HyDE as
+        #    a 3rd retriever in retrievers mode.
+        need_retrievers_mode = args.hyde or args.adaptive_weights
+        if need_retrievers_mode:
             retrievers = [
                 VectorRetriever(embedding=provider, vector_store=store),
                 BM25Retriever(docs=bm25),
-                HyDERetriever(llm=llm, embedding=provider, vector_store=store),
             ]
-            recaller = Recaller(retrievers=retrievers)
+            if args.hyde:
+                retrievers.append(
+                    HyDERetriever(llm=llm, embedding=provider, vector_store=store)
+                )
+            recaller = Recaller(
+                retrievers=retrievers,
+                adaptive_weights=args.adaptive_weights,
+            )
         else:
             recaller = Recaller(
                 embedding_provider=provider, vector_store=store, bm25_docs=bm25

@@ -14,5 +14,5 @@ See ARCHITECTURE.md for design, README.md for usage.
 from .config import Config
 from .ingest import IngestItem, IngestStats, Ingestor, stable_chunk_id
 
-__version__ = "0.1.0a13"
+__version__ = "0.1.0a14"
 __all__ = ["Config", "IngestItem", "IngestStats", "Ingestor", "stable_chunk_id"]
