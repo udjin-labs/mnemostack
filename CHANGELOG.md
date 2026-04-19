@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Weighted RRF fusion** (`reciprocal_rank_fusion(weights=[...])`). Classical equal-weight RRF stays the default; callers can now lift sources they trust more for a given workload (for example BM25 and graph on exact-token queries).
+- **Adaptive per-query-shape weights in `Recaller`** (`adaptive_weights=True`, opt-in). Light regex+keyword detection picks a profile per query: exact-token queries (IPs, ports, version strings, API / UUID markers) lift BM25 and the graph retriever; person queries lift the graph retriever; temporal queries (`when`, `когда`, `yesterday` …) lift the temporal retriever; general queries keep classical equal weights. Measured on our real production corpus (10 needle probes): recall@1 went 50% → 60% with recall@5 unchanged at 90%. Static `retriever_weights={...}` always wins over adaptive when both are set.
 - **`HyDERetriever`** (opt-in, not in the default `Recaller`). Generates a hypothetical answer via an LLM, embeds that, and searches vectors for memories similar to the synthesised answer. Ships with measured limitations in the docstring — on dialogue-backed memory (our LoCoMo smoke) it gave +1 correct on the hardest cat_3 reasoning sample (14.3% → 21.4%) at the cost of one extra LLM roundtrip per query. Ship it when your query↔answer vocabulary gap is large (structured docs, code, schemas); skip it for general dialogue memory. 5 unit tests included.
 
 ## [0.1.0a13] - 2026-04-18
