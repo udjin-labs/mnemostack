@@ -46,6 +46,7 @@ from .pipeline import (
     build_stateless_pipeline,
 )
 from .recaller import Recaller, RecallResult
+from .render import compact_format, full_format
 from .reranker import Reranker
 
 __all__ = [
@@ -55,6 +56,8 @@ __all__ = [
     "reciprocal_rank_fusion",
     "Recaller",
     "RecallResult",
+    "compact_format",
+    "full_format",
     "QueryExpander",
     "Retriever",
     "VectorRetriever",

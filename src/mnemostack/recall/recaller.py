@@ -18,6 +18,17 @@ class RecallResult:
     """Unified result from hybrid recall.
 
     Contains merged ranking + which sources contributed + fused score.
+
+    The ``id`` field is a stable, citable identifier for the underlying chunk.
+    For most retrievers it is derived from chunk content (e.g. a UUID-shaped
+    content hash) and is therefore consistent across recall invocations and
+    across processes as long as the chunk itself does not change. Callers may
+    use it as a citation handle (``[id:<...>]``) and later resolve it back to
+    the full record via storage-specific helpers.
+
+    The ``sources`` list records which retrievers contributed this result
+    (e.g. ``['bm25', 'vector']``) and is useful for observability and for
+    rendering compact result indexes.
     """
 
     id: str | int
