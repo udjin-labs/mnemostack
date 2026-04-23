@@ -25,6 +25,8 @@ Not the best fit if you only need a single call to `text-embedding-3-small` + co
 
 On each `recall(query)`: the four retrievers (Vector, BM25, Memgraph, Temporal) run in parallel and return ranked lists. Reciprocal Rank Fusion merges them. The 8-stage pipeline reweights results using query classification, exact-token rescue, gravity/hub dampening (to avoid always-winning popular chunks), freshness, inhibition-of-return (to not return the exact same thing twice in a row), curiosity boosts, a Q-learning reranker learned from usage, and graph resurrection (pull in related facts that weren't in top-K). An optional LLM reranker does a final ordering pass. You get a list of `RecallResult` with source, score, and provenance — ready to hand to a model.
 
+![mnemostack architecture](docs/images/mnemostack-architecture.png)
+
 ## Benchmarks
 
 Full LoCoMo run (official SNAP-Research dataset, 10 samples / **1986 QA**, clean state, judged by Gemini Flash):
