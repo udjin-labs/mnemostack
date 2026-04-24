@@ -6,6 +6,7 @@ from typing import Any
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
+    DatetimeRange,
     Distance,
     FieldCondition,
     Filter,
@@ -207,14 +208,31 @@ class VectorStore:
         must = []
         for key, value in filters.items():
             if isinstance(value, dict) and ("gte" in value or "lte" in value):
-                must.append(
-                    FieldCondition(
-                        key=key,
-                        range=Range(
-                            gte=value.get("gte"), lte=value.get("lte")
-                        ),
+                gte = value.get("gte")
+                lte = value.get("lte")
+                # Dispatch between numeric Range and DatetimeRange by
+                # value type. Qdrant's Range(gte=, lte=) requires
+                # numbers; string-valued ISO timestamps (as produced
+                # by TemporalRetriever and any caller filtering a
+                # DATETIME-indexed payload field) must go through
+                # DatetimeRange instead. Before this split the
+                # temporal path silently blew up inside pydantic
+                # validation, which the caller's broad except
+                # swallowed, yielding zero hits with no warning.
+                if isinstance(gte, str) or isinstance(lte, str):
+                    must.append(
+                        FieldCondition(
+                            key=key,
+                            range=DatetimeRange(gte=gte, lte=lte),
+                        )
                     )
-                )
+                else:
+                    must.append(
+                        FieldCondition(
+                            key=key,
+                            range=Range(gte=gte, lte=lte),
+                        )
+                    )
             else:
                 must.append(
                     FieldCondition(key=key, match=MatchValue(value=value))
