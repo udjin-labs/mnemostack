@@ -29,7 +29,7 @@ Think of it as a storage hierarchy for agent memory:
 - **mnemostack corpus = Disk.** Persistent, searchable, grows forever — every fact the agent has ever seen, queryable on demand.
 - **`recall(query)` = page fault handler.** When the agent needs something that isn't in the current context, it pulls the exact fact from storage with a single hybrid query — not a grep, not a reload of the whole corpus.
 
-The practical effect: you stop re-explaining your project to the agent after every `/compact`. You stop losing momentum. Microsoft's [auto-memory post](https://devblogs.microsoft.com/all-things-azure/i-wasted-68-minutes-a-day-re-explaining-my-code-then-i-built-auto-memory/) measured **68 minutes per day** spent on this re-orientation tax on Copilot CLI alone; mnemostack solves the same problem at the library level, not tied to any single agent runtime.
+The practical effect: you stop re-explaining your project to the agent after every `/compact`. You stop losing momentum to the re-orientation tax that shows up in any agent with session compaction. mnemostack solves it at the library level, not tied to any single agent runtime.
 
 ### How it works, in one paragraph
 
