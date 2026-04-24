@@ -21,6 +21,16 @@ Build it in if you need:
 
 Not the best fit if you only need a single call to `text-embedding-3-small` + cosine similarity — something simpler will do. mnemostack earns its complexity on mixed, long-horizon workloads.
 
+### Mental model
+
+Think of it as a storage hierarchy for agent memory:
+
+- **Context window = RAM.** Fast, limited (200K tokens in Opus 4.7, often ~45K usable after MCP/instructions/context rot), clears on session restart.
+- **mnemostack corpus = Disk.** Persistent, searchable, grows forever — every fact the agent has ever seen, queryable on demand.
+- **`recall(query)` = page fault handler.** When the agent needs something that isn't in the current context, it pulls the exact fact from storage with a single hybrid query — not a grep, not a reload of the whole corpus.
+
+The practical effect: you stop re-explaining your project to the agent after every `/compact`. You stop losing momentum. Microsoft's [auto-memory post](https://devblogs.microsoft.com/all-things-azure/i-wasted-68-minutes-a-day-re-explaining-my-code-then-i-built-auto-memory/) measured **68 minutes per day** spent on this re-orientation tax on Copilot CLI alone; mnemostack solves the same problem at the library level, not tied to any single agent runtime.
+
 ### How it works, in one paragraph
 
 On each `recall(query)`: the four retrievers (Vector, BM25, Memgraph, Temporal) run in parallel and return ranked lists. Reciprocal Rank Fusion merges them. The 8-stage pipeline reweights results using query classification, exact-token rescue, gravity/hub dampening (to avoid always-winning popular chunks), freshness, inhibition-of-return (to not return the exact same thing twice in a row), curiosity boosts, a Q-learning reranker learned from usage, and graph resurrection (pull in related facts that weren't in top-K). An optional LLM reranker does a final ordering pass. You get a list of `RecallResult` with source, score, and provenance — ready to hand to a model.
@@ -85,6 +95,14 @@ bash benchmarks/run_locomo.sh        # full 10-sample run, writes results/ts.{js
 ```
 
 Details, category definitions, and notes on the judge protocol: [benchmarks/README.md](benchmarks/README.md).
+
+## Where mnemostack fits
+
+Most memory tools in the agent ecosystem pick one axis and optimize for it: simple vector similarity for RAG, framework-bound memory tied to a specific agent library, platform-level runtimes with audit and compliance features, or CLI wrappers over a single vendor's session store. Each makes sense for its scope.
+
+mnemostack takes a different slice: it is a **recall quality layer**, offered as a plain Python package. Four retrievers (Vector + BM25 + Memgraph + Temporal), RRF fusion, an 8-stage pipeline, and an optional LLM reranker — composed to handle mixed workloads on the same corpus: exact-token lookups, semantic queries, temporal questions, and multi-hop reasoning, without forcing you to choose one mode over another.
+
+We are not a replacement for your agent framework and not a full platform runtime. We are the piece that actually finds the right fact in a growing corpus. Drop mnemostack into your own Python agent, or let a higher-level memory service call `recall()` over a plain function boundary. The retrievers, pipeline, and reranker are individually composable — take only the parts you need.
 
 ## Features
 
