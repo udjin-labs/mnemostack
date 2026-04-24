@@ -35,8 +35,9 @@ import hashlib
 import logging
 import uuid
 from collections import OrderedDict
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Iterator
+from typing import Any
 
 from mnemostack.embeddings.base import EmbeddingProvider
 from mnemostack.observability.recorder import counter, histogram
@@ -68,7 +69,7 @@ class IngestStats:
     failed: int = 0
     ids: list[str] = field(default_factory=list)
 
-    def __iadd__(self, other: "IngestStats") -> "IngestStats":
+    def __iadd__(self, other: IngestStats) -> IngestStats:
         self.seen += other.seen
         self.embedded += other.embedded
         self.upserted += other.upserted
@@ -85,7 +86,7 @@ def stable_chunk_id(source: str, offset: int, text: str) -> str:
     re-indexing is idempotent. Also exported for callers that want to compute
     ids without going through the Ingestor (e.g. to delete an item).
     """
-    digest = hashlib.sha256(f"{source}|{offset}|{text}".encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(f"{source}|{offset}|{text}".encode()).hexdigest()
     return str(uuid.UUID(digest[:32]))
 
 
@@ -220,7 +221,7 @@ class Ingestor:
                 vectors = [self._safe_embed_single(t) for t in texts]
 
         points = []
-        for (pid, item), vec in zip(buffer, vectors):
+        for (pid, item), vec in zip(buffer, vectors, strict=False):
             if not vec:
                 stats.failed += 1
                 continue

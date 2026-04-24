@@ -11,10 +11,8 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from ..recaller import RecallResult
-from .base import PipelineContext, Stage
+from .base import Stage
 from .state import StateStore
-
 
 # ---------- defaults / stopwords ----------
 

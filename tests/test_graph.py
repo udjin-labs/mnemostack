@@ -3,12 +3,11 @@
 Uses a test-specific node label to avoid polluting production data.
 All tests clean up after themselves.
 """
-import os
 import uuid
 
 import pytest
 
-from mnemostack.graph import GraphStore, Triple
+from mnemostack.graph import GraphStore
 
 TEST_LABEL = "MnemoTestEntity"
 

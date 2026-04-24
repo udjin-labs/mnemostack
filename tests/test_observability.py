@@ -117,6 +117,7 @@ def test_recaller_emits_metrics_via_observability():
     """Integration: Recaller should emit counter/histogram when recall() runs."""
     from qdrant_client import QdrantClient
     from qdrant_client.models import Distance
+
     from mnemostack.embeddings import EmbeddingProvider
     from mnemostack.recall import BM25Doc, Recaller
     from mnemostack.vector import VectorStore

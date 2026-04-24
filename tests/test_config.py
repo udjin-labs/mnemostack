@@ -1,6 +1,5 @@
 """Tests for Config loader."""
 import os
-from pathlib import Path
 
 import pytest
 

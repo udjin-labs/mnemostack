@@ -5,7 +5,7 @@ Provides compact and full text renderings — useful for 3-layer search UX
 """
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Iterable
 
 from .recaller import RecallResult
 

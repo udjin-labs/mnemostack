@@ -1,5 +1,4 @@
 """Tests for TripleExtractor with FakeLLM."""
-import pytest
 
 from mnemostack.graph import TripleExtractor
 from mnemostack.llm.base import LLMProvider, LLMResponse

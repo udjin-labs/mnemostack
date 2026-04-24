@@ -132,7 +132,7 @@ def test_context_formatting_includes_timestamps_and_sources(sample_memories):
 
 
 def test_llm_registry():
-    from mnemostack.llm import list_llms, get_llm
+    from mnemostack.llm import get_llm, list_llms
 
     assert "gemini" in list_llms()
     assert "ollama" in list_llms()
@@ -142,7 +142,7 @@ def test_llm_registry():
 
 
 def test_custom_llm_registration():
-    from mnemostack.llm import register_llm, get_llm
+    from mnemostack.llm import get_llm, register_llm
 
     class MyLLM(LLMProvider):
         @property

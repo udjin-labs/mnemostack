@@ -11,14 +11,8 @@ assert on the observed calls. The point is to verify:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any
-
-import pytest
-
 from mnemostack.ingest import (
     IngestItem,
-    IngestStats,
     Ingestor,
     stable_chunk_id,
 )

@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from mnemostack.recall.recaller import RecallResult, Recaller
+from mnemostack.recall.recaller import Recaller, RecallResult
 
 
 @dataclass

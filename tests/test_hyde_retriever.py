@@ -9,8 +9,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-import pytest
-
 from mnemostack.recall import HyDERetriever
 from mnemostack.recall.recaller import RecallResult
 

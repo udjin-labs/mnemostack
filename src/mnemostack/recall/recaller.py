@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..embeddings.base import EmbeddingProvider
 from ..observability import counter, histogram
@@ -11,6 +11,9 @@ from ..observability.recorder import get_recorder
 from ..vector.qdrant import Hit, VectorStore
 from .bm25 import BM25, BM25Doc
 from .fusion import reciprocal_rank_fusion
+
+if TYPE_CHECKING:
+    from .retrievers import Retriever
 
 
 @dataclass
@@ -99,7 +102,7 @@ class Recaller:
         vector_store: VectorStore | None = None,
         bm25_docs: list[BM25Doc] | None = None,
         rrf_k: int = 60,
-        retrievers: list["Retriever"] | None = None,
+        retrievers: list[Retriever] | None = None,
         retriever_weights: dict[str, float] | None = None,
         adaptive_weights: bool = False,
     ):

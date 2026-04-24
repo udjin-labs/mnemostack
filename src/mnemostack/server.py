@@ -119,7 +119,7 @@ class ServerConfig:
     state_path: str = "/tmp/mnemostack-server-state.json"
 
     @classmethod
-    def from_env(cls) -> "ServerConfig":
+    def from_env(cls) -> ServerConfig:
         return cls(
             provider_name=os.environ.get("MNEMOSTACK_PROVIDER", "gemini"),
             llm_name=os.environ.get("MNEMOSTACK_LLM", "gemini"),
@@ -228,9 +228,9 @@ def _prometheus_dump(rec: InMemoryRecorder) -> str:
         obs_sorted = sorted(obs)
         n = len(obs_sorted)
 
-        def pct(p: float) -> float:
-            idx = min(n - 1, max(0, int(round(p * (n - 1)))))
-            return obs_sorted[idx]
+        def pct(p: float, _n: int = n, _obs_sorted: list[float] = obs_sorted) -> float:
+            idx = min(_n - 1, max(0, int(round(p * (_n - 1)))))
+            return _obs_sorted[idx]
 
         if prom not in seen_help:
             lines.append(f"# HELP {prom} mnemostack histogram: {name} (ms)")

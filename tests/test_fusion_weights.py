@@ -20,7 +20,7 @@ def test_weight_1_1_equivalent_to_default():
     out_default = reciprocal_rank_fusion([a, b])
     out_explicit = reciprocal_rank_fusion([a, b], weights=[1.0, 1.0])
     assert [x[0] for x in out_default] == [x[0] for x in out_explicit]
-    for (_, s1), (_, s2) in zip(out_default, out_explicit):
+    for (_, s1), (_, s2) in zip(out_default, out_explicit, strict=False):
         assert abs(s1 - s2) < 1e-9
 
 

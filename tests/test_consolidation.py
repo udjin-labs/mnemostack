@@ -1,12 +1,10 @@
 """Tests for consolidation runtime and built-in phases."""
-import pytest
 
 from mnemostack.consolidation import (
     CallablePhase,
     Phase,
     PhaseResult,
     Runtime,
-    RuntimeState,
 )
 
 

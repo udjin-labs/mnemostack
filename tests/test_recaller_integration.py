@@ -7,7 +7,7 @@ import pytest
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance
 
-from mnemostack.embeddings import EmbeddingProvider, register_provider, get_provider
+from mnemostack.embeddings import EmbeddingProvider
 from mnemostack.recall import BM25Doc, Recaller, RecallResult
 from mnemostack.vector import VectorStore
 

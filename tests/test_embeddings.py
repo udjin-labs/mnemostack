@@ -55,7 +55,6 @@ def test_custom_provider_registration():
 
 def test_batch_fake_provider():
     """Default embed_batch implementation should work for any subclass."""
-    from mnemostack.embeddings import register_provider
 
     calls = []
 

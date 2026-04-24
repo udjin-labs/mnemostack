@@ -9,11 +9,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from io import StringIO
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 from mnemostack.cli import (
     TIER_PROFILES,
@@ -39,7 +36,7 @@ FAKE_RESULTS = [
 
 def test_tier_profiles_schema():
     """Each tier has required keys and sensible bounds."""
-    for tier, profile in TIER_PROFILES.items():
+    for _tier, profile in TIER_PROFILES.items():
         assert "limit" in profile
         assert "snippet_chars" in profile
         assert "max_sources" in profile
@@ -97,7 +94,7 @@ def test_tier1_list_view_text_output():
     rc, out = _run_search_capture(tier=1)
     assert rc == 0
     # Should be 5 short lines
-    lines = [l for l in out.splitlines() if l.strip()]
+    lines = [line for line in out.splitlines() if line.strip()]
     assert len(lines) == TIER_PROFILES[1]["limit"]
     # No "score=" detailed format, no text preview
     for line in lines:

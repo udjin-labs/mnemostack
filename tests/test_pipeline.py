@@ -1,8 +1,6 @@
 """Tests for pipeline stages and orchestrator."""
 from datetime import datetime, timedelta, timezone
 
-import pytest
-
 from mnemostack.recall import RecallResult
 from mnemostack.recall.pipeline import (
     ClassifyQuery,

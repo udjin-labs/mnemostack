@@ -15,15 +15,12 @@ import json
 import sys
 from pathlib import Path
 
-from pathlib import Path
-
 from . import __version__
-from .config import Config, DEFAULT_CONFIG_PATHS, generate_example_config
+from .config import DEFAULT_CONFIG_PATHS, Config, generate_example_config
 from .embeddings import get_provider, list_providers
 from .llm import get_llm, list_llms
-from .recall import AnswerGenerator, BM25Doc, Recaller
+from .recall import AnswerGenerator, Recaller
 from .vector import VectorStore
-
 
 # -- Progressive tiers --------------------------------------------------------
 # Tiered output budgets let agents pay only for the detail they need.
@@ -224,7 +221,7 @@ def _stable_chunk_id(source: str, offset: int, text: str) -> str:
     import hashlib
     import uuid
 
-    digest = hashlib.sha256(f"{source}|{offset}|{text}".encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(f"{source}|{offset}|{text}".encode()).hexdigest()
     return str(uuid.UUID(digest[:32]))
 
 

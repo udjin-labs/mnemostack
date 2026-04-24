@@ -21,8 +21,7 @@ from typing import Any
 from ..llm.base import LLMProvider
 from ..observability import counter, histogram
 from .fusion import reciprocal_rank_fusion
-from .recaller import RecallResult, Recaller
-
+from .recaller import Recaller, RecallResult
 
 _EXPANSION_PROMPT = """Given a user question, produce {n} short paraphrases that
 are likely to match different wordings in a memory store. Keep them diverse.

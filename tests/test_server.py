@@ -19,9 +19,9 @@ from fastapi.testclient import TestClient
 from mnemostack.server import (
     Memory,
     RecallResponse,
+    ServerConfig,
     _memory_of,
     build_app,
-    ServerConfig,
 )
 
 

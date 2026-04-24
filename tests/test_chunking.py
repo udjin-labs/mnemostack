@@ -8,7 +8,6 @@ from mnemostack.chunking import (
     ParagraphChunker,
 )
 
-
 # ---------- CharChunker ----------
 
 def test_char_chunker_basic():

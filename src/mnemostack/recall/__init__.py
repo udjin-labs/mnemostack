@@ -18,15 +18,6 @@ from .answer import Answer, AnswerGenerator
 from .bm25 import BM25, BM25Doc, tokenize
 from .expansion import QueryExpander
 from .fusion import reciprocal_rank_fusion
-from .retrievers import (
-    BM25Retriever,
-    HyDERetriever,
-    MemgraphRetriever,
-    Retriever,
-    TemporalRetriever,
-    VectorRetriever,
-    extract_temporal,
-)
 from .pipeline import (
     ClassifyQuery,
     CuriosityBoost,
@@ -48,6 +39,15 @@ from .pipeline import (
 from .recaller import Recaller, RecallResult
 from .render import compact_format, full_format
 from .reranker import Reranker
+from .retrievers import (
+    BM25Retriever,
+    HyDERetriever,
+    MemgraphRetriever,
+    Retriever,
+    TemporalRetriever,
+    VectorRetriever,
+    extract_temporal,
+)
 
 __all__ = [
     "BM25",

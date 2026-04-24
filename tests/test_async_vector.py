@@ -56,7 +56,7 @@ async def test_async_search_with_filter(store):
 
 @pytest.mark.asyncio
 async def test_async_context_manager():
-    async with AsyncVectorStore(collection="test_ctx", dimension=4) as s:
+    async with AsyncVectorStore(collection="test_ctx", dimension=4):
         # Just ensure we can call async methods
         # Skip actual Qdrant call if no real server — in-memory works
         pass

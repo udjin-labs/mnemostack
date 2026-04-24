@@ -31,12 +31,11 @@ Example config file:
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
-
 
 DEFAULT_CONFIG_PATHS = [
     Path.home() / ".config" / "mnemostack" / "config.yaml",
