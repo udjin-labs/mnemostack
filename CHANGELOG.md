@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0a1] - 2026-04-24
+
+### Fixed
+
+- **`TemporalRetriever` silently returned zero hits** (PR #1 by @perlowja). Two compounding bugs hidden behind a broad `except Exception: return []`: the retriever emitted a nested qdrant-raw filter shape that `VectorStore._build_filter` didn't understand, and `_build_filter` always built a numeric `Range` even for ISO datetime strings, which pydantic rejected. Both paths now use a dispatch-by-type filter builder, and the fallback logs a `WARNING` so future silent-zero cases are observable. 7 new regression tests in `tests/test_temporal_retriever.py`. This was a real bug affecting any install that relied on the temporal recall path — users on `0.1.0a14` should upgrade.
+
 ### Added
 
 - **Progressive Tiers API** (`mnemostack search --tier {1,2,3}`, `mnemostack answer --tier {1,2,3}`). Optional output budgets that let agents pay only for the detail they actually need:
@@ -13,6 +19,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **Tier 2** (~200 tokens): short (~40 char) snippets around hits. Default-useful recall for most triage flows.
   - **Tier 3** (~500 tokens): fuller 200-char previews and up to 10 results. Use when the agent actually needs to read memory.
   - Omitting `--tier` keeps the existing full-output behavior (backward compatible). Covered by 9 unit tests in `tests/test_cli_tiers.py`.
+- **MCP integration guides** for Claude Desktop / Claude Code, Cursor, and OpenClaw under `integrations/`. Each is self-contained (install / verify / uninstall / troubleshooting). The OpenClaw guide explicitly documents coexistence with the host's native memory tools — MCP is an out-of-band channel for sub-agents and external hosts, not a replacement for in-host recall.
+
+### Docs
+
+- Progressive Tiers examples added to `README.md` and `examples/quickstart.md`, including the `answer --tier 1` shortcut that drops the `SOURCES:` block when only the answer text is wanted.
 
 ## [0.1.0a14] - 2026-04-19
 
