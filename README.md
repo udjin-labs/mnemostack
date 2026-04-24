@@ -119,6 +119,7 @@ We are not a replacement for your agent framework and not a full platform runtim
 - 🤖 **Pluggable LLM** — Gemini Flash / Ollama for answer generation and reranking
 - 📚 **Temporal knowledge graph** — facts have `valid_from`/`valid_until`, query point-in-time state; graph resurrection stage recovers evicted-but-relevant memories.
 - 💬 **Answer mode** — inference layer synthesizes concise factual answers with source citations and confidence
+- 📏 **Progressive Tiers API** — `search --tier {1,2,3}` and `answer --tier {1,2,3}` bound output size (~50 / ~200 / ~500 tokens) so agents can pay only for the detail they actually need. Omit `--tier` for unchanged full output.
 - ✂️ **Chunkers** — plain, fixed-size, and `MessagePairChunker` for chat transcripts (keeps user↔assistant pairs together).
 - 🔎 **Query expansion** — optional `QueryExpander` rewrites short queries for better recall before fusion.
 - ⚙ **Consolidation runtime** — phase orchestrator for nightly memory lifecycle
@@ -561,6 +562,9 @@ Any retriever can fail (Memgraph down, Qdrant unreachable, BM25 corpus empty). `
 - [x] Adaptive per-query-shape weights in `Recaller` (`adaptive_weights=True`)
 - [x] `HyDERetriever` (opt-in, not in default `Recaller`)
 - [x] Two-pass graph extraction (full + detail) in the agent's graph-sync pipeline
+- [x] Progressive Tiers API on `search`/`answer` (`--tier {1,2,3}`, backward-compatible)
+- [x] MCP integration guides for Claude Desktop/Code, Cursor, OpenClaw (`integrations/`)
+- [x] Silent-zero fix in `TemporalRetriever` + dispatch-by-type filter builder (`0.2.0a1`)
 
 ## License
 
