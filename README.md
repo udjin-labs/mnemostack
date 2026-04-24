@@ -25,7 +25,7 @@ Not the best fit if you only need a single call to `text-embedding-3-small` + co
 
 Think of it as a storage hierarchy for agent memory:
 
-- **Context window = RAM.** Fast, limited (200K tokens in Opus 4.7, often ~45K usable after MCP/instructions/context rot), clears on session restart.
+- **Context window = RAM.** Fast, limited (typically 200K tokens for most agent models; up to 1M in frontier offerings like Claude Opus 4.6/4.7 or GPT-5.4 Codex), often far less usable after MCP/instructions/context rot — ~45K on a 200K window is a realistic working number. Clears on session restart.
 - **mnemostack corpus = Disk.** Persistent, searchable, grows forever — every fact the agent has ever seen, queryable on demand.
 - **`recall(query)` = page fault handler.** When the agent needs something that isn't in the current context, it pulls the exact fact from storage with a single hybrid query — not a grep, not a reload of the whole corpus.
 
