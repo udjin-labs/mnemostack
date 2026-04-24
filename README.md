@@ -225,6 +225,30 @@ mnemostack answer "what is the capital of France" --provider gemini --collection
 mnemostack mcp-serve --provider gemini --collection my-memory
 ```
 
+#### Progressive tiers — pay only for the detail you need
+
+`search` and `answer` accept an optional `--tier {1,2,3}` flag that bounds how
+much output a call produces. Useful when a recall is called from a long-running
+agent loop where full recall output would burn context unnecessarily.
+
+```bash
+# Tier 1 (~50 tokens) — just "is there anything in memory about this?"
+# Returns id, score, source labels; no text.
+mnemostack search "VPN failover" --tier 1 --provider gemini
+
+# Tier 2 (~200 tokens) — triage with short snippets (~40 chars each)
+mnemostack search "VPN failover" --tier 2 --provider gemini
+
+# Tier 3 (~500 tokens) — full 200-char previews, up to 10 results
+mnemostack search "VPN failover" --tier 3 --provider gemini
+```
+
+Omit `--tier` to get the full, uncapped output (backward compatible). Rule of
+thumb for agents: **tier 1 for navigation / existence checks, tier 3 only when
+you actually need to read the memories.** `answer` is already compressed, so it
+needs a tier less often — use `--tier 1` there to drop the `SOURCES:` block
+when only the answer text is wanted.
+
 ### Streaming ingest API
 
 When you want to feed items into mnemostack from code — a chatbot that logs every message, a scraper, a daemon tailing a log — use the `Ingestor`. It handles batching, deduplication, and idempotency for you.

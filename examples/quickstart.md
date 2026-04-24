@@ -48,10 +48,34 @@ mnemostack index ./my-notes/ --provider ollama --recreate
 mnemostack search "what did we decide about auth" --provider ollama
 ```
 
+### Progressive tiers (optional)
+
+When search is called from an automated agent loop, full output can be
+wasteful. `--tier` caps it to three fixed budgets so you pay only for the
+detail you actually need.
+
+```bash
+# Tier 1 — list view only (~50 tokens). Use when the question is "does memory
+# contain anything about this at all?". Returns id + score + sources, no text.
+mnemostack search "auth decisions" --tier 1 --provider ollama
+
+# Tier 2 — short 40-char snippets (~200 tokens). Good default for triage.
+mnemostack search "auth decisions" --tier 2 --provider ollama
+
+# Tier 3 — 200-char previews, up to 10 results (~500 tokens). Use when the
+# agent actually needs to read the memories.
+mnemostack search "auth decisions" --tier 3 --provider ollama
+```
+
+Omitting `--tier` keeps the original full-output behavior.
+
 ## 7. Answer mode (needs LLM)
 
 ```bash
 mnemostack answer "what is the capital of France" --provider gemini
+
+# With --tier 1, the SOURCES: block is omitted — only ANSWER + CONFIDENCE.
+mnemostack answer "what is the capital of France" --tier 1 --provider gemini
 ```
 
 ## 8. MCP server (Claude Desktop / Cursor)
