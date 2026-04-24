@@ -392,10 +392,16 @@ class CuriosityBoost(Stage):
 class QLearningReranker(Stage):
     """Rerank results by source Q-value given query type.
 
-    Each result must have `payload['retrieval_source']` (e.g. 'vector', 'bm25',
-    'graph'). Stage boosts scores from sources that historically performed
-    well for the query type. Updates happen via `record_feedback(memory_id,
-    query_type, source, reward)`.
+    Each result must have ``RecallResult.sources`` populated (e.g.
+    ``['vector']``, ``['bm25']``, ``['graph']``). One result may carry
+    multiple contributing sources when RRF fused them; Q-value is
+    averaged across the listed sources. Falls back to ``['vector']``
+    when ``sources`` is absent/empty so historical payloads that
+    predate the ``sources`` field still score.
+
+    Stage boosts scores from sources that historically performed well
+    for the query type. Updates happen via ``record_feedback(memory_id,
+    query_type, source, reward)``.
     """
 
     STATE_KEY = "q_table"

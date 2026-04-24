@@ -14,6 +14,7 @@ Built-in retrievers:
 """
 from __future__ import annotations
 
+import logging
 import re
 from abc import ABC, abstractmethod
 from collections import defaultdict
@@ -25,6 +26,8 @@ from ..llm.base import LLMProvider
 from ..vector import VectorStore
 from .bm25 import BM25, BM25Doc
 from .recaller import RecallResult
+
+logger = logging.getLogger(__name__)
 
 try:
     from neo4j import GraphDatabase
@@ -416,17 +419,27 @@ class TemporalRetriever(Retriever):
         vec = self.embedding.embed(query)
         if not vec:
             return []
+        # Flat filter shape understood by VectorStore._build_filter
+        # (see src/mnemostack/vector/qdrant.py). The previous nested
+        # `{"must": [{"key": "timestamp", "range": {...}}]}` shape was
+        # not a flat {field: value} / {field: {gte, lte}} map, so
+        # _build_filter treated the literal "must" key as a payload
+        # field and the resulting qdrant-client call raised — which
+        # was then silently swallowed by `except Exception: return []`
+        # below, so the temporal path appeared to work but always
+        # returned zero hits. VectorStore._build_filter currently
+        # maps dict-valued filters only onto qdrant Range(gte=, lte=),
+        # so `end` is inclusive here.
         temporal_filter = {
-            "must": [
-                {
-                    "key": "timestamp",
-                    "range": {"gte": start, "lt": end},
-                }
-            ]
+            "timestamp": {"gte": start, "lte": end},
         }
         try:
             hits = self.vector_store.search(vec, limit=limit, filters=temporal_filter)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 — defensive; log instead of silent
+            logger.warning(
+                "TemporalRetriever: vector_store.search failed (window=%s..%s): %s",
+                start, end, exc,
+            )
             return []
         return [
             RecallResult(
