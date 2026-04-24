@@ -25,6 +25,34 @@ from .recall import AnswerGenerator, BM25Doc, Recaller
 from .vector import VectorStore
 
 
+# -- Progressive tiers --------------------------------------------------------
+# Tiered output budgets let agents pay only for the detail they need.
+# Tier 1: enumerate what's in memory (list view, ~50 tokens).
+# Tier 2: short snippets around hits (default usable recall, ~200 tokens).
+# Tier 3: fuller detail around hits, more results (~500 tokens).
+# When --tier is omitted, behavior is unchanged (backward compatible).
+TIER_PROFILES: dict[int, dict] = {
+    1: {"limit": 5, "snippet_chars": 0, "max_sources": 2},
+    2: {"limit": 5, "snippet_chars": 40, "max_sources": 2},
+    3: {"limit": 10, "snippet_chars": 200, "max_sources": 3},
+}
+
+
+def _apply_tier(args: argparse.Namespace) -> dict | None:
+    """Return the tier profile for this call, or None if no --tier was passed.
+
+    Also collapses --limit into the tier-enforced limit so recall doesn't over-fetch.
+    """
+    tier = getattr(args, "tier", None)
+    if tier is None:
+        return None
+    profile = TIER_PROFILES[tier]
+    # Tier caps limit; user-provided --limit is ignored when smaller would waste work,
+    # and clamped when larger would bust the token budget.
+    args.limit = min(getattr(args, "limit", profile["limit"]), profile["limit"])
+    return profile
+
+
 def cmd_health(args: argparse.Namespace) -> int:
     try:
         provider = get_provider(args.provider)
@@ -54,6 +82,7 @@ def cmd_health(args: argparse.Namespace) -> int:
 
 
 def cmd_search(args: argparse.Namespace) -> int:
+    profile = _apply_tier(args)
     provider = get_provider(args.provider)
     store = VectorStore(
         collection=args.collection,
@@ -72,30 +101,49 @@ def cmd_search(args: argparse.Namespace) -> int:
     results = recaller.recall(args.query, limit=args.limit)
 
     if args.json:
-        payload = [
-            {
+        snippet_chars = profile["snippet_chars"] if profile else None
+        max_sources = profile["max_sources"] if profile else None
+        payload = []
+        for r in results:
+            entry: dict = {
                 "id": r.id,
                 "score": round(r.score, 4),
-                "text": r.text,
-                "sources": r.sources,
-                "payload": r.payload,
+                "sources": r.sources[:max_sources] if max_sources else r.sources,
             }
-            for r in results
-        ]
+            if snippet_chars is None:
+                # backward-compatible: full text + payload
+                entry["text"] = r.text
+                entry["payload"] = r.payload
+            elif snippet_chars > 0:
+                entry["text"] = r.text[:snippet_chars]
+            # tier 1 (snippet_chars == 0) emits no text at all
+            payload.append(entry)
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         if not results:
             print("(no results)")
             return 0
+        if profile is not None and profile["snippet_chars"] == 0:
+            # Tier 1: list view — sources + score only, one line per hit
+            for i, r in enumerate(results, 1):
+                sources = ",".join(r.sources[: profile["max_sources"]]) or "?"
+                print(f"[{i}] {r.score:.3f} {sources}")
+            return 0
+        preview_chars = profile["snippet_chars"] if profile else 200
+        max_sources = profile["max_sources"] if profile else None
         for i, r in enumerate(results, 1):
-            preview = (r.text[:200] + "...") if len(r.text) > 200 else r.text
-            sources = ",".join(r.sources) or "?"
+            text = r.text or ""
+            preview = (text[:preview_chars] + "...") if len(text) > preview_chars else text
+            srcs = r.sources[:max_sources] if max_sources else r.sources
+            sources = ",".join(srcs) or "?"
             print(f"[{i}] score={r.score:.4f} ({sources})")
-            print(f"    {preview}")
+            if preview:
+                print(f"    {preview}")
     return 0
 
 
 def cmd_answer(args: argparse.Namespace) -> int:
+    profile = _apply_tier(args)
     provider = get_provider(args.provider)
     store = VectorStore(
         collection=args.collection,
@@ -117,6 +165,11 @@ def cmd_answer(args: argparse.Namespace) -> int:
     gen = AnswerGenerator(llm=llm, confidence_threshold=args.min_confidence)
     answer = gen.generate(args.query, results)
 
+    # Tier caps how many sources we emit (answer text itself is model-sized).
+    sources_out = answer.sources
+    if profile is not None:
+        sources_out = answer.sources[: profile["max_sources"]]
+
     if args.json:
         print(
             json.dumps(
@@ -124,7 +177,7 @@ def cmd_answer(args: argparse.Namespace) -> int:
                     "query": args.query,
                     "answer": answer.text,
                     "confidence": round(answer.confidence, 3),
-                    "sources": answer.sources,
+                    "sources": sources_out,
                     "fallback_recommended": gen.should_fallback(answer),
                     "error": answer.error,
                 },
@@ -138,12 +191,17 @@ def cmd_answer(args: argparse.Namespace) -> int:
         print(f"error: {answer.error}", file=sys.stderr)
         return 1
 
-    print(f"ANSWER: {answer.text}")
-    print(f"CONFIDENCE: {answer.confidence:.2f}")
-    if answer.sources:
-        print("SOURCES:")
-        for s in answer.sources:
-            print(f"  - {s}")
+    # Tier 1: answer + confidence only (no SOURCES list)
+    if profile is not None and profile["snippet_chars"] == 0:
+        print(f"ANSWER: {answer.text}")
+        print(f"CONFIDENCE: {answer.confidence:.2f}")
+    else:
+        print(f"ANSWER: {answer.text}")
+        print(f"CONFIDENCE: {answer.confidence:.2f}")
+        if sources_out:
+            print("SOURCES:")
+            for s in sources_out:
+                print(f"  - {s}")
     if gen.should_fallback(answer):
         print(
             f"\n⚠ Low confidence ({answer.confidence:.2f}) — consider reviewing raw memories:",
@@ -271,6 +329,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_search.add_argument("query", help="Search query text")
     p_search.add_argument("--limit", type=int, default=10, help="Max results")
     p_search.add_argument("--json", action="store_true", help="JSON output")
+    p_search.add_argument(
+        "--tier",
+        type=int,
+        choices=[1, 2, 3],
+        default=None,
+        help=(
+            "Progressive output budget: 1=list only (~50 tok), 2=snippets (~200 tok), "
+            "3=detail (~500 tok). Omit for full output (back-compat)."
+        ),
+    )
     p_search.set_defaults(func=cmd_search)
 
     p_answer = sub.add_parser(
@@ -278,6 +346,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_answer.add_argument("query", help="Question to answer")
     p_answer.add_argument("--limit", type=int, default=10, help="Max memories to consider")
+    p_answer.add_argument(
+        "--tier",
+        type=int,
+        choices=[1, 2, 3],
+        default=None,
+        help=(
+            "Progressive output budget: 1=answer only (~50 tok), 2=answer+few sources (~200 tok), "
+            "3=answer+more sources (~500 tok). Omit for full output (back-compat)."
+        ),
+    )
     p_answer.add_argument(
         "--llm", default="gemini", choices=list_llms(), help="LLM provider for answer generation"
     )

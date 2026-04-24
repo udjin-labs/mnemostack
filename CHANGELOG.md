@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Progressive Tiers API** (`mnemostack search --tier {1,2,3}`, `mnemostack answer --tier {1,2,3}`). Optional output budgets that let agents pay only for the detail they actually need:
+  - **Tier 1** (~50 tokens): list view only — score, id, and source labels. Use when the agent just needs to know *whether* anything relevant exists in memory.
+  - **Tier 2** (~200 tokens): short (~40 char) snippets around hits. Default-useful recall for most triage flows.
+  - **Tier 3** (~500 tokens): fuller 200-char previews and up to 10 results. Use when the agent actually needs to read memory.
+  - Omitting `--tier` keeps the existing full-output behavior (backward compatible). Covered by 9 unit tests in `tests/test_cli_tiers.py`.
+
 ## [0.1.0a14] - 2026-04-19
 
 ### Added
