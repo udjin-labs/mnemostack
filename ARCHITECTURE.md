@@ -15,8 +15,8 @@ mnemostack/
 ├── graph/            # Memgraph/Neo4j operations (temporal knowledge graph)
 ├── recall/           # Unified recall pipeline (BM25 + vector + RRF + rerank + answer)
 ├── consolidation/    # Memory lifecycle (decay, promote, summarize)
-├── monitoring/       # Health checks
-├── mcp/              # Model Context Protocol server (future)
+├── observability/    # Metrics recorder + Prometheus exposition helpers
+├── mcp/              # Model Context Protocol server
 └── cli.py            # `mnemostack` command-line tool
 ```
 
@@ -53,7 +53,7 @@ Qdrant wrapper. Collection holds chunked documents with payload:
 }
 ```
 
-Chunking is 400–800 tokens with overlap. Timestamps are indexed as datetime for temporal queries.
+Chunking depends on the ingest surface. The CLI uses deterministic character windows by default; the Python chunking package also provides fixed-size, paragraph, markdown, and message-pair chunkers for applications that need richer boundaries. Timestamp payloads are indexed as datetime for temporal queries.
 
 ### Knowledge graph
 
@@ -61,13 +61,13 @@ Memgraph (Cypher-compatible) with temporal validity:
 
 - Nodes: `Person`, `Project`, `Decision`, `Event`, `Fact`
 - Edges: `WORKS_ON`, `DECIDED`, `RELATES_TO`, `CAUSES`, `ENABLES`, `PREVENTS`
-- Each edge has `valid_from` and `valid_until` — so you can query point-in-time state.
+- Each edge has `valid_from` and `valid_until`; current facts use the explicit `valid_until="current"` marker, and older `NULL` markers are still read as current for compatibility.
 
 ### Recall pipeline (hybrid)
 
 Query goes through staged pipeline:
 
-1. Parallel retrieval: BM25 (exact tokens), Qdrant (semantic), Memgraph (graph traversal)
+1. Parallel retrieval: Qdrant vector, Temporal vector, optional BM25, optional Memgraph
 2. Reciprocal Rank Fusion (RRF) to merge ranked lists
 3. Graph spreading activation (optional)
 4. Reranker (cross-encoder or LLM) for top-K
@@ -89,14 +89,14 @@ Nightly lifecycle runtime:
 5. Prune orphan graph nodes
 6. Health check
 
-### MCP server (future)
+### MCP server
 
-Expose mnemostack tools over Model Context Protocol so LLM clients (Claude Desktop, etc.) can call:
+Expose mnemostack tools over Model Context Protocol so LLM clients (Claude Desktop, Cursor, etc.) can call:
 
-- `recall_search(query, limit)`
-- `recall_answer(query)` — with confidence + sources
-- `graph_query(entity, as_of)` — point-in-time graph query
-- `add_fact(text, memory_class)` — index new memory
+- `mnemostack_search(query, limit)`
+- `mnemostack_answer(query, limit)` — with confidence + sources
+- `mnemostack_graph_query(subject, predicate, obj, as_of)` — point-in-time graph query
+- `mnemostack_graph_add_triple(subject, predicate, obj, valid_from, valid_until)`
 
 ## Configuration
 
@@ -112,14 +112,19 @@ vector:
   overlap: 100
 
 graph:
-  host: bolt://localhost:7687
+  uri: bolt://localhost:7687
+  timeout: 5.0
+  health_timeout: 1.0
 
 recall:
   rrf_k: 60
   top_k: 10
-  answer_provider: gemini
-  answer_model: gemini-2.5-flash
   confidence_threshold: 0.5
+  bm25_paths: []
+
+llm:
+  provider: gemini
+  model: null
 ```
 
 ## Deployment
@@ -152,10 +157,10 @@ services:
 **Alpha.** See CHANGELOG.md for progress.
 
 - [x] Embedding provider registry (Gemini, Ollama, HuggingFace)
-- [ ] Vector store wrapper
-- [ ] Hybrid recall pipeline
-- [ ] Inference layer (answer mode)
-- [ ] Graph client
-- [ ] Consolidation runtime
-- [ ] CLI
-- [ ] MCP server
+- [x] Vector store wrapper
+- [x] Hybrid recall pipeline
+- [x] Inference layer (answer mode)
+- [x] Graph client
+- [x] Consolidation runtime
+- [x] CLI
+- [x] MCP server

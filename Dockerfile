@@ -30,11 +30,11 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# Install from source (this is the dev / CI path — PyPI users can also
-# just `pip install mnemostack` and skip the Dockerfile entirely).
+# Install from source with the HTTP server extra so docker-compose does not
+# need a network-dependent pip install at container startup.
 COPY pyproject.toml README.md LICENSE ./
 COPY src ./src
-RUN pip install --upgrade pip && pip install .
+RUN pip install --upgrade pip && pip install '.[server]'
 
 # Run as a non-root user for anything that doesn't need root.
 RUN useradd --create-home --shell /bin/bash mnemos

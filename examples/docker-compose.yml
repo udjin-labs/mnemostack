@@ -83,8 +83,6 @@ services:
       - bash
       - -lc
       - |
-        # Install the server extra into the pre-baked venv.
-        pip install --quiet 'mnemostack[server]' >/dev/null
         # Wait for dependencies (Qdrant is fast; Memgraph can be slow on first boot).
         for i in $$(seq 1 30); do
           if (echo > /dev/tcp/qdrant/6333) 2>/dev/null; then break; fi
