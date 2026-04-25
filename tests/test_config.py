@@ -53,6 +53,30 @@ graph:
     assert cfg.recall.rrf_k == 60
 
 
+def test_provider_kwargs_include_configured_models(isolated_env, tmp_path):
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        """
+embedding:
+  model: text-embedding-004
+llm:
+  model: gemini-2.5-pro
+"""
+    )
+    cfg = Config.load(cfg_path)
+
+    assert cfg.embedding_provider_kwargs() == {"model": "text-embedding-004"}
+    assert cfg.llm_provider_kwargs() == {"model": "gemini-2.5-pro"}
+
+
+def test_provider_kwargs_omit_unset_models(isolated_env, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg = Config.load()
+
+    assert cfg.embedding_provider_kwargs() == {}
+    assert cfg.llm_provider_kwargs() == {}
+
+
 def test_env_overrides_file(isolated_env, tmp_path):
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text("vector:\n  collection: from-file\n")
@@ -98,14 +122,20 @@ def test_cli_parser_defaults_from_config_env(isolated_env, tmp_path, monkeypatch
     isolated_env.setenv("MNEMOSTACK_PROVIDER", "ollama")
     isolated_env.setenv("MNEMOSTACK_QDRANT_URL", "http://qdrant:6333")
     isolated_env.setenv("MNEMOSTACK_COLLECTION", "memory")
+    isolated_env.setenv("MNEMOSTACK_EMBEDDING_MODEL", "embed-from-env")
+    isolated_env.setenv("MNEMOSTACK_LLM", "ollama")
+    isolated_env.setenv("MNEMOSTACK_LLM_MODEL", "llm-from-env")
     isolated_env.setenv("MNEMOSTACK_MEMGRAPH_URI", "bolt://memgraph:7687")
     isolated_env.setenv("MNEMOSTACK_BM25_PATHS", "/notes")
 
     from mnemostack.cli import build_parser
 
-    args = build_parser().parse_args(["search", "hello"])
+    args = build_parser().parse_args(["answer", "hello"])
 
     assert args.provider == "ollama"
+    assert args.embedding_model == "embed-from-env"
+    assert args.llm == "ollama"
+    assert args.llm_model == "llm-from-env"
     assert args.qdrant == "http://qdrant:6333"
     assert args.collection == "memory"
     assert args.memgraph_uri == "bolt://memgraph:7687"
@@ -115,7 +145,9 @@ def test_cli_parser_defaults_from_config_env(isolated_env, tmp_path, monkeypatch
 def test_server_config_from_env_uses_config_aliases(isolated_env, tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     isolated_env.setenv("MNEMOSTACK_PROVIDER", "ollama")
+    isolated_env.setenv("MNEMOSTACK_EMBEDDING_MODEL", "embed-from-env")
     isolated_env.setenv("MNEMOSTACK_LLM", "ollama")
+    isolated_env.setenv("MNEMOSTACK_LLM_MODEL", "llm-from-env")
     isolated_env.setenv("MNEMOSTACK_QDRANT_URL", "http://qdrant:6333")
     isolated_env.setenv("MNEMOSTACK_COLLECTION", "memory")
     isolated_env.setenv("MNEMOSTACK_GRAPH_URI", "bolt://memgraph:7687")
@@ -128,7 +160,9 @@ def test_server_config_from_env_uses_config_aliases(isolated_env, tmp_path, monk
     cfg = ServerConfig.from_env()
 
     assert cfg.provider_name == "ollama"
+    assert cfg.embedding_model == "embed-from-env"
     assert cfg.llm_name == "ollama"
+    assert cfg.llm_model == "llm-from-env"
     assert cfg.qdrant_url == "http://qdrant:6333"
     assert cfg.collection == "memory"
     assert cfg.graph_uri == "bolt://memgraph:7687"

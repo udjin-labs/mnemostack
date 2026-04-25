@@ -31,7 +31,7 @@ except ImportError as e:  # pragma: no cover - import guard
     ) from e
 
 from mnemostack import __version__
-from mnemostack.config import Config
+from mnemostack.config import Config, model_kwargs
 from mnemostack.embeddings import get_provider
 from mnemostack.llm import get_llm
 from mnemostack.observability.recorder import (
@@ -111,7 +111,9 @@ class HealthResponse(BaseModel):
 @dataclass
 class ServerConfig:
     provider_name: str = "gemini"
+    embedding_model: str | None = None
     llm_name: str = "gemini"
+    llm_model: str | None = None
     collection: str = "mnemostack"
     qdrant_url: str = "http://localhost:6333"
     graph_uri: str = "bolt://localhost:7687"
@@ -125,7 +127,9 @@ class ServerConfig:
         cfg = Config.load()
         return cls(
             provider_name=cfg.embedding.provider,
+            embedding_model=cfg.embedding.model,
             llm_name=cfg.llm.provider,
+            llm_model=cfg.llm.model,
             collection=cfg.vector.collection,
             qdrant_url=cfg.vector.host,
             graph_uri=cfg.graph.uri or "bolt://localhost:7687",
@@ -262,7 +266,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     # handles single-worker fine.
     set_recorder(InMemoryRecorder())
 
-    provider = get_provider(cfg.provider_name)
+    provider = get_provider(cfg.provider_name, **model_kwargs(cfg.embedding_model))
     store = VectorStore(collection=cfg.collection, dimension=provider.dimension, host=cfg.qdrant_url)
 
     def _graph_ok() -> bool:
@@ -304,7 +308,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     )
 
     try:
-        llm = get_llm(cfg.llm_name)
+        llm = get_llm(cfg.llm_name, **model_kwargs(cfg.llm_model))
         answer_gen: AnswerGenerator | None = AnswerGenerator(llm=llm)
         reranker: Reranker | None = Reranker(llm=llm, max_items=20)
     except Exception as exc:  # pragma: no cover - missing provider key
