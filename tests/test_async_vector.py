@@ -26,6 +26,21 @@ async def test_async_ensure_collection_idempotent(store):
 
 
 @pytest.mark.asyncio
+async def test_async_collection_exists_reraises_non_not_found_errors():
+    store = AsyncVectorStore.__new__(AsyncVectorStore)
+    store.collection = "test_async"
+
+    class FailingClient:
+        async def get_collection(self, _collection):
+            raise RuntimeError("qdrant auth failed")
+
+    store.client = FailingClient()
+
+    with pytest.raises(RuntimeError, match="qdrant auth failed"):
+        await store.collection_exists()
+
+
+@pytest.mark.asyncio
 async def test_async_upsert_and_search(store):
     await store.upsert(1, [1.0, 0.0, 0.0, 0.0], {"text": "dog"})
     await store.upsert(2, [0.0, 1.0, 0.0, 0.0], {"text": "car"})

@@ -43,8 +43,9 @@ def _to_iso(value: str | date | datetime | None) -> str | None:
 class GraphStore:
     """Connection wrapper for Memgraph/Neo4j.
 
-    Uses generic Entity label for all nodes so Memgraph's Cypher compatibility
-    works out of the box. Callers can add additional labels via `add_label`.
+    Uses generic Entity label for all nodes by default so Memgraph's Cypher
+    compatibility works out of the box. Callers can choose labels per write via
+    `subject_label` and `obj_label`.
     """
 
     def __init__(
