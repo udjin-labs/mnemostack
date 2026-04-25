@@ -8,6 +8,7 @@ Design notes:
 """
 from __future__ import annotations
 
+import os
 from typing import Any
 
 try:
@@ -20,6 +21,7 @@ except ImportError:  # pragma: no cover
 
 from ..config import Config, model_kwargs
 from ..embeddings import get_provider
+from ..feedback import apply_feedback
 from ..llm import get_llm
 from ..recall import (
     AnswerGenerator,
@@ -29,7 +31,9 @@ from ..recall import (
     TemporalRetriever,
     VectorRetriever,
     build_bm25_docs,
+    build_full_pipeline,
 )
+from ..recall.pipeline import FileStateStore
 from ..vector import VectorStore
 
 
@@ -43,6 +47,7 @@ def build_server(
     memgraph_uri: str | None = None,
     graph_timeout: float = 5.0,
     bm25_paths: list[str] | None = None,
+    state_path: str = "/tmp/mnemostack-server-state.json",
 ) -> Any:
     """Build and return a configured FastMCP server.
 
@@ -54,6 +59,7 @@ def build_server(
         llm_model: LLM model override (None uses provider default)
         qdrant_host: Qdrant URL
         memgraph_uri: if provided, register graph tools (e.g. bolt://localhost:7687)
+        state_path: JSON state file for feedback / stateful recall stages
 
     Returns:
         FastMCP instance ready to .run()
@@ -111,6 +117,14 @@ def build_server(
                 llm=get_llm(llm_provider, **model_kwargs(llm_model))
             )
         return _components["answer"]
+
+    def _get_feedback_pipeline():
+        if "feedback_pipeline" not in _components:
+            _components["feedback_pipeline"] = build_full_pipeline(
+                state_store=FileStateStore(state_path),
+                graph_uri=None,
+            )
+        return _components["feedback_pipeline"]
 
     # ---------- tools ----------
 
@@ -222,6 +236,44 @@ def build_server(
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": str(e), "query": query}
 
+    @mcp.tool()
+    def mnemostack_feedback(
+        hit_id: str,
+        signal: str,
+        query: str | None = None,
+        query_type: str | None = None,
+        source: str | None = None,
+        sources: list[str] | None = None,
+        reward: float | None = None,
+    ) -> dict:
+        """Record explicit feedback for stateful recall learning.
+
+        Use signal='clicked' to also record inhibition-of-return exposure.
+        Pass retriever labels from mnemostack_search results as sources so
+        Q-learning can update source weights.
+        """
+        if signal not in {"useful", "irrelevant", "clicked"}:
+            return {
+                "ok": False,
+                "error": "signal must be one of: useful, irrelevant, clicked",
+            }
+        if reward is not None and not 0.0 <= reward <= 1.0:
+            return {"ok": False, "error": "reward must be in [0, 1]"}
+        try:
+            outcome = apply_feedback(
+                _get_feedback_pipeline(),
+                hit_id=hit_id,
+                signal=signal,
+                query=query,
+                query_type=query_type,
+                source=source,
+                sources=sources or [],
+                reward=reward,
+            )
+            return outcome.to_dict()
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e), "hit_id": hit_id}
+
     # ---------- graph tools (optional) ----------
 
     if memgraph_uri:
@@ -306,6 +358,7 @@ def main() -> None:
         MNEMOSTACK_MEMGRAPH_URI     (default: none — graph tools disabled)
         MNEMOSTACK_GRAPH_TIMEOUT    (default: 5.0)
         MNEMOSTACK_BM25_PATHS       (default: none, os.pathsep-separated paths)
+        MNEMOSTACK_STATE_PATH       (default: /tmp/mnemostack-server-state.json)
     """
     cfg = Config.load()
     mcp = build_server(
@@ -318,6 +371,7 @@ def main() -> None:
         memgraph_uri=cfg.graph.uri,
         graph_timeout=cfg.graph.timeout,
         bm25_paths=list(cfg.recall.bm25_paths) or None,
+        state_path=os.environ.get("MNEMOSTACK_STATE_PATH", "/tmp/mnemostack-server-state.json"),
     )
     mcp.run()
 

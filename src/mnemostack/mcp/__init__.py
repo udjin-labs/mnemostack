@@ -18,6 +18,7 @@ Tools exposed:
     - mnemostack_health — check all components
     - mnemostack_search — hybrid recall (BM25 + vector + RRF)
     - mnemostack_answer — inference answer with confidence
+    - mnemostack_feedback — explicit feedback for stateful learning
     - mnemostack_graph_query — query knowledge graph (optional, requires Memgraph)
     - mnemostack_graph_add_triple — add a fact to the graph
 """
