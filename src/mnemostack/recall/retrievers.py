@@ -425,20 +425,11 @@ class TemporalRetriever(Retriever):
         vec = self.embedding.embed(query)
         if not vec:
             return []
-        # Flat filter shape understood by VectorStore._build_filter
-        # (see src/mnemostack/vector/qdrant.py). The previous nested
-        # `{"must": [{"key": "timestamp", "range": {...}}]}` shape was
-        # not a flat {field: value} / {field: {gte, lte}} map, so
-        # _build_filter treated the literal "must" key as a payload
-        # field and the resulting qdrant-client call raised — which
-        # was then silently swallowed by `except Exception: return []`
-        # below, so the temporal path appeared to work but always
-        # returned zero hits. VectorStore._build_filter currently
-        # maps dict-valued filters only onto qdrant Range(gte=, lte=),
-        # so `end` is inclusive here.
-        temporal_filter = {
-            "timestamp": {"gte": start, "lte": end},
-        }
+        # Flat filter shape understood by VectorStore._build_filter. Preserve
+        # caller filters (workspace/source/tenant scope) and add the temporal
+        # timestamp constraint instead of replacing the whole filter map.
+        temporal_filter = dict(filters or {})
+        temporal_filter["timestamp"] = {"gte": start, "lte": end}
         try:
             hits = self.vector_store.search(vec, limit=limit, filters=temporal_filter)
         except Exception as exc:  # noqa: BLE001 — defensive; log instead of silent
@@ -449,7 +440,7 @@ class TemporalRetriever(Retriever):
             return []
         return [
             RecallResult(
-                id=f"temporal:{h.id}",
+                id=h.id,
                 text=h.payload.get("text", ""),
                 score=h.score,
                 payload={**h.payload, "temporal_match": True},

@@ -16,6 +16,7 @@ Usage:
 
 from .answer import Answer, AnswerGenerator
 from .bm25 import BM25, BM25Doc, tokenize
+from .corpus import build_bm25_docs
 from .expansion import QueryExpander
 from .fusion import reciprocal_rank_fusion
 from .pipeline import (
@@ -52,6 +53,7 @@ from .retrievers import (
 __all__ = [
     "BM25",
     "BM25Doc",
+    "build_bm25_docs",
     "tokenize",
     "reciprocal_rank_fusion",
     "Recaller",

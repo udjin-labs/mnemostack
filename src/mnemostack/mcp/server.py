@@ -21,7 +21,15 @@ except ImportError:  # pragma: no cover
 
 from ..embeddings import get_provider
 from ..llm import get_llm
-from ..recall import AnswerGenerator, Recaller
+from ..recall import (
+    AnswerGenerator,
+    BM25Retriever,
+    MemgraphRetriever,
+    Recaller,
+    TemporalRetriever,
+    VectorRetriever,
+    build_bm25_docs,
+)
 from ..vector import VectorStore
 
 
@@ -32,6 +40,7 @@ def build_server(
     qdrant_host: str = "http://localhost:6333",
     memgraph_uri: str | None = None,
     graph_timeout: float = 5.0,
+    bm25_paths: list[str] | None = None,
 ) -> Any:
     """Build and return a configured FastMCP server.
 
@@ -73,9 +82,19 @@ def build_server(
 
     def _get_recaller():
         if "recaller" not in _components:
+            emb = _get_embedding()
+            vec = _get_vector()
+            bm25_docs = build_bm25_docs(bm25_paths)
+            retrievers = [
+                VectorRetriever(embedding=emb, vector_store=vec),
+                BM25Retriever(docs=bm25_docs) if bm25_docs else None,
+                MemgraphRetriever(uri=memgraph_uri, timeout=graph_timeout)
+                if memgraph_uri
+                else None,
+                TemporalRetriever(embedding=emb, vector_store=vec),
+            ]
             _components["recaller"] = Recaller(
-                embedding_provider=_get_embedding(),
-                vector_store=_get_vector(),
+                retrievers=[r for r in retrievers if r is not None],
             )
         return _components["recaller"]
 
@@ -275,7 +294,9 @@ def main() -> None:
         MNEMOSTACK_QDRANT_HOST      (default: http://localhost:6333)
         MNEMOSTACK_MEMGRAPH_URI     (default: none — graph tools disabled)
         MNEMOSTACK_GRAPH_TIMEOUT    (default: 5.0)
+        MNEMOSTACK_BM25_PATHS       (default: none, os.pathsep-separated paths)
     """
+    bm25_paths_env = os.environ.get("MNEMOSTACK_BM25_PATHS")
     mcp = build_server(
         collection=os.environ.get("MNEMOSTACK_COLLECTION", "mnemostack"),
         embedding_provider=os.environ.get("MNEMOSTACK_EMBEDDING", "gemini"),
@@ -283,6 +304,7 @@ def main() -> None:
         qdrant_host=os.environ.get("MNEMOSTACK_QDRANT_HOST", "http://localhost:6333"),
         memgraph_uri=os.environ.get("MNEMOSTACK_MEMGRAPH_URI"),
         graph_timeout=float(os.environ.get("MNEMOSTACK_GRAPH_TIMEOUT", "5.0")),
+        bm25_paths=bm25_paths_env.split(os.pathsep) if bm25_paths_env else None,
     )
     mcp.run()
 

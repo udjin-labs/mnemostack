@@ -122,6 +122,21 @@ def test_filter_bounds_match_extract_temporal_window():
     assert ts["lte"] == end_iso
 
 
+def test_temporal_filter_preserves_caller_filters():
+    store = _FakeVectorStore(results=_hits(1))
+    r = TemporalRetriever(embedding=_FakeEmbedding(), vector_store=store)
+
+    r.search(
+        "what happened in april 2026?",
+        limit=1,
+        filters={"workspace": "team-a", "source": "notes.md"},
+    )
+
+    assert store.last_filters["workspace"] == "team-a"
+    assert store.last_filters["source"] == "notes.md"
+    assert "timestamp" in store.last_filters
+
+
 # ----- the flat shape round-trips through the real VectorStore._build_filter -----
 
 
@@ -197,7 +212,7 @@ def test_returns_recallresults_with_temporal_source_tag():
         assert isinstance(res, RecallResult)
         assert res.sources == ["temporal"]
         assert res.payload.get("temporal_match") is True
-        assert res.id.startswith("temporal:")
+        assert not str(res.id).startswith("temporal:")
 
 
 # ----- empty extractor result short-circuits -----

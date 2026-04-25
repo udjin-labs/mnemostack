@@ -54,8 +54,9 @@ class ClassifyQuery(Stage):
 
     def apply(self, context, results):
         q_lower = context.query.lower()
+        q_tokens = set(re.findall(r"\w+", q_lower))
         for qtype, ms in self.markers.items():
-            if any(m in q_lower for m in ms):
+            if q_tokens & ms:
                 context.query_type = qtype
                 break
         else:
@@ -82,7 +83,8 @@ def is_exact_token_query(query: str) -> bool:
     q = query.lower()
     if any(p.search(q) for p in _EXACT_PATTERNS):
         return True
-    return any(m in q for m in _EXACT_MARKERS)
+    tokens = set(re.findall(r"\w+", q))
+    return bool(tokens & _EXACT_MARKERS)
 
 
 class ExactTokenRescue(Stage):

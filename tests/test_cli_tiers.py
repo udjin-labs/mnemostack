@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 from mnemostack.cli import (
     TIER_PROFILES,
     _apply_tier,
+    _build_recaller,
     cmd_search,
 )
 
@@ -60,6 +61,16 @@ def test_apply_tier_caps_limit_to_tier():
     profile = _apply_tier(args)
     assert profile == TIER_PROFILES[1]
     assert args.limit == TIER_PROFILES[1]["limit"]  # clamped
+
+
+def test_build_recaller_uses_retriever_mode_by_default():
+    args = argparse.Namespace(bm25_path=[], memgraph_uri=None)
+    provider = MagicMock(dimension=3)
+    store = MagicMock()
+
+    recaller = _build_recaller(args, provider, store)
+
+    assert [r.name for r in recaller.retrievers] == ["vector", "temporal"]
 
 
 def _run_search_capture(tier, json_out=False, results=None):

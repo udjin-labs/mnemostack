@@ -19,7 +19,15 @@ from . import __version__
 from .config import DEFAULT_CONFIG_PATHS, Config, generate_example_config
 from .embeddings import get_provider, list_providers
 from .llm import get_llm, list_llms
-from .recall import AnswerGenerator, Recaller
+from .recall import (
+    AnswerGenerator,
+    BM25Retriever,
+    MemgraphRetriever,
+    Recaller,
+    TemporalRetriever,
+    VectorRetriever,
+    build_bm25_docs,
+)
 from .vector import VectorStore
 
 # -- Progressive tiers --------------------------------------------------------
@@ -94,7 +102,7 @@ def cmd_search(args: argparse.Namespace) -> int:
         )
         return 2
 
-    recaller = Recaller(embedding_provider=provider, vector_store=store)
+    recaller = _build_recaller(args, provider, store)
     results = recaller.recall(args.query, limit=args.limit)
 
     if args.json:
@@ -155,7 +163,7 @@ def cmd_answer(args: argparse.Namespace) -> int:
         )
         return 2
 
-    recaller = Recaller(embedding_provider=provider, vector_store=store)
+    recaller = _build_recaller(args, provider, store)
     results = recaller.recall(args.query, limit=args.limit)
 
     llm = get_llm(args.llm)
@@ -223,6 +231,20 @@ def _stable_chunk_id(source: str, offset: int, text: str) -> str:
 
     digest = hashlib.sha256(f"{source}|{offset}|{text}".encode()).hexdigest()
     return str(uuid.UUID(digest[:32]))
+
+
+def _build_recaller(args: argparse.Namespace, provider, store) -> Recaller:
+    """Build the same retriever-mode Recaller used by the service surfaces."""
+    bm25_docs = build_bm25_docs(list(getattr(args, "bm25_path", []) or []))
+    retrievers = [
+        VectorRetriever(embedding=provider, vector_store=store),
+        BM25Retriever(docs=bm25_docs) if bm25_docs else None,
+        MemgraphRetriever(uri=getattr(args, "memgraph_uri", None))
+        if getattr(args, "memgraph_uri", None)
+        else None,
+        TemporalRetriever(embedding=provider, vector_store=store),
+    ]
+    return Recaller(retrievers=[r for r in retrievers if r is not None])
 
 
 def cmd_index(args: argparse.Namespace) -> int:
@@ -327,6 +349,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_search.add_argument("--limit", type=int, default=10, help="Max results")
     p_search.add_argument("--json", action="store_true", help="JSON output")
     p_search.add_argument(
+        "--bm25-path",
+        action="append",
+        default=[],
+        help="Directory/file to index for the BM25 retriever (can be given multiple times)",
+    )
+    p_search.add_argument(
+        "--memgraph-uri",
+        default=None,
+        help="Memgraph URI to enable graph recall (e.g. bolt://localhost:7687)",
+    )
+    p_search.add_argument(
         "--tier",
         type=int,
         choices=[1, 2, 3],
@@ -343,6 +376,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_answer.add_argument("query", help="Question to answer")
     p_answer.add_argument("--limit", type=int, default=10, help="Max memories to consider")
+    p_answer.add_argument(
+        "--bm25-path",
+        action="append",
+        default=[],
+        help="Directory/file to index for the BM25 retriever (can be given multiple times)",
+    )
+    p_answer.add_argument(
+        "--memgraph-uri",
+        default=None,
+        help="Memgraph URI to enable graph recall (e.g. bolt://localhost:7687)",
+    )
     p_answer.add_argument(
         "--tier",
         type=int,
@@ -389,6 +433,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=5.0,
         help="Memgraph connection timeout in seconds (default 5.0)",
+    )
+    p_mcp.add_argument(
+        "--bm25-path",
+        action="append",
+        default=[],
+        help="Directory/file to index for the BM25 retriever (can be given multiple times)",
     )
     p_mcp.set_defaults(func=cmd_mcp_serve)
 
@@ -567,6 +617,7 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
         qdrant_host=args.qdrant,
         memgraph_uri=args.memgraph_uri,
         graph_timeout=args.graph_timeout,
+        bm25_paths=list(args.bm25_path) if args.bm25_path else None,
     )
     mcp.run()
     return 0
