@@ -115,6 +115,7 @@ class ServerConfig:
     collection: str = "mnemostack"
     qdrant_url: str = "http://localhost:6333"
     graph_uri: str = "bolt://localhost:7687"
+    graph_health_timeout: float = 1.0
     bm25_paths: list[str] | None = None  # optional markdown dirs for BM25 corpus
     state_path: str = "/tmp/mnemostack-server-state.json"
 
@@ -260,12 +261,18 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     store = VectorStore(collection=cfg.collection, dimension=provider.dimension, host=cfg.qdrant_url)
 
     def _graph_ok() -> bool:
+        if not cfg.graph_uri:
+            return False
         try:
             from neo4j import GraphDatabase
 
-            d = GraphDatabase.driver(cfg.graph_uri)
+            d = GraphDatabase.driver(
+                cfg.graph_uri,
+                connection_timeout=cfg.graph_health_timeout,
+                connection_acquisition_timeout=cfg.graph_health_timeout,
+            )
             with d.session() as s:
-                s.run("RETURN 1").single()
+                s.run("RETURN 1", timeout=cfg.graph_health_timeout).single()
             d.close()
             return True
         except Exception:
