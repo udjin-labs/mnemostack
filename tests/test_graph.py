@@ -4,6 +4,7 @@ Uses a test-specific node label to avoid polluting production data.
 All tests clean up after themselves.
 """
 import uuid
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -63,7 +64,7 @@ def test_add_and_query_triple(store):
     assert t.obj == obj
     assert t.predicate == "WORKS_ON"
     assert t.valid_from == "2024-01-01"
-    assert t.valid_until is None
+    assert t.valid_until == "current"
 
 
 def test_invalidate(store):
@@ -153,3 +154,28 @@ def test_context_manager(store):
     with GraphStore() as gs:
         ok, _ = gs.health_check()
         assert ok
+
+
+def test_backfill_current_markers_uses_explicit_current_marker():
+    store = GraphStore.__new__(GraphStore)
+    store.database = None
+
+    node_rec = {"n": 2}
+    rel_rec = {"n": 3}
+    session = MagicMock()
+    session.run.side_effect = [
+        MagicMock(single=MagicMock(return_value=node_rec)),
+        MagicMock(single=MagicMock(return_value=rel_rec)),
+    ]
+    session.__enter__ = MagicMock(return_value=session)
+    session.__exit__ = MagicMock(return_value=False)
+    driver = MagicMock()
+    driver.session.return_value = session
+    store.driver = driver
+
+    counts = store.backfill_current_markers()
+
+    assert counts == {"nodes": 2, "relationships": 3}
+    cypher = " ".join(call.args[0] for call in session.run.call_args_list)
+    assert "SET n.valid_until = 'current'" in cypher
+    assert "SET r.valid_until = 'current'" in cypher

@@ -381,6 +381,9 @@ export GEMINI_API_KEY=...
 mnemostack serve --provider gemini --collection memory --port 8000
 ```
 
+`mnemostack serve` binds to `127.0.0.1` by default. Use
+`--host 0.0.0.0` only behind your own auth/rate-limit layer.
+
 Endpoints:
 
 | Method | Path | Purpose |
@@ -424,6 +427,11 @@ graph.add_triple("alice", "works_on", "project-y", valid_from="2024-07-01")
 # Who was alice working on in March?
 march_facts = graph.query_triples(subject="alice", as_of="2024-03-15")
 ```
+
+Current graph facts use the explicit `valid_until="current"` marker. If you
+created graph data with an older release, run
+`mnemostack graph-migrate-current --dry-run` first, then
+`mnemostack graph-migrate-current` to backfill legacy `NULL` markers.
 
 ### MCP server for Claude Desktop
 

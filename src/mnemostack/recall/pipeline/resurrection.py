@@ -50,6 +50,7 @@ class GraphResurrection(Stage):
         max_seeds: int = 8,
         max_per_seed: int = 5,
         driver: Any = None,
+        timeout: float = 5.0,
     ):
         self.uri = uri
         self.user = user
@@ -58,6 +59,7 @@ class GraphResurrection(Stage):
         self.min_seed_len = min_seed_len
         self.max_seeds = max_seeds
         self.max_per_seed = max_per_seed
+        self.timeout = timeout
         self._driver = driver
         self._own_driver = driver is None
 
@@ -68,7 +70,10 @@ class GraphResurrection(Stage):
             return None
         try:
             self._driver = GraphDatabase.driver(
-                self.uri, auth=(self.user, self.password) if self.user else None
+                self.uri,
+                auth=(self.user, self.password) if self.user else None,
+                connection_timeout=self.timeout,
+                connection_acquisition_timeout=self.timeout,
             )
             return self._driver
         except Exception:
@@ -112,8 +117,9 @@ class GraphResurrection(Stage):
                         """
                         MATCH (n)-[r1]-(m)
                         WHERE toLower(n.name) = $seed
-                          AND n.valid_until = 'current'
-                          AND m.valid_until = 'current'
+                          AND coalesce(n.valid_until, 'current') = 'current'
+                          AND coalesce(m.valid_until, 'current') = 'current'
+                          AND coalesce(r1.valid_until, 'current') = 'current'
                         RETURN DISTINCT m.name AS name, labels(m)[0] AS type,
                                m.memory_class AS mc, type(r1) AS rel
                         LIMIT $lim

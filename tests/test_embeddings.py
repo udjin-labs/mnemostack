@@ -1,4 +1,6 @@
 """Tests for embedding provider registry + batch embedding."""
+import json
+
 import pytest
 
 from mnemostack.embeddings import EmbeddingProvider, get_provider, list_providers
@@ -107,3 +109,34 @@ def test_ollama_batch_single_item_uses_embed(monkeypatch):
     result = provider.embed_batch(["just one"])
     assert len(result) == 1
     assert called == ["just one"]
+
+
+def test_gemini_uses_api_key_header_not_query_string(monkeypatch):
+    from mnemostack.embeddings.gemini import GeminiProvider
+
+    seen = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps({"embedding": {"values": [0.1, 0.2]}}).encode()
+
+    def fake_urlopen(req, timeout):
+        seen["url"] = req.full_url
+        seen["headers"] = dict(req.header_items())
+        seen["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    provider = GeminiProvider(api_key="secret-key", timeout=7)
+    assert provider.embed("hello") == [0.1, 0.2]
+
+    assert "key=" not in seen["url"]
+    assert seen["headers"]["X-goog-api-key"] == "secret-key"
+    assert seen["timeout"] == 7
