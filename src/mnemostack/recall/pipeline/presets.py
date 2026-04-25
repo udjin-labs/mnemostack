@@ -29,6 +29,7 @@ def build_full_pipeline(
     freshness_weight: float = 0.2,
     gravity_penalty: float = 0.5,
     rescue_boost: float = 0.5,
+    enable_stateful_stages: bool = True,
     enable_q_learning: bool = True,
     enable_ior: bool = True,
     enable_curiosity: bool = True,
@@ -54,9 +55,14 @@ def build_full_pipeline(
         state_store: persistent state for stateful stages. If None, uses
                      in-memory store (state lost on restart).
         hub_degrees: graph node degree map for hub dampening (pass None to skip).
+        enable_stateful_stages: master toggle for Q-learning, IoR, and curiosity.
+                                Disable for deterministic benchmarks.
         enable_*: toggle individual stateful stages.
     """
     store = state_store or InMemoryStateStore()
+    enable_q_learning = enable_stateful_stages and enable_q_learning
+    enable_ior = enable_stateful_stages and enable_ior
+    enable_curiosity = enable_stateful_stages and enable_curiosity
 
     # Stage order mirrors legacy enhanced-recall.py pipeline:
     #   Gravity → Hub → Q-learning → Curiosity → Freshness → IOR → Graph

@@ -109,7 +109,7 @@ We are not a replacement for your agent framework and not a full platform runtim
 - 🧠 **4-source hybrid retrieval** — Vector (Qdrant) + BM25 (exact tokens) + Memgraph (knowledge graph) + Temporal (time-aware vector), all fused via Reciprocal Rank Fusion. Pluggable `Retriever` abstraction — add your own sources.
 - ⚖️ **Weighted & adaptive RRF fusion** — `reciprocal_rank_fusion(weights=[...])` lets you lift sources you trust more; `Recaller(adaptive_weights=True)` picks a per-query-shape profile (exact-token / person / temporal / general). See the honest write-up below for where this helps and where it doesn't.
 - 🧪 **HyDE retriever (opt-in)** — embeds a hypothetical answer instead of the query. Useful for query↔document vocabulary gaps in documentation-style corpora; does **not** reliably help on dialogue-backed memory and always costs one extra LLM roundtrip per `search()`. Not included in the default `Recaller`.
-- ⚡ **8-stage recall pipeline** — ClassifyQuery → ExactTokenRescue → GravityDampen → HubDampen → FreshnessBlend → InhibitionOfReturn → CuriosityBoost → QLearningReranker. Opt-in; stateful stages expose APIs for recording recalls/feedback, but standard CLI/HTTP/MCP calls do not collect user feedback automatically.
+- ⚡ **8-stage recall pipeline** — ClassifyQuery → ExactTokenRescue → GravityDampen → HubDampen → FreshnessBlend → InhibitionOfReturn → CuriosityBoost → QLearningReranker. Opt-in; stateful HTTP feedback is explicit via `/feedback`, and recall exposure logging is off unless `--auto-record-ior` is enabled.
 - 🔁 **LLM reranker** — Gemini Flash (or any LLM) reorders top-K by relevance; catches cases where embedding similarity alone is too broad.
 - ⚡ **Async-friendly** — `Recaller.recall_async` dispatches retrievers in parallel; five concurrent HTTP recalls finish in roughly one single-recall wall-clock.
 - 🌍 **Unicode-aware entity resolution** — Memgraph retriever probes by `telegram_id`, handle, and precomputed `name_lower` so non-ASCII names match correctly (Memgraph's `toLower()` lower-cases ASCII only).
@@ -157,6 +157,7 @@ Both knobs are opt-in by design — the default `Recaller` stays classical equal
 | `MNEMOSTACK_PROVIDER` / `MNEMOSTACK_EMBEDDING_PROVIDER` | Embedding provider | CLI / HTTP / MCP |
 | `MNEMOSTACK_LLM` / `MNEMOSTACK_LLM_PROVIDER` | LLM provider | Answer generation / reranking |
 | `MNEMOSTACK_BM25_PATHS` | BM25 corpus paths separated by `os.pathsep` (`:` on Unix) | CLI / HTTP / MCP BM25 retriever |
+| `MNEMOSTACK_AUTO_RECORD_IOR` | `true`/`false` toggle for HTTP recall exposure logging | HTTP stateful pipeline |
 
 Only the providers you actually use need their keys. HuggingFace local-GPU embeddings need no keys at all. `mnemostack init` writes the same settings as YAML; explicit CLI flags override config/env defaults.
 
@@ -394,6 +395,7 @@ Endpoints:
 | `GET`  | `/health`  | Qdrant + Memgraph reachability + config summary |
 | `POST` | `/recall`  | Hybrid recall with optional 8-stage pipeline |
 | `POST` | `/answer`  | Recall + LLM answer synthesis with citations |
+| `POST` | `/feedback` | Explicit click/usefulness feedback for stateful learning |
 | `GET`  | `/metrics` | Prometheus scrape endpoint (counters + summary histograms) |
 | `GET`  | `/docs`    | Interactive OpenAPI UI |
 
@@ -415,6 +417,16 @@ Response shape (abridged):
 ```
 
 The `/answer` endpoint adds `{ answer, confidence, sources }` alongside the memories. If the LLM isn't configured, `/answer` returns `503` and `/recall` still works — graceful degradation applies at the HTTP layer too.
+
+Stateful learning is explicit. Start the server with `--auto-record-ior` if you want `/recall` and `/answer` responses to update inhibition-of-return state. Send user actions to `/feedback` to update Q-learning:
+
+```bash
+curl -s http://localhost:8000/feedback \
+    -H 'content-type: application/json' \
+    -d '{"hit_id":"...","signal":"clicked","query":"what did we decide about auth","sources":["vector","bm25"]}' | jq
+```
+
+`signal` is one of `useful`, `clicked`, or `irrelevant`; pass the `retrievers` list returned by `/recall` as `sources` so Q-learning can update the right source weights.
 
 For production, front this with whichever reverse proxy you already use (nginx, Caddy, Traefik) and set an auth layer — mnemostack's server does not do auth itself on purpose; the goal is to plug into whatever you already have.
 
@@ -538,7 +550,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed design: pipeline stages, Qdr
 
 ### Pipeline state
 
-The 8-stage pipeline can use a small state store between calls (Q-learning weights, inhibition-of-return history, per-document gravity/hub counters). `FileStateStore(path)` persists it to a JSON file. Standard HTTP/MCP/CLI recall applies existing state but does not automatically record user feedback; call the stage APIs from your application if you want learning from clicks, accepts, or explicit ratings. For multi-process servers, implement your own `StateStore` (two methods: `load()` / `save(state)`) backed by Redis or your database.
+The 8-stage pipeline can use a small state store between calls (Q-learning weights, inhibition-of-return history, per-document gravity/hub counters). `FileStateStore(path)` persists it to a JSON file. HTTP recall applies existing state and can record inhibition-of-return exposure with `--auto-record-ior`; Q-learning updates only through explicit `/feedback` calls. CLI/MCP recall still apply existing state but do not collect feedback automatically. For deterministic benchmarks, call `build_full_pipeline(enable_stateful_stages=False)` so IoR/Q-learning/curiosity state cannot affect scores. For multi-process servers, implement your own `StateStore` (three methods: `get()`, `set()`, `update()`) backed by Redis or your database.
 
 ### Graceful degradation
 
