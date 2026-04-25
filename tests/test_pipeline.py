@@ -66,6 +66,12 @@ def test_classify_query_default_general():
     assert ctx.query_type == "general"
 
 
+def test_classify_query_does_not_match_markers_inside_words():
+    ctx = PipelineContext(query="show bridge status")
+    ClassifyQuery().apply(ctx, [])
+    assert ctx.query_type == "general"
+
+
 def test_classify_query_tokens_filtered():
     ctx = PipelineContext(query="how do I know about Paris")
     ClassifyQuery().apply(ctx, [])
@@ -77,6 +83,7 @@ def test_is_exact_token_query():
     assert is_exact_token_query("какой IP у сервера")
     assert is_exact_token_query("какой порт 6333")
     assert is_exact_token_query("version 2026.4.14")
+    assert not is_exact_token_query("candidate idea bridge")
     assert not is_exact_token_query("what is love")
 
 

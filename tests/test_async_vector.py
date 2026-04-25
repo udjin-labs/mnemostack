@@ -2,7 +2,7 @@
 import pytest
 import pytest_asyncio
 from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import Distance
+from qdrant_client.models import DatetimeRange, Distance, Range
 
 from mnemostack.vector import AsyncVectorStore, Hit
 
@@ -52,6 +52,29 @@ async def test_async_search_with_filter(store):
     hits = await store.search([1.0, 0.0, 0.0, 0.0], limit=10, filters={"class": "B"})
     assert len(hits) == 1
     assert hits[0].id == 2
+
+
+def test_async_build_filter_uses_datetime_range_for_iso_strings():
+    filters = {
+        "timestamp": {
+            "gte": "2026-04-01T00:00:00+00:00",
+            "lte": "2026-05-01T00:00:00+00:00",
+        }
+    }
+
+    qfilter = AsyncVectorStore._build_filter(filters)
+
+    cond = qfilter.must[0]
+    assert cond.key == "timestamp"
+    assert isinstance(cond.range, DatetimeRange)
+
+
+def test_async_build_filter_keeps_numeric_range():
+    qfilter = AsyncVectorStore._build_filter({"score": {"gte": 0.5, "lte": 1.0}})
+
+    cond = qfilter.must[0]
+    assert cond.key == "score"
+    assert isinstance(cond.range, Range)
 
 
 @pytest.mark.asyncio
