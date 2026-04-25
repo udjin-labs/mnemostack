@@ -323,6 +323,7 @@ def cmd_index(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    cfg = Config.load()
     p = argparse.ArgumentParser(prog="mnemostack", description="Memory stack for AI agents")
     p.add_argument("--version", action="version", version=f"mnemostack {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
@@ -330,15 +331,15 @@ def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument(
         "--provider",
-        default="ollama",
+        default=cfg.embedding.provider,
         choices=list_providers(),
-        help="Embedding provider (default: ollama)",
+        help=f"Embedding provider (default: {cfg.embedding.provider})",
     )
     common.add_argument(
-        "--collection", default="mnemostack", help="Qdrant collection name"
+        "--collection", default=cfg.vector.collection, help="Qdrant collection name"
     )
     common.add_argument(
-        "--qdrant", default="http://localhost:6333", help="Qdrant URL"
+        "--qdrant", default=cfg.vector.host, help="Qdrant URL"
     )
 
     p_health = sub.add_parser("health", parents=[common], help="Check stack health")
@@ -346,17 +347,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_search = sub.add_parser("search", parents=[common], help="Hybrid recall")
     p_search.add_argument("query", help="Search query text")
-    p_search.add_argument("--limit", type=int, default=10, help="Max results")
+    p_search.add_argument("--limit", type=int, default=cfg.recall.top_k, help="Max results")
     p_search.add_argument("--json", action="store_true", help="JSON output")
     p_search.add_argument(
         "--bm25-path",
         action="append",
-        default=[],
+        default=list(cfg.recall.bm25_paths),
         help="Directory/file to index for the BM25 retriever (can be given multiple times)",
     )
     p_search.add_argument(
         "--memgraph-uri",
-        default=None,
+        default=cfg.graph.uri,
         help="Memgraph URI to enable graph recall (e.g. bolt://localhost:7687)",
     )
     p_search.add_argument(
@@ -375,16 +376,16 @@ def build_parser() -> argparse.ArgumentParser:
         "answer", parents=[common], help="Synthesize concise answer from memories"
     )
     p_answer.add_argument("query", help="Question to answer")
-    p_answer.add_argument("--limit", type=int, default=10, help="Max memories to consider")
+    p_answer.add_argument("--limit", type=int, default=cfg.recall.top_k, help="Max memories to consider")
     p_answer.add_argument(
         "--bm25-path",
         action="append",
-        default=[],
+        default=list(cfg.recall.bm25_paths),
         help="Directory/file to index for the BM25 retriever (can be given multiple times)",
     )
     p_answer.add_argument(
         "--memgraph-uri",
-        default=None,
+        default=cfg.graph.uri,
         help="Memgraph URI to enable graph recall (e.g. bolt://localhost:7687)",
     )
     p_answer.add_argument(
@@ -398,12 +399,12 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_answer.add_argument(
-        "--llm", default="gemini", choices=list_llms(), help="LLM provider for answer generation"
+        "--llm", default=cfg.llm.provider, choices=list_llms(), help="LLM provider for answer generation"
     )
     p_answer.add_argument(
         "--min-confidence",
         type=float,
-        default=0.5,
+        default=cfg.recall.confidence_threshold,
         help="Fallback suggestion threshold",
     )
     p_answer.add_argument("--json", action="store_true", help="JSON output")
@@ -411,7 +412,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_index = sub.add_parser("index", parents=[common], help="Index files into vector store")
     p_index.add_argument("path", help="File or directory to index")
-    p_index.add_argument("--chunk-size", type=int, default=800, help="Chunk size in chars")
+    p_index.add_argument("--chunk-size", type=int, default=cfg.vector.chunk_size, help="Chunk size in chars")
     p_index.add_argument("--recreate", action="store_true", help="Drop existing collection")
     p_index.set_defaults(func=cmd_index)
 
@@ -421,23 +422,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run MCP server (stdio). Requires: pip install 'mnemostack[mcp]'",
     )
     p_mcp.add_argument(
-        "--llm", default="gemini", help="LLM provider for answer generation"
+        "--llm", default=cfg.llm.provider, help="LLM provider for answer generation"
     )
     p_mcp.add_argument(
         "--memgraph-uri",
-        default=None,
+        default=cfg.graph.uri,
         help="Memgraph URI to enable graph tools (e.g. bolt://localhost:7687)",
     )
     p_mcp.add_argument(
         "--graph-timeout",
         type=float,
-        default=5.0,
+        default=cfg.graph.timeout,
         help="Memgraph connection timeout in seconds (default 5.0)",
     )
     p_mcp.add_argument(
         "--bm25-path",
         action="append",
-        default=[],
+        default=list(cfg.recall.bm25_paths),
         help="Directory/file to index for the BM25 retriever (can be given multiple times)",
     )
     p_mcp.set_defaults(func=cmd_mcp_serve)
@@ -469,19 +470,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_serve.add_argument(
         "--memgraph-uri",
-        default="bolt://localhost:7687",
+        default=cfg.graph.uri or "bolt://localhost:7687",
         help="Memgraph bolt URI for the graph retriever",
     )
     p_serve.add_argument(
         "--graph-timeout",
         type=float,
-        default=5.0,
+        default=cfg.graph.timeout,
         help="Memgraph connection timeout in seconds (default 5.0)",
     )
     p_serve.add_argument(
         "--bm25-path",
         action="append",
-        default=[],
+        default=list(cfg.recall.bm25_paths),
         help="Directory/file to index for the BM25 retriever (can be given multiple times)",
     )
     p_serve.add_argument(
@@ -500,7 +501,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_graph_migrate.add_argument(
         "--memgraph-uri",
-        default="bolt://localhost:7687",
+        default=cfg.graph.uri or "bolt://localhost:7687",
         help="Memgraph bolt URI (default bolt://localhost:7687)",
     )
     p_graph_migrate.add_argument(
@@ -511,7 +512,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_graph_migrate.add_argument(
         "--timeout",
         type=float,
-        default=5.0,
+        default=cfg.graph.timeout,
         help="Memgraph connection timeout in seconds (default 5.0)",
     )
     p_graph_migrate.set_defaults(func=cmd_graph_migrate_current)
