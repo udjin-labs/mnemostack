@@ -6,6 +6,41 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0a2] - 2026-04-25
+
+### Fixed
+
+- **`recall_async` no longer hangs** — replaced the previous `asyncio.to_thread` path with a direct `await asyncio.to_thread(...)` call signature that works reliably under all async test harnesses (PR #2). Health checks gained timeouts so a dead Memgraph cannot stall startup or `/health`.
+- **Path validation before destructive index ops** — `mnemostack index --recreate` now verifies the input path exists *before* dropping/recreating the Qdrant collection (PR #3). A typo in `--path` no longer wipes your index.
+- **Graph contract is now consistent** — `add_triple` writes `valid_until = "current"` for both nodes and relationships; `MemgraphRetriever`, `GraphResurrection`, `query_triples`, and `end_validity` all read with `coalesce(x.valid_until, 'current') = 'current'`, so legacy `NULL` markers continue to work without migration (PR #3). A `mnemostack graph-migrate-current --dry-run` CLI is provided for hosts that want to normalize storage explicitly.
+- **`TemporalRetriever` filter merge** — caller filters (workspace/source/tenant scope) are now preserved instead of being overwritten by the temporal timestamp filter (PR #4).
+- **Vector + Temporal dedupe** — temporal hits keep the original Qdrant point id instead of a `temporal:` prefix, so RRF can dedupe the same hit returned by both retrievers (PR #4).
+- **Async/sync Qdrant filter parity** — `AsyncVectorStore._build_filter` now dispatches to `DatetimeRange` for ISO-string ranges and `Range` for numeric, matching the sync `VectorStore` behavior (PR #4).
+- **Query classification false positives** — `ClassifyQuery` and `is_exact_token_query` now match against tokenized words instead of raw substrings, so markers like `id` or `api` no longer fire inside `idea`/`bridge`/`hidden`/`apiary` (PR #4).
+
+### Changed
+
+- **HTTP server defaults to `127.0.0.1`** instead of `0.0.0.0`, with an explicit warning printed on stderr when `--host 0.0.0.0` is used (PR #3). The HTTP API has no built-in auth or rate limiting; expose it only behind a reverse proxy.
+- **Gemini API key is sent via `x-goog-api-key` header** instead of as a `?key=` query string parameter, so it no longer appears in proxy/access logs (PR #3, embeddings + LLM paths).
+- **`/recall` and `/answer` no longer leak raw exception text** — backend errors are logged with full stack via `log.exception(...)` and the client receives a generic `"recall failed"` / `"answer failed"` (PR #3).
+- **CLI and MCP `search` / `answer` now use the same retriever-mode `Recaller`** as the HTTP server: Vector + Temporal by default, with optional BM25 (`--bm25-path`) and optional Memgraph (`--memgraph-uri`). The legacy `Recaller(embedding_provider=, vector_store=)` path is no longer used for service surfaces (PR #4). Bench numbers from `locomo_single` are now achievable from CLI/MCP, not just HTTP.
+- **Single-source `Config`** — CLI, HTTP server (`ServerConfig.from_env`), and MCP (`main()`) all resolve through `Config.load()` with backward-compatible env aliases (`MNEMOSTACK_PROVIDER`/`_EMBEDDING_PROVIDER`/`_EMBEDDING`, `MNEMOSTACK_QDRANT_URL`/`_QDRANT_HOST`/`_VECTOR_HOST`, `MNEMOSTACK_LLM`/`_LLM_PROVIDER`, `MNEMOSTACK_GRAPH_URI`/`_MEMGRAPH_URI`, `MNEMOSTACK_BM25_PATHS`) (PR #5). `Config` itself now carries `graph.timeout`, `graph.health_timeout`, and `recall.bm25_paths`.
+- **Docker image installs the `[server]` extra at build time** instead of running `pip install` in the container entrypoint (PR #6). `examples/docker-compose.yml` no longer needs network access at start.
+
+### Added
+
+- `mnemostack graph-migrate-current` CLI to backfill legacy `NULL` graph validity markers to the explicit `"current"` marker (with `--dry-run`).
+- `build_bm25_docs(paths)` helper used by HTTP, CLI, and MCP recall setup (PR #4).
+- `MNEMOSTACK_GRAPH_TIMEOUT`, `MNEMOSTACK_GRAPH_HEALTH_TIMEOUT`, and `MNEMOSTACK_BM25_PATHS` environment variables (PRs #3, #5).
+- Regression coverage: 8 new tests covering env aliases, CLI defaults, server env resolution, async filter parity, graph migration, embedding header, and exception scrub (PRs #3, #4, #5).
+
+### Docs
+
+- README updated for 0.2.x: corrected retriever defaults (Vector + Temporal default, BM25 + Memgraph optional), accurate description of the 8-stage pipeline (stateful stages have APIs but standard CLI/HTTP/MCP do not auto-record feedback), refreshed env table with all new aliases.
+- ARCHITECTURE.md aligned with code: `observability/` directory (was `monitoring/`), MCP server marked as shipped with current tool names, graph contract documents the `"current"` marker, config example reflects PR #5 schema.
+- SECURITY.md gained explicit notes on HTTP without built-in auth and on LLM-backed features sending memory text to the configured provider.
+- Chunking and chunk-id wording corrected (deterministic UUID-shaped content id, deterministic character windows by default).
+
 ## [0.2.0a1] - 2026-04-24
 
 ### Fixed
