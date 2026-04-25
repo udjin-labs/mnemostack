@@ -167,6 +167,21 @@ def test_recall_endpoint(monkeypatch):
     assert recaller.calls
 
 
+def test_recall_endpoint_scrubs_internal_exception(monkeypatch):
+    app, recaller = _patched_app(monkeypatch)
+
+    def _raise(*_args, **_kwargs):
+        raise RuntimeError("secret backend token leaked")
+
+    recaller.recall = _raise
+    client = TestClient(app)
+    r = client.post("/recall", json={"query": "hello"})
+
+    assert r.status_code == 500
+    assert r.json()["detail"] == "recall failed"
+    assert "secret backend token" not in r.text
+
+
 def test_answer_endpoint(monkeypatch):
     app, _ = _patched_app(monkeypatch)
     client = TestClient(app)

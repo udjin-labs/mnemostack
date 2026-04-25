@@ -20,7 +20,8 @@ class Triple:
 
     subject and obj are node names (nodes are created on demand).
     predicate is the relationship type.
-    valid_from / valid_until are ISO date strings or None.
+    valid_from / valid_until are ISO date strings. The marker "current" means
+    still valid.
     """
 
     subject: str
@@ -52,6 +53,7 @@ class GraphStore:
         user: str = "",
         password: str = "",
         database: str | None = None,
+        timeout: float = 5.0,
     ):
         if not _AVAILABLE:
             raise ImportError(
@@ -59,8 +61,14 @@ class GraphStore:
             )
         self.uri = uri
         self.database = database
+        self.timeout = timeout
         auth = (user, password) if user else None
-        self.driver = GraphDatabase.driver(uri, auth=auth)
+        self.driver = GraphDatabase.driver(
+            uri,
+            auth=auth,
+            connection_timeout=timeout,
+            connection_acquisition_timeout=timeout,
+        )
 
     def close(self) -> None:
         self.driver.close()
@@ -91,7 +99,7 @@ class GraphStore:
         """Add a temporal fact. Nodes are created on demand."""
         props = {
             "valid_from": _to_iso(valid_from),
-            "valid_until": _to_iso(valid_until),
+            "valid_until": _to_iso(valid_until) or "current",
             **(properties or {}),
         }
         # Filter out None values (neo4j property can be null but cleaner to omit)
@@ -103,6 +111,8 @@ class GraphStore:
         query = (
             f"MERGE (s:{s_label} {{name: $subject}}) "
             f"MERGE (o:{o_label} {{name: $obj}}) "
+            f"SET s.valid_until = coalesce(s.valid_until, 'current'), "
+            f"    o.valid_until = coalesce(o.valid_until, 'current') "
             f"MERGE (s)-[r:{rel}]->(o) "
             f"SET r += $props"
         )
@@ -120,7 +130,7 @@ class GraphStore:
         rel = self._safe_rel(predicate)
         query = (
             f"MATCH (s {{name: $subject}})-[r:{rel}]->(o {{name: $obj}}) "
-            f"WHERE r.valid_until IS NULL "
+            f"WHERE r.valid_until = 'current' OR r.valid_until IS NULL "
             f"SET r.valid_until = $ended "
             f"RETURN count(r) AS n"
         )
@@ -143,8 +153,8 @@ class GraphStore:
         """Query triples with optional SPO filters and point-in-time constraint.
 
         If `as_of` is provided, returns only facts valid at that date
-        (valid_from <= as_of < valid_until, with valid_until NULL treated as
-        indefinite future).
+        (valid_from <= as_of < valid_until, with valid_until "current" treated
+        as indefinite future). Legacy NULL markers are also treated as current.
         """
         where_parts = []
         params: dict[str, Any] = {"limit": limit}
@@ -158,7 +168,7 @@ class GraphStore:
             params["as_of"] = _to_iso(as_of)
             where_parts.append(
                 "(r.valid_from IS NULL OR r.valid_from <= $as_of) "
-                "AND (r.valid_until IS NULL OR r.valid_until > $as_of)"
+                "AND (r.valid_until = 'current' OR r.valid_until IS NULL OR r.valid_until > $as_of)"
             )
 
         rel_pattern = f":{self._safe_rel(predicate)}" if predicate else ""
@@ -208,6 +218,30 @@ class GraphStore:
         with self.driver.session(database=self.database) as session:
             rec = session.run("MATCH ()-[r]->() RETURN count(r) AS n").single()
             return rec["n"] if rec else 0
+
+    def backfill_current_markers(self, dry_run: bool = False) -> dict[str, int]:
+        """Backfill legacy NULL validity markers to the explicit "current" marker."""
+        with self.driver.session(database=self.database) as session:
+            if dry_run:
+                nodes = session.run(
+                    "MATCH (n) WHERE n.valid_until IS NULL RETURN count(n) AS n"
+                ).single()
+                rels = session.run(
+                    "MATCH ()-[r]->() WHERE r.valid_until IS NULL RETURN count(r) AS n"
+                ).single()
+            else:
+                nodes = session.run(
+                    "MATCH (n) WHERE n.valid_until IS NULL "
+                    "SET n.valid_until = 'current' RETURN count(n) AS n"
+                ).single()
+                rels = session.run(
+                    "MATCH ()-[r]->() WHERE r.valid_until IS NULL "
+                    "SET r.valid_until = 'current' RETURN count(r) AS n"
+                ).single()
+        return {
+            "nodes": int(nodes["n"] if nodes else 0),
+            "relationships": int(rels["n"] if rels else 0),
+        }
 
     # ---------- helpers ----------
 

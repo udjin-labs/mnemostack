@@ -1,4 +1,6 @@
 """Tests for AnswerGenerator — uses FakeLLM for deterministic behavior."""
+import json
+
 import pytest
 
 from mnemostack.llm.base import LLMProvider, LLMResponse
@@ -156,6 +158,40 @@ def test_custom_llm_registration():
     llm = get_llm("my-llm")
     resp = llm.generate("test")
     assert resp.text == "hello"
+
+
+def test_gemini_llm_uses_api_key_header_not_query_string(monkeypatch):
+    from mnemostack.llm.gemini import GeminiLLM
+
+    seen = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
+            ).encode()
+
+    def fake_urlopen(req, timeout):
+        seen["url"] = req.full_url
+        seen["headers"] = dict(req.header_items())
+        seen["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    llm = GeminiLLM(api_key="secret-key", timeout=9)
+    response = llm.generate("hello")
+
+    assert response.text == "ok"
+    assert "key=" not in seen["url"]
+    assert seen["headers"]["X-goog-api-key"] == "secret-key"
+    assert seen["timeout"] == 9
 
 
 def test_prompt_has_temporal_reasoning_rules(sample_memories):

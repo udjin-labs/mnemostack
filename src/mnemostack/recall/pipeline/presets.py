@@ -36,6 +36,7 @@ def build_full_pipeline(
     graph_user: str = "",
     graph_password: str = "",
     graph_limit: int = 3,
+    graph_timeout: float = 5.0,
 ) -> Pipeline:
     """Build the full 8-stage reranking pipeline.
 
@@ -84,7 +85,7 @@ def build_full_pipeline(
     if graph_uri:
         stages.append(GraphResurrection(
             uri=graph_uri, user=graph_user, password=graph_password,
-            limit=graph_limit,
+            limit=graph_limit, timeout=graph_timeout,
         ))
 
     return Pipeline(stages)

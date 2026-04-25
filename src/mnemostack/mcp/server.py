@@ -31,6 +31,7 @@ def build_server(
     llm_provider: str = "gemini",
     qdrant_host: str = "http://localhost:6333",
     memgraph_uri: str | None = None,
+    graph_timeout: float = 5.0,
 ) -> Any:
     """Build and return a configured FastMCP server.
 
@@ -122,7 +123,7 @@ def build_server(
             try:
                 from ..graph import GraphStore
 
-                gs = GraphStore(uri=memgraph_uri)
+                gs = GraphStore(uri=memgraph_uri, timeout=graph_timeout)
                 ok, msg = gs.health_check()
                 result["components"]["graph"] = {
                     "ok": ok,
@@ -212,7 +213,7 @@ def build_server(
             try:
                 from ..graph import GraphStore
 
-                gs = GraphStore(uri=memgraph_uri)
+                gs = GraphStore(uri=memgraph_uri, timeout=graph_timeout)
                 triples = gs.query_triples(
                     subject=subject, predicate=predicate, obj=obj,
                     as_of=as_of, limit=limit,
@@ -251,7 +252,7 @@ def build_server(
             try:
                 from ..graph import GraphStore
 
-                gs = GraphStore(uri=memgraph_uri)
+                gs = GraphStore(uri=memgraph_uri, timeout=graph_timeout)
                 gs.add_triple(
                     subject=subject, predicate=predicate, obj=obj,
                     valid_from=valid_from, valid_until=valid_until,
@@ -273,6 +274,7 @@ def main() -> None:
         MNEMOSTACK_LLM              (default: gemini)
         MNEMOSTACK_QDRANT_HOST      (default: http://localhost:6333)
         MNEMOSTACK_MEMGRAPH_URI     (default: none — graph tools disabled)
+        MNEMOSTACK_GRAPH_TIMEOUT    (default: 5.0)
     """
     mcp = build_server(
         collection=os.environ.get("MNEMOSTACK_COLLECTION", "mnemostack"),
@@ -280,6 +282,7 @@ def main() -> None:
         llm_provider=os.environ.get("MNEMOSTACK_LLM", "gemini"),
         qdrant_host=os.environ.get("MNEMOSTACK_QDRANT_HOST", "http://localhost:6333"),
         memgraph_uri=os.environ.get("MNEMOSTACK_MEMGRAPH_URI"),
+        graph_timeout=float(os.environ.get("MNEMOSTACK_GRAPH_TIMEOUT", "5.0")),
     )
     mcp.run()
 
