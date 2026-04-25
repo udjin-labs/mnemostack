@@ -6,6 +6,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0a3] - 2026-04-25
+
+### Fixed
+
+- **Temporal year regex extended past 2030.** `extract_temporal()` now matches `20\d{2}` (2000-2099) instead of `20[12]\d` (2010-2029). Queries with years 2030+ no longer silently fall back to current year (PR #7).
+- **Month + year matches preferred over bare year matches.** `extract_temporal("april 2035")` now returns the April-only window instead of the entire 2035; bare-year fallback applies only when no month is mentioned (PR #7).
+- **`VectorStore.collection_exists()` and `AsyncVectorStore.collection_exists()` no longer mask non-404 errors.** The previous `except Exception: return False` swallowed Qdrant auth, network, and runtime errors, making them look like missing collections to callers. Now only `ValueError("not found")` and `UnexpectedResponse(404)` map to `False`; everything else re-raises (PR #7). Regression tests added.
+- **`embedding.model` and `llm.model` from `Config` are now actually applied.** PR #5 added these fields but service surfaces ignored them; CLI / HTTP server / MCP now pass them into `get_provider(...)` and `get_llm(...)` (PR #8).
+- **`mnemostack serve --llm` default now reads from `Config`** instead of being hardcoded to `gemini` (PR #8).
+
+### Added
+
+- **Explicit stateful feedback API** (PR #9). The 8-stage pipeline now has a real way to learn from usage:
+  - `POST /feedback` HTTP endpoint with `{hit_id, signal, query, query_type, source, sources, reward}`. Signals: `useful` (reward 1.0), `clicked` (0.7), `irrelevant` (0.0); explicit `reward` overrides the map.
+  - `mnemostack feedback <hit_id>` CLI command writing into the same state file (PR #10).
+  - `mnemostack_feedback` MCP tool with the same contract (PR #10).
+  - `--auto-record-ior` / `MNEMOSTACK_AUTO_RECORD_IOR` opt-in flag for the HTTP server. When enabled, `/recall` records returned ids into the inhibition-of-return state automatically. Off by default to avoid silent state drift.
+  - `build_full_pipeline(enable_stateful_stages=False)` master toggle for deterministic benchmark runs. When `False`, Q-learning, IoR, and CuriosityBoost are removed from the pipeline so accumulated state cannot affect scores.
+  - Shared `mnemostack.feedback` module (`apply_feedback`, `feedback_reward`, `feedback_query_type`, `feedback_sources`, `record_recall_events`, `record_feedback_events`, `FeedbackOutcome`, `FeedbackHit`) used by all three surfaces — single source of truth.
+- **CLI overrides for provider models:** `--embedding-model` (in the common parser block) and `--llm-model` (in `answer`/`mcp-serve`/`serve`) (PR #8).
+- **`MNEMOSTACK_EMBEDDING_MODEL` and `MNEMOSTACK_LLM_MODEL` environment variables** wired through `Config.load()` (PR #8).
+- **`MNEMOSTACK_STATE_PATH` environment variable** for MCP feedback state file location (PR #10).
+
+### Changed
+
+- `ServerConfig.graph_uri` is now `str | None` so HTTP server can run with the graph layer fully disabled (PR #9 internal).
+- README and docstrings updated for stateful learning behavior, CLI/MCP feedback usage, and benchmark-mode toggle.
+
 ## [0.2.0a2] - 2026-04-25
 
 ### Fixed
