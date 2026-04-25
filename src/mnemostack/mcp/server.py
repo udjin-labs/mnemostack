@@ -8,7 +8,6 @@ Design notes:
 """
 from __future__ import annotations
 
-import os
 from typing import Any
 
 try:
@@ -19,6 +18,7 @@ except ImportError:  # pragma: no cover
     FastMCP = None  # type: ignore[assignment, misc]
     _FASTMCP_AVAILABLE = False
 
+from ..config import Config
 from ..embeddings import get_provider
 from ..llm import get_llm
 from ..recall import (
@@ -296,15 +296,15 @@ def main() -> None:
         MNEMOSTACK_GRAPH_TIMEOUT    (default: 5.0)
         MNEMOSTACK_BM25_PATHS       (default: none, os.pathsep-separated paths)
     """
-    bm25_paths_env = os.environ.get("MNEMOSTACK_BM25_PATHS")
+    cfg = Config.load()
     mcp = build_server(
-        collection=os.environ.get("MNEMOSTACK_COLLECTION", "mnemostack"),
-        embedding_provider=os.environ.get("MNEMOSTACK_EMBEDDING", "gemini"),
-        llm_provider=os.environ.get("MNEMOSTACK_LLM", "gemini"),
-        qdrant_host=os.environ.get("MNEMOSTACK_QDRANT_HOST", "http://localhost:6333"),
-        memgraph_uri=os.environ.get("MNEMOSTACK_MEMGRAPH_URI"),
-        graph_timeout=float(os.environ.get("MNEMOSTACK_GRAPH_TIMEOUT", "5.0")),
-        bm25_paths=bm25_paths_env.split(os.pathsep) if bm25_paths_env else None,
+        collection=cfg.vector.collection,
+        embedding_provider=cfg.embedding.provider,
+        llm_provider=cfg.llm.provider,
+        qdrant_host=cfg.vector.host,
+        memgraph_uri=cfg.graph.uri,
+        graph_timeout=cfg.graph.timeout,
+        bm25_paths=list(cfg.recall.bm25_paths) or None,
     )
     mcp.run()
 
