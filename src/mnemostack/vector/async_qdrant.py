@@ -10,6 +10,7 @@ from typing import Any
 
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import (
+    DatetimeRange,
     Distance,
     FieldCondition,
     Filter,
@@ -128,12 +129,22 @@ class AsyncVectorStore:
         must = []
         for key, value in filters.items():
             if isinstance(value, dict) and ("gte" in value or "lte" in value):
-                must.append(
-                    FieldCondition(
-                        key=key,
-                        range=Range(gte=value.get("gte"), lte=value.get("lte")),
+                gte = value.get("gte")
+                lte = value.get("lte")
+                if isinstance(gte, str) or isinstance(lte, str):
+                    must.append(
+                        FieldCondition(
+                            key=key,
+                            range=DatetimeRange(gte=gte, lte=lte),
+                        )
                     )
-                )
+                else:
+                    must.append(
+                        FieldCondition(
+                            key=key,
+                            range=Range(gte=gte, lte=lte),
+                        )
+                    )
             else:
                 must.append(FieldCondition(key=key, match=MatchValue(value=value)))
         return Filter(must=must)
