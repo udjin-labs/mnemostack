@@ -154,6 +154,7 @@ def test_server_config_from_env_uses_config_aliases(isolated_env, tmp_path, monk
     isolated_env.setenv("MNEMOSTACK_GRAPH_TIMEOUT", "2.5")
     isolated_env.setenv("MNEMOSTACK_GRAPH_HEALTH_TIMEOUT", "0.5")
     isolated_env.setenv("MNEMOSTACK_BM25_PATHS", "/notes")
+    isolated_env.setenv("MNEMOSTACK_AUTO_RECORD_IOR", "true")
 
     from mnemostack.server import ServerConfig
 
@@ -169,6 +170,7 @@ def test_server_config_from_env_uses_config_aliases(isolated_env, tmp_path, monk
     assert cfg.graph_timeout == 2.5
     assert cfg.graph_health_timeout == 0.5
     assert cfg.bm25_paths == ["/notes"]
+    assert cfg.auto_record_ior is True
 
 
 def test_save_roundtrip(isolated_env, tmp_path):
