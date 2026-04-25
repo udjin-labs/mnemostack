@@ -96,7 +96,7 @@ def _patched_app(monkeypatch, with_answer: bool = True):
         def embed(self, text):  # unused; kept for shape
             return [0.0, 0.0, 0.0]
 
-    monkeypatch.setattr(srv, "get_provider", lambda _name: _FakeProvider())
+    monkeypatch.setattr(srv, "get_provider", lambda _name, **_kwargs: _FakeProvider())
 
     fake_recaller = _FakeRecaller()
     monkeypatch.setattr(srv, "Recaller", lambda **_: fake_recaller)
@@ -134,7 +134,7 @@ def _patched_app(monkeypatch, with_answer: bool = True):
                 return rs
 
         monkeypatch.setattr(srv, "Reranker", _FakeReranker)
-        monkeypatch.setattr(srv, "get_llm", lambda _n: _FakeLLM())
+        monkeypatch.setattr(srv, "get_llm", lambda _n, **_kwargs: _FakeLLM())
     else:
         def _raise(*_a, **_kw):
             raise RuntimeError("no llm")
@@ -152,6 +152,59 @@ def test_health_endpoint(monkeypatch):
     data = r.json()
     assert data["provider"] == "fake"
     assert "qdrant" in data and "memgraph" in data
+
+
+def test_build_app_passes_configured_provider_models(monkeypatch):
+    import mnemostack.server as srv
+
+    calls = {"embedding": None, "llm": None}
+
+    monkeypatch.setattr(
+        srv,
+        "VectorStore",
+        lambda **_: type("VS", (), {"count": lambda self: 0, "dimension": 3})(),
+    )
+
+    class _FakeProvider:
+        dimension = 3
+
+        def embed(self, text):
+            return [0.0, 0.0, 0.0]
+
+    def _get_provider(name, **kwargs):
+        calls["embedding"] = (name, kwargs)
+        return _FakeProvider()
+
+    class _FakeLLM:
+        pass
+
+    def _get_llm(name, **kwargs):
+        calls["llm"] = (name, kwargs)
+        return _FakeLLM()
+
+    monkeypatch.setattr(srv, "get_provider", _get_provider)
+    monkeypatch.setattr(srv, "get_llm", _get_llm)
+    monkeypatch.setattr(srv, "Recaller", lambda **_: _FakeRecaller())
+    monkeypatch.setattr(srv, "VectorRetriever", lambda **_: object())
+    monkeypatch.setattr(srv, "BM25Retriever", lambda **_: object())
+    monkeypatch.setattr(srv, "MemgraphRetriever", lambda **_: object())
+    monkeypatch.setattr(srv, "TemporalRetriever", lambda **_: object())
+    monkeypatch.setattr(srv, "build_full_pipeline", lambda **_: _FakePipeline())
+    monkeypatch.setattr(srv, "FileStateStore", lambda path: object())
+    monkeypatch.setattr(srv, "AnswerGenerator", lambda **_: object())
+    monkeypatch.setattr(srv, "Reranker", lambda **_: object())
+
+    build_app(
+        ServerConfig(
+            provider_name="fake",
+            embedding_model="embed-custom",
+            llm_name="fake-llm",
+            llm_model="llm-custom",
+        )
+    )
+
+    assert calls["embedding"] == ("fake", {"model": "embed-custom"})
+    assert calls["llm"] == ("fake-llm", {"model": "llm-custom"})
 
 
 def test_recall_endpoint(monkeypatch):
