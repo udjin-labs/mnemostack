@@ -185,7 +185,12 @@ class Recaller:
         import asyncio
 
         return await asyncio.to_thread(
-            self.recall, query, limit, vector_limit, bm25_limit, filters
+            self.recall,
+            query,
+            limit,
+            vector_limit,
+            bm25_limit,
+            filters,
         )
 
     def recall(
