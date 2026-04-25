@@ -35,6 +35,7 @@ except ImportError as e:  # pragma: no cover - import guard
 from mnemostack import __version__
 from mnemostack.config import Config, model_kwargs
 from mnemostack.embeddings import get_provider
+from mnemostack.feedback import apply_feedback, record_recall_events
 from mnemostack.llm import get_llm
 from mnemostack.observability.recorder import (
     InMemoryRecorder,
@@ -44,9 +45,7 @@ from mnemostack.observability.recorder import (
 from mnemostack.recall import (
     AnswerGenerator,
     BM25Retriever,
-    ClassifyQuery,
     MemgraphRetriever,
-    PipelineContext,
     Recaller,
     Reranker,
     TemporalRetriever,
@@ -183,11 +182,6 @@ class ServerConfig:
         )
 
 
-@dataclass
-class _FeedbackHit:
-    id: str
-
-
 def _build_bm25_docs(paths: list[str] | None):
     if not paths:
         return []
@@ -241,69 +235,6 @@ def _memory_of(result) -> Memory:
         retrievers=retrievers,
         metadata=payload,
     )
-
-
-def _feedback_reward(signal: str, override: float | None = None) -> float:
-    if override is not None:
-        return float(override)
-    return {
-        "useful": 1.0,
-        "clicked": 0.7,
-        "irrelevant": 0.0,
-    }[signal]
-
-
-def _feedback_query_type(req: FeedbackRequest) -> str:
-    if req.query_type:
-        return req.query_type
-    if not req.query:
-        return "general"
-    ctx = PipelineContext(query=req.query)
-    ClassifyQuery().apply(ctx, [])
-    return ctx.query_type
-
-
-def _feedback_sources(req: FeedbackRequest) -> list[str]:
-    seen: set[str] = set()
-    sources: list[str] = []
-    for source in [req.source, *req.sources]:
-        if not source:
-            continue
-        source = str(source)
-        if source in seen:
-            continue
-        seen.add(source)
-        sources.append(source)
-    return sources
-
-
-def _record_recall_events(pipeline, results) -> bool:
-    recorded = False
-    for stage in pipeline:
-        record_recall = getattr(stage, "record_recall", None)
-        if record_recall is None:
-            continue
-        for result in results:
-            record_recall(str(result.id))
-            recorded = True
-    return recorded
-
-
-def _record_feedback_events(
-    pipeline,
-    sources: list[str],
-    query_type: str,
-    reward: float,
-) -> int:
-    updates = 0
-    for stage in pipeline:
-        record_feedback = getattr(stage, "record_feedback", None)
-        if record_feedback is None:
-            continue
-        for source in sources:
-            record_feedback(source, query_type, reward)
-            updates += 1
-    return updates
 
 
 def _prometheus_dump(rec: InMemoryRecorder) -> str:
@@ -448,7 +379,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                     log.warning("reranker failed (%s) — returning pre-rerank order", exc)
         results = results[:limit]
         if cfg.auto_record_ior:
-            _record_recall_events(pipeline, results)
+            record_recall_events(pipeline, results)
         return results
 
     async def _run_recall(query: str, limit: int, full_pipeline: bool):
@@ -537,27 +468,19 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         field returned by /recall or /answer as `sources`.
         """
         try:
-            reward = _feedback_reward(req.signal, req.reward)
-            query_type = _feedback_query_type(req)
-            sources = _feedback_sources(req)
-            q_updates = _record_feedback_events(pipeline, sources, query_type, reward)
-            ior_recorded = False
-            if req.signal == "clicked":
-                ior_recorded = _record_recall_events(
-                    pipeline,
-                    [_FeedbackHit(req.hit_id)],
-                )
+            outcome = apply_feedback(
+                pipeline,
+                hit_id=req.hit_id,
+                signal=req.signal,
+                query=req.query,
+                query_type=req.query_type,
+                source=req.source,
+                sources=req.sources,
+                reward=req.reward,
+            )
         except Exception as exc:
             log.exception("feedback endpoint failed")
             raise HTTPException(status_code=500, detail="feedback failed") from exc
-        return FeedbackResponse(
-            ok=True,
-            hit_id=req.hit_id,
-            signal=req.signal,
-            reward=reward,
-            query_type=query_type,
-            ior_recorded=ior_recorded,
-            q_learning_updates=q_updates,
-        )
+        return FeedbackResponse(**outcome.to_dict())
 
     return app

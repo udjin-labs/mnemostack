@@ -226,6 +226,10 @@ mnemostack search "what did we decide about auth" --provider gemini --collection
 # Synthesize answer
 mnemostack answer "what is the capital of France" --provider gemini --collection my-memory
 
+# Record explicit feedback into the same state file used by the HTTP/MCP pipeline
+mnemostack feedback <hit-id> --signal clicked --query "what did we decide about auth" \
+  --source-list vector --source-list bm25
+
 # MCP server (for Claude Desktop, Cursor, etc.)
 mnemostack mcp-serve --provider gemini --collection my-memory
 ```
@@ -427,6 +431,7 @@ curl -s http://localhost:8000/feedback \
 ```
 
 `signal` is one of `useful`, `clicked`, or `irrelevant`; pass the `retrievers` list returned by `/recall` as `sources` so Q-learning can update the right source weights.
+The same state update is available from CLI as `mnemostack feedback ...` and from MCP as `mnemostack_feedback`.
 
 For production, front this with whichever reverse proxy you already use (nginx, Caddy, Traefik) and set an auth layer — mnemostack's server does not do auth itself on purpose; the goal is to plug into whatever you already have.
 

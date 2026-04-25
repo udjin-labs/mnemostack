@@ -330,6 +330,43 @@ def cmd_index(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_feedback(args: argparse.Namespace) -> int:
+    """Record explicit feedback into the pipeline state store."""
+    from .feedback import apply_feedback
+    from .recall.pipeline import FileStateStore, build_full_pipeline
+
+    pipeline = build_full_pipeline(
+        state_store=FileStateStore(args.state_path),
+        graph_uri=None,
+    )
+    try:
+        outcome = apply_feedback(
+            pipeline,
+            hit_id=args.hit_id,
+            signal=args.signal,
+            query=args.query,
+            query_type=args.query_type,
+            source=args.source,
+            sources=list(args.source_list or []),
+            reward=args.reward,
+        )
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    payload = outcome.to_dict()
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(
+            f"Recorded feedback for {payload['hit_id']}: "
+            f"signal={payload['signal']} reward={payload['reward']:.3f} "
+            f"query_type={payload['query_type']} "
+            f"q_updates={payload['q_learning_updates']} "
+            f"ior_recorded={payload['ior_recorded']}"
+        )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     cfg = Config.load()
     p = argparse.ArgumentParser(prog="mnemostack", description="Memory stack for AI agents")
@@ -434,6 +471,48 @@ def build_parser() -> argparse.ArgumentParser:
     p_index.add_argument("--recreate", action="store_true", help="Drop existing collection")
     p_index.set_defaults(func=cmd_index)
 
+    p_feedback = sub.add_parser(
+        "feedback",
+        help="Record explicit feedback for stateful recall learning",
+    )
+    p_feedback.add_argument("hit_id", help="Memory/result id the feedback refers to")
+    p_feedback.add_argument(
+        "--signal",
+        required=True,
+        choices=["useful", "irrelevant", "clicked"],
+        help="Feedback signal",
+    )
+    p_feedback.add_argument("--query", default=None, help="Original query")
+    p_feedback.add_argument(
+        "--query-type",
+        default=None,
+        help="Explicit query type override (otherwise inferred from --query)",
+    )
+    p_feedback.add_argument(
+        "--source",
+        default=None,
+        help="Single retriever/source label",
+    )
+    p_feedback.add_argument(
+        "--source-list",
+        action="append",
+        default=[],
+        help="Retriever/source label; can be given multiple times",
+    )
+    p_feedback.add_argument(
+        "--reward",
+        type=float,
+        default=None,
+        help="Optional reward override in [0, 1]",
+    )
+    p_feedback.add_argument(
+        "--state-path",
+        default="/tmp/mnemostack-server-state.json",
+        help="Pipeline state file path",
+    )
+    p_feedback.add_argument("--json", action="store_true", help="JSON output")
+    p_feedback.set_defaults(func=cmd_feedback)
+
     p_mcp = sub.add_parser(
         "mcp-serve",
         parents=[common],
@@ -463,6 +542,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=list(cfg.recall.bm25_paths),
         help="Directory/file to index for the BM25 retriever (can be given multiple times)",
+    )
+    p_mcp.add_argument(
+        "--state-path",
+        default="/tmp/mnemostack-server-state.json",
+        help="Pipeline state file path for feedback",
     )
     p_mcp.set_defaults(func=cmd_mcp_serve)
 
@@ -663,6 +747,7 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
         memgraph_uri=args.memgraph_uri,
         graph_timeout=args.graph_timeout,
         bm25_paths=list(args.bm25_path) if args.bm25_path else None,
+        state_path=args.state_path,
     )
     mcp.run()
     return 0
