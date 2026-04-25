@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from qdrant_client import QdrantClient
+from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.models import (
     DatetimeRange,
     Distance,
@@ -53,8 +54,14 @@ class VectorStore:
         try:
             self.client.get_collection(self.collection)
             return True
-        except Exception:  # noqa: BLE001
-            return False
+        except ValueError as exc:
+            if "not found" in str(exc).lower():
+                return False
+            raise
+        except UnexpectedResponse as exc:
+            if exc.status_code == 404:
+                return False
+            raise
 
     def ensure_collection(self, recreate: bool = False) -> bool:
         """Create collection if missing. If recreate=True, drop and recreate."""

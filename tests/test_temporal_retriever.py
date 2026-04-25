@@ -122,6 +122,14 @@ def test_filter_bounds_match_extract_temporal_window():
     assert ts["lte"] == end_iso
 
 
+def test_extract_temporal_accepts_2030s_years():
+    window = extract_temporal("what happened in april 2035?")
+    assert window is not None
+    start_iso, end_iso = window
+    assert start_iso.startswith("2035-04-01")
+    assert end_iso.startswith("2035-05-01")
+
+
 def test_temporal_filter_preserves_caller_filters():
     store = _FakeVectorStore(results=_hits(1))
     r = TemporalRetriever(embedding=_FakeEmbedding(), vector_store=store)

@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from qdrant_client import AsyncQdrantClient
+from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.models import (
     DatetimeRange,
     Distance,
@@ -55,8 +56,14 @@ class AsyncVectorStore:
         try:
             await self.client.get_collection(self.collection)
             return True
-        except Exception:  # noqa: BLE001
-            return False
+        except ValueError as exc:
+            if "not found" in str(exc).lower():
+                return False
+            raise
+        except UnexpectedResponse as exc:
+            if exc.status_code == 404:
+                return False
+            raise
 
     async def ensure_collection(self, recreate: bool = False) -> bool:
         exists = await self.collection_exists()
