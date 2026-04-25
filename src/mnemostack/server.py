@@ -18,7 +18,6 @@ The server is opt-in: install with `pip install 'mnemostack[server]'`.
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -32,6 +31,7 @@ except ImportError as e:  # pragma: no cover - import guard
     ) from e
 
 from mnemostack import __version__
+from mnemostack.config import Config
 from mnemostack.embeddings import get_provider
 from mnemostack.llm import get_llm
 from mnemostack.observability.recorder import (
@@ -122,14 +122,16 @@ class ServerConfig:
 
     @classmethod
     def from_env(cls) -> ServerConfig:
+        cfg = Config.load()
         return cls(
-            provider_name=os.environ.get("MNEMOSTACK_PROVIDER", "gemini"),
-            llm_name=os.environ.get("MNEMOSTACK_LLM", "gemini"),
-            collection=os.environ.get("MNEMOSTACK_COLLECTION", "mnemostack"),
-            qdrant_url=os.environ.get("MNEMOSTACK_QDRANT_URL", "http://localhost:6333"),
-            graph_uri=os.environ.get("MNEMOSTACK_GRAPH_URI", "bolt://localhost:7687"),
-            graph_health_timeout=float(os.environ.get("MNEMOSTACK_GRAPH_HEALTH_TIMEOUT", "1.0")),
-            graph_timeout=float(os.environ.get("MNEMOSTACK_GRAPH_TIMEOUT", "5.0")),
+            provider_name=cfg.embedding.provider,
+            llm_name=cfg.llm.provider,
+            collection=cfg.vector.collection,
+            qdrant_url=cfg.vector.host,
+            graph_uri=cfg.graph.uri or "bolt://localhost:7687",
+            graph_health_timeout=cfg.graph.health_timeout,
+            graph_timeout=cfg.graph.timeout,
+            bm25_paths=list(cfg.recall.bm25_paths) or None,
         )
 
 

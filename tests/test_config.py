@@ -70,6 +70,73 @@ def test_env_vars_direct(isolated_env, tmp_path, monkeypatch):
     assert cfg.graph.uri == "bolt://foo:7687"
 
 
+def test_env_aliases_cover_cli_http_mcp_surfaces(isolated_env, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    isolated_env.setenv("MNEMOSTACK_PROVIDER", "ollama")
+    isolated_env.setenv("MNEMOSTACK_QDRANT_URL", "http://qdrant:6333")
+    isolated_env.setenv("MNEMOSTACK_COLLECTION", "memory")
+    isolated_env.setenv("MNEMOSTACK_LLM", "ollama")
+    isolated_env.setenv("MNEMOSTACK_MEMGRAPH_URI", "bolt://memgraph:7687")
+    isolated_env.setenv("MNEMOSTACK_GRAPH_TIMEOUT", "2.5")
+    isolated_env.setenv("MNEMOSTACK_GRAPH_HEALTH_TIMEOUT", "0.5")
+    isolated_env.setenv("MNEMOSTACK_BM25_PATHS", f"/a{os.pathsep}/b")
+
+    cfg = Config.load()
+
+    assert cfg.embedding.provider == "ollama"
+    assert cfg.vector.host == "http://qdrant:6333"
+    assert cfg.vector.collection == "memory"
+    assert cfg.llm.provider == "ollama"
+    assert cfg.graph.uri == "bolt://memgraph:7687"
+    assert cfg.graph.timeout == 2.5
+    assert cfg.graph.health_timeout == 0.5
+    assert cfg.recall.bm25_paths == ["/a", "/b"]
+
+
+def test_cli_parser_defaults_from_config_env(isolated_env, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    isolated_env.setenv("MNEMOSTACK_PROVIDER", "ollama")
+    isolated_env.setenv("MNEMOSTACK_QDRANT_URL", "http://qdrant:6333")
+    isolated_env.setenv("MNEMOSTACK_COLLECTION", "memory")
+    isolated_env.setenv("MNEMOSTACK_MEMGRAPH_URI", "bolt://memgraph:7687")
+    isolated_env.setenv("MNEMOSTACK_BM25_PATHS", "/notes")
+
+    from mnemostack.cli import build_parser
+
+    args = build_parser().parse_args(["search", "hello"])
+
+    assert args.provider == "ollama"
+    assert args.qdrant == "http://qdrant:6333"
+    assert args.collection == "memory"
+    assert args.memgraph_uri == "bolt://memgraph:7687"
+    assert args.bm25_path == ["/notes"]
+
+
+def test_server_config_from_env_uses_config_aliases(isolated_env, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    isolated_env.setenv("MNEMOSTACK_PROVIDER", "ollama")
+    isolated_env.setenv("MNEMOSTACK_LLM", "ollama")
+    isolated_env.setenv("MNEMOSTACK_QDRANT_URL", "http://qdrant:6333")
+    isolated_env.setenv("MNEMOSTACK_COLLECTION", "memory")
+    isolated_env.setenv("MNEMOSTACK_GRAPH_URI", "bolt://memgraph:7687")
+    isolated_env.setenv("MNEMOSTACK_GRAPH_TIMEOUT", "2.5")
+    isolated_env.setenv("MNEMOSTACK_GRAPH_HEALTH_TIMEOUT", "0.5")
+    isolated_env.setenv("MNEMOSTACK_BM25_PATHS", "/notes")
+
+    from mnemostack.server import ServerConfig
+
+    cfg = ServerConfig.from_env()
+
+    assert cfg.provider_name == "ollama"
+    assert cfg.llm_name == "ollama"
+    assert cfg.qdrant_url == "http://qdrant:6333"
+    assert cfg.collection == "memory"
+    assert cfg.graph_uri == "bolt://memgraph:7687"
+    assert cfg.graph_timeout == 2.5
+    assert cfg.graph_health_timeout == 0.5
+    assert cfg.bm25_paths == ["/notes"]
+
+
 def test_save_roundtrip(isolated_env, tmp_path):
     cfg = Config()
     cfg.embedding.provider = "ollama"

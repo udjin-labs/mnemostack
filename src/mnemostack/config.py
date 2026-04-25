@@ -72,6 +72,8 @@ class GraphConfig:
     user: str = ""
     password: str = ""
     database: str | None = None
+    timeout: float = 5.0
+    health_timeout: float = 1.0
 
 
 @dataclass
@@ -79,6 +81,7 @@ class RecallConfig:
     rrf_k: int = 60
     top_k: int = 10
     confidence_threshold: float = 0.5
+    bm25_paths: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -150,12 +153,19 @@ def _apply_env_overrides(cfg: Config) -> Config:
 
     Supported:
         MNEMOSTACK_EMBEDDING_PROVIDER
+        MNEMOSTACK_PROVIDER          (alias for EMBEDDING_PROVIDER)
+        MNEMOSTACK_EMBEDDING        (alias for EMBEDDING_PROVIDER)
         MNEMOSTACK_EMBEDDING_MODEL
         MNEMOSTACK_VECTOR_HOST
+        MNEMOSTACK_QDRANT_URL       (alias for VECTOR_HOST)
         MNEMOSTACK_VECTOR_COLLECTION
         MNEMOSTACK_LLM_PROVIDER
+        MNEMOSTACK_LLM              (alias for LLM_PROVIDER)
         MNEMOSTACK_LLM_MODEL
         MNEMOSTACK_GRAPH_URI
+        MNEMOSTACK_GRAPH_TIMEOUT
+        MNEMOSTACK_GRAPH_HEALTH_TIMEOUT
+        MNEMOSTACK_BM25_PATHS       (os.pathsep-separated)
         MNEMOSTACK_QDRANT_HOST  (alias for VECTOR_HOST)
         MNEMOSTACK_COLLECTION   (alias for VECTOR_COLLECTION)
         MNEMOSTACK_MEMGRAPH_URI (alias for GRAPH_URI)
@@ -163,13 +173,22 @@ def _apply_env_overrides(cfg: Config) -> Config:
     env = os.environ
 
     # Embedding
-    if v := env.get("MNEMOSTACK_EMBEDDING_PROVIDER"):
-        cfg.embedding.provider = v
+    embedding_provider = (
+        env.get("MNEMOSTACK_EMBEDDING_PROVIDER")
+        or env.get("MNEMOSTACK_PROVIDER")
+        or env.get("MNEMOSTACK_EMBEDDING")
+    )
+    if embedding_provider:
+        cfg.embedding.provider = embedding_provider
     if v := env.get("MNEMOSTACK_EMBEDDING_MODEL"):
         cfg.embedding.model = v
 
     # Vector (with aliases)
-    host = env.get("MNEMOSTACK_VECTOR_HOST") or env.get("MNEMOSTACK_QDRANT_HOST")
+    host = (
+        env.get("MNEMOSTACK_VECTOR_HOST")
+        or env.get("MNEMOSTACK_QDRANT_URL")
+        or env.get("MNEMOSTACK_QDRANT_HOST")
+    )
     if host:
         cfg.vector.host = host
     collection = env.get("MNEMOSTACK_VECTOR_COLLECTION") or env.get("MNEMOSTACK_COLLECTION")
@@ -177,8 +196,9 @@ def _apply_env_overrides(cfg: Config) -> Config:
         cfg.vector.collection = collection
 
     # LLM
-    if v := env.get("MNEMOSTACK_LLM_PROVIDER"):
-        cfg.llm.provider = v
+    llm_provider = env.get("MNEMOSTACK_LLM_PROVIDER") or env.get("MNEMOSTACK_LLM")
+    if llm_provider:
+        cfg.llm.provider = llm_provider
     if v := env.get("MNEMOSTACK_LLM_MODEL"):
         cfg.llm.model = v
 
@@ -186,6 +206,14 @@ def _apply_env_overrides(cfg: Config) -> Config:
     graph_uri = env.get("MNEMOSTACK_GRAPH_URI") or env.get("MNEMOSTACK_MEMGRAPH_URI")
     if graph_uri:
         cfg.graph.uri = graph_uri
+    if v := env.get("MNEMOSTACK_GRAPH_TIMEOUT"):
+        cfg.graph.timeout = float(v)
+    if v := env.get("MNEMOSTACK_GRAPH_HEALTH_TIMEOUT"):
+        cfg.graph.health_timeout = float(v)
+
+    # Recall
+    if v := env.get("MNEMOSTACK_BM25_PATHS"):
+        cfg.recall.bm25_paths = [p for p in v.split(os.pathsep) if p]
 
     return cfg
 
@@ -215,9 +243,13 @@ graph:
   uri: null               # e.g. bolt://localhost:7687 to enable graph
   user: ""
   password: ""
+  database: null
+  timeout: 5.0
+  health_timeout: 1.0
 
 recall:
   rrf_k: 60
   top_k: 10
   confidence_threshold: 0.5
+  bm25_paths: []
 """
