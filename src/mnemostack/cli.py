@@ -226,6 +226,11 @@ def _stable_chunk_id(source: str, offset: int, text: str) -> str:
 
 
 def cmd_index(args: argparse.Namespace) -> int:
+    target = Path(args.path)
+    if not target.exists():
+        print(f"error: path does not exist: {target}", file=sys.stderr)
+        return 2
+
     provider = get_provider(args.provider)
     store = VectorStore(
         collection=args.collection,
@@ -233,11 +238,6 @@ def cmd_index(args: argparse.Namespace) -> int:
         host=args.qdrant,
     )
     store.ensure_collection(recreate=args.recreate)
-
-    target = Path(args.path)
-    if not target.exists():
-        print(f"error: path does not exist: {target}", file=sys.stderr)
-        return 2
 
     files = (
         [target] if target.is_file()
@@ -384,6 +384,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Memgraph URI to enable graph tools (e.g. bolt://localhost:7687)",
     )
+    p_mcp.add_argument(
+        "--graph-timeout",
+        type=float,
+        default=5.0,
+        help="Memgraph connection timeout in seconds (default 5.0)",
+    )
     p_mcp.set_defaults(func=cmd_mcp_serve)
 
     p_init = sub.add_parser(
@@ -404,7 +410,7 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[common],
         help="Run HTTP API (FastAPI). Requires: pip install 'mnemostack[server]'",
     )
-    p_serve.add_argument("--host", default="0.0.0.0", help="Bind address (default 0.0.0.0)")
+    p_serve.add_argument("--host", default="127.0.0.1", help="Bind address (default 127.0.0.1)")
     p_serve.add_argument("--port", type=int, default=8000, help="Port (default 8000)")
     p_serve.add_argument(
         "--llm",
@@ -415,6 +421,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--memgraph-uri",
         default="bolt://localhost:7687",
         help="Memgraph bolt URI for the graph retriever",
+    )
+    p_serve.add_argument(
+        "--graph-timeout",
+        type=float,
+        default=5.0,
+        help="Memgraph connection timeout in seconds (default 5.0)",
     )
     p_serve.add_argument(
         "--bm25-path",
@@ -431,6 +443,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--reload", action="store_true", help="Enable uvicorn auto-reload (dev only)"
     )
     p_serve.set_defaults(func=cmd_serve)
+
+    p_graph_migrate = sub.add_parser(
+        "graph-migrate-current",
+        help="Backfill legacy NULL graph validity markers to 'current'",
+    )
+    p_graph_migrate.add_argument(
+        "--memgraph-uri",
+        default="bolt://localhost:7687",
+        help="Memgraph bolt URI (default bolt://localhost:7687)",
+    )
+    p_graph_migrate.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Only count graph items that would be updated",
+    )
+    p_graph_migrate.add_argument(
+        "--timeout",
+        type=float,
+        default=5.0,
+        help="Memgraph connection timeout in seconds (default 5.0)",
+    )
+    p_graph_migrate.set_defaults(func=cmd_graph_migrate_current)
 
     return p
 
@@ -455,10 +489,17 @@ def cmd_serve(args: argparse.Namespace) -> int:
         collection=args.collection,
         qdrant_url=args.qdrant,
         graph_uri=args.memgraph_uri,
+        graph_timeout=args.graph_timeout,
         bm25_paths=list(args.bm25_path) if args.bm25_path else None,
         state_path=args.state_path,
     )
     app = build_app(cfg)
+
+    if args.host == "0.0.0.0":
+        print(
+            "warning: binding to 0.0.0.0 exposes the unauthenticated API on all interfaces",
+            file=sys.stderr,
+        )
 
     print(f"mnemostack serve: http://{args.host}:{args.port}")
     print(f"  provider:   {cfg.provider_name}")
@@ -467,6 +508,24 @@ def cmd_serve(args: argparse.Namespace) -> int:
     print(f"  memgraph:   {cfg.graph_uri}")
     print(f"  docs:       http://{args.host}:{args.port}/docs")
     uvicorn.run(app, host=args.host, port=args.port, reload=args.reload)
+    return 0
+
+
+def cmd_graph_migrate_current(args: argparse.Namespace) -> int:
+    """Backfill legacy graph NULL validity markers to the explicit current marker."""
+    from .graph import GraphStore
+
+    store = GraphStore(uri=args.memgraph_uri, timeout=args.timeout)
+    try:
+        counts = store.backfill_current_markers(dry_run=args.dry_run)
+    finally:
+        store.close()
+
+    action = "Would update" if args.dry_run else "Updated"
+    print(
+        f"{action} {counts['nodes']} node(s) and "
+        f"{counts['relationships']} relationship(s)."
+    )
     return 0
 
 
@@ -507,6 +566,7 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
         llm_provider=args.llm,
         qdrant_host=args.qdrant,
         memgraph_uri=args.memgraph_uri,
+        graph_timeout=args.graph_timeout,
     )
     mcp.run()
     return 0

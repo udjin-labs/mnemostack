@@ -51,7 +51,7 @@ class GeminiProvider(EmbeddingProvider):
         return f"gemini:{self.model}"
 
     def embed(self, text: str) -> list[float]:
-        url = f"{self.BASE_URL}/{self.model}:embedContent?key={self.api_key}"
+        url = f"{self.BASE_URL}/{self.model}:embedContent"
         payload = {
             "model": f"models/{self.model}",
             "content": {"parts": [{"text": text}]},
@@ -61,7 +61,10 @@ class GeminiProvider(EmbeddingProvider):
                 req = urllib.request.Request(
                     url,
                     data=json.dumps(payload).encode(),
-                    headers={"Content-Type": "application/json"},
+                    headers={
+                        "Content-Type": "application/json",
+                        "x-goog-api-key": self.api_key,
+                    },
                 )
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                     data = json.loads(resp.read())
@@ -103,7 +106,7 @@ class GeminiProvider(EmbeddingProvider):
                 results.extend(self.embed_batch(texts[i : i + BATCH_SIZE]))
             return results
 
-        url = f"{self.BASE_URL}/{self.model}:batchEmbedContents?key={self.api_key}"
+        url = f"{self.BASE_URL}/{self.model}:batchEmbedContents"
         payload = {
             "requests": [
                 {
@@ -118,7 +121,10 @@ class GeminiProvider(EmbeddingProvider):
                 req = urllib.request.Request(
                     url,
                     data=json.dumps(payload).encode(),
-                    headers={"Content-Type": "application/json"},
+                    headers={
+                        "Content-Type": "application/json",
+                        "x-goog-api-key": self.api_key,
+                    },
                 )
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                     data = json.loads(resp.read())

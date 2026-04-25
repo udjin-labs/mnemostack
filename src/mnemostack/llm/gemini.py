@@ -50,7 +50,7 @@ class GeminiLLM(LLMProvider):
         max_tokens: int = 200,
         temperature: float = 0.0,
     ) -> LLMResponse:
-        url = f"{self.BASE_URL}/{self.model}:generateContent?key={self.api_key}"
+        url = f"{self.BASE_URL}/{self.model}:generateContent"
         gen_config: dict = {
             "temperature": temperature,
             "maxOutputTokens": max_tokens,
@@ -68,7 +68,10 @@ class GeminiLLM(LLMProvider):
                 req = urllib.request.Request(
                     url,
                     data=json.dumps(payload).encode(),
-                    headers={"Content-Type": "application/json"},
+                    headers={
+                        "Content-Type": "application/json",
+                        "x-goog-api-key": self.api_key,
+                    },
                 )
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                     data = json.loads(resp.read())

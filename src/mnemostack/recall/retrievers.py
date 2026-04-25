@@ -211,6 +211,7 @@ class MemgraphRetriever(Retriever):
         max_nodes: int = 10,
         max_rels: int = 5,
         driver: Any = None,
+        timeout: float = 5.0,
     ):
         self.uri = uri
         self.user = user
@@ -219,6 +220,7 @@ class MemgraphRetriever(Retriever):
         self.contains_min = contains_min
         self.max_nodes = max_nodes
         self.max_rels = max_rels
+        self.timeout = timeout
         self._driver = driver
         self._own_driver = driver is None
 
@@ -229,7 +231,10 @@ class MemgraphRetriever(Retriever):
             return None
         try:
             self._driver = GraphDatabase.driver(
-                self.uri, auth=(self.user, self.password) if self.user else None
+                self.uri,
+                auth=(self.user, self.password) if self.user else None,
+                connection_timeout=self.timeout,
+                connection_acquisition_timeout=self.timeout,
             )
             return self._driver
         except Exception:
@@ -264,7 +269,7 @@ class MemgraphRetriever(Retriever):
                     if w.isdigit() and len(w) >= 6:
                         rows = session.run(
                             "MATCH (n) WHERE (n.telegram_id = $w OR n.contact_id = $w) "
-                            "AND n.valid_until = 'current' "
+                            "AND coalesce(n.valid_until, 'current') = 'current' "
                             "RETURN n.name AS name, labels(n)[0] AS type, "
                             "n.memory_class AS mc LIMIT 5",
                             w=w,
@@ -279,7 +284,7 @@ class MemgraphRetriever(Retriever):
                     if not rows:
                         rows = session.run(
                             "MATCH (n) WHERE coalesce(n.name_lower, toLower(n.name)) = $w "
-                            "AND n.valid_until = 'current' "
+                            "AND coalesce(n.valid_until, 'current') = 'current' "
                             "RETURN n.name AS name, labels(n)[0] AS type, "
                             "n.memory_class AS mc LIMIT 5",
                             w=w,
@@ -288,7 +293,7 @@ class MemgraphRetriever(Retriever):
                     if not rows and len(w) >= 3:
                         rows = session.run(
                             "MATCH (n) WHERE toLower(coalesce(n.telegram_username, '')) = $w "
-                            "AND n.valid_until = 'current' "
+                            "AND coalesce(n.valid_until, 'current') = 'current' "
                             "RETURN n.name AS name, labels(n)[0] AS type, "
                             "n.memory_class AS mc LIMIT 5",
                             w=w,
@@ -297,7 +302,7 @@ class MemgraphRetriever(Retriever):
                     if not rows and len(w) >= self.contains_min:
                         rows = session.run(
                             "MATCH (n) WHERE coalesce(n.name_lower, toLower(n.name)) CONTAINS $w "
-                            "AND n.valid_until = 'current' "
+                            "AND coalesce(n.valid_until, 'current') = 'current' "
                             "RETURN n.name AS name, labels(n)[0] AS type, "
                             "n.memory_class AS mc LIMIT 5",
                             w=w,
@@ -315,7 +320,8 @@ class MemgraphRetriever(Retriever):
                 for name, info in ranked:
                     rel_rows = session.run(
                         "MATCH (n {name: $name})-[r]->(m) "
-                        "WHERE n.valid_until = 'current' "
+                        "WHERE coalesce(n.valid_until, 'current') = 'current' "
+                        "AND coalesce(r.valid_until, 'current') = 'current' "
                         "RETURN n.name AS from_n, type(r) AS rel, m.name AS to_n "
                         "LIMIT $lim",
                         name=name, lim=self.max_rels,

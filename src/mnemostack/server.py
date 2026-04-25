@@ -116,6 +116,7 @@ class ServerConfig:
     qdrant_url: str = "http://localhost:6333"
     graph_uri: str = "bolt://localhost:7687"
     graph_health_timeout: float = 1.0
+    graph_timeout: float = 5.0
     bm25_paths: list[str] | None = None  # optional markdown dirs for BM25 corpus
     state_path: str = "/tmp/mnemostack-server-state.json"
 
@@ -127,6 +128,8 @@ class ServerConfig:
             collection=os.environ.get("MNEMOSTACK_COLLECTION", "mnemostack"),
             qdrant_url=os.environ.get("MNEMOSTACK_QDRANT_URL", "http://localhost:6333"),
             graph_uri=os.environ.get("MNEMOSTACK_GRAPH_URI", "bolt://localhost:7687"),
+            graph_health_timeout=float(os.environ.get("MNEMOSTACK_GRAPH_HEALTH_TIMEOUT", "1.0")),
+            graph_timeout=float(os.environ.get("MNEMOSTACK_GRAPH_TIMEOUT", "5.0")),
         )
 
 
@@ -272,7 +275,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 connection_acquisition_timeout=cfg.graph_health_timeout,
             )
             with d.session() as s:
-                s.run("RETURN 1", timeout=cfg.graph_health_timeout).single()
+                s.run("RETURN 1").single()
             d.close()
             return True
         except Exception:
@@ -282,7 +285,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     retrievers = [
         VectorRetriever(embedding=provider, vector_store=store),
         BM25Retriever(docs=bm25_docs) if bm25_docs else None,
-        MemgraphRetriever(uri=cfg.graph_uri),
+        MemgraphRetriever(uri=cfg.graph_uri, timeout=cfg.graph_timeout),
         TemporalRetriever(embedding=provider, vector_store=store),
     ]
     retrievers = [r for r in retrievers if r is not None]
@@ -295,6 +298,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     pipeline = build_full_pipeline(
         state_store=FileStateStore(state_path),
         graph_uri=cfg.graph_uri,
+        graph_timeout=cfg.graph_timeout,
     )
 
     try:
@@ -379,7 +383,8 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         try:
             results = await _run_recall(req.query, req.limit, req.full_pipeline)
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"recall failed: {exc}") from exc
+            log.exception("recall endpoint failed")
+            raise HTTPException(status_code=500, detail="recall failed") from exc
         return RecallResponse(query=req.query, results=[_memory_of(r) for r in results])
 
     @app.post("/answer", response_model=AnswerResponse)
@@ -393,7 +398,8 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             results = await _run_recall(req.query, req.limit, req.full_pipeline)
             ans = await asyncio.to_thread(answer_gen.generate, req.query, results)
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"answer failed: {exc}") from exc
+            log.exception("answer endpoint failed")
+            raise HTTPException(status_code=500, detail="answer failed") from exc
         return AnswerResponse(
             query=req.query,
             answer=ans.text,
