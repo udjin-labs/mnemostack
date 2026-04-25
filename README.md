@@ -277,7 +277,7 @@ print(stats)  # IngestStats(seen=2, embedded=2, upserted=2, skipped=0, failed=0)
 
 Guarantees:
 
-- **Idempotent.** Each item gets a deterministic UUID5 id computed from `(source, offset, text)`. Re-running with the same input is a no-op: Qdrant upsert replaces the point onto itself, and an in-process LRU cache skips even the embedding call for items already seen in this session.
+- **Idempotent.** Each item gets a deterministic UUID-shaped content id computed from `(source, offset, text)`. Re-running with the same input is a no-op: Qdrant upsert replaces the point onto itself, and an in-process LRU cache skips even the embedding call for items already seen in this session.
 - **Batched.** Items are embedded in batches of `batch_size`, so provider HTTP overhead amortises across many items.
 - **Streaming-friendly.** `ing.stream(item_iter)` yields per-batch stats so long feeds can be monitored without waiting for the whole stream to drain.
 - **Graceful.** If a single item fails to embed, it is counted as `failed` but the rest of the batch still lands.

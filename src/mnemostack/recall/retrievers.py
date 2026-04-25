@@ -376,18 +376,10 @@ _MONTHS = {
 def extract_temporal(query: str) -> tuple[str, str] | None:
     """Best-effort date range extraction. Returns (start_iso, end_iso) or None."""
     q = query.lower()
-    # "YYYY" — full year
-    m = re.search(r"\b(20[12]\d)\b", q)
-    if m:
-        y = int(m.group(1))
-        return (
-            datetime(y, 1, 1, tzinfo=timezone.utc).isoformat(),
-            datetime(y + 1, 1, 1, tzinfo=timezone.utc).isoformat(),
-        )
     # "<month> <year>" or Russian stem
     for stem, month in _MONTHS.items():
         if stem in q:
-            y_m = re.search(r"\b(20[12]\d)\b", q)
+            y_m = re.search(r"\b(20\d{2})\b", q)
             y = int(y_m.group(1)) if y_m else datetime.now(timezone.utc).year
             start = datetime(y, month, 1, tzinfo=timezone.utc)
             end_month = month + 1
@@ -395,6 +387,14 @@ def extract_temporal(query: str) -> tuple[str, str] | None:
             end_month = end_month if end_month <= 12 else 1
             end = datetime(end_year, end_month, 1, tzinfo=timezone.utc)
             return start.isoformat(), end.isoformat()
+    # "YYYY" — full year
+    m = re.search(r"\b(20\d{2})\b", q)
+    if m:
+        y = int(m.group(1))
+        return (
+            datetime(y, 1, 1, tzinfo=timezone.utc).isoformat(),
+            datetime(y + 1, 1, 1, tzinfo=timezone.utc).isoformat(),
+        )
     return None
 
 

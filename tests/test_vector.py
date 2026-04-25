@@ -25,6 +25,20 @@ def test_ensure_collection_creates(store):
     assert store.collection_exists()
 
 
+def test_collection_exists_reraises_non_not_found_errors():
+    store = VectorStore.__new__(VectorStore)
+    store.collection = "test_collection"
+
+    class FailingClient:
+        def get_collection(self, _collection):
+            raise RuntimeError("qdrant auth failed")
+
+    store.client = FailingClient()
+
+    with pytest.raises(RuntimeError, match="qdrant auth failed"):
+        store.collection_exists()
+
+
 def test_ensure_collection_idempotent(store):
     store.ensure_collection()
     # second call — should NOT recreate
