@@ -9,7 +9,7 @@
 
 `mnemostack` is a hybrid memory system combining BM25, vector search (Qdrant), and knowledge graph (Memgraph) with a unified recall pipeline, reranker, and optional LLM inference layer.
 
-**Status:** 🚧 alpha — API may change between 0.1.x releases.
+**Status:** 🚧 alpha — API may change between 0.2.x releases.
 
 ### Who is this for?
 
@@ -33,7 +33,7 @@ The practical effect: you stop re-explaining your project to the agent after eve
 
 ### How it works, in one paragraph
 
-On each `recall(query)`: the four retrievers (Vector, BM25, Memgraph, Temporal) run in parallel and return ranked lists. Reciprocal Rank Fusion merges them. The 8-stage pipeline reweights results using query classification, exact-token rescue, gravity/hub dampening (to avoid always-winning popular chunks), freshness, inhibition-of-return (to not return the exact same thing twice in a row), curiosity boosts, a Q-learning reranker learned from usage, and graph resurrection (pull in related facts that weren't in top-K). An optional LLM reranker does a final ordering pass. You get a list of `RecallResult` with source, score, and provenance — ready to hand to a model.
+On each `recall(query)`: the configured retrievers (Vector and Temporal by default, with BM25 and Memgraph when configured) run in parallel and return ranked lists. Reciprocal Rank Fusion merges them. The optional 8-stage pipeline can reweight results using query classification, exact-token rescue, gravity/hub dampening, freshness, inhibition-of-return, curiosity boosts, Q-learning weights supplied through its state store, and graph resurrection. An optional LLM reranker does a final ordering pass. You get a list of `RecallResult` with source, score, and provenance — ready to hand to a model.
 
 ![mnemostack architecture](docs/images/mnemostack-architecture.jpg)
 
@@ -109,11 +109,11 @@ We are not a replacement for your agent framework and not a full platform runtim
 - 🧠 **4-source hybrid retrieval** — Vector (Qdrant) + BM25 (exact tokens) + Memgraph (knowledge graph) + Temporal (time-aware vector), all fused via Reciprocal Rank Fusion. Pluggable `Retriever` abstraction — add your own sources.
 - ⚖️ **Weighted & adaptive RRF fusion** — `reciprocal_rank_fusion(weights=[...])` lets you lift sources you trust more; `Recaller(adaptive_weights=True)` picks a per-query-shape profile (exact-token / person / temporal / general). See the honest write-up below for where this helps and where it doesn't.
 - 🧪 **HyDE retriever (opt-in)** — embeds a hypothetical answer instead of the query. Useful for query↔document vocabulary gaps in documentation-style corpora; does **not** reliably help on dialogue-backed memory and always costs one extra LLM roundtrip per `search()`. Not included in the default `Recaller`.
-- ⚡ **8-stage recall pipeline** — ClassifyQuery → ExactTokenRescue → GravityDampen → HubDampen → FreshnessBlend → InhibitionOfReturn → CuriosityBoost → QLearningReranker. Opt-in, with persistent state store.
+- ⚡ **8-stage recall pipeline** — ClassifyQuery → ExactTokenRescue → GravityDampen → HubDampen → FreshnessBlend → InhibitionOfReturn → CuriosityBoost → QLearningReranker. Opt-in; stateful stages expose APIs for recording recalls/feedback, but standard CLI/HTTP/MCP calls do not collect user feedback automatically.
 - 🔁 **LLM reranker** — Gemini Flash (or any LLM) reorders top-K by relevance; catches cases where embedding similarity alone is too broad.
 - ⚡ **Async-friendly** — `Recaller.recall_async` dispatches retrievers in parallel; five concurrent HTTP recalls finish in roughly one single-recall wall-clock.
 - 🌍 **Unicode-aware entity resolution** — Memgraph retriever probes by `telegram_id`, handle, and precomputed `name_lower` so non-ASCII names match correctly (Memgraph's `toLower()` lower-cases ASCII only).
-- 📥 **Streaming `Ingestor` API** — batched, idempotent, LRU-cached ingest from any Python code. Same `(source, offset, text)` → same deterministic UUID-5 id, so re-runs are no-ops.
+- 📥 **Streaming `Ingestor` API** — batched, idempotent, LRU-cached ingest from any Python code. Same `(source, offset, text)` → same deterministic UUID-shaped content id, so re-runs are no-ops.
 - 🌐 **HTTP API** (optional) — `pip install 'mnemostack[server]'` gives you `/recall`, `/answer`, `/health`, `/docs`, plus `/metrics` in Prometheus text format. See the HTTP server section below.
 - 🔌 **Pluggable embeddings** — Gemini, Ollama, or HuggingFace (local GPU), via provider registry
 - 🤖 **Pluggable LLM** — Gemini Flash / Ollama for answer generation and reranking
@@ -153,9 +153,12 @@ Both knobs are opt-in by design — the default `Recaller` stays classical equal
 | `OLLAMA_HOST` | Ollama server URL (default `http://localhost:11434`) | Ollama embeddings / LLM |
 | `MNEMOSTACK_COLLECTION` | Qdrant collection name (default `mnemostack`) | CLI convenience |
 | `MNEMOSTACK_QDRANT_URL` | Qdrant URL (default `http://localhost:6333`) | Remote Qdrant |
-| `MNEMOSTACK_GRAPH_URI` | Memgraph bolt URI (default `bolt://localhost:7687`) | Graph retriever / GraphStore |
+| `MNEMOSTACK_GRAPH_URI` / `MNEMOSTACK_MEMGRAPH_URI` | Memgraph bolt URI | Graph retriever / GraphStore |
+| `MNEMOSTACK_PROVIDER` / `MNEMOSTACK_EMBEDDING_PROVIDER` | Embedding provider | CLI / HTTP / MCP |
+| `MNEMOSTACK_LLM` / `MNEMOSTACK_LLM_PROVIDER` | LLM provider | Answer generation / reranking |
+| `MNEMOSTACK_BM25_PATHS` | BM25 corpus paths separated by `os.pathsep` (`:` on Unix) | CLI / HTTP / MCP BM25 retriever |
 
-Only the providers you actually use need their keys. HuggingFace local-GPU embeddings need no keys at all.
+Only the providers you actually use need their keys. HuggingFace local-GPU embeddings need no keys at all. `mnemostack init` writes the same settings as YAML; explicit CLI flags override config/env defaults.
 
 ## Try it in 30 seconds (Docker)
 
@@ -535,7 +538,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed design: pipeline stages, Qdr
 
 ### Pipeline state
 
-The 8-stage pipeline needs a tiny bit of state between calls (Q-learning weights, inhibition-of-return history, per-document gravity/hub counters). `FileStateStore(path)` persists it to a JSON file. For multi-process servers, implement your own `StateStore` (two methods: `load()` / `save(state)`) backed by Redis or your database.
+The 8-stage pipeline can use a small state store between calls (Q-learning weights, inhibition-of-return history, per-document gravity/hub counters). `FileStateStore(path)` persists it to a JSON file. Standard HTTP/MCP/CLI recall applies existing state but does not automatically record user feedback; call the stage APIs from your application if you want learning from clicks, accepts, or explicit ratings. For multi-process servers, implement your own `StateStore` (two methods: `load()` / `save(state)`) backed by Redis or your database.
 
 ### Graceful degradation
 
