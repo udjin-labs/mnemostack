@@ -2,13 +2,13 @@
 
 ## Supported Versions
 
-mnemostack is in alpha (0.1.x). Only the latest alpha release receives
+mnemostack is in alpha (0.2.x). Only the latest alpha release receives
 security fixes.
 
 | Version | Supported |
 | --- | --- |
-| 0.1.0a12+ | ✅ |
-| < 0.1.0a12 | ❌ |
+| 0.2.0a1+ | ✅ |
+| < 0.2.0a1 | ❌ |
 
 ## Reporting a Vulnerability
 
@@ -33,14 +33,20 @@ mnemostack is a library and a small HTTP service consumers run themselves.
 Relevant attack surfaces:
 
 - Untrusted memory contents injected into the vector store or graph and then
-  surfaced in recall results (prompt injection propagation).
+  surfaced in recall results or LLM prompts (prompt injection propagation).
 - Untrusted queries to `mnemostack serve` endpoints.
 - Dependency vulnerabilities in `qdrant-client`, `neo4j`, `fastapi`, etc.
-- Secrets leaking into logs or responses.
+- Secrets leaking into logs, responses, prompts, or third-party provider traffic.
 
-Out of scope: operator-side misconfiguration (for example exposing the HTTP
-server to the internet without an auth proxy) is a deployment concern that
-mnemostack does not attempt to fix in-package.
+The HTTP server has no built-in authentication or rate limiting. It binds to
+`127.0.0.1` by default; if you expose it with `--host 0.0.0.0`, put it behind
+your own auth, TLS, and rate-limit layer.
+
+LLM-backed features (`/answer`, LLM reranking, HyDE, triple extraction, query
+expansion) send retrieved memory text and/or user queries to the configured LLM
+provider. Use a local provider such as Ollama, redact sensitive payloads, or
+disable those features when memories contain data that must not leave your
+environment. Treat retrieved memory text as untrusted prompt input.
 
 ## Dependencies
 
