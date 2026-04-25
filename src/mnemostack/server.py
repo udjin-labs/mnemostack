@@ -1,7 +1,8 @@
 """FastAPI service wrapper for mnemostack.
 
-Exposes `/recall`, `/answer`, `/health`, and `/metrics` over HTTP so callers in
-any language (Node, Go, Rust, curl) can use mnemostack without a Python SDK.
+Exposes `/recall`, `/answer`, `/feedback`, `/health`, and `/metrics` over HTTP
+so callers in any language (Node, Go, Rust, curl) can use mnemostack without a
+Python SDK.
 
 Start from the CLI:
 
@@ -18,8 +19,9 @@ The server is opt-in: install with `pip install 'mnemostack[server]'`.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 try:
     from fastapi import FastAPI, HTTPException
@@ -42,7 +44,9 @@ from mnemostack.observability.recorder import (
 from mnemostack.recall import (
     AnswerGenerator,
     BM25Retriever,
+    ClassifyQuery,
     MemgraphRetriever,
+    PipelineContext,
     Recaller,
     Reranker,
     TemporalRetriever,
@@ -53,6 +57,13 @@ from mnemostack.recall.pipeline import FileStateStore
 from mnemostack.vector import VectorStore
 
 log = logging.getLogger(__name__)
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 # ----- Request / response models -----
@@ -70,6 +81,27 @@ class AnswerRequest(BaseModel):
     query: str = Field(..., min_length=1)
     limit: int = Field(10, ge=1, le=100)
     full_pipeline: bool = Field(True)
+
+
+class FeedbackRequest(BaseModel):
+    hit_id: str = Field(..., min_length=1, description="Memory/result id the feedback refers to.")
+    signal: Literal["useful", "irrelevant", "clicked"] = Field(
+        ...,
+        description="User feedback signal. Useful/clicked are positive, irrelevant is negative.",
+    )
+    query: str | None = Field(None, description="Original query; used to infer query_type.")
+    query_type: str | None = Field(None, description="Explicit query type override.")
+    source: str | None = Field(None, description="Single retriever/source label.")
+    sources: list[str] = Field(
+        default_factory=list,
+        description="Retriever/source labels from the recalled hit.",
+    )
+    reward: float | None = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description="Optional reward override in [0, 1].",
+    )
 
 
 class Memory(BaseModel):
@@ -97,6 +129,16 @@ class AnswerResponse(BaseModel):
     memories: list[Memory]
 
 
+class FeedbackResponse(BaseModel):
+    ok: bool
+    hit_id: str
+    signal: str
+    reward: float
+    query_type: str
+    ior_recorded: bool
+    q_learning_updates: int
+
+
 class HealthResponse(BaseModel):
     status: str
     version: str
@@ -116,11 +158,12 @@ class ServerConfig:
     llm_model: str | None = None
     collection: str = "mnemostack"
     qdrant_url: str = "http://localhost:6333"
-    graph_uri: str = "bolt://localhost:7687"
+    graph_uri: str | None = "bolt://localhost:7687"
     graph_health_timeout: float = 1.0
     graph_timeout: float = 5.0
     bm25_paths: list[str] | None = None  # optional markdown dirs for BM25 corpus
     state_path: str = "/tmp/mnemostack-server-state.json"
+    auto_record_ior: bool = False
 
     @classmethod
     def from_env(cls) -> ServerConfig:
@@ -136,7 +179,13 @@ class ServerConfig:
             graph_health_timeout=cfg.graph.health_timeout,
             graph_timeout=cfg.graph.timeout,
             bm25_paths=list(cfg.recall.bm25_paths) or None,
+            auto_record_ior=_env_bool("MNEMOSTACK_AUTO_RECORD_IOR"),
         )
+
+
+@dataclass
+class _FeedbackHit:
+    id: str
 
 
 def _build_bm25_docs(paths: list[str] | None):
@@ -192,6 +241,69 @@ def _memory_of(result) -> Memory:
         retrievers=retrievers,
         metadata=payload,
     )
+
+
+def _feedback_reward(signal: str, override: float | None = None) -> float:
+    if override is not None:
+        return float(override)
+    return {
+        "useful": 1.0,
+        "clicked": 0.7,
+        "irrelevant": 0.0,
+    }[signal]
+
+
+def _feedback_query_type(req: FeedbackRequest) -> str:
+    if req.query_type:
+        return req.query_type
+    if not req.query:
+        return "general"
+    ctx = PipelineContext(query=req.query)
+    ClassifyQuery().apply(ctx, [])
+    return ctx.query_type
+
+
+def _feedback_sources(req: FeedbackRequest) -> list[str]:
+    seen: set[str] = set()
+    sources: list[str] = []
+    for source in [req.source, *req.sources]:
+        if not source:
+            continue
+        source = str(source)
+        if source in seen:
+            continue
+        seen.add(source)
+        sources.append(source)
+    return sources
+
+
+def _record_recall_events(pipeline, results) -> bool:
+    recorded = False
+    for stage in pipeline:
+        record_recall = getattr(stage, "record_recall", None)
+        if record_recall is None:
+            continue
+        for result in results:
+            record_recall(str(result.id))
+            recorded = True
+    return recorded
+
+
+def _record_feedback_events(
+    pipeline,
+    sources: list[str],
+    query_type: str,
+    reward: float,
+) -> int:
+    updates = 0
+    for stage in pipeline:
+        record_feedback = getattr(stage, "record_feedback", None)
+        if record_feedback is None:
+            continue
+        for source in sources:
+            record_feedback(source, query_type, reward)
+            updates += 1
+    return updates
 
 
 def _prometheus_dump(rec: InMemoryRecorder) -> str:
@@ -334,7 +446,10 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                     results = reranker.rerank(query, results)
                 except Exception as exc:  # pragma: no cover
                     log.warning("reranker failed (%s) — returning pre-rerank order", exc)
-        return results[:limit]
+        results = results[:limit]
+        if cfg.auto_record_ior:
+            _record_recall_events(pipeline, results)
+        return results
 
     async def _run_recall(query: str, limit: int, full_pipeline: bool):
         """Offload the blocking recall stack to a worker thread.
@@ -412,6 +527,37 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             confidence=float(getattr(ans, "confidence", 0.0)),
             sources=list(getattr(ans, "sources", []) or []),
             memories=[_memory_of(r) for r in results],
+        )
+
+    @app.post("/feedback", response_model=FeedbackResponse)
+    async def feedback_endpoint(req: FeedbackRequest):
+        """Record explicit feedback for stateful recall stages.
+
+        Q-learning updates require retriever/source labels. Pass the `retrievers`
+        field returned by /recall or /answer as `sources`.
+        """
+        try:
+            reward = _feedback_reward(req.signal, req.reward)
+            query_type = _feedback_query_type(req)
+            sources = _feedback_sources(req)
+            q_updates = _record_feedback_events(pipeline, sources, query_type, reward)
+            ior_recorded = False
+            if req.signal == "clicked":
+                ior_recorded = _record_recall_events(
+                    pipeline,
+                    [_FeedbackHit(req.hit_id)],
+                )
+        except Exception as exc:
+            log.exception("feedback endpoint failed")
+            raise HTTPException(status_code=500, detail="feedback failed") from exc
+        return FeedbackResponse(
+            ok=True,
+            hit_id=req.hit_id,
+            signal=req.signal,
+            reward=reward,
+            query_type=query_type,
+            ior_recorded=ior_recorded,
+            q_learning_updates=q_updates,
         )
 
     return app

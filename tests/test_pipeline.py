@@ -303,3 +303,18 @@ def test_preset_full_pipeline_disabled_stages():
     )
     # Should still have classify + rescue + gravity + freshness at minimum
     assert len(pipe) >= 4
+
+
+def test_preset_full_pipeline_stateful_master_toggle():
+    from mnemostack.recall.pipeline import (
+        CuriosityBoost,
+        InhibitionOfReturn,
+        QLearningReranker,
+        build_full_pipeline,
+    )
+
+    pipe = build_full_pipeline(enable_stateful_stages=False)
+
+    assert not any(isinstance(stage, QLearningReranker) for stage in pipe)
+    assert not any(isinstance(stage, CuriosityBoost) for stage in pipe)
+    assert not any(isinstance(stage, InhibitionOfReturn) for stage in pipe)

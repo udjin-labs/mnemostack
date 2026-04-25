@@ -519,6 +519,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Pipeline state file path",
     )
     p_serve.add_argument(
+        "--auto-record-ior",
+        action="store_true",
+        help="Record returned recall ids for inhibition-of-return state",
+    )
+    p_serve.add_argument(
         "--reload", action="store_true", help="Enable uvicorn auto-reload (dev only)"
     )
     p_serve.set_defaults(func=cmd_serve)
@@ -573,6 +578,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         graph_timeout=args.graph_timeout,
         bm25_paths=list(args.bm25_path) if args.bm25_path else None,
         state_path=args.state_path,
+        auto_record_ior=args.auto_record_ior,
     )
     app = build_app(cfg)
 
@@ -591,6 +597,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
     print(f"  collection: {cfg.collection}")
     print(f"  qdrant:     {cfg.qdrant_url}")
     print(f"  memgraph:   {cfg.graph_uri}")
+    print(f"  state:      {cfg.state_path}")
+    print(f"  auto IoR:   {cfg.auto_record_ior}")
     print(f"  docs:       http://{args.host}:{args.port}/docs")
     uvicorn.run(app, host=args.host, port=args.port, reload=args.reload)
     return 0

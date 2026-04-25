@@ -80,11 +80,22 @@ class _FakeRecaller:
 
 
 class _FakePipeline:
+    def __init__(self, stages=None):
+        self.stages = list(stages or [])
+
     def apply(self, query, results):
         return results
 
+    def __iter__(self):
+        return iter(self.stages)
 
-def _patched_app(monkeypatch, with_answer: bool = True):
+
+def _patched_app(
+    monkeypatch,
+    with_answer: bool = True,
+    pipeline: _FakePipeline | None = None,
+    config: ServerConfig | None = None,
+):
     """Build the FastAPI app with the heavy retrieval layers mocked out."""
     import mnemostack.server as srv
 
@@ -104,7 +115,8 @@ def _patched_app(monkeypatch, with_answer: bool = True):
     monkeypatch.setattr(srv, "BM25Retriever", lambda **_: object())
     monkeypatch.setattr(srv, "MemgraphRetriever", lambda **_: object())
     monkeypatch.setattr(srv, "TemporalRetriever", lambda **_: object())
-    monkeypatch.setattr(srv, "build_full_pipeline", lambda **_: _FakePipeline())
+    fake_pipeline = pipeline or _FakePipeline()
+    monkeypatch.setattr(srv, "build_full_pipeline", lambda **_: fake_pipeline)
     monkeypatch.setattr(srv, "FileStateStore", lambda path: object())
 
     if with_answer:
@@ -140,7 +152,11 @@ def _patched_app(monkeypatch, with_answer: bool = True):
             raise RuntimeError("no llm")
         monkeypatch.setattr(srv, "get_llm", _raise)
 
-    app = build_app(ServerConfig(provider_name="fake", llm_name="fake"))
+    app = build_app(config or ServerConfig(
+        provider_name="fake",
+        llm_name="fake",
+        graph_uri=None,
+    ))
     return app, fake_recaller
 
 
@@ -218,6 +234,101 @@ def test_recall_endpoint(monkeypatch):
     assert data["results"][0]["id"] == "0"
     # Validates the recaller was invoked
     assert recaller.calls
+
+
+def test_recall_endpoint_can_auto_record_ior(monkeypatch):
+    class _IorStage:
+        def __init__(self):
+            self.recorded = []
+
+        def record_recall(self, memory_id):
+            self.recorded.append(memory_id)
+
+    ior = _IorStage()
+    app, _ = _patched_app(
+        monkeypatch,
+        pipeline=_FakePipeline([ior]),
+        config=ServerConfig(
+            provider_name="fake",
+            llm_name="fake",
+            auto_record_ior=True,
+        ),
+    )
+    client = TestClient(app)
+    r = client.post("/recall", json={"query": "hello", "limit": 2, "full_pipeline": False})
+
+    assert r.status_code == 200
+    assert ior.recorded == ["0", "1"]
+
+
+def test_feedback_endpoint_records_qlearning_and_clicked_ior(monkeypatch):
+    class _IorStage:
+        def __init__(self):
+            self.recorded = []
+
+        def record_recall(self, memory_id):
+            self.recorded.append(memory_id)
+
+    class _QStage:
+        def __init__(self):
+            self.feedback = []
+
+        def record_feedback(self, source, query_type, reward):
+            self.feedback.append((source, query_type, reward))
+
+    ior = _IorStage()
+    qstage = _QStage()
+    app, _ = _patched_app(monkeypatch, pipeline=_FakePipeline([ior, qstage]))
+    client = TestClient(app)
+    r = client.post(
+        "/feedback",
+        json={
+            "hit_id": "mem-1",
+            "signal": "clicked",
+            "query": "how to configure nginx",
+            "sources": ["vector", "bm25", "vector"],
+        },
+    )
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ok"] is True
+    assert data["reward"] == 0.7
+    assert data["query_type"] == "technical"
+    assert data["ior_recorded"] is True
+    assert data["q_learning_updates"] == 2
+    assert ior.recorded == ["mem-1"]
+    assert qstage.feedback == [
+        ("vector", "technical", 0.7),
+        ("bm25", "technical", 0.7),
+    ]
+
+
+def test_feedback_endpoint_accepts_reward_override(monkeypatch):
+    class _QStage:
+        def __init__(self):
+            self.feedback = []
+
+        def record_feedback(self, source, query_type, reward):
+            self.feedback.append((source, query_type, reward))
+
+    qstage = _QStage()
+    app, _ = _patched_app(monkeypatch, pipeline=_FakePipeline([qstage]))
+    client = TestClient(app)
+    r = client.post(
+        "/feedback",
+        json={
+            "hit_id": "mem-2",
+            "signal": "irrelevant",
+            "query_type": "person",
+            "source": "graph",
+            "reward": 0.25,
+        },
+    )
+
+    assert r.status_code == 200
+    assert r.json()["reward"] == 0.25
+    assert qstage.feedback == [("graph", "person", 0.25)]
 
 
 def test_recall_endpoint_scrubs_internal_exception(monkeypatch):
