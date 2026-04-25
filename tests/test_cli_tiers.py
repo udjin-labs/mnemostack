@@ -16,6 +16,7 @@ from mnemostack.cli import (
     TIER_PROFILES,
     _apply_tier,
     _build_recaller,
+    cmd_answer,
     cmd_search,
 )
 
@@ -170,3 +171,84 @@ def test_tier_sources_capped():
     max_sources = TIER_PROFILES[1]["max_sources"]
     for entry in payload:
         assert len(entry["sources"]) <= max_sources
+
+
+def test_search_passes_embedding_model_to_provider():
+    args = argparse.Namespace(
+        provider="fake",
+        embedding_model="embed-custom",
+        collection="test",
+        qdrant="http://localhost:6333",
+        query="anything",
+        limit=10,
+        json=True,
+        tier=None,
+        bm25_path=[],
+        memgraph_uri=None,
+    )
+    mock_provider = MagicMock(dimension=3072)
+    mock_store = MagicMock()
+    mock_store.collection_exists.return_value = True
+    mock_recaller = MagicMock()
+    mock_recaller.recall.return_value = []
+
+    with patch("mnemostack.cli.get_provider", return_value=mock_provider) as get_provider_mock, \
+         patch("mnemostack.cli.VectorStore", return_value=mock_store), \
+         patch("mnemostack.cli.Recaller", return_value=mock_recaller), \
+         patch("sys.stdout", StringIO()):
+        rc = cmd_search(args)
+
+    assert rc == 0
+    get_provider_mock.assert_called_once_with("fake", model="embed-custom")
+
+
+def test_answer_passes_llm_model_to_provider():
+    args = argparse.Namespace(
+        provider="fake",
+        embedding_model="embed-custom",
+        llm="fake-llm",
+        llm_model="llm-custom",
+        collection="test",
+        qdrant="http://localhost:6333",
+        query="anything",
+        limit=10,
+        json=True,
+        tier=None,
+        bm25_path=[],
+        memgraph_uri=None,
+        min_confidence=0.5,
+    )
+    mock_provider = MagicMock(dimension=3072)
+    mock_store = MagicMock()
+    mock_store.collection_exists.return_value = True
+    mock_recaller = MagicMock()
+    mock_recaller.recall.return_value = []
+
+    class _FakeAnswer:
+        text = "ok"
+        confidence = 1.0
+        sources = []
+        error = None
+        ok = True
+
+    class _FakeAnswerGenerator:
+        def __init__(self, llm, confidence_threshold):
+            self.llm = llm
+            self.confidence_threshold = confidence_threshold
+
+        def generate(self, query, results):
+            return _FakeAnswer()
+
+        def should_fallback(self, answer):
+            return False
+
+    with patch("mnemostack.cli.get_provider", return_value=mock_provider), \
+         patch("mnemostack.cli.get_llm", return_value=object()) as get_llm_mock, \
+         patch("mnemostack.cli.VectorStore", return_value=mock_store), \
+         patch("mnemostack.cli.Recaller", return_value=mock_recaller), \
+         patch("mnemostack.cli.AnswerGenerator", _FakeAnswerGenerator), \
+         patch("sys.stdout", StringIO()):
+        rc = cmd_answer(args)
+
+    assert rc == 0
+    get_llm_mock.assert_called_once_with("fake-llm", model="llm-custom")

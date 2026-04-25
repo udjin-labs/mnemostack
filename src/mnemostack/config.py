@@ -44,6 +44,11 @@ DEFAULT_CONFIG_PATHS = [
 ]
 
 
+def model_kwargs(model: str | None) -> dict[str, str]:
+    """Return provider kwargs for an optional model override."""
+    return {"model": model} if model else {}
+
+
 @dataclass
 class EmbeddingConfig:
     provider: str = "gemini"
@@ -94,6 +99,14 @@ class Config:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    def embedding_provider_kwargs(self) -> dict[str, Any]:
+        """Keyword arguments for the configured embedding provider."""
+        return model_kwargs(self.embedding.model)
+
+    def llm_provider_kwargs(self) -> dict[str, Any]:
+        """Keyword arguments for the configured LLM provider."""
+        return model_kwargs(self.llm.model)
 
     @classmethod
     def load(cls, path: str | Path | None = None) -> Config:

@@ -18,7 +18,7 @@ except ImportError:  # pragma: no cover
     FastMCP = None  # type: ignore[assignment, misc]
     _FASTMCP_AVAILABLE = False
 
-from ..config import Config
+from ..config import Config, model_kwargs
 from ..embeddings import get_provider
 from ..llm import get_llm
 from ..recall import (
@@ -36,7 +36,9 @@ from ..vector import VectorStore
 def build_server(
     collection: str = "mnemostack",
     embedding_provider: str = "gemini",
+    embedding_model: str | None = None,
     llm_provider: str = "gemini",
+    llm_model: str | None = None,
     qdrant_host: str = "http://localhost:6333",
     memgraph_uri: str | None = None,
     graph_timeout: float = 5.0,
@@ -47,7 +49,9 @@ def build_server(
     Args:
         collection: Qdrant collection name
         embedding_provider: embedding provider name (registered in mnemostack.embeddings)
+        embedding_model: embedding model override (None uses provider default)
         llm_provider: LLM provider name for answer generation
+        llm_model: LLM model override (None uses provider default)
         qdrant_host: Qdrant URL
         memgraph_uri: if provided, register graph tools (e.g. bolt://localhost:7687)
 
@@ -69,7 +73,10 @@ def build_server(
 
     def _get_embedding():
         if "embedding" not in _components:
-            _components["embedding"] = get_provider(embedding_provider)
+            _components["embedding"] = get_provider(
+                embedding_provider,
+                **model_kwargs(embedding_model),
+            )
         return _components["embedding"]
 
     def _get_vector():
@@ -100,7 +107,9 @@ def build_server(
 
     def _get_answer_gen():
         if "answer" not in _components:
-            _components["answer"] = AnswerGenerator(llm=get_llm(llm_provider))
+            _components["answer"] = AnswerGenerator(
+                llm=get_llm(llm_provider, **model_kwargs(llm_model))
+            )
         return _components["answer"]
 
     # ---------- tools ----------
@@ -290,7 +299,9 @@ def main() -> None:
     Reads config from env vars:
         MNEMOSTACK_COLLECTION       (default: mnemostack)
         MNEMOSTACK_EMBEDDING        (default: gemini)
+        MNEMOSTACK_EMBEDDING_MODEL  (default: provider default)
         MNEMOSTACK_LLM              (default: gemini)
+        MNEMOSTACK_LLM_MODEL        (default: provider default)
         MNEMOSTACK_QDRANT_HOST      (default: http://localhost:6333)
         MNEMOSTACK_MEMGRAPH_URI     (default: none — graph tools disabled)
         MNEMOSTACK_GRAPH_TIMEOUT    (default: 5.0)
@@ -300,7 +311,9 @@ def main() -> None:
     mcp = build_server(
         collection=cfg.vector.collection,
         embedding_provider=cfg.embedding.provider,
+        embedding_model=cfg.embedding.model,
         llm_provider=cfg.llm.provider,
+        llm_model=cfg.llm.model,
         qdrant_host=cfg.vector.host,
         memgraph_uri=cfg.graph.uri,
         graph_timeout=cfg.graph.timeout,

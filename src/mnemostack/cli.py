@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .config import DEFAULT_CONFIG_PATHS, Config, generate_example_config
+from .config import DEFAULT_CONFIG_PATHS, Config, generate_example_config, model_kwargs
 from .embeddings import get_provider, list_providers
 from .llm import get_llm, list_llms
 from .recall import (
@@ -43,6 +43,14 @@ TIER_PROFILES: dict[int, dict] = {
 }
 
 
+def _embedding_model(args: argparse.Namespace) -> str | None:
+    return getattr(args, "embedding_model", None)
+
+
+def _llm_model(args: argparse.Namespace) -> str | None:
+    return getattr(args, "llm_model", None)
+
+
 def _apply_tier(args: argparse.Namespace) -> dict | None:
     """Return the tier profile for this call, or None if no --tier was passed.
 
@@ -60,7 +68,7 @@ def _apply_tier(args: argparse.Namespace) -> dict | None:
 
 def cmd_health(args: argparse.Namespace) -> int:
     try:
-        provider = get_provider(args.provider)
+        provider = get_provider(args.provider, **model_kwargs(_embedding_model(args)))
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -88,7 +96,7 @@ def cmd_health(args: argparse.Namespace) -> int:
 
 def cmd_search(args: argparse.Namespace) -> int:
     profile = _apply_tier(args)
-    provider = get_provider(args.provider)
+    provider = get_provider(args.provider, **model_kwargs(_embedding_model(args)))
     store = VectorStore(
         collection=args.collection,
         dimension=provider.dimension,
@@ -149,7 +157,7 @@ def cmd_search(args: argparse.Namespace) -> int:
 
 def cmd_answer(args: argparse.Namespace) -> int:
     profile = _apply_tier(args)
-    provider = get_provider(args.provider)
+    provider = get_provider(args.provider, **model_kwargs(_embedding_model(args)))
     store = VectorStore(
         collection=args.collection,
         dimension=provider.dimension,
@@ -166,7 +174,7 @@ def cmd_answer(args: argparse.Namespace) -> int:
     recaller = _build_recaller(args, provider, store)
     results = recaller.recall(args.query, limit=args.limit)
 
-    llm = get_llm(args.llm)
+    llm = get_llm(args.llm, **model_kwargs(_llm_model(args)))
     gen = AnswerGenerator(llm=llm, confidence_threshold=args.min_confidence)
     answer = gen.generate(args.query, results)
 
@@ -253,7 +261,7 @@ def cmd_index(args: argparse.Namespace) -> int:
         print(f"error: path does not exist: {target}", file=sys.stderr)
         return 2
 
-    provider = get_provider(args.provider)
+    provider = get_provider(args.provider, **model_kwargs(_embedding_model(args)))
     store = VectorStore(
         collection=args.collection,
         dimension=provider.dimension,
@@ -336,6 +344,11 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Embedding provider (default: {cfg.embedding.provider})",
     )
     common.add_argument(
+        "--embedding-model",
+        default=cfg.embedding.model,
+        help="Embedding model override (default: provider default or config value)",
+    )
+    common.add_argument(
         "--collection", default=cfg.vector.collection, help="Qdrant collection name"
     )
     common.add_argument(
@@ -402,6 +415,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--llm", default=cfg.llm.provider, choices=list_llms(), help="LLM provider for answer generation"
     )
     p_answer.add_argument(
+        "--llm-model",
+        default=cfg.llm.model,
+        help="LLM model override (default: provider default or config value)",
+    )
+    p_answer.add_argument(
         "--min-confidence",
         type=float,
         default=cfg.recall.confidence_threshold,
@@ -423,6 +441,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_mcp.add_argument(
         "--llm", default=cfg.llm.provider, help="LLM provider for answer generation"
+    )
+    p_mcp.add_argument(
+        "--llm-model",
+        default=cfg.llm.model,
+        help="LLM model override (default: provider default or config value)",
     )
     p_mcp.add_argument(
         "--memgraph-uri",
@@ -465,8 +488,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve.add_argument("--port", type=int, default=8000, help="Port (default 8000)")
     p_serve.add_argument(
         "--llm",
-        default="gemini",
+        default=cfg.llm.provider,
         help="LLM provider for /answer (optional; disables /answer if missing)",
+    )
+    p_serve.add_argument(
+        "--llm-model",
+        default=cfg.llm.model,
+        help="LLM model override (default: provider default or config value)",
     )
     p_serve.add_argument(
         "--memgraph-uri",
@@ -536,7 +564,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
     cfg = ServerConfig(
         provider_name=args.provider,
+        embedding_model=_embedding_model(args),
         llm_name=args.llm,
+        llm_model=_llm_model(args),
         collection=args.collection,
         qdrant_url=args.qdrant,
         graph_uri=args.memgraph_uri,
@@ -554,6 +584,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
     print(f"mnemostack serve: http://{args.host}:{args.port}")
     print(f"  provider:   {cfg.provider_name}")
+    if cfg.embedding_model:
+        print(f"  embed model: {cfg.embedding_model}")
+    if cfg.llm_model:
+        print(f"  llm model:  {cfg.llm_model}")
     print(f"  collection: {cfg.collection}")
     print(f"  qdrant:     {cfg.qdrant_url}")
     print(f"  memgraph:   {cfg.graph_uri}")
@@ -614,7 +648,9 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
     mcp = build_server(
         collection=args.collection,
         embedding_provider=args.provider,
+        embedding_model=_embedding_model(args),
         llm_provider=args.llm,
+        llm_model=_llm_model(args),
         qdrant_host=args.qdrant,
         memgraph_uri=args.memgraph_uri,
         graph_timeout=args.graph_timeout,
