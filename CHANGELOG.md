@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0b4] - 2026-04-26
+
+### Added
+
+- feat(answer): retrieval-then-extract for list/count questions, opt-in via `list_extract_mode` (#19)
+
 ## [0.2.0b3] - 2026-04-26
 
 ### Fixed
