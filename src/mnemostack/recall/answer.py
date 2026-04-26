@@ -217,7 +217,8 @@ def classify_question(query: str) -> str:
         return "list"
 
     if re.search(
-        r"\b(both|common between|across|what was the connection between|"
+        r"\b(both|common between|across (?:sessions|dates|speakers|memories)|"
+        r"what was the connection between|"
         r"what motivated|what did .+ take away from|what do .+ and .+|"
         r"what did .+ and .+ both|how does .+ compare to .+)\b",
         q,
