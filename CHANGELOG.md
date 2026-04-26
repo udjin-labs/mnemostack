@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0b2] - 2026-04-26
+
+### Added
+
+- feat(answer): category-aware prompt routing (opt-in via `category_aware_prompts=True`) (#16)
+
 ## [0.2.0b1] - 2026-04-26
 
 ### Changed
