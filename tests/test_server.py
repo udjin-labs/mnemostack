@@ -126,8 +126,10 @@ def _patched_app(
             sources = ["notes/a.md"]
 
         class _FakeAnswerGen:
-            def __init__(self, llm):
-                pass
+            last_kwargs = None
+
+            def __init__(self, **kwargs):
+                type(self).last_kwargs = kwargs
 
             def generate(self, q, memories):
                 return _FakeAns()
@@ -158,6 +160,15 @@ def _patched_app(
         graph_uri=None,
     ))
     return app, fake_recaller
+
+
+def test_build_app_wires_recaller_into_answer_generator(monkeypatch):
+    import mnemostack.server as srv
+
+    app, recaller = _patched_app(monkeypatch)
+
+    assert app is not None
+    assert srv.AnswerGenerator.last_kwargs["recaller"] is recaller
 
 
 def test_health_endpoint(monkeypatch):
