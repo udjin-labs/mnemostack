@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0b5] - 2026-04-26
+
+### Added
+
+- feat(answer): specificity resolver — opt-in via `specificity_resolver=True` (#20)
+
 ## [0.2.0b4] - 2026-04-26
 
 ### Added

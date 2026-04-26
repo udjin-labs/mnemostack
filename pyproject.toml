@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mnemostack"
-version = "0.2.0b4"
+version = "0.2.0b5"
 description = "Memory stack for AI agents: BM25 + Qdrant + Memgraph + RRF retrieval, Gemini Flash inference layer, 8-stage recall pipeline."
 readme = "README.md"
 requires-python = ">=3.10"
