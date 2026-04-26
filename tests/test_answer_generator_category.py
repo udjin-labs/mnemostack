@@ -70,9 +70,18 @@ def test_classify_question_ambiguous_returns_general():
     assert classify_question("Color of Melanie's dog") == "general"
 
 
-def test_generate_uses_list_prompt_for_list_question(sample_memories):
+def test_answer_generator_defaults_enable_p1_features_except_list_extract():
+    gen = AnswerGenerator(llm=FakeLLM())
+
+    assert gen.category_aware_prompts is True
+    assert gen.specificity_resolver is True
+    assert gen.inference_retry is True
+    assert gen.list_extract_mode is False
+
+
+def test_generate_uses_list_prompt_for_list_question_by_default(sample_memories):
     llm = FakeLLM()
-    gen = AnswerGenerator(llm=llm, category_aware_prompts=True)
+    gen = AnswerGenerator(llm=llm)
 
     gen.generate("What are Melanie's pets?", sample_memories)
 
@@ -93,10 +102,21 @@ def test_generate_uses_inference_prompt_for_would_question(sample_memories):
 
 def test_generate_uses_default_when_category_aware_disabled(sample_memories):
     llm = FakeLLM()
-    gen = AnswerGenerator(llm=llm)
+    gen = AnswerGenerator(llm=llm, category_aware_prompts=False)
 
     gen.generate("What are Melanie's pets?", sample_memories)
 
     assert _DEFAULT_PROMPT.split("\n", 1)[0] in llm.last_prompt
     assert "SHORTEST factual answer" in llm.last_prompt
+    assert "COMPLETE list of ALL items" not in llm.last_prompt
+
+
+def test_custom_prompt_template_overrides_default_category_routing(sample_memories):
+    llm = FakeLLM()
+    template = "CUSTOM PROMPT\nMEMORIES:\n{context}\nQUESTION: {query}\n"
+    gen = AnswerGenerator(llm=llm, prompt_template=template)
+
+    gen.generate("What are Melanie's pets?", sample_memories)
+
+    assert "CUSTOM PROMPT" in llm.last_prompt
     assert "COMPLETE list of ALL items" not in llm.last_prompt

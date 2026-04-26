@@ -352,7 +352,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
 
     try:
         llm = get_llm(cfg.llm_name, **model_kwargs(cfg.llm_model))
-        answer_gen: AnswerGenerator | None = AnswerGenerator(llm=llm)
+        answer_gen: AnswerGenerator | None = AnswerGenerator(llm=llm, recaller=recaller)
         reranker: Reranker | None = Reranker(llm=llm, max_items=20)
     except Exception as exc:  # pragma: no cover - missing provider key
         log.warning("LLM init failed (%s); /answer and reranker disabled.", exc)

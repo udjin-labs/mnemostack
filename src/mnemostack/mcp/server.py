@@ -114,7 +114,8 @@ def build_server(
     def _get_answer_gen():
         if "answer" not in _components:
             _components["answer"] = AnswerGenerator(
-                llm=get_llm(llm_provider, **model_kwargs(llm_model))
+                llm=get_llm(llm_provider, **model_kwargs(llm_model)),
+                recaller=_get_recaller(),
             )
         return _components["answer"]
 
