@@ -379,6 +379,28 @@ for i, path in enumerate(Path("my-notes/").rglob("*.md")):
 
 For transcript-like inputs (user↔assistant messages), prefer `MessagePairChunker` so a question and its answer stay in the same chunk. See `mnemostack.chunking`.
 
+If your canonical memory corpus is already stored in Qdrant payloads, build the BM25 corpus from the same collection instead of maintaining a separate markdown export. This keeps exact-token lookup aligned with vector search (message IDs, commit hashes, filenames, quoted phrases):
+
+```python
+from qdrant_client import QdrantClient
+from qdrant_client.models import FieldCondition, Filter, MatchValue
+from mnemostack.recall import BM25Retriever
+
+client = QdrantClient(host="localhost", port=6333)
+bm25 = BM25Retriever.from_qdrant(
+    client,
+    "memory",
+    scroll_filter=Filter(
+        must=[FieldCondition(key="chunk_type", match=MatchValue(value="transcript"))]
+    ),
+    limit=40_000,
+)
+
+hits = bm25.search("MERGED 71706", limit=5)
+```
+
+You can also call `bm25_docs_from_qdrant(...)` directly if you want to combine Qdrant payload chunks with local `BM25Doc`s before constructing `BM25Retriever`.
+
 ### HTTP server (optional)
 
 If you want mnemostack available to callers that aren't Python — any service written in Node, Go, Rust, or a plain `curl` from a shell script — install the server extra and expose it over HTTP:
