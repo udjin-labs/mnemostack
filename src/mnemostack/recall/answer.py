@@ -102,6 +102,26 @@ QUESTION: {query}
 
 ANSWER:"""
 
+_MULTIHOP_PROMPT = """Answer a multi-hop reasoning question based on retrieved memories.
+
+MEMORIES:
+{context}
+
+RULES:
+1. This is a multi-hop reasoning question requiring evidence from MULTIPLE memories. Do not answer from a single memory.
+2. Connect facts from different sessions/dates/speakers before answering.
+3. Be specific about WHO did WHAT and WHY when stating motivations or causes.
+4. Answer in 1-2 sentences with key entities, actions, and reasons explicitly named.
+5. If multiple aspects exist (e.g. 'what motivated X' has emotional + practical reasons), list both.
+6. If the memories genuinely don't contain an answer, reply: "Not in memory."
+7. NO meta commentary, NO explanation, JUST the answer.
+
+{confidence_rules}
+
+QUESTION: {query}
+
+ANSWER:"""
+
 _TEMPORAL_PROMPT = """Answer a temporal question based on retrieved memories.
 
 MEMORIES:
@@ -151,6 +171,7 @@ _PROMPT_BY_CATEGORY = {
     "list": _LIST_PROMPT,
     "count": _LIST_PROMPT,
     "temporal": _TEMPORAL_PROMPT,
+    "multihop": _MULTIHOP_PROMPT,
     "inference": _INFERENCE_PROMPT,
     "adversarial": _ADVERSARIAL_PROMPT,
     "general": _DEFAULT_PROMPT,
@@ -196,10 +217,18 @@ def classify_question(query: str) -> str:
         return "list"
 
     if re.search(
-        rf"\b(when|what year|which year|what month|which month|what date|"
-        rf"which date|in ({_MONTH_PATTERN}|20(?:20|21|22|23|24)))\b",
+        r"\b(both|common between|across|what was the connection between|"
+        r"what motivated|what did .+ take away from|what do .+ and .+|"
+        r"what did .+ and .+ both|how does .+ compare to .+)\b",
         q,
     ):
+        return "multihop"
+
+    if re.search(
+        r"\b(when|what year|which year|what month|which month|what date|"
+        r"which date)\b",
+        q,
+    ) or re.match(rf"^in ({_MONTH_PATTERN}|20(?:20|21|22|23|24))\b", q):
         return "temporal"
 
     if re.search(
