@@ -379,14 +379,7 @@ class AnswerGenerator:
         with histogram("mnemostack.answer.llm_latency_ms"):
             final_resp = self.llm.generate(finalize_prompt, max_tokens=self.max_tokens)
         if not final_resp.ok:
-            counter("mnemostack.answer.errors", 1)
-            return Answer(
-                text="",
-                confidence=0.0,
-                sources=[],
-                raw=final_resp.text,
-                error=final_resp.error,
-            )
+            return self._fallback_list_answer(query, memories)
 
         return Answer(
             text=final_resp.text.strip(),
@@ -485,7 +478,17 @@ class AnswerGenerator:
         items = data.get("items")
         if not isinstance(items, list):
             raise ValueError("extracted JSON must contain an items list")
-        return [item.strip() for item in items if isinstance(item, str) and item.strip()]
+        seen: set[str] = set()
+        out: list[str] = []
+        for item in items:
+            if not isinstance(item, str):
+                continue
+            item = item.strip()
+            if not item or item in seen:
+                continue
+            seen.add(item)
+            out.append(item)
+        return out
 
     @staticmethod
     def _parse_response(raw: str) -> tuple[str, float]:

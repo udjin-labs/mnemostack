@@ -21,6 +21,20 @@ class SequenceLLM(LLMProvider):
         return LLMResponse(text=self.responses.pop(0), tokens_used=10)
 
 
+class SequenceMaybeFailLLM(LLMProvider):
+    def __init__(self, responses: list[LLMResponse]):
+        self.responses = list(responses)
+        self.prompts: list[str] = []
+
+    @property
+    def name(self) -> str:
+        return "sequence"
+
+    def generate(self, prompt, max_tokens=200, temperature=0.0):
+        self.prompts.append(prompt)
+        return self.responses.pop(0)
+
+
 @pytest.fixture
 def memories():
     return [
@@ -81,6 +95,31 @@ def test_list_extract_falls_back_on_malformed_json(memories, extract_output):
     assert answer.confidence == 0.3
     assert len(llm.prompts) == 2
     assert _LIST_PROMPT.split("\n", 1)[0] in llm.prompts[1]
+
+
+def test_list_extract_falls_back_when_finalize_call_fails(memories):
+    llm = SequenceMaybeFailLLM([
+        LLMResponse(text='{"items": ["Luna", "Oliver"]}', tokens_used=10),
+        LLMResponse(text="", error="rate limited"),
+        LLMResponse(text="Luna, Oliver\nCONFIDENCE: 0.8", tokens_used=10),
+    ])
+    gen = AnswerGenerator(llm=llm, category_aware_prompts=True, list_extract_mode=True)
+
+    answer = gen.generate("What are Melanie's pets?", memories)
+
+    assert answer.ok is True
+    assert answer.text == "Luna, Oliver"
+    assert answer.confidence == 0.3
+    assert len(llm.prompts) == 3
+    assert _LIST_PROMPT.split("\n", 1)[0] in llm.prompts[2]
+
+
+def test_parse_extracted_items_deduplicates_preserving_order():
+    items = AnswerGenerator._parse_extracted_items(
+        '{"items": ["Luna", "Oliver", "Luna", "", 42, "Bailey", "Oliver"]}'
+    )
+
+    assert items == ["Luna", "Oliver", "Bailey"]
 
 
 def test_list_extract_passes_more_memories_than_max_memories(memories):
