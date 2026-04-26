@@ -42,6 +42,7 @@ from .render import compact_format, full_format
 from .reranker import Reranker
 from .retrievers import (
     BM25Retriever,
+    bm25_docs_from_qdrant,
     HyDERetriever,
     MemgraphRetriever,
     Retriever,
@@ -64,6 +65,7 @@ __all__ = [
     "Retriever",
     "VectorRetriever",
     "BM25Retriever",
+    "bm25_docs_from_qdrant",
     "HyDERetriever",
     "MemgraphRetriever",
     "TemporalRetriever",

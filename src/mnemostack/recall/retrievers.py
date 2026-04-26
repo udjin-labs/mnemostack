@@ -19,7 +19,7 @@ import re
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from ..embeddings.base import EmbeddingProvider
 from ..llm.base import LLMProvider
@@ -78,6 +78,64 @@ class VectorRetriever(Retriever):
         ]
 
 
+def bm25_docs_from_qdrant(
+    client: Any,
+    collection_name: str,
+    *,
+    scroll_filter: Any | None = None,
+    limit: int = 40_000,
+    batch_size: int = 1_000,
+    text_key: str = "text",
+    id_prefix: str = "qdrant",
+    payload_filter: Callable[[dict[str, Any]], bool] | None = None,
+) -> list[BM25Doc]:
+    """Create BM25 documents from Qdrant payload text.
+
+    This is useful when the canonical memory corpus is already stored in
+    Qdrant. It keeps lexical BM25 search aligned with vector search and avoids
+    a common failure mode where exact tokens in transcripts (message IDs,
+    commit hashes, filenames, quoted phrases) are invisible to BM25 because the
+    lexical corpus was built only from local markdown files.
+    """
+    docs: list[BM25Doc] = []
+    offset = None
+    remaining = max(0, limit)
+    while remaining > 0:
+        current_limit = min(batch_size, remaining)
+        points, offset = client.scroll(
+            collection_name=collection_name,
+            scroll_filter=scroll_filter,
+            limit=current_limit,
+            offset=offset,
+            with_payload=True,
+            with_vectors=False,
+        )
+        if not points:
+            break
+        for point in points:
+            payload = dict(getattr(point, "payload", None) or {})
+            if payload_filter and not payload_filter(payload):
+                continue
+            text = payload.get(text_key) or ""
+            if not isinstance(text, str) or not text.strip():
+                continue
+            qdrant_id = str(getattr(point, "id", len(docs)))
+            doc_payload = dict(payload)
+            doc_payload.setdefault("qdrant_id", qdrant_id)
+            doc_payload.setdefault("source", payload.get("source_file") or payload.get("source"))
+            docs.append(
+                BM25Doc(
+                    id=f"bm25:{id_prefix}:{qdrant_id}",
+                    text=text,
+                    payload=doc_payload,
+                )
+            )
+        remaining = limit - len(docs)
+        if offset is None:
+            break
+    return docs
+
+
 class BM25Retriever(Retriever):
     """Exact token match via BM25."""
 
@@ -85,6 +143,52 @@ class BM25Retriever(Retriever):
 
     def __init__(self, docs: list[BM25Doc]):
         self.bm25 = BM25(docs)
+
+    @classmethod
+    def from_qdrant(
+        cls,
+        client: Any,
+        collection_name: str,
+        *,
+        scroll_filter: Any | None = None,
+        limit: int = 40_000,
+        batch_size: int = 1_000,
+        text_key: str = "text",
+        id_prefix: str = "qdrant",
+        payload_filter: Callable[[dict[str, Any]], bool] | None = None,
+    ) -> "BM25Retriever":
+        """Build a BM25 retriever from Qdrant payload text.
+
+        Vector search catches semantic similarity, but exact-token recall
+        (message IDs, commit hashes, quoted words, filenames) needs a lexical
+        retriever over the same corpus. If memories/transcripts already live in
+        Qdrant payloads, this helper builds the BM25 corpus directly from those
+        payloads without requiring a duplicate markdown export.
+
+        Args:
+            client: ``qdrant_client.QdrantClient``-compatible object.
+            collection_name: Qdrant collection to scroll.
+            scroll_filter: Optional Qdrant filter passed to ``scroll``.
+            limit: Maximum payload chunks to load.
+            batch_size: Number of points per scroll call.
+            text_key: Payload key containing searchable text.
+            id_prefix: Prefix for generated BM25Doc IDs.
+            payload_filter: Optional predicate to skip payloads client-side.
+
+        Returns:
+            BM25Retriever over the collected Qdrant payload chunks.
+        """
+        docs = bm25_docs_from_qdrant(
+            client,
+            collection_name,
+            scroll_filter=scroll_filter,
+            limit=limit,
+            batch_size=batch_size,
+            text_key=text_key,
+            id_prefix=id_prefix,
+            payload_filter=payload_filter,
+        )
+        return cls(docs=docs)
 
     def search(self, query, limit=20, filters=None):
         hits = self.bm25.search(query, limit=limit)
