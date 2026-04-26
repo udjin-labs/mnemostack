@@ -70,9 +70,18 @@ def test_classify_question_ambiguous_returns_general():
     assert classify_question("Color of Melanie's dog") == "general"
 
 
-def test_generate_uses_list_prompt_for_list_question(sample_memories):
+def test_answer_generator_defaults_enable_p1_features_except_list_extract():
+    gen = AnswerGenerator(llm=FakeLLM())
+
+    assert gen.category_aware_prompts is True
+    assert gen.specificity_resolver is True
+    assert gen.inference_retry is True
+    assert gen.list_extract_mode is False
+
+
+def test_generate_uses_list_prompt_for_list_question_by_default(sample_memories):
     llm = FakeLLM()
-    gen = AnswerGenerator(llm=llm, category_aware_prompts=True)
+    gen = AnswerGenerator(llm=llm)
 
     gen.generate("What are Melanie's pets?", sample_memories)
 
@@ -93,7 +102,7 @@ def test_generate_uses_inference_prompt_for_would_question(sample_memories):
 
 def test_generate_uses_default_when_category_aware_disabled(sample_memories):
     llm = FakeLLM()
-    gen = AnswerGenerator(llm=llm)
+    gen = AnswerGenerator(llm=llm, category_aware_prompts=False)
 
     gen.generate("What are Melanie's pets?", sample_memories)
 

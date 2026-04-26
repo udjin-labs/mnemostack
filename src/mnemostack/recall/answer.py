@@ -127,7 +127,7 @@ MEMORIES:
 {context}
 
 RULES:
-1. This is an inference question. Make a reasonable inference from any relevant evidence in the memories.
+1. This is an inference question (might be / would be / likely). Make a reasonable inference from any relevant evidence in the memories.
 2. DO NOT answer 'Not in memory' if even partial evidence exists. Examples:
    - 'What might X's political leaning be?' → infer from values/causes they mention
    - 'Would Y be religious?' → infer from references/practices
@@ -318,10 +318,10 @@ class AnswerGenerator:
         max_tokens: int = 200,
         confidence_threshold: float = 0.5,
         prompt_template: str | None = None,
-        category_aware_prompts: bool = False,
+        category_aware_prompts: bool = True,
         list_extract_mode: bool = False,
-        specificity_resolver: bool = False,
-        inference_retry: bool = False,
+        specificity_resolver: bool = True,
+        inference_retry: bool = True,
         recaller: Recaller | None = None,
     ):
         self.llm = llm

@@ -6,6 +6,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-04-26
+
+### Changed
+
+- feat(answer): enable proven P1 answer-generation features by default for the 0.2.0 stable release:
+  - `category_aware_prompts=True` to route list, temporal, multi-hop, inference, and adversarial questions through category-specific prompts.
+  - `specificity_resolver=True` to rewrite placeholder answers when concrete evidence is available.
+  - `inference_retry=True` to retry low-confidence open-domain inference answers with decomposed evidence queries.
+  - `list_extract_mode=False` remains off by default because LoCoMo results were a wash.
+- Explicit constructor arguments remain backward compatible: pass `category_aware_prompts=False`, `specificity_resolver=False`, or `inference_retry=False` to keep the old 0.2.0b6 behavior.
+
+### Benchmarks
+
+- Internal LoCoMo subset run (9/9 valid conversations, excluding conv-50 until Gemini RPD reset): strict accuracy improved from 66.6% (1186/1782, 0.2.0b1 baseline without P1) to 67.7% (1207/1782, 0.2.0b6 with P1), and combined accuracy improved from 80.4% to 81.0%.
+- Main lift came from `cat_3` open-domain inference (+10.1pp, 29.2% → 39.3%) and `cat_2` multi-hop temporal (+3.5pp, 67.1% → 70.6%).
+- Mechanism: `inference_retry` reduced `cat_3` not-in-memory answers from 42 to 27; 9 of those recovered answers became correct.
+- Full 10/10 LoCoMo numbers are intentionally not published yet; conv-50 will be rerun after the Gemini RPD reset on 2026-04-27.
+
 ## [0.2.0b6] - 2026-04-26
 
 ### Added
