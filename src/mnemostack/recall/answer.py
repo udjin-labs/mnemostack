@@ -6,6 +6,7 @@ uncertainty: low confidence → caller should fall back to raw evidence.
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 
@@ -77,6 +78,40 @@ RULES:
 {confidence_rules}
 
 QUESTION: {query}
+
+ANSWER:"""
+
+_LIST_EXTRACT_PROMPT = """You will scan {n_memories} memories and extract ALL items matching the question.
+
+QUESTION: {query}
+
+MEMORIES:
+{context}
+
+INSTRUCTIONS:
+1. Read EVERY memory. Don't skip.
+2. Extract every distinct item that directly matches the question's predicate (e.g. 'pets' = animals owned, 'activities' = things actively done by the person, 'cities visited' = explicit travel destinations).
+3. Return JSON: {{"items": ["item1", "item2", ...]}}
+4. Each item must be:
+   - Specific (use exact names, not 'her dog' → 'Luna')
+   - Distinct (no duplicates or near-duplicates like 'cat' and 'cats')
+   - Directly supported by memory text (don't infer or generalize)
+5. If question asks for a count rather than list — still return all items, count derived from list length.
+6. If no items match — return {{"items": []}}
+
+JSON_OUTPUT:"""
+
+_LIST_FINALIZE_PROMPT = """Format these extracted items as a final answer.
+
+QUESTION: {query}
+
+EXTRACTED ITEMS: {items}
+
+RULES:
+1. Output the items as a comma-separated list. NO filler.
+2. For count questions: output just the number.
+3. Use the exact specific names from the items list (no generalizations like 'her dog').
+4. Do not invent items. Do not omit items.
 
 ANSWER:"""
 
@@ -278,6 +313,7 @@ class AnswerGenerator:
         confidence_threshold: float = 0.5,
         prompt_template: str | None = None,
         category_aware_prompts: bool = False,
+        list_extract_mode: bool = False,
     ):
         self.llm = llm
         self.max_memories = max_memories
@@ -285,6 +321,7 @@ class AnswerGenerator:
         self.confidence_threshold = confidence_threshold
         self.prompt_template = prompt_template or _DEFAULT_PROMPT
         self.category_aware_prompts = category_aware_prompts
+        self.list_extract_mode = list_extract_mode
 
     def generate(self, query: str, memories: list[RecallResult]) -> Answer:
         """Synthesize answer from retrieved memories."""
@@ -298,7 +335,6 @@ class AnswerGenerator:
                 raw="",
             )
 
-        context = self._format_context(memories[: self.max_memories])
         prompt_template = self.prompt_template
         if self.category_aware_prompts:
             category = classify_question(query)
@@ -307,7 +343,79 @@ class AnswerGenerator:
                 1,
                 labels={"category": category},
             )
+            if self.list_extract_mode and category in {"list", "count"}:
+                return self._generate_list_extract(query, memories)
             prompt_template = _PROMPT_BY_CATEGORY[category]
+
+        return self._generate_single_prompt(
+            query=query,
+            memories=memories[: self.max_memories],
+            prompt_template=prompt_template,
+        )
+
+    def _generate_list_extract(self, query: str, memories: list[RecallResult]) -> Answer:
+        extract_memories = memories[:40]
+        context = self._format_context(extract_memories)
+        prompt = _LIST_EXTRACT_PROMPT.format(
+            n_memories=len(extract_memories),
+            context=context,
+            query=query,
+        )
+
+        with histogram("mnemostack.answer.llm_latency_ms"):
+            extract_resp = self.llm.generate(prompt, max_tokens=self.max_tokens)
+        if not extract_resp.ok:
+            return self._fallback_list_answer(query, memories)
+
+        try:
+            items = self._parse_extracted_items(extract_resp.text)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return self._fallback_list_answer(query, memories)
+
+        if not items:
+            return self._fallback_list_answer(query, memories)
+
+        finalize_prompt = _LIST_FINALIZE_PROMPT.format(query=query, items=json.dumps(items))
+        with histogram("mnemostack.answer.llm_latency_ms"):
+            final_resp = self.llm.generate(finalize_prompt, max_tokens=self.max_tokens)
+        if not final_resp.ok:
+            counter("mnemostack.answer.errors", 1)
+            return Answer(
+                text="",
+                confidence=0.0,
+                sources=[],
+                raw=final_resp.text,
+                error=final_resp.error,
+            )
+
+        return Answer(
+            text=final_resp.text.strip(),
+            confidence=0.8,
+            sources=self._extract_sources(extract_memories),
+            raw=final_resp.text,
+        )
+
+    def _fallback_list_answer(
+        self,
+        query: str,
+        memories: list[RecallResult],
+    ) -> Answer:
+        answer = self._generate_single_prompt(
+            query=query,
+            memories=memories[: self.max_memories],
+            prompt_template=_LIST_PROMPT,
+        )
+        if answer.ok:
+            answer.confidence = 0.3
+        return answer
+
+    def _generate_single_prompt(
+        self,
+        query: str,
+        memories: list[RecallResult],
+        prompt_template: str,
+    ) -> Answer:
+        context = self._format_context(memories)
         prompt = prompt_template.format(
             context=context,
             query=query,
@@ -332,7 +440,7 @@ class AnswerGenerator:
         return Answer(
             text=text,
             confidence=confidence,
-            sources=self._extract_sources(memories[: self.max_memories]),
+            sources=self._extract_sources(memories),
             raw=resp.text,
         )
 
@@ -367,6 +475,17 @@ class AnswerGenerator:
                 seen.add(src)
                 out.append(src)
         return out[:5]
+
+    @staticmethod
+    def _parse_extracted_items(raw: str) -> list[str]:
+        """Parse extraction-pass JSON into a clean item list."""
+        data = json.loads(raw.strip())
+        if not isinstance(data, dict):
+            raise ValueError("extracted JSON must be an object")
+        items = data.get("items")
+        if not isinstance(items, list):
+            raise ValueError("extracted JSON must contain an items list")
+        return [item.strip() for item in items if isinstance(item, str) and item.strip()]
 
     @staticmethod
     def _parse_response(raw: str) -> tuple[str, float]:
