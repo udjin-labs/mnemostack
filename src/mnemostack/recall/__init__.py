@@ -14,7 +14,7 @@ Usage:
     hits = bm25.search("query", limit=10)
 """
 
-from .answer import Answer, AnswerGenerator
+from .answer import Answer, AnswerGenerator, classify_question
 from .bm25 import BM25, BM25Doc, tokenize
 from .corpus import build_bm25_docs
 from .expansion import QueryExpander
@@ -73,6 +73,7 @@ __all__ = [
     "extract_temporal",
     "Answer",
     "AnswerGenerator",
+    "classify_question",
     "Reranker",
     "Pipeline",
     "PipelineContext",
