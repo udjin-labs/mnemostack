@@ -58,7 +58,7 @@ By question category:
 | `cat_1` single-hop lists | 33.7% |
 | `cat_3` open-domain reasoning | 32.3% |
 
-_Last run: 2026-04-26, mnemostack 0.2.0b1. Result file: `benchmarks/results/20260426T123139Z.json`._
+_Last run: 2026-04-26, mnemostack 0.2.0b1._
 
 > **Honest numbers disclaimer.** The table above is our full-benchmark number across **all 1986 questions and all 5 categories**. Some vendors report their strongest sub-category only; if we did the same we could honestly claim **90.1% on adversarial open-domain** or **69.3% on multi-hop reasoning**. We publish the full aggregate because that's what actually predicts how the system behaves on mixed workloads.
 
