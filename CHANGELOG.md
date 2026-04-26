@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0b6] - 2026-04-26
+
+### Added
+
+- feat(answer): cat_3 inference retry with query decomposition (#21)
+
+### Fixed
+
+- fix(answer): specificity resolver uses merged_memories after retry (#23)
+
 ## [0.2.0b5] - 2026-04-26
 
 ### Added
