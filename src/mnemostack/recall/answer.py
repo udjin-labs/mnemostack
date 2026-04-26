@@ -371,6 +371,7 @@ class AnswerGenerator:
             memories=memories[: self.max_memories],
             prompt_template=prompt_template,
         )
+        specificity_memories = memories
         if (
             self.category_aware_prompts
             and self.inference_retry
@@ -378,14 +379,14 @@ class AnswerGenerator:
             and self.recaller is not None
             and should_retry(answer.text, answer.confidence)
         ):
-            answer = self._retry_inference_answer(
+            answer, specificity_memories = self._retry_inference_answer(
                 query=query,
                 memories=memories,
                 draft=answer,
                 prompt_template=prompt_template,
                 recall_filters=recall_filters,
             )
-        return self._apply_specificity_resolver(query, answer, memories, category)
+        return self._apply_specificity_resolver(query, answer, specificity_memories, category)
 
     def _retry_inference_answer(
         self,
@@ -394,11 +395,11 @@ class AnswerGenerator:
         draft: Answer,
         prompt_template: str,
         recall_filters: dict[str, object] | None,
-    ) -> Answer:
+    ) -> tuple[Answer, list[RecallResult]]:
         """Retry low-confidence inference answers with decomposed evidence queries."""
         sub_queries = decompose_query(query, self.llm)
         if not sub_queries:
-            return draft
+            return draft, memories
 
         sub_results: list[list[RecallResult]] = []
         for sub_query in sub_queries:
@@ -418,7 +419,7 @@ class AnswerGenerator:
 
         merged_memories = merge_results(memories, *sub_results)
         if not merged_memories:
-            return draft
+            return draft, memories
 
         retry_answer = self._generate_single_prompt(
             query=query,
@@ -430,8 +431,8 @@ class AnswerGenerator:
             and "not in memory" not in retry_answer.text.lower()
             and retry_answer.confidence >= 0.5
         ):
-            return retry_answer
-        return draft
+            return retry_answer, merged_memories
+        return draft, memories
 
     def _apply_specificity_resolver(
         self,
