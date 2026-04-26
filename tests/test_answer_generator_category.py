@@ -38,6 +38,8 @@ def test_classify_question_list_patterns():
     assert classify_question("What are X's pets?") == "list"
     assert classify_question("Which cities did Y visit?") == "list"
     assert classify_question("Name all members") == "list"
+    assert classify_question("Which cities did Y visit in 2023?") == "list"
+    assert classify_question("Which activities happened in March?") == "list"
 
 
 def test_classify_question_count_patterns():

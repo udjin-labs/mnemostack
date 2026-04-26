@@ -184,6 +184,17 @@ def classify_question(query: str) -> str:
     if re.search(r"\b(how many|count)\b", q):
         return "count"
 
+    if re.match(
+        r"^(what are|list|name all|who are|what kinds of|what events|"
+        r"what activities|what symbols|what items)\b",
+        q,
+    ) or re.match(
+        r"^which (?:cities|places|locations|countries|books|movies|films|"
+        r"events|activities|symbols|items|people|members|pets)\b",
+        q,
+    ):
+        return "list"
+
     if re.search(
         rf"\b(when|what year|which year|what month|which month|what date|"
         rf"which date|in ({_MONTH_PATTERN}|20(?:20|21|22|23|24)))\b",
@@ -200,17 +211,6 @@ def classify_question(query: str) -> str:
         q,
     ):
         return "inference"
-
-    if re.match(
-        r"^(what are|list|name all|who are|what kinds of|what events|"
-        r"what activities|what symbols|what items)\b",
-        q,
-    ) or re.match(
-        r"^which (?:cities|places|locations|countries|books|movies|films|"
-        r"events|activities|symbols|items|people|members|pets)\b",
-        q,
-    ):
-        return "list"
 
     return "general"
 
