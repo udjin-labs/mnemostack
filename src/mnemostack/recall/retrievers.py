@@ -288,7 +288,7 @@ class HyDERetriever(Retriever):
 
         query:  "what fields would she likely pursue in her education?"
         hypo:   "Caroline is considering psychology, counselling and mental
-                 health degrees, aiming to work with transgender youth."
+                 health degrees, aiming to work with teenagers."
 
     When it helps vs when it doesn't (measured, not guessed):
 
