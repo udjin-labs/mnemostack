@@ -30,10 +30,15 @@ class FakeLLM(LLMProvider):
 class FakeRecaller:
     def __init__(self, by_query: dict[str, list[RecallResult]] | None = None):
         self.by_query = by_query or {}
-        self.calls: list[tuple[str, int]] = []
+        self.calls: list[tuple[str, int, dict[str, object] | None]] = []
 
-    def recall(self, query: str, limit: int = 10):
-        self.calls.append((query, limit))
+    def recall(
+        self,
+        query: str,
+        limit: int = 10,
+        filters: dict[str, object] | None = None,
+    ):
+        self.calls.append((query, limit, filters))
         return self.by_query.get(query, [])
 
 
@@ -150,8 +155,45 @@ def test_inference_retry_executes_full_flow(memories):
 
     assert answer.text == "likely progressive"
     assert answer.confidence == 0.7
-    assert recaller.calls == [("Caroline activism", 10), ("Caroline values", 10)]
+    assert recaller.calls == [
+        ("Caroline activism", 10, None),
+        ("Caroline values", 10, None),
+    ]
     assert len(llm.prompts) == 3
+
+
+def test_inference_retry_forwards_recall_filters(memories):
+    llm = FakeLLM(
+        [
+            "Not in memory.\nCONFIDENCE: 0.2",
+            '{"queries": ["Caroline activism", "Caroline values"]}',
+            "likely progressive\nCONFIDENCE: 0.7",
+        ]
+    )
+    recaller = FakeRecaller(
+        {
+            "Caroline activism": [result("a", "Caroline supports LGBTQ rights.")],
+            "Caroline values": [result("b", "Caroline campaigns for climate action.")],
+        }
+    )
+    gen = AnswerGenerator(
+        llm=llm,
+        category_aware_prompts=True,
+        inference_retry=True,
+        recaller=recaller,
+    )
+
+    answer = gen.generate(
+        "What would Caroline's political leaning be?",
+        memories,
+        recall_filters={"workspace": "team-a", "session": "conv-26"},
+    )
+
+    assert answer.text == "likely progressive"
+    assert recaller.calls == [
+        ("Caroline activism", 10, {"workspace": "team-a", "session": "conv-26"}),
+        ("Caroline values", 10, {"workspace": "team-a", "session": "conv-26"}),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -231,7 +273,7 @@ def test_inference_retry_returns_draft_when_new_answer_no_better(memories):
     answer = gen.generate("Would Caroline support the policy?", memories)
 
     assert answer.text == "Not in memory."
-    assert recaller.calls == [("Caroline activism", 10)]
+    assert recaller.calls == [("Caroline activism", 10, None)]
 
 
 def test_inference_retry_disabled_when_flag_false(memories):

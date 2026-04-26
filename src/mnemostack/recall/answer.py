@@ -335,7 +335,12 @@ class AnswerGenerator:
         self.inference_retry = inference_retry
         self.recaller = recaller
 
-    def generate(self, query: str, memories: list[RecallResult]) -> Answer:
+    def generate(
+        self,
+        query: str,
+        memories: list[RecallResult],
+        recall_filters: dict[str, object] | None = None,
+    ) -> Answer:
         """Synthesize answer from retrieved memories."""
         counter("mnemostack.answer.calls", 1)
         if not memories:
@@ -378,6 +383,7 @@ class AnswerGenerator:
                 memories=memories,
                 draft=answer,
                 prompt_template=prompt_template,
+                recall_filters=recall_filters,
             )
         return self._apply_specificity_resolver(query, answer, memories, category)
 
@@ -387,6 +393,7 @@ class AnswerGenerator:
         memories: list[RecallResult],
         draft: Answer,
         prompt_template: str,
+        recall_filters: dict[str, object] | None,
     ) -> Answer:
         """Retry low-confidence inference answers with decomposed evidence queries."""
         sub_queries = decompose_query(query, self.llm)
@@ -396,7 +403,16 @@ class AnswerGenerator:
         sub_results: list[list[RecallResult]] = []
         for sub_query in sub_queries:
             try:
-                sub_results.append(self.recaller.recall(sub_query, limit=10))
+                if recall_filters is None:
+                    sub_results.append(self.recaller.recall(sub_query, limit=10))
+                else:
+                    sub_results.append(
+                        self.recaller.recall(
+                            sub_query,
+                            limit=10,
+                            filters=dict(recall_filters),
+                        )
+                    )
             except Exception:
                 sub_results.append([])
 
