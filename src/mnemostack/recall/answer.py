@@ -9,11 +9,16 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from ..llm.base import LLMProvider
 from ..observability import counter, histogram
+from .inference_retry import decompose_query, merge_results, should_retry
 from .recaller import RecallResult
 from .specificity import detect_placeholders, resolve_specificity
+
+if TYPE_CHECKING:
+    from .recaller import Recaller
 
 _CONFIDENCE_RULES = """After your answer, on a NEW line, output ONLY:
 CONFIDENCE: <float 0.0-1.0>
@@ -316,6 +321,8 @@ class AnswerGenerator:
         category_aware_prompts: bool = False,
         list_extract_mode: bool = False,
         specificity_resolver: bool = False,
+        inference_retry: bool = False,
+        recaller: Recaller | None = None,
     ):
         self.llm = llm
         self.max_memories = max_memories
@@ -325,6 +332,8 @@ class AnswerGenerator:
         self.category_aware_prompts = category_aware_prompts
         self.list_extract_mode = list_extract_mode
         self.specificity_resolver = specificity_resolver
+        self.inference_retry = inference_retry
+        self.recaller = recaller
 
     def generate(self, query: str, memories: list[RecallResult]) -> Answer:
         """Synthesize answer from retrieved memories."""
@@ -357,7 +366,56 @@ class AnswerGenerator:
             memories=memories[: self.max_memories],
             prompt_template=prompt_template,
         )
+        if (
+            self.category_aware_prompts
+            and self.inference_retry
+            and category == "inference"
+            and self.recaller is not None
+            and should_retry(answer.text, answer.confidence)
+        ):
+            answer = self._retry_inference_answer(
+                query=query,
+                memories=memories,
+                draft=answer,
+                prompt_template=prompt_template,
+            )
         return self._apply_specificity_resolver(query, answer, memories, category)
+
+    def _retry_inference_answer(
+        self,
+        query: str,
+        memories: list[RecallResult],
+        draft: Answer,
+        prompt_template: str,
+    ) -> Answer:
+        """Retry low-confidence inference answers with decomposed evidence queries."""
+        sub_queries = decompose_query(query, self.llm)
+        if not sub_queries:
+            return draft
+
+        sub_results: list[list[RecallResult]] = []
+        for sub_query in sub_queries:
+            try:
+                sub_results.append(self.recaller.recall(sub_query, limit=10))
+            except Exception:
+                sub_results.append([])
+
+        merged_memories = merge_results(memories, *sub_results)
+        if not merged_memories:
+            return draft
+
+        retry_answer = self._generate_single_prompt(
+            query=query,
+            memories=merged_memories[: self.max_memories],
+            prompt_template=prompt_template,
+        )
+        if (
+            retry_answer.ok
+            and "not in memory" not in retry_answer.text.lower()
+            and retry_answer.confidence >= 0.5
+        ):
+            return retry_answer
+        return draft
 
     def _apply_specificity_resolver(
         self,
