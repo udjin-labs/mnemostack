@@ -43,22 +43,24 @@ Full LoCoMo run (official SNAP-Research dataset, 10 samples / **1986 QA**, clean
 
 | Metric | mnemostack |
 | --- | --- |
-| **Correct (strict)** | **66.4%** (1319 / 1986) |
-| Partial | 12.8% (254) |
-| Wrong | 20.8% (413) |
-| **Combined (correct + partial)** | **79.2%** |
+| **Correct (strict)** | **66.5%** (1320 / 1986) |
+| Partial | 13.3% (265) |
+| Wrong | 20.2% (401) |
+| **Combined (correct + partial)** | **79.8%** |
 
 By question category:
 
 | Category | Correct |
 | --- | --- |
 | `cat_5` adversarial open-domain | **90.1%** |
-| `cat_4` multi-hop reasoning | 69.2% |
-| `cat_2` temporal | 64.5% |
-| `cat_1` single-hop lists | 34.8% |
-| `cat_3` open-domain reasoning | 31.2% |
+| `cat_4` multi-hop reasoning | **69.3%** |
+| `cat_2` temporal | **65.1%** |
+| `cat_1` single-hop lists | 33.7% |
+| `cat_3` open-domain reasoning | 32.3% |
 
-> **Honest numbers disclaimer.** The table above is our full-benchmark number across **all 1986 questions and all 5 categories**. Some vendors report their strongest sub-category only; if we did the same we could honestly claim **90.1% on adversarial open-domain** or **69.2% on multi-hop reasoning**. We publish the full aggregate because that's what actually predicts how the system behaves on mixed workloads.
+_Last run: 2026-04-26, mnemostack 0.2.0b1. Result file: `benchmarks/results/20260426T123139Z.json`._
+
+> **Honest numbers disclaimer.** The table above is our full-benchmark number across **all 1986 questions and all 5 categories**. Some vendors report their strongest sub-category only; if we did the same we could honestly claim **90.1% on adversarial open-domain** or **69.3% on multi-hop reasoning**. We publish the full aggregate because that's what actually predicts how the system behaves on mixed workloads.
 
 How that compares with reported numbers from other systems on the same benchmark (caveat: different judges, evaluation protocols, and in some cases category cherry-picking):
 
@@ -68,7 +70,7 @@ How that compares with reported numbers from other systems on the same benchmark
 | Memobase (temporal subset) | 85% |
 | Letta filesystem agent | 74% |
 | Mem0 graph variant | ~68.5% |
-| **mnemostack** | **66.4%** |
+| **mnemostack** | **66.5%** |
 | Zep (independently replicated) | 58.4% |
 
 ### Real-corpus needle benchmark
@@ -335,7 +337,7 @@ print(answer.text, answer.confidence, answer.sources)
 
 #### Full stack: 4-source retrieval + 8-stage pipeline + reranker
 
-This is the configuration that produced the 66.4% / 79.2% LoCoMo numbers above.
+This is the configuration that produced the 66.5% / 79.8% LoCoMo numbers above.
 
 ```python
 from mnemostack.embeddings import get_provider
