@@ -328,6 +328,7 @@ class AnswerGenerator:
         self.max_memories = max_memories
         self.max_tokens = max_tokens
         self.confidence_threshold = confidence_threshold
+        self._custom_prompt_template = prompt_template is not None
         self.prompt_template = prompt_template or _DEFAULT_PROMPT
         self.category_aware_prompts = category_aware_prompts
         self.list_extract_mode = list_extract_mode
@@ -364,7 +365,8 @@ class AnswerGenerator:
             if self.list_extract_mode and category in {"list", "count"}:
                 answer = self._generate_list_extract(query, memories)
                 return self._apply_specificity_resolver(query, answer, memories, category)
-            prompt_template = _PROMPT_BY_CATEGORY[category]
+            if not self._custom_prompt_template:
+                prompt_template = _PROMPT_BY_CATEGORY[category]
 
         answer = self._generate_single_prompt(
             query=query,

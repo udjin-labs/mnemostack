@@ -109,3 +109,14 @@ def test_generate_uses_default_when_category_aware_disabled(sample_memories):
     assert _DEFAULT_PROMPT.split("\n", 1)[0] in llm.last_prompt
     assert "SHORTEST factual answer" in llm.last_prompt
     assert "COMPLETE list of ALL items" not in llm.last_prompt
+
+
+def test_custom_prompt_template_overrides_default_category_routing(sample_memories):
+    llm = FakeLLM()
+    template = "CUSTOM PROMPT\nMEMORIES:\n{context}\nQUESTION: {query}\n"
+    gen = AnswerGenerator(llm=llm, prompt_template=template)
+
+    gen.generate("What are Melanie's pets?", sample_memories)
+
+    assert "CUSTOM PROMPT" in llm.last_prompt
+    assert "COMPLETE list of ALL items" not in llm.last_prompt
