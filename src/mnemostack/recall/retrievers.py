@@ -18,8 +18,9 @@ import logging
 import re
 from abc import ABC, abstractmethod
 from collections import defaultdict
+from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any
 
 from ..embeddings.base import EmbeddingProvider
 from ..llm.base import LLMProvider
@@ -86,7 +87,7 @@ def bm25_docs_from_qdrant(
     limit: int = 40_000,
     batch_size: int = 1_000,
     text_key: str = "text",
-    id_prefix: str = "qdrant",
+    id_prefix: str | None = None,
     payload_filter: Callable[[dict[str, Any]], bool] | None = None,
 ) -> list[BM25Doc]:
     """Create BM25 documents from Qdrant payload text.
@@ -123,9 +124,10 @@ def bm25_docs_from_qdrant(
             doc_payload = dict(payload)
             doc_payload.setdefault("qdrant_id", qdrant_id)
             doc_payload.setdefault("source", payload.get("source_file") or payload.get("source"))
+            doc_id = qdrant_id if id_prefix is None else f"bm25:{id_prefix}:{qdrant_id}"
             docs.append(
                 BM25Doc(
-                    id=f"bm25:{id_prefix}:{qdrant_id}",
+                    id=doc_id,
                     text=text,
                     payload=doc_payload,
                 )
@@ -154,9 +156,9 @@ class BM25Retriever(Retriever):
         limit: int = 40_000,
         batch_size: int = 1_000,
         text_key: str = "text",
-        id_prefix: str = "qdrant",
+        id_prefix: str | None = None,
         payload_filter: Callable[[dict[str, Any]], bool] | None = None,
-    ) -> "BM25Retriever":
+    ) -> BM25Retriever:
         """Build a BM25 retriever from Qdrant payload text.
 
         Vector search catches semantic similarity, but exact-token recall
@@ -172,7 +174,9 @@ class BM25Retriever(Retriever):
             limit: Maximum payload chunks to load.
             batch_size: Number of points per scroll call.
             text_key: Payload key containing searchable text.
-            id_prefix: Prefix for generated BM25Doc IDs.
+            id_prefix: Optional prefix for generated BM25Doc IDs. By default,
+                Qdrant point IDs are reused so vector and BM25 hits fuse as the
+                same memory. Set a prefix to namespace docs when mixing corpora.
             payload_filter: Optional predicate to skip payloads client-side.
 
         Returns:

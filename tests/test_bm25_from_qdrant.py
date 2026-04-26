@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from mnemostack.recall import BM25Retriever, bm25_docs_from_qdrant
+from mnemostack.recall import BM25Retriever, Recaller, RecallResult, bm25_docs_from_qdrant
 
 
 class FakeQdrantClient:
@@ -32,7 +32,7 @@ def test_bm25_docs_from_qdrant_reads_payload_text_and_metadata():
 
     docs = bm25_docs_from_qdrant(client, "memory", batch_size=2, limit=10)
 
-    assert [d.id for d in docs] == ["bm25:qdrant:a", "bm25:qdrant:b"]
+    assert [d.id for d in docs] == ["a", "b"]
     assert docs[0].text == "MERGED pull request 71706"
     assert docs[0].payload["qdrant_id"] == "a"
     assert docs[0].payload["source"] == "transcript:one.jsonl"
@@ -75,6 +75,38 @@ def test_bm25_retriever_from_qdrant_finds_exact_token():
     results = retriever.search("MERGED 71706", limit=1)
 
     assert len(results) == 1
-    assert results[0].id == "bm25:qdrant:msg-1"
+    assert results[0].id == "msg-1"
     assert "MERGED" in results[0].text
     assert results[0].sources == ["bm25"]
+
+
+def test_bm25_from_qdrant_fuses_with_vector_result_by_qdrant_id():
+    class FakeVectorRetriever:
+        name = "vector"
+
+        def search(self, query, limit=20, filters=None):
+            return [
+                RecallResult(
+                    id="msg-1",
+                    text="[09:20] user said MERGED! PR 71706",
+                    score=0.9,
+                    payload={"text": "[09:20] user said MERGED! PR 71706"},
+                    sources=["vector"],
+                )
+            ]
+
+    client = FakeQdrantClient([
+        point("msg-1", {"text": "[09:20] user said MERGED! PR 71706"}),
+    ])
+
+    recaller = Recaller(
+        retrievers=[
+            FakeVectorRetriever(),
+            BM25Retriever.from_qdrant(client, "memory"),
+        ]
+    )
+    results = recaller.recall("MERGED 71706", limit=5)
+
+    assert len(results) == 1
+    assert results[0].id == "msg-1"
+    assert set(results[0].sources) == {"vector", "bm25"}
