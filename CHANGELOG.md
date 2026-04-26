@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0a4] - 2026-04-26
+
+### Added
+
+- feat: BM25Retriever.from_qdrant() — build BM25 corpus from existing Qdrant payloads (#11)
+
+### Fixed
+
+- fix: bm25_docs_from_qdrant uses raw Qdrant point ids by default so RRF fuses BM25+vector hits on the same chunk
+
 ## [0.2.0a3] - 2026-04-25
 
 ### Fixed
