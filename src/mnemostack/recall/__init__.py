@@ -47,6 +47,7 @@ from .retrievers import (
     Retriever,
     TemporalRetriever,
     VectorRetriever,
+    bm25_docs_from_qdrant,
     extract_temporal,
 )
 
@@ -64,6 +65,7 @@ __all__ = [
     "Retriever",
     "VectorRetriever",
     "BM25Retriever",
+    "bm25_docs_from_qdrant",
     "HyDERetriever",
     "MemgraphRetriever",
     "TemporalRetriever",
