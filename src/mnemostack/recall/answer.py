@@ -383,10 +383,8 @@ class AnswerGenerator:
             llm=self.llm,
         )
         if rewritten == answer.text:
-            answer.confidence = 0.5
             return answer
         answer.text = rewritten
-        answer.confidence = 0.85
         return answer
 
     def _generate_list_extract(self, query: str, memories: list[RecallResult]) -> Answer:

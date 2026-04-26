@@ -175,5 +175,27 @@ def test_specificity_resolver_rewrites_answer_when_enabled(sample_memories):
     answer = gen.generate("Where did Caroline move from 4 years ago?", sample_memories)
 
     assert answer.text == "Sweden"
-    assert answer.confidence == 0.85
+    assert answer.confidence == 0.9
     assert llm.calls == 2
+
+
+def test_specificity_resolver_preserves_low_confidence_after_rewrite(sample_memories):
+    llm = SequenceLLM(["her home country\nCONFIDENCE: 0.1", "Sweden"])
+    gen = AnswerGenerator(llm=llm, category_aware_prompts=True, specificity_resolver=True)
+
+    answer = gen.generate("Where did Caroline move from 4 years ago?", sample_memories)
+
+    assert answer.text == "Sweden"
+    assert answer.confidence == 0.1
+    assert gen.should_fallback(answer)
+
+
+def test_specificity_resolver_preserves_confidence_without_rewrite(sample_memories):
+    llm = SequenceLLM(["her home country\nCONFIDENCE: 0.8", "her home country"])
+    gen = AnswerGenerator(llm=llm, category_aware_prompts=True, specificity_resolver=True)
+
+    answer = gen.generate("Where did Caroline move from 4 years ago?", sample_memories)
+
+    assert answer.text == "her home country"
+    assert answer.confidence == 0.8
+    assert not gen.should_fallback(answer)
