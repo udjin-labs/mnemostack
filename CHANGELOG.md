@@ -6,9 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0a6] - 2026-04-26
+
 ### Fixed
 
-- `is_heartbeat_poll()` no longer treats ordinary short messages that merely mention `HEARTBEAT_OK` / `HEALTH_CHECK_OK` as heartbeat polls.
+- fix(utils): is_heartbeat_poll false positive on mid-message HEARTBEAT_OK mention (#13)
 
 ## [0.2.0a5] - 2026-04-26
 
