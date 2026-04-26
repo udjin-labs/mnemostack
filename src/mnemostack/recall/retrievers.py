@@ -25,6 +25,11 @@ from typing import Any
 from ..embeddings.base import EmbeddingProvider
 from ..llm.base import LLMProvider
 from ..vector import VectorStore
+
+try:
+    from qdrant_client.models import DatetimeRange, FieldCondition, Filter
+except ImportError:  # pragma: no cover - qdrant-client is a runtime dependency
+    DatetimeRange = FieldCondition = Filter = None  # type: ignore[assignment]
 from .bm25 import BM25, BM25Doc
 from .recaller import RecallResult
 
@@ -79,16 +84,41 @@ class VectorRetriever(Retriever):
         ]
 
 
+def _with_timestamp_range_filter(
+    scroll_filter: Any | None,
+    *,
+    newer_than: str | None,
+    older_than: str | None,
+) -> Any | None:
+    if newer_than is None and older_than is None:
+        return scroll_filter
+    if Filter is None or FieldCondition is None or DatetimeRange is None:
+        raise RuntimeError("qdrant-client is required for timestamp range filters")
+
+    timestamp_condition = FieldCondition(
+        key="timestamp",
+        range=DatetimeRange(gte=newer_than, lte=older_than),
+    )
+    if scroll_filter is None:
+        return Filter(must=[timestamp_condition])
+    if isinstance(scroll_filter, Filter):
+        must = list(scroll_filter.must or [])
+        return scroll_filter.model_copy(update={"must": [*must, timestamp_condition]})
+    raise TypeError("newer_than/older_than can only be combined with a qdrant Filter scroll_filter")
+
+
 def bm25_docs_from_qdrant(
     client: Any,
     collection_name: str,
     *,
     scroll_filter: Any | None = None,
-    limit: int = 40_000,
+    limit: int | None = None,
     batch_size: int = 1_000,
     text_key: str = "text",
     id_prefix: str | None = None,
     payload_filter: Callable[[dict[str, Any]], bool] | None = None,
+    newer_than: str | None = None,
+    older_than: str | None = None,
 ) -> list[BM25Doc]:
     """Create BM25 documents from Qdrant payload text.
 
@@ -97,15 +127,40 @@ def bm25_docs_from_qdrant(
     a common failure mode where exact tokens in transcripts (message IDs,
     commit hashes, filenames, quoted phrases) are invisible to BM25 because the
     lexical corpus was built only from local markdown files.
+
+    Args:
+        client: ``qdrant_client.QdrantClient``-compatible object.
+        collection_name: Qdrant collection to scroll.
+        scroll_filter: Optional Qdrant filter passed to ``scroll``.
+        limit: Maximum BM25 docs to load. ``None`` (default) means unbounded:
+            scroll until the collection/filter is exhausted.
+        batch_size: Number of points per scroll call.
+        text_key: Payload key containing searchable text.
+        id_prefix: Optional prefix for generated BM25Doc IDs.
+        payload_filter: Optional predicate to skip payloads client-side.
+        newer_than: Optional ISO timestamp; keep chunks with
+            ``payload["timestamp"] >= newer_than``.
+        older_than: Optional ISO timestamp; keep chunks with
+            ``payload["timestamp"] <= older_than``.
+
+    Warning:
+        For very large collections (>1M chunks), consider passing a Filter to
+        scope the BM25 corpus, or using newer_than/older_than for a rolling
+        window. BM25 build memory is O(n). For example:
+        ``bm25_docs_from_qdrant(client, "memory", newer_than="2026-04-01T00:00:00Z")``.
     """
     docs: list[BM25Doc] = []
     offset = None
-    remaining = max(0, limit)
-    while remaining > 0:
-        current_limit = min(batch_size, remaining)
+    effective_filter = _with_timestamp_range_filter(
+        scroll_filter, newer_than=newer_than, older_than=older_than
+    )
+    while limit is None or len(docs) < limit:
+        current_limit = batch_size if limit is None else min(batch_size, limit - len(docs))
+        if current_limit <= 0:
+            break
         points, offset = client.scroll(
             collection_name=collection_name,
-            scroll_filter=scroll_filter,
+            scroll_filter=effective_filter,
             limit=current_limit,
             offset=offset,
             with_payload=True,
@@ -132,7 +187,8 @@ def bm25_docs_from_qdrant(
                     payload=doc_payload,
                 )
             )
-        remaining = limit - len(docs)
+            if limit is not None and len(docs) >= limit:
+                break
         if offset is None:
             break
     return docs
@@ -153,11 +209,13 @@ class BM25Retriever(Retriever):
         collection_name: str,
         *,
         scroll_filter: Any | None = None,
-        limit: int = 40_000,
+        limit: int | None = None,
         batch_size: int = 1_000,
         text_key: str = "text",
         id_prefix: str | None = None,
         payload_filter: Callable[[dict[str, Any]], bool] | None = None,
+        newer_than: str | None = None,
+        older_than: str | None = None,
     ) -> BM25Retriever:
         """Build a BM25 retriever from Qdrant payload text.
 
@@ -171,13 +229,24 @@ class BM25Retriever(Retriever):
             client: ``qdrant_client.QdrantClient``-compatible object.
             collection_name: Qdrant collection to scroll.
             scroll_filter: Optional Qdrant filter passed to ``scroll``.
-            limit: Maximum payload chunks to load.
+            limit: Maximum BM25 docs to load. ``None`` (default) means unbounded:
+                scroll until the collection/filter is exhausted.
             batch_size: Number of points per scroll call.
             text_key: Payload key containing searchable text.
             id_prefix: Optional prefix for generated BM25Doc IDs. By default,
                 Qdrant point IDs are reused so vector and BM25 hits fuse as the
                 same memory. Set a prefix to namespace docs when mixing corpora.
             payload_filter: Optional predicate to skip payloads client-side.
+            newer_than: Optional ISO timestamp; keep chunks with
+                ``payload["timestamp"] >= newer_than``.
+            older_than: Optional ISO timestamp; keep chunks with
+                ``payload["timestamp"] <= older_than``.
+
+        Warning:
+            For very large collections (>1M chunks), consider passing a Filter
+            to scope the BM25 corpus, or using newer_than/older_than for a
+            rolling window. BM25 build memory is O(n). Example:
+            ``BM25Retriever.from_qdrant(client, "memory", newer_than="2026-04-01T00:00:00Z")``.
 
         Returns:
             BM25Retriever over the collected Qdrant payload chunks.
@@ -191,6 +260,8 @@ class BM25Retriever(Retriever):
             text_key=text_key,
             id_prefix=id_prefix,
             payload_filter=payload_filter,
+            newer_than=newer_than,
+            older_than=older_than,
         )
         return cls(docs=docs)
 

@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0b1] - 2026-04-26
+
+### Changed
+
+- **BREAKING**: `bm25_docs_from_qdrant()` and `BM25Retriever.from_qdrant()` default `limit` changed from `40000` to `None` (unbounded). For users who relied on the implicit cap, pass `limit=40000` explicitly. Rationale: silent data loss for users with active conversations.
+
+### Added
+
+- feat: `newer_than` / `older_than` ISO timestamp filters for rolling-window BM25 corpora loaded from Qdrant.
+
 ## [0.2.0a6] - 2026-04-26
 
 ### Fixed
