@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from ..llm.base import LLMProvider
 from ..observability import counter, histogram
 from .recaller import RecallResult
+from .specificity import detect_placeholders, resolve_specificity
 
 _CONFIDENCE_RULES = """After your answer, on a NEW line, output ONLY:
 CONFIDENCE: <float 0.0-1.0>
@@ -314,6 +315,7 @@ class AnswerGenerator:
         prompt_template: str | None = None,
         category_aware_prompts: bool = False,
         list_extract_mode: bool = False,
+        specificity_resolver: bool = False,
     ):
         self.llm = llm
         self.max_memories = max_memories
@@ -322,6 +324,7 @@ class AnswerGenerator:
         self.prompt_template = prompt_template or _DEFAULT_PROMPT
         self.category_aware_prompts = category_aware_prompts
         self.list_extract_mode = list_extract_mode
+        self.specificity_resolver = specificity_resolver
 
     def generate(self, query: str, memories: list[RecallResult]) -> Answer:
         """Synthesize answer from retrieved memories."""
@@ -336,6 +339,7 @@ class AnswerGenerator:
             )
 
         prompt_template = self.prompt_template
+        category = "general"
         if self.category_aware_prompts:
             category = classify_question(query)
             counter(
@@ -344,14 +348,46 @@ class AnswerGenerator:
                 labels={"category": category},
             )
             if self.list_extract_mode and category in {"list", "count"}:
-                return self._generate_list_extract(query, memories)
+                answer = self._generate_list_extract(query, memories)
+                return self._apply_specificity_resolver(query, answer, memories, category)
             prompt_template = _PROMPT_BY_CATEGORY[category]
 
-        return self._generate_single_prompt(
+        answer = self._generate_single_prompt(
             query=query,
             memories=memories[: self.max_memories],
             prompt_template=prompt_template,
         )
+        return self._apply_specificity_resolver(query, answer, memories, category)
+
+    def _apply_specificity_resolver(
+        self,
+        query: str,
+        answer: Answer,
+        memories: list[RecallResult],
+        category: str,
+    ) -> Answer:
+        if (
+            not self.specificity_resolver
+            or not self.category_aware_prompts
+            or category == "adversarial"
+            or not answer.ok
+        ):
+            return answer
+        if not detect_placeholders(answer.text):
+            return answer
+
+        rewritten = resolve_specificity(
+            query=query,
+            draft_answer=answer.text,
+            candidate_memories=memories[: self.max_memories],
+            llm=self.llm,
+        )
+        if rewritten == answer.text:
+            answer.confidence = 0.5
+            return answer
+        answer.text = rewritten
+        answer.confidence = 0.85
+        return answer
 
     def _generate_list_extract(self, query: str, memories: list[RecallResult]) -> Answer:
         extract_memories = memories[:40]
