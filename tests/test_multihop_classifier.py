@@ -36,6 +36,12 @@ def test_classify_question_multihop_patterns():
     assert classify_question('What did Caroline take away from the book "Becoming Nicole"?') == "multihop"
     assert classify_question("What did Caroline and Melanie both learn?") == "multihop"
     assert classify_question("What do Caroline and Melanie have in common?") == "multihop"
+    assert classify_question("What pattern appears across sessions?") == "multihop"
+
+
+def test_across_single_hop_phrases_are_not_multihop():
+    assert classify_question("Where did she travel across Europe?") == "general"
+    assert classify_question("Who moved across town?") == "general"
 
 
 def test_multihop_takes_precedence_over_inference_markers():
