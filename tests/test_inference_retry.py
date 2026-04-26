@@ -196,6 +196,35 @@ def test_inference_retry_forwards_recall_filters(memories):
     ]
 
 
+def test_inference_retry_specificity_uses_merged_memories(memories):
+    llm = FakeLLM(
+        [
+            "Not in memory.\nCONFIDENCE: 0.2",
+            '{"queries": ["Caroline city"]}',
+            "her city\nCONFIDENCE: 0.7",
+            "Lisbon",
+        ]
+    )
+    recaller = FakeRecaller(
+        {
+            "Caroline city": [result("city", "Caroline moved to Lisbon for work.")],
+        }
+    )
+    gen = AnswerGenerator(
+        llm=llm,
+        category_aware_prompts=True,
+        inference_retry=True,
+        specificity_resolver=True,
+        recaller=recaller,
+    )
+
+    answer = gen.generate("Would Caroline enjoy living downtown?", memories)
+
+    assert answer.text == "Lisbon"
+    assert answer.confidence == 0.7
+    assert "Caroline moved to Lisbon" in llm.prompts[-1]
+
+
 @pytest.mark.parametrize(
     "query",
     [
