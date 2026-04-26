@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0a5] - 2026-04-26
+
+### Added
+
+- feat: utils.text.strip_metadata_blocks() and is_heartbeat_poll() — clean agent-runtime metadata envelopes from transcripts before chunking/embedding
+
 ## [0.2.0a4] - 2026-04-26
 
 ### Added
