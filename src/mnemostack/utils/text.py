@@ -47,6 +47,11 @@ _HEARTBEAT_RX = re.compile(
     r"Read HEARTBEAT\.md if it exists|HEARTBEAT_OK|HEALTH_CHECK_OK",
     re.IGNORECASE,
 )
+_HEARTBEAT_PROMPT_RX = re.compile(
+    r"Read HEARTBEAT\.md if it exists.*?(reply HEARTBEAT_OK\.|HEALTH_CHECK_OK\.)",
+    re.IGNORECASE | re.DOTALL,
+)
+_HEARTBEAT_ACK_RX = re.compile(r"^\s*(HEARTBEAT_OK|HEALTH_CHECK_OK)\b", re.IGNORECASE)
 
 
 def strip_metadata_blocks(
@@ -98,11 +103,14 @@ def is_heartbeat_poll(content: str, body_threshold: int = 80) -> bool:
     """
     if not content or not _HEARTBEAT_RX.search(content):
         return False
+    has_prompt = bool(_HEARTBEAT_PROMPT_RX.search(content))
+    has_ack_prefix = bool(_HEARTBEAT_ACK_RX.search(content))
+    if not has_prompt and not has_ack_prefix:
+        return False
     body = re.sub(
-        r"Read HEARTBEAT\.md if it exists.*?(reply HEARTBEAT_OK\.|HEALTH_CHECK_OK\.)",
+        _HEARTBEAT_PROMPT_RX,
         "",
         content,
-        flags=re.IGNORECASE | re.DOTALL,
     )
     body = re.sub(r"HEARTBEAT_OK|HEALTH_CHECK_OK", "", body, flags=re.IGNORECASE).strip()
     return len(body) < body_threshold
