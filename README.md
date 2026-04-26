@@ -126,6 +126,18 @@ We are not a replacement for your agent framework and not a full platform runtim
 - 🔌 **MCP server** — expose memory tools to Claude Desktop, ChatGPT, Cursor, etc.
 - 🛡 **Graceful degradation** — retrieval keeps working if graph or any retriever is down
 
+## Utilities
+
+Agent runtimes often wrap transcript messages in metadata envelopes before the real body, which can dominate embeddings and make unrelated turns look similar. Clean messages before chunking/indexing with `strip_metadata_blocks()`:
+
+```python
+from mnemostack.utils import strip_metadata_blocks
+
+clean = strip_metadata_blocks(raw_message)
+```
+
+Built-in profiles cover OpenClaw webchat and Telegram envelopes; pass `profiles=` or `extra_patterns=` to tune the cleanup for your runtime.
+
 ### Fusion weights & HyDE — honest notes
 
 Some of the newer knobs help in specific workloads and do nothing (or mildly hurt) in others. Measured, not promised:
