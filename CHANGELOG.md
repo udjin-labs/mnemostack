@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0b3] - 2026-04-26
+
+### Fixed
+
+- feat(answer): multi-hop category protection — fix cat_4 regression from category-aware routing (#17)
+
 ## [0.2.0b2] - 2026-04-26
 
 ### Added

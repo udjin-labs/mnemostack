@@ -147,7 +147,7 @@ def main():
     client = QdrantClient(host="localhost", port=6333)
     provider = get_provider("gemini")
     llm = get_llm("gemini")
-    answer_gen = AnswerGenerator(llm=llm, confidence_threshold=0.5, max_memories=args.limit)
+    answer_gen = AnswerGenerator(llm=llm, confidence_threshold=0.5, max_memories=args.limit, category_aware_prompts=True)
     pipeline = build_full_pipeline()  # no graph — dataset ingest makes its own isolated collection
 
     # Keep existing log when resuming so all samples stay in one file
