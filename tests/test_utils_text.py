@@ -75,6 +75,12 @@ def test_is_heartbeat_poll_returns_false_for_real_content():
     assert is_heartbeat_poll(content) is False
 
 
+def test_is_heartbeat_poll_returns_false_for_discussion_of_marker():
+    content = "We discussed HEARTBEAT_OK handling in the scheduler bug."
+
+    assert is_heartbeat_poll(content) is False
+
+
 def test_is_heartbeat_poll_threshold_param():
     content = "HEALTH_CHECK_OK. abcdefghij"
 
