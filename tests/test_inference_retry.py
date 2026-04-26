@@ -140,7 +140,7 @@ def test_inference_retry_executes_full_flow(memories):
     )
     recaller = FakeRecaller(
         {
-            "Caroline activism": [result("a", "Caroline supports LGBTQ rights.")],
+            "Caroline activism": [result("a", "Caroline supports local community programs.")],
             "Caroline values": [result("b", "Caroline campaigns for climate action.")],
         }
     )
@@ -172,7 +172,7 @@ def test_inference_retry_forwards_recall_filters(memories):
     )
     recaller = FakeRecaller(
         {
-            "Caroline activism": [result("a", "Caroline supports LGBTQ rights.")],
+            "Caroline activism": [result("a", "Caroline supports local community programs.")],
             "Caroline values": [result("b", "Caroline campaigns for climate action.")],
         }
     )
