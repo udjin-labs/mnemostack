@@ -50,6 +50,7 @@ from .retrievers import (
     bm25_docs_from_qdrant,
     extract_temporal,
 )
+from .specificity import detect_placeholders, resolve_specificity
 
 __all__ = [
     "BM25",
@@ -74,6 +75,8 @@ __all__ = [
     "Answer",
     "AnswerGenerator",
     "classify_question",
+    "detect_placeholders",
+    "resolve_specificity",
     "Reranker",
     "Pipeline",
     "PipelineContext",
