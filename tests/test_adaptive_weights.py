@@ -39,6 +39,11 @@ def test_detect_general_default():
     assert Recaller._detect_query_shape("summarise the architecture") == "general"
 
 
+def test_plain_year_does_not_force_exact_token_shape():
+    assert Recaller._detect_query_shape("Which cities did Y visit in 2023?") == "general"
+    assert Recaller._detect_query_shape("what changed before merge in PR 16 in 2023") == "general"
+
+
 def test_weight_for_static_overrides_adaptive():
     r = Recaller(
         retrievers=[],

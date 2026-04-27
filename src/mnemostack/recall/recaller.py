@@ -63,7 +63,9 @@ class Recaller:
     _WEIGHT_PROFILES: dict[str, dict[str, float]] = {
         # Queries mentioning specific IP / port / version / UUID / ID markers.
         # Exact-token retrievers (BM25, graph with structural matches) are
-        # more reliable than pure vector similarity here.
+        # more reliable than pure vector similarity here. Plain 4-digit years
+        # are intentionally not exact tokens: date mentions in natural-language
+        # questions should not suppress semantic/vector evidence.
         "exact_token": {"bm25": 1.4, "memgraph": 1.4, "vector": 1.0, "temporal": 0.9},
         # Queries with a when/date shape. The temporal retriever is date-aware
         # — let it lead, but don't zero out the others (dates often require
@@ -82,7 +84,6 @@ class Recaller:
     # like "pipeline" → "ip" or "important" → "port".
     _EXACT_TOKEN_RE = re.compile(
         r"\b\d{1,3}(?:\.\d{1,3}){3}\b|"       # IPv4
-        r"\b\d{4,5}\b|"                        # port / numeric code
         r"\b\d{4}\.\d+\.\d+\b|"                 # version
         r"\b[A-Za-z]+[-_]\d+[A-Za-z0-9-]*\b"  # id/code
     )
