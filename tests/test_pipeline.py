@@ -83,6 +83,7 @@ def test_is_exact_token_query():
     assert is_exact_token_query("какой IP у сервера")
     assert is_exact_token_query("какой порт 6333")
     assert is_exact_token_query("version 2026.4.14")
+    assert not is_exact_token_query("Which cities did Y visit in 2023?")
     assert not is_exact_token_query("candidate idea bridge")
     assert not is_exact_token_query("what is love")
 
