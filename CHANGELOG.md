@@ -19,10 +19,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Benchmarks
 
-- Internal LoCoMo subset run (9/9 valid conversations, excluding conv-50 until Gemini RPD reset): strict accuracy improved from 66.6% (1186/1782, 0.2.0b1 baseline without P1) to 67.7% (1207/1782, 0.2.0b6 with P1), and combined accuracy improved from 80.4% to 81.0%.
-- Main lift came from `cat_3` open-domain inference (+10.1pp, 29.2% → 39.3%) and `cat_2` multi-hop temporal (+3.5pp, 67.1% → 70.6%).
-- Mechanism: `inference_retry` reduced `cat_3` not-in-memory answers from 42 to 27; 9 of those recovered answers became correct.
-- Full 10/10 LoCoMo numbers are intentionally not published yet; conv-50 will be rerun after the Gemini RPD reset on 2026-04-27.
+- Full LoCoMo run, 10/10 conversations (1986 QA), same Gemini Flash judge for both rows:
+  - Strict accuracy: 66.5% (1320/1986, 0.2.0b1 baseline) → **67.8%** (1346/1986, 0.2.0b6 with P1), **+1.3pp**.
+  - Combined (correct + partial): 79.8% → **80.4%**, +0.6pp.
+  - Per-category strict: `cat_3` open-domain reasoning 32.3% → **41.7%** (+9.4pp), `cat_2` temporal 65.1% → **69.8%** (+4.7pp), `cat_1` 33.7% → 34.4% (+0.7pp), `cat_4` 69.3% → 69.6% (+0.2pp), `cat_5` 90.1% → 89.7% (−0.4pp, within run-to-run noise).
+- Conv-50 was rerun in isolation on 2026-04-27 (after the Gemini RPD reset) and merged with the other 9 conversations from the 2026-04-26 b6+all-P1 full run; both halves use the same pipeline and judge.
+- Mechanism for the `cat_3` lift: `inference_retry` decomposed evidence queries, which converts a chunk of previous "not in memory" answers into correct ones; combined with `category_aware_prompts` for `cat_2`/`cat_3` the gains stack.
+- These are now the official numbers cited in `README.md`.
 
 ## [0.2.0b6] - 2026-04-26
 

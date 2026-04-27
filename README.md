@@ -41,26 +41,26 @@ On each `recall(query)`: the configured retrievers (Vector and Temporal by defau
 
 Full LoCoMo run (official SNAP-Research dataset, 10 samples / **1986 QA**, clean state, judged by Gemini Flash):
 
-| Metric | mnemostack |
-| --- | --- |
-| **Correct (strict)** | **66.5%** (1320 / 1986) |
-| Partial | 13.3% (265) |
-| Wrong | 20.2% (401) |
-| **Combined (correct + partial)** | **79.8%** |
+| Metric | mnemostack 0.2.0b6 (P1) | 0.2.0b1 baseline |
+| --- | --- | --- |
+| **Correct (strict)** | **67.8%** (1346 / 1986) | 66.5% (1320 / 1986) |
+| Partial | 12.6% (250) | 13.3% (265) |
+| Wrong | 19.6% (390) | 20.2% (401) |
+| **Combined (correct + partial)** | **80.4%** | 79.8% |
 
-By question category:
+By question category (strict / combined):
 
-| Category | Correct |
-| --- | --- |
-| `cat_5` adversarial open-domain | **90.1%** |
-| `cat_4` multi-hop reasoning | **69.3%** |
-| `cat_2` temporal | **65.1%** |
-| `cat_1` single-hop lists | 33.7% |
-| `cat_3` open-domain reasoning | 32.3% |
+| Category | 0.2.0b6 (P1) | 0.2.0b1 baseline | Δ strict |
+| --- | --- | --- | --- |
+| `cat_5` adversarial open-domain | 89.7% / 89.7% | 90.1% / 90.1% | −0.4pp |
+| `cat_4` multi-hop reasoning | **69.6%** / 82.0% | 69.3% / 82.0% | +0.2pp |
+| `cat_2` temporal | **69.8%** / 77.9% | 65.1% / 75.7% | **+4.7pp** |
+| `cat_1` single-hop lists | 34.4% / 74.1% | 33.7% / 75.2% | +0.7pp |
+| `cat_3` open-domain reasoning | **41.7%** / 49.0% | 32.3% / 39.6% | **+9.4pp** |
 
-_Last run: 2026-04-26, mnemostack 0.2.0b1._
+_Last run: 2026-04-27, mnemostack 0.2.0b6 (P1 retrieval+answer changes). Baseline column is 0.2.0b1 from 2026-04-26 on the same dataset and the same Gemini Flash judge. Main lift: `cat_3` open-domain reasoning (+9.4pp) and `cat_2` temporal (+4.7pp); slight regression on `cat_5` adversarial (−0.4pp) within run-to-run noise._
 
-> **Honest numbers disclaimer.** The table above is our full-benchmark number across **all 1986 questions and all 5 categories**. Some vendors report their strongest sub-category only; if we did the same we could honestly claim **90.1% on adversarial open-domain** or **69.3% on multi-hop reasoning**. We publish the full aggregate because that's what actually predicts how the system behaves on mixed workloads.
+> **Honest numbers disclaimer.** The table above is our full-benchmark number across **all 1986 questions and all 5 categories**. Some vendors report their strongest sub-category only; if we did the same we could honestly claim **89.7% on adversarial open-domain** or **69.6% on multi-hop reasoning**. We publish the full aggregate because that's what actually predicts how the system behaves on mixed workloads.
 
 How that compares with reported numbers from other systems on the same benchmark (caveat: different judges, evaluation protocols, and in some cases category cherry-picking):
 
@@ -70,7 +70,7 @@ How that compares with reported numbers from other systems on the same benchmark
 | Memobase (temporal subset) | 85% |
 | Letta filesystem agent | 74% |
 | Mem0 graph variant | ~68.5% |
-| **mnemostack** | **66.5%** |
+| **mnemostack** | **67.8%** |
 | Zep (independently replicated) | 58.4% |
 
 ### Real-corpus needle benchmark
@@ -337,7 +337,7 @@ print(answer.text, answer.confidence, answer.sources)
 
 #### Full stack: 4-source retrieval + 8-stage pipeline + reranker
 
-This is the configuration that produced the 66.5% / 79.8% LoCoMo numbers above.
+This is the configuration that produced the 67.8% / 80.4% LoCoMo numbers above.
 
 ```python
 from mnemostack.embeddings import get_provider
