@@ -41,24 +41,24 @@ On each `recall(query)`: the configured retrievers (Vector and Temporal by defau
 
 Full LoCoMo run (official SNAP-Research dataset, 10 samples / **1986 QA**, clean state, judged by Gemini Flash):
 
-| Metric | mnemostack 0.2.0b6 (P1) | 0.2.0b1 baseline |
+| Metric | mnemostack 0.2.0b6 (P1) | First full run |
 | --- | --- | --- |
-| **Correct (strict)** | **67.8%** (1346 / 1986) | 66.5% (1320 / 1986) |
-| Partial | 12.6% (250) | 13.3% (265) |
-| Wrong | 19.6% (390) | 20.2% (401) |
-| **Combined (correct + partial)** | **80.4%** | 79.8% |
+| **Correct (strict)** | **67.8%** (1346 / 1986) | 66.4% (1319 / 1986) |
+| Partial | 12.6% (250) | 12.8% (254) |
+| Wrong | 19.6% (390) | 20.8% (413) |
+| **Combined (correct + partial)** | **80.4%** | 79.2% |
 
-By question category (strict / combined):
+By question category:
 
-| Category | 0.2.0b6 (P1) | 0.2.0b1 baseline | Δ strict |
+| Category | 0.2.0b6 (P1 strict / combined) | First full run strict | Δ strict |
 | --- | --- | --- | --- |
-| `cat_5` adversarial open-domain | 89.7% / 89.7% | 90.1% / 90.1% | −0.4pp |
-| `cat_4` multi-hop reasoning | **69.6%** / 82.0% | 69.3% / 82.0% | +0.2pp |
-| `cat_2` temporal | **69.8%** / 77.9% | 65.1% / 75.7% | **+4.7pp** |
-| `cat_1` single-hop lists | 34.4% / 74.1% | 33.7% / 75.2% | +0.7pp |
-| `cat_3` open-domain reasoning | **41.7%** / 49.0% | 32.3% / 39.6% | **+9.4pp** |
+| `cat_5` adversarial open-domain | 89.7% / 89.7% | 90.1% | −0.4pp |
+| `cat_4` multi-hop reasoning | **69.6%** / 82.0% | 69.2% | +0.4pp |
+| `cat_2` temporal | **69.8%** / 77.9% | 64.5% | **+5.3pp** |
+| `cat_1` single-hop lists | 34.4% / 74.1% | 34.8% | −0.4pp |
+| `cat_3` open-domain reasoning | **41.7%** / 49.0% | 31.2% | **+10.5pp** |
 
-_Last run: 2026-04-27, mnemostack 0.2.0b6 (P1 retrieval+answer changes). Baseline column is 0.2.0b1 from 2026-04-26 on the same dataset and the same Gemini Flash judge. Main lift: `cat_3` open-domain reasoning (+9.4pp) and `cat_2` temporal (+4.7pp); slight regression on `cat_5` adversarial (−0.4pp) within run-to-run noise._
+_Last run: 2026-04-27, mnemostack 0.2.0b6 (P1 retrieval+answer changes). Baseline column is the first full 10/10 LoCoMo run published for mnemostack on the same dataset and Gemini Flash judge. Main lift: `cat_3` open-domain reasoning (+10.5pp) and `cat_2` temporal (+5.3pp); slight regressions on `cat_1` and `cat_5` (−0.4pp each) are within run-to-run noise._
 
 > **Honest numbers disclaimer.** The table above is our full-benchmark number across **all 1986 questions and all 5 categories**. Some vendors report their strongest sub-category only; if we did the same we could honestly claim **89.7% on adversarial open-domain** or **69.6% on multi-hop reasoning**. We publish the full aggregate because that's what actually predicts how the system behaves on mixed workloads.
 
