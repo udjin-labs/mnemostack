@@ -1,7 +1,7 @@
 # mnemostack benchmarks
 
 Reproducible LoCoMo benchmark harness for mnemostack. Used to produce the
-66.4% / 79.2% numbers on the main README.
+67.8% / 80.4% numbers on the main README.
 
 ## What gets measured
 
@@ -100,4 +100,3 @@ marker in every case inside the top-5. This is exactly the
 
 Bigger runs (50k+ turns, full pipeline + reranker) are pending; run them
 yourself with the command above to see how the curves look on your hardware.
-
