@@ -1,0 +1,36 @@
+{
+  "name": "mnemostack-openclaw-plugin",
+  "version": "0.1.0",
+  "description": "OpenClaw companion plugin that injects mnemostack recall results into prompts.",
+  "license": "MIT",
+  "type": "module",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "src",
+    "README.md",
+    "MIGRATION.md",
+    "openclaw.plugin.json"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/udjin-labs/mnemostack.git",
+    "directory": "openclaw-plugin"
+  },
+  "keywords": [
+    "openclaw",
+    "plugin",
+    "recall",
+    "memory",
+    "rag"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "peerDependencies": {
+    "openclaw": "*"
+  }
+}

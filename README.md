@@ -585,6 +585,20 @@ If you run an OpenClaw-style assistant with its own `scripts/recall.sh` or simil
 
 If you're a human operator and you'd rather do this yourself, the same steps apply; treat them as a checklist.
 
+## OpenClaw auto-recall companion plugin
+
+This repository also includes a self-contained OpenClaw companion plugin in [`openclaw-plugin/`](openclaw-plugin/). mnemostack remains the recall backend — vector + BM25 + graph + temporal retrieval, fusion, reranking, and answer synthesis — while the plugin connects that backend to OpenClaw's `before_prompt_build` hook.
+
+Zero-config path: install mnemostack, run the daemon on the default local port, install/enable the plugin, and OpenClaw will automatically inject bounded recall answers for recall-style questions:
+
+```bash
+mnemostack serve --host 127.0.0.1 --port 18793
+cd openclaw-plugin
+npm test
+```
+
+The plugin defaults to `http://127.0.0.1:18793/answer`, supports English/Russian trigger defaults with extensible language-agnostic trigger lists, and can fall back to a Script backend such as `recall-selfeval.sh` when you are not running the daemon.
+
 ## Design
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed design: pipeline stages, Qdrant schema, Memgraph temporal model, consolidation runtime, MCP tools.
