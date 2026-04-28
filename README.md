@@ -41,26 +41,26 @@ On each `recall(query)`: the configured retrievers (Vector and Temporal by defau
 
 Full LoCoMo run (official SNAP-Research dataset, 10 samples / **1986 QA**, clean state, judged by Gemini Flash):
 
-| Metric | mnemostack 0.2.0b6 (P1) | First full run |
-| --- | --- | --- |
-| **Correct (strict)** | **67.8%** (1346 / 1986) | 66.4% (1319 / 1986) |
-| Partial | 12.6% (250) | 12.8% (254) |
-| Wrong | 19.6% (390) | 20.8% (413) |
-| **Combined (correct + partial)** | **80.4%** | 79.2% |
+| Metric | mnemostack 0.2.0 stable (exact-token fix) | mnemostack 0.2.0b6 (P1) | First full run |
+| --- | --- | --- | --- |
+| **Correct (strict)** | **67.6%** (1342 / 1986) | 67.8% (1346 / 1986) | 66.4% (1319 / 1986) |
+| Partial | 12.5% (248) | 12.6% (250) | 12.8% (254) |
+| Wrong | 19.9% (396) | 19.6% (390) | 20.8% (413) |
+| **Combined (correct + partial)** | **80.1%** | 80.4% | 79.2% |
 
 By question category:
 
-| Category | 0.2.0b6 (P1 strict / combined) | First full run strict | Δ strict |
-| --- | --- | --- | --- |
-| `cat_5` adversarial open-domain | 89.7% / 89.7% | 90.1% | −0.4pp |
-| `cat_4` multi-hop reasoning | **69.6%** / 82.0% | 69.2% | +0.4pp |
-| `cat_2` temporal | **69.8%** / 77.9% | 64.5% | **+5.3pp** |
-| `cat_1` single-hop lists | 34.4% / 74.1% | 34.8% | −0.4pp |
-| `cat_3` open-domain reasoning | **41.7%** / 49.0% | 31.2% | **+10.5pp** |
+| Category | 0.2.0 stable strict / combined | 0.2.0b6 (P1 strict / combined) | First full run strict | Δ strict |
+| --- | --- | --- | --- | --- |
+| `cat_5` adversarial open-domain | 89.0% / 89.0% | 89.7% / 89.7% | 90.1% | −1.1pp |
+| `cat_4` multi-hop reasoning | **69.8%** / 82.4% | 69.6% / 82.0% | 69.2% | +0.6pp |
+| `cat_2` temporal | 69.5% / 77.3% | **69.8%** / 77.9% | 64.5% | **+5.0pp** |
+| `cat_1` single-hop lists | 34.0% / 72.7% | 34.4% / 74.1% | 34.8% | −0.8pp |
+| `cat_3` open-domain reasoning | **40.6%** / 49.0% | 41.7% / 49.0% | 31.2% | **+9.4pp** |
 
-_Last run: 2026-04-27, mnemostack 0.2.0b6 (P1 retrieval+answer changes). Baseline column is the first full 10/10 LoCoMo run published for mnemostack on the same dataset and Gemini Flash judge. Main lift: `cat_3` open-domain reasoning (+10.5pp) and `cat_2` temporal (+5.3pp); slight regressions on `cat_1` and `cat_5` (−0.4pp each) are within run-to-run noise._
+_Last run: 2026-04-28, mnemostack 0.2.0 stable with refined exact-token year handling. Baseline column is the first full 10/10 LoCoMo run published for mnemostack on the same dataset and Gemini Flash judge. The latest clean rerun is effectively tied with the 0.2.0b6 P1 run within judge variance while preserving the main lifts in `cat_3` open-domain reasoning (+9.4pp) and `cat_2` temporal (+5.0pp)._
 
-> **Honest numbers disclaimer.** The table above is our full-benchmark number across **all 1986 questions and all 5 categories**. Some vendors report their strongest sub-category only; if we did the same we could honestly claim **89.7% on adversarial open-domain** or **69.6% on multi-hop reasoning**. We publish the full aggregate because that's what actually predicts how the system behaves on mixed workloads.
+> **Honest numbers disclaimer.** The table above is our full-benchmark number across **all 1986 questions and all 5 categories**. Some vendors report their strongest sub-category only; if we did the same we could honestly claim **89.0% on adversarial open-domain** or **69.8% on multi-hop reasoning**. We publish the full aggregate because that's what actually predicts how the system behaves on mixed workloads.
 
 How that compares with reported numbers from other systems on the same benchmark (caveat: different judges, evaluation protocols, and in some cases category cherry-picking):
 
@@ -70,7 +70,7 @@ How that compares with reported numbers from other systems on the same benchmark
 | Memobase (temporal subset) | 85% |
 | Letta filesystem agent | 74% |
 | Mem0 graph variant | ~68.5% |
-| **mnemostack** | **67.8%** |
+| **mnemostack** | **67.6%** |
 | Zep (independently replicated) | 58.4% |
 
 ### Real-corpus needle benchmark
@@ -337,7 +337,7 @@ print(answer.text, answer.confidence, answer.sources)
 
 #### Full stack: 4-source retrieval + 8-stage pipeline + reranker
 
-This is the configuration that produced the 67.8% / 80.4% LoCoMo numbers above.
+This is the configuration that produced the 67.6% / 80.1% LoCoMo numbers above.
 
 ```python
 from mnemostack.embeddings import get_provider
