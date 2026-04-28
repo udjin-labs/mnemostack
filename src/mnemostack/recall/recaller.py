@@ -85,9 +85,11 @@ class Recaller:
     _EXACT_TOKEN_RE = re.compile(
         r"\b\d{1,3}(?:\.\d{1,3}){3}\b|"       # IPv4
         r"\b\d{4}\.\d+\.\d+\b|"                 # version
-        r"\b[A-Za-z]+[-_]\d+[A-Za-z0-9-]*\b"  # id/code
+        r"\b[A-Za-z]{2,}[-_]?\d+[A-Za-z0-9-]*\b"  # id/code like PR16/RFC1234/LKOH-123
     )
-    _EXACT_MARKERS = {"ip", "порт", "port", "версия", "version", "uuid", "api"}
+    _EXACT_MARKERS = {
+        "ip", "порт", "port", "версия", "version", "id", "uuid", "api", "token", "токен",
+    }
     _PERSON_MARKERS = {
         "кто", "who", "telegram", "handle", "username",
         "contact", "контакт",

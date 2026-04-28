@@ -44,6 +44,12 @@ def test_plain_year_does_not_force_exact_token_shape():
     assert Recaller._detect_query_shape("what changed before merge in PR 16 in 2023") == "general"
 
 
+def test_identifier_numbers_stay_exact_token_shape():
+    assert Recaller._detect_query_shape("record id 12345") == "exact_token"
+    assert Recaller._detect_query_shape("show RFC1234 context") == "exact_token"
+    assert Recaller._detect_query_shape("what happened in PR16") == "exact_token"
+
+
 def test_weight_for_static_overrides_adaptive():
     r = Recaller(
         retrievers=[],
