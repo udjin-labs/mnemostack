@@ -1,0 +1,54 @@
+{
+  "id": "mnemostack-auto-recall",
+  "name": "mnemostack Auto Recall",
+  "description": "Connects OpenClaw's before_prompt_build hook to a local mnemostack recall daemon and injects bounded memory answers into prompt context.",
+  "enabledByDefault": false,
+  "defaultConfig": {
+    "enabled": true,
+    "allowedChatTypes": ["direct", "group"],
+    "timeoutMs": 7000,
+    "maxResults": 5,
+    "minConfidence": 0.4,
+    "backends": [
+      {
+        "type": "http",
+        "name": "mnemostack-daemon",
+        "url": "http://127.0.0.1:18793/answer",
+        "method": "POST",
+        "requestMode": "default",
+        "timeoutMs": 7000,
+        "allowedHosts": ["127.0.0.1", "localhost"]
+      }
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": { "type": "boolean" },
+      "agents": { "type": "array", "items": { "type": "string" } },
+      "allowedChatTypes": { "type": "array", "items": { "type": "string" } },
+      "timeoutMs": { "type": "integer", "minimum": 100, "maximum": 60000 },
+      "maxResults": { "type": "integer", "minimum": 1, "maximum": 50 },
+      "minConfidence": { "type": "number", "minimum": 0, "maximum": 1 },
+      "allowDegraded": { "type": "boolean" },
+      "logPath": { "type": "string" },
+      "recallMinChars": { "type": "integer", "minimum": 1 },
+      "recallMaxChars": { "type": "integer", "minimum": 100 },
+      "triggers": { "type": "object" },
+      "cache": { "type": "object" },
+      "injection": { "type": "object" },
+      "backends": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["type"],
+          "properties": {
+            "type": { "type": "string", "enum": ["http", "script"] }
+          },
+          "additionalProperties": true
+        }
+      }
+    }
+  }
+}
