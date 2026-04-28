@@ -21,8 +21,9 @@ function providerFor(ctx = {}, event = {}) {
 
 function eligible(ctx, event, cfg) {
   const agentId = ctx?.agentId || event?.agentId || event?.metadata?.agentId;
+  const trigger = ctx?.trigger || event?.trigger || event?.metadata?.trigger;
   if (cfg.agents.length && (!agentId || !cfg.agents.includes(agentId))) return { ok: false, reason: "agent" };
-  if (ctx?.trigger && ctx.trigger !== "user") return { ok: false, reason: "trigger" };
+  if (trigger && trigger !== "user") return { ok: false, reason: "trigger" };
   const chatType = deriveChatType(ctx, event);
   if (!chatType || !cfg.allowedChatTypes.includes(chatType)) return { ok: false, reason: "chat_type", chatType };
   return { ok: true, agentId, chatType, provider: providerFor(ctx, event), sessionKey: sessionKeyFor(ctx, event) };
@@ -98,7 +99,7 @@ export function createBeforePromptBuildHandler(runtime) {
     if (!ok.ok) return undefined;
 
     const original = event.prompt || event.text || event.message || "";
-    if (!original || hasActiveMemoryMarker(original) || isSyntheticOrInternalEnvelope(original)) return undefined;
+    if (!original || hasActiveMemoryMarker(original, cfg.injection.tag) || isSyntheticOrInternalEnvelope(original)) return undefined;
     const text = stripEnvelope(original).slice(0, cfg.recallMaxChars);
     if (text.length < cfg.recallMinChars || isInternalPrompt(text, triggers.getSnapshot())) return undefined;
 

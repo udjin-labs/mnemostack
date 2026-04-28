@@ -1,10 +1,14 @@
 /**
  * Detect whether prompt text already contains an active memory block.
  * @param {unknown} text Prompt text.
+ * @param {string} [tag="active_memory"] Configured injection tag.
  * @returns {boolean} True when an active memory marker is present.
  */
-export function hasActiveMemoryMarker(text) {
-  return /<active_memory(?:_plugin)?>[\s\S]*?<\/active_memory(?:_plugin)?>/i.test(String(text || ""));
+export function hasActiveMemoryMarker(text, tag = "active_memory") {
+  const value = String(text || "");
+  const tags = new Set(["active_memory", "active_memory_plugin"]);
+  if (typeof tag === "string" && /^[a-zA-Z][a-zA-Z0-9_-]*$/.test(tag)) tags.add(tag);
+  return [...tags].some((name) => new RegExp(`<${name}>[\\s\\S]*?<\\/${name}>`, "i").test(value));
 }
 
 function formatSources(sources = []) {

@@ -462,6 +462,43 @@ test("hot reload keeps last-known-good trigger snapshot on malformed config", as
   await runtime.dispose();
 });
 
+test("handler respects event triggers and custom injection markers", async () => {
+  let hits = 0;
+  const server = http.createServer((req, res) => {
+    hits += 1;
+    req.resume();
+    req.on("end", () => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ status: "ok", answer: "custom marker answer", confidence: 0.9 }));
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "auto-recall-custom-marker-"));
+  const triggersPath = path.join(tmp, "triggers.json");
+  await fs.writeFile(triggersPath, JSON.stringify({ named_entities: ["MarkerEntity"] }));
+  const runtime = createRuntime({
+    injection: { tag: "mnemostack_memory" },
+    triggers: { customPath: triggersPath },
+    backends: [{ type: "http", url: `http://127.0.0.1:${server.address().port}` }]
+  }, { info() {}, warn() {} });
+  await runtime.triggers.reload("test");
+  const handler = createBeforePromptBuildHandler(runtime);
+  const ctx = { chatType: "direct", sessionKey: "agent:main:telegram:direct:1" };
+
+  try {
+    assert.equal(await handler({ prompt: "MarkerEntity", trigger: "assistant" }, ctx), undefined);
+    assert.equal(await handler({ prompt: "<mnemostack_memory>existing</mnemostack_memory>\nMarkerEntity", trigger: "user" }, ctx), undefined);
+    const result = await handler({ prompt: "MarkerEntity", trigger: "user" }, ctx);
+    assert.match(result.prependContext, /<mnemostack_memory>/);
+    assert.equal(hits, 1);
+  } finally {
+    await runtime.dispose();
+    server.close();
+  }
+});
+
 test("plugin entry registers and helpers work", () => {
   assert.equal(typeof plugin.register, "function");
   const handlers = [];
@@ -481,5 +518,6 @@ test("plugin entry registers and helpers work", () => {
   assert.equal(deriveChatType({ messageProvider: "telegram", sessionKey: "agent:main:telegram:group:-100" }), "group");
   assert.equal(deriveChatType({ messageProvider: "webchat", sessionKey: "agent:main:webchat:1" }), null);
   assert.equal(hasActiveMemoryMarker("<active_memory>x</active_memory>"), true);
+  assert.equal(hasActiveMemoryMarker("<mnemostack_memory>x</mnemostack_memory>", "mnemostack_memory"), true);
   assert.match(buildInjection({ answer: "abc", confidence: 0.5, sources: ["s"] }), /abc/);
 });
