@@ -101,14 +101,15 @@ export function createBeforePromptBuildHandler(runtime) {
     const original = event.prompt || event.text || event.message || "";
     if (!original || hasActiveMemoryMarker(original, cfg.injection.tag) || isSyntheticOrInternalEnvelope(original)) return undefined;
     const text = stripEnvelope(original).slice(0, cfg.recallMaxChars);
-    if (text.length < cfg.recallMinChars || isInternalPrompt(text, triggers.getSnapshot())) return undefined;
-
+    await triggers.ready;
+    if (runtime.disposed || runtime.signal?.aborted) return undefined;
     const triggerSnapshot = triggers.getSnapshot();
+    if (text.length < cfg.recallMinChars || isInternalPrompt(text, triggerSnapshot)) return undefined;
+
     const trigger = getRecallTrigger(text, triggerSnapshot);
     if (!trigger.match) return undefined;
 
-    const parentSignal = ctx?.signal || event?.signal;
-    const { signal, cleanup } = timeoutController([runtime.signal, parentSignal], cfg.timeoutMs);
+    const { signal, cleanup } = timeoutController([runtime.signal, ctx?.signal, event?.signal], cfg.timeoutMs);
     try {
       const request = {
         text,

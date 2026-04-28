@@ -392,6 +392,40 @@ test("runtime dispose aborts in-flight work and makes old handlers inert", async
   assert.equal(await handler({ prompt: "DisposeEntity" }, { trigger: "user", chatType: "direct", sessionKey: "agent:main:telegram:direct:1" }), undefined);
 });
 
+test("handler waits for startup trigger reload and observes event aborts", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "auto-recall-ready-abort-"));
+  const triggersPath = path.join(tmp, "triggers.json");
+  await fs.writeFile(triggersPath, JSON.stringify({ named_entities: ["ReadyEntity"] }));
+  const runtime = createRuntime({ triggers: { customPath: triggersPath }, backends: [{ type: "http", url: "http://127.0.0.1:1" }] }, { info() {}, warn() {} });
+  const eventAbort = new AbortController();
+  let abortReason;
+  runtime.backends = [{
+    name: "slow",
+    kind: "test",
+    configHash: "slow",
+    query(request) {
+      return new Promise((resolve) => {
+        request.signal.addEventListener("abort", () => {
+          abortReason = request.signal.reason?.message || String(request.signal.reason);
+          resolve({ status: "error", confidence: 0, diagnostics: { reason: "aborted" }, cache: { cacheable: false } });
+        }, { once: true });
+      });
+    }
+  }];
+  const handler = createBeforePromptBuildHandler(runtime);
+  const pending = handler(
+    { prompt: "ReadyEntity", signal: eventAbort.signal },
+    { trigger: "user", chatType: "direct", sessionKey: "agent:main:telegram:direct:1", signal: new AbortController().signal }
+  );
+  await runtime.triggers.ready;
+  await new Promise((resolve) => setImmediate(resolve));
+  eventAbort.abort(new Error("event_cancelled"));
+
+  assert.equal(await pending, undefined);
+  assert.equal(abortReason, "event_cancelled");
+  await runtime.dispose();
+});
+
 test("backend chain continues after not_found and low confidence cache", async () => {
   let firstHits = 0;
   let secondHits = 0;

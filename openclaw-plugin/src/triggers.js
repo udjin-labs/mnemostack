@@ -171,7 +171,7 @@ export function getRecallTrigger(text, snapshot = defaultTriggerSnapshot()) {
 /**
  * Create a hot-reloadable trigger snapshot manager.
  * @param {{customPath?: string, reloadSignal?: string|false, logger?: {info?: Function, warn?: Function}}} [options={}] Trigger manager options.
- * @returns {{getSnapshot: Function, reload: Function, dispose: Function}} Trigger manager.
+ * @returns {{getSnapshot: Function, reload: Function, ready: Promise<object>, dispose: Function}} Trigger manager.
  */
 export function createTriggerManager({ customPath, reloadSignal = "SIGUSR2", logger } = {}) {
   let snapshot = defaultTriggerSnapshot();
@@ -204,11 +204,12 @@ export function createTriggerManager({ customPath, reloadSignal = "SIGUSR2", log
       logger?.warn?.({ event: "triggers_signal_failed", signal: signalName, error: error?.message || String(error) });
     }
   }
-  if (customPath) void reload("startup");
+  const ready = customPath ? reload("startup") : Promise.resolve(snapshot);
 
   return {
     getSnapshot: () => snapshot,
     reload,
+    ready,
     dispose() {
       disposed = true;
       if (signalRegistered && typeof process?.off === "function") process.off(signalName, onSignal);
