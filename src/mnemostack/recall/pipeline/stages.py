@@ -72,8 +72,9 @@ class ClassifyQuery(Stage):
 
 _EXACT_PATTERNS = [
     re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b"),          # IP address
+    re.compile(r"\b\d{4,5}\b"),                            # port / numeric code
     re.compile(r"\b\d{4}\.\d+\.\d+\b"),                    # version like 2026.4.12
-    re.compile(r"\b[a-z]+[-_]\d+[a-z0-9-]*\b"),             # IDs/codes
+    re.compile(r"\b[a-z]+[-_]?\d+[a-z0-9-]*\b"),            # IDs/codes
 ]
 _EXACT_MARKERS = {"ip", "порт", "port", "версия", "version", "id", "uuid", "токен", "api"}
 
