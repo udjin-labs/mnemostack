@@ -597,7 +597,7 @@ cd openclaw-plugin
 npm test
 ```
 
-The plugin defaults to `http://127.0.0.1:18793/recall-answer`, supports English/Russian trigger defaults with extensible language-agnostic trigger lists, and can fall back to a Script backend such as `recall-selfeval.sh` when you are not running the daemon.
+The plugin defaults to `http://127.0.0.1:18793/answer`, supports English/Russian trigger defaults with extensible language-agnostic trigger lists, and can fall back to a Script backend such as `recall-selfeval.sh` when you are not running the daemon.
 
 ## Design
 

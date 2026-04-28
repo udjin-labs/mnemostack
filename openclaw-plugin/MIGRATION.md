@@ -11,7 +11,7 @@ This companion plugin is based on the universal Phase 1 extraction of `auto-reca
 
 ## Companion defaults
 
-The default HTTP backend points at `http://127.0.0.1:18793/recall-answer`. Use the backend chain examples below to override that endpoint or add a script fallback.
+The default HTTP backend points at `http://127.0.0.1:18793/answer`. Use the backend chain examples below to override that endpoint or add a script fallback.
 
 ## Map old config to new config
 
@@ -34,7 +34,7 @@ New HTTP backend:
     {
       "type": "http",
       "name": "mnemostack",
-      "url": "http://127.0.0.1:18793/recall-answer",
+      "url": "http://127.0.0.1:18793/answer",
       "timeoutMs": 9000,
       "responseMapping": {
         "answerPath": "answer",
@@ -79,7 +79,7 @@ To preserve daemon-then-script fallback:
 ```json
 {
   "backends": [
-    { "type": "http", "name": "mnemostack", "url": "http://127.0.0.1:18793/recall-answer" },
+    { "type": "http", "name": "mnemostack", "url": "http://127.0.0.1:18793/answer" },
     { "type": "script", "name": "selfeval", "command": "/path/to/recall-selfeval.sh", "args": ["--answer"], "queryMode": "stdin", "protocol": "text" }
   ]
 }

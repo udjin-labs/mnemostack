@@ -44,6 +44,7 @@ test("stripEnvelope handles metadata and queued wrappers without dropping real d
   assert.equal(stripEnvelope('[Queued messages while agent was busy]\n\n---\nQueued #1\nactual question'), "actual question");
   assert.equal(stripEnvelope('[media attached: /tmp/a.png]\ncaption'), "caption");
   assert.equal(stripEnvelope('[Sat 2026-04-25 16:01 UTC] keep this\nbody'), '[Sat 2026-04-25 16:01 UTC] keep this\nbody');
+  assert.equal(stripEnvelope('Sender status update\nwhat did we decide?'), 'Sender status update\nwhat did we decide?');
 });
 
 test("config and backend numeric limits normalize malformed nested values", () => {
@@ -53,7 +54,7 @@ test("config and backend numeric limits normalize malformed nested values", () =
   assert.equal(cfg.triggers.reloadSignal, false);
   assert.equal(cfg.timeoutMs, 60000);
   assert.equal(cfg.backends.length, 1);
-  assert.equal(cfg.backends[0].url, "http://127.0.0.1:18793/recall-answer");
+  assert.equal(cfg.backends[0].url, "http://127.0.0.1:18793/answer");
 
   const httpBackend = new HttpBackend({ url: "http://127.0.0.1:1", headers: "bad", timeoutMs: -1, maxResponseBytes: 12, bodyTemplate: "bad", responseMapping: "bad" });
   assert.equal(httpBackend.config.timeoutMs, 100);
@@ -101,6 +102,7 @@ test("HttpBackend maps JSON, bounds malformed responses, and plugin integrates w
     req.on("data", (chunk) => { body += chunk; });
     req.on("end", () => {
       assert.match(body, /MockEntity/);
+      assert.equal(JSON.parse(body).limit, 5);
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ answer: "mock answer", confidence: 0.82, sources: [{ title: "doc", score: 0.9 }] }));
     });

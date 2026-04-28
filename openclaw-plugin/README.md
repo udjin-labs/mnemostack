@@ -7,7 +7,7 @@ mnemostack provides the durable recall backend: vector retrieval, BM25/exact-tok
 ## Quick start
 
 1. Install and configure mnemostack.
-2. Start the mnemostack HTTP daemon/server with its default recall-answer endpoint:
+2. Start the mnemostack HTTP daemon/server with its default answer endpoint:
 
    ```bash
    mnemostack serve --host 127.0.0.1 --port 18793
@@ -23,7 +23,7 @@ With the daemon on the default port, no plugin configuration is required. The bu
 {
   "type": "http",
   "name": "mnemostack-daemon",
-  "url": "http://127.0.0.1:18793/recall-answer",
+  "url": "http://127.0.0.1:18793/answer",
   "method": "POST",
   "requestMode": "default",
   "timeoutMs": 7000,
@@ -44,12 +44,13 @@ It does **not** store memories itself. mnemostack owns ingestion, storage, retri
 
 ## HTTP backend contract
 
-By default, the plugin POSTs JSON to `http://127.0.0.1:18793/recall-answer`:
+By default, the plugin POSTs JSON to `http://127.0.0.1:18793/answer`:
 
 ```json
 {
   "query": "user text",
   "normalizedQuery": "user text normalized for cache",
+  "limit": 5,
   "maxResults": 5,
   "minConfidence": 0.4,
   "trigger": { "patternId": "memory_keyword", "matchedText": "remember" },

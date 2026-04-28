@@ -21,7 +21,7 @@ export const DEFAULT_CONFIG = Object.freeze({
     {
       type: "http",
       name: "mnemostack-daemon",
-      url: "http://127.0.0.1:18793/recall-answer",
+      url: "http://127.0.0.1:18793/answer",
       method: "POST",
       requestMode: "default",
       timeoutMs: 7000,

@@ -7,6 +7,12 @@ export function isEnvelopeDateLine(line) {
   return /^\[(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC\]/i.test(String(line || "").trim());
 }
 
+function isMetadataHeader(line, nextLine) {
+  if (!String(nextLine || "").trim().startsWith("```json")) return false;
+  return /^(Conversation info|Sender\b|Replied message|Forwarded message)/i.test(line)
+    || /^[A-Za-z][\w -]{0,80}:\s*(?:\(untrusted metadata\))?$/i.test(line);
+}
+
 /**
  * Remove transport/runtime metadata envelopes before trigger matching.
  * @param {unknown} text Raw event text.
@@ -47,8 +53,7 @@ export function stripEnvelope(text) {
       continue;
     }
 
-    if (/^(Conversation info|Sender\b|Replied message|Forwarded message)/i.test(trimmed)
-      || (/^[A-Za-z][\w -]{0,80}:\s*(?:\(untrusted metadata\))?$/i.test(trimmed) && lines[i + 1]?.trim().startsWith("```json"))) {
+    if (isMetadataHeader(trimmed, lines[i + 1])) {
       state = "metadata_header";
       continue;
     }

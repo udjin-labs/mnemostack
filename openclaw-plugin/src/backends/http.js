@@ -98,6 +98,7 @@ function buildBody(mode, request, template = {}) {
     ...template.static,
     query: request.text,
     normalizedQuery: request.normalizedText,
+    limit: request.maxResults,
     maxResults: request.maxResults,
     minConfidence: request.minConfidence,
     trigger: request.trigger,
