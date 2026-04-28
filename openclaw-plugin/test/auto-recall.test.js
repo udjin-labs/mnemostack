@@ -78,6 +78,8 @@ test("cache keys include backend config hash and in-flight cleanup runs on rejec
     cacheKeyFor({ backend: a, text: "same", session: { sessionKey: "chat-b" } })
   );
   assert.equal(normalizeCacheText("  WHAT   was? "), "what was?");
+  assert.notEqual(normalizeCacheText("sender what did we decide about launch?"), normalizeCacheText("sender what did we decide about budget?"));
+  assert.equal(normalizeCacheText('Sender (untrusted metadata):\n```json\n{"id":1}\n```\nwhat did we decide?'), "what did we decide?");
 
   const cache = new RecallCache({ okTtlMs: 5, notFoundTtlMs: 50, maxEntries: 1 });
   cache.set("a", { status: "ok" }, cache.ttlFor("ok"));
@@ -552,6 +554,7 @@ test("plugin entry registers and helpers work", () => {
   cleanup();
   assert.equal(handlers.length, 0);
   assert.equal(deriveChatType({ messageProvider: "telegram", sessionKey: "agent:main:telegram:group:-100" }), "group");
+  assert.equal(deriveChatType({}, { metadata: { chatType: "direct" } }), "direct");
   assert.equal(deriveChatType({ messageProvider: "webchat", sessionKey: "agent:main:webchat:1" }), null);
   assert.equal(hasActiveMemoryMarker("<active_memory>x</active_memory>"), true);
   assert.equal(hasActiveMemoryMarker("<mnemostack_memory>x</mnemostack_memory>", "mnemostack_memory"), true);

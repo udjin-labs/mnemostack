@@ -121,6 +121,7 @@ export function createBackends(config, logger) {
 export function deriveChatType(ctx = {}, event = {}) {
   if (typeof ctx.chatType === "string") return ctx.chatType;
   if (typeof event.chatType === "string") return event.chatType;
+  if (typeof event?.metadata?.chatType === "string") return event.metadata.chatType;
   const key = ctx.sessionKey || event.sessionKey || event?.metadata?.sessionKey || "";
   if (/:group:/i.test(key)) return "group";
   if (/:direct:/i.test(key)) return "direct";

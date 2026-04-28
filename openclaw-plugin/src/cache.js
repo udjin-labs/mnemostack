@@ -38,9 +38,9 @@ export function configHash(value) {
 export function normalizeCacheText(text) {
   return String(text || "")
     .toLowerCase()
+    .replace(/^\s*(?:conversation info|sender|replied message|forwarded message)\b[^\n:]*:?\s*\n\s*```json[\s\S]*?```\s*/gim, " ")
     .replace(/```json[\s\S]*?```/gi, " ")
     .replace(/\[(mon|tue|wed|thu|fri|sat|sun) \d{4}-\d{2}-\d{2} \d{2}:\d{2} utc\]/gi, " ")
-    .replace(/\b(?:conversation info|sender|replied message|forwarded message)\b.*$/gim, " ")
     .replace(/[{}[\]",:]+/g, " ")
     .replace(/\s+/g, " ")
     .trim()
