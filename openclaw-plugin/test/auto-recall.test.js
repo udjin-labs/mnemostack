@@ -52,6 +52,8 @@ test("config and backend numeric limits normalize malformed nested values", () =
   assert.equal(cfg.injection.maxLength, 2000);
   assert.equal(cfg.triggers.reloadSignal, false);
   assert.equal(cfg.timeoutMs, 60000);
+  assert.equal(cfg.backends.length, 1);
+  assert.equal(cfg.backends[0].url, "http://127.0.0.1:18793/recall-answer");
 
   const httpBackend = new HttpBackend({ url: "http://127.0.0.1:1", headers: "bad", timeoutMs: -1, maxResponseBytes: 12, bodyTemplate: "bad", responseMapping: "bad" });
   assert.equal(httpBackend.config.timeoutMs, 100);
@@ -208,6 +210,7 @@ test("ScriptBackend uses argv/stdin protocols and does not invoke a shell", asyn
   assert.equal(parsed.status, "ok");
   assert.equal(parsed.sources[0].title, "one");
   assert.equal(parseScriptOutput("ANSWER:\nCONFIDENCE: .", "text").status, "error");
+  assert.equal(parseScriptOutput(JSON.stringify({ status: "surprise", answer: "do not inject", confidence: 1 }), "json").status, "error");
 
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "auto-recall-script-"));
   const script = path.join(tmp, "recall.mjs");

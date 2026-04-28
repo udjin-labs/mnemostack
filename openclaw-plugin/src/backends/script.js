@@ -16,6 +16,10 @@ function int(value, fallback, min = 0, max = Number.MAX_SAFE_INTEGER) {
   return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.trunc(n))) : fallback;
 }
 
+function normalizeStatus(value) {
+  return ["ok", "not_found", "degraded", "error"].includes(value) ? value : "error";
+}
+
 /**
  * Parse stdout from a script backend into the normalized recall result shape.
  * @param {unknown} stdout Script stdout.
@@ -28,8 +32,9 @@ export function parseScriptOutput(stdout, protocol = "json") {
   if (protocol === "json") {
     try {
       const obj = JSON.parse(text);
+      const status = obj.status || (obj.degraded ? "degraded" : (obj.answer ? "ok" : "not_found"));
       return {
-        status: obj.status || (obj.degraded ? "degraded" : (obj.answer ? "ok" : "not_found")),
+        status: normalizeStatus(status),
         answer: obj.answer == null ? undefined : String(obj.answer),
         confidence: Number.isFinite(Number(obj.confidence)) ? Number(obj.confidence) : (obj.answer ? 1 : 0),
         sources: toSources(obj.sources),

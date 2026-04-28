@@ -87,7 +87,7 @@ export function normalizeConfig(raw = {}) {
       tag: typeof injection.tag === "string" && /^[a-zA-Z][a-zA-Z0-9_-]*$/.test(injection.tag) ? injection.tag : DEFAULT_CONFIG.injection.tag,
       includeSources: injection.includeSources !== false
     },
-    backends: Array.isArray(c.backends) ? c.backends : []
+    backends: Array.isArray(c.backends) ? c.backends : DEFAULT_CONFIG.backends
   };
 }
 
