@@ -34,12 +34,13 @@ def test_pair_chunker_window_3():
 
 def test_pair_chunker_metadata_passthrough():
     msgs = ["m1", "m2", "m3"]
-    meta = [{"speaker": "A"}, {"speaker": "B"}, {"speaker": "A"}]
+    meta = [{"speaker": "A"}, {"speaker": "B"}, {"speaker": "C"}]
     chunks = MessagePairChunker().chunk_messages(msgs, metadata=meta)
-    # each chunk should carry speaker of its starting message
     for c in chunks:
         assert "speaker" in c.metadata
     pair_chunks = [c for c in chunks if "\n" in c.text]
+    assert pair_chunks[0].metadata["speaker"] == "B"
+    assert pair_chunks[1].metadata["speaker"] == "C"
     for c in pair_chunks:
         assert c.metadata["chunk_window"] == 2
 
@@ -64,6 +65,11 @@ def test_pair_chunker_from_text():
     assert len(chunks) == 5
 
 
+def test_pair_chunker_window_size_1_solo_only():
+    chunks = MessagePairChunker(window_size=1).chunk_messages(["A", "B"])
+    assert [c.text for c in chunks] == ["A", "B"]
+
+
 def test_pair_chunker_invalid_window():
     with pytest.raises(ValueError):
-        MessagePairChunker(window=1)
+        MessagePairChunker(window=0)

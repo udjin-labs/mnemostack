@@ -136,3 +136,43 @@ def test_ingest_one_shortcut():
     ing = Ingestor(embedding=emb, vector_store=store)
     stats = ing.ingest_one(IngestItem(text="solo", source="s.md"))
     assert stats.upserted == 1
+
+
+def test_ingest_window_size_1_matches_current_behavior():
+    emb = _FakeEmbedding()
+    baseline_store = _FakeStore()
+    window_store = _FakeStore()
+    items = [
+        IngestItem(text="a", source="chat", offset=0),
+        IngestItem(text="b", source="chat", offset=1),
+        IngestItem(text="c", source="chat", offset=2),
+    ]
+
+    baseline = Ingestor(embedding=emb, vector_store=baseline_store, batch_size=10)
+    windowed = Ingestor(embedding=emb, vector_store=window_store, batch_size=10, window_size=1)
+
+    assert baseline.ingest(items).upserted == 3
+    assert windowed.ingest(items).upserted == 3
+    assert baseline_store.upserts == window_store.upserts
+
+
+def test_ingest_sliding_window_adds_context_chunks_with_middle_metadata():
+    emb = _FakeEmbedding()
+    store = _FakeStore()
+    ing = Ingestor(embedding=emb, vector_store=store, batch_size=10, window_size=3)
+    items = [
+        IngestItem(text="A", source="chat", offset=0, metadata={"speaker": "s0"}),
+        IngestItem(text="B", source="chat", offset=1, metadata={"speaker": "s1"}),
+        IngestItem(text="C", source="chat", offset=2, metadata={"speaker": "s2"}),
+        IngestItem(text="D", source="chat", offset=3, metadata={"speaker": "s3"}),
+        IngestItem(text="E", source="chat", offset=4, metadata={"speaker": "s4"}),
+    ]
+
+    stats = ing.ingest(items)
+
+    assert stats.upserted == 8  # 5 solos + 3 windows
+    payloads = [payload for _id, _vec, payload in store.upserts]
+    window_payloads = [p for p in payloads if p.get("chunk_window") == 3]
+    assert [p["text"] for p in window_payloads] == ["A\nB\nC", "B\nC\nD", "C\nD\nE"]
+    assert [p["speaker"] for p in window_payloads] == ["s1", "s2", "s3"]
+    assert [p["offset"] for p in window_payloads] == [1, 2, 3]
