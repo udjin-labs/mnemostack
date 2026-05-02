@@ -8,7 +8,16 @@ slow and can leave async test runners waiting on unrelated imports.
 
 __version__ = "0.2.1"
 
-__all__ = ["Config", "IngestItem", "IngestStats", "Ingestor", "stable_chunk_id"]
+__all__ = [
+    "Config",
+    "IngestItem",
+    "IngestStats",
+    "Ingestor",
+    "stable_chunk_id",
+    "SynthesisFact",
+    "SynthesisResult",
+    "synthesize",
+]
 
 
 def __getattr__(name: str):
@@ -24,5 +33,13 @@ def __getattr__(name: str):
             "IngestStats": IngestStats,
             "Ingestor": Ingestor,
             "stable_chunk_id": stable_chunk_id,
+        }[name]
+    if name in {"SynthesisFact", "SynthesisResult", "synthesize"}:
+        from .synthesis import SynthesisFact, SynthesisResult, synthesize
+
+        return {
+            "SynthesisFact": SynthesisFact,
+            "SynthesisResult": SynthesisResult,
+            "synthesize": synthesize,
         }[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
