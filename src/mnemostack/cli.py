@@ -28,6 +28,7 @@ from .recall import (
     VectorRetriever,
     build_bm25_docs,
 )
+from .synthesis import synthesize
 from .vector import VectorStore
 
 # -- Progressive tiers --------------------------------------------------------
@@ -155,6 +156,48 @@ def cmd_search(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_synthesize(args: argparse.Namespace) -> int:
+    sources = list(args.source) if args.source else None
+    source_filter = _normalize_source_filter(sources)
+    provider = None
+    store = None
+    if _source_enabled_for_cli("vector", source_filter) or _source_enabled_for_cli(
+        "temporal", source_filter
+    ):
+        provider = get_provider(args.provider, **model_kwargs(_embedding_model(args)))
+        store = VectorStore(
+            collection=args.collection,
+            dimension=provider.dimension,
+            host=args.qdrant,
+        )
+        if not store.collection_exists():
+            print(
+                f"error: collection '{args.collection}' does not exist. "
+                f"Run `mnemostack index` first.",
+                file=sys.stderr,
+            )
+            return 2
+
+    recaller = _build_recaller(args, provider, store, source_filter=source_filter)
+    llm = None
+    if args.llm_summarize:
+        llm = get_llm(args.llm, **model_kwargs(_llm_model(args)))
+    result = synthesize(
+        args.entity,
+        sources=sources,
+        format=args.format,
+        max_results=args.limit,
+        llm_summarize=args.llm_summarize,
+        recaller=recaller,
+        llm=llm,
+    )
+    if args.format == "json":
+        print(json.dumps(result.to_json(), ensure_ascii=False, indent=2))
+    else:
+        print(result.markdown(), end="")
+    return 0
+
+
 def cmd_answer(args: argparse.Namespace) -> int:
     profile = _apply_tier(args)
     provider = get_provider(args.provider, **model_kwargs(_embedding_model(args)))
@@ -241,17 +284,41 @@ def _stable_chunk_id(source: str, offset: int, text: str) -> str:
     return str(uuid.UUID(digest[:32]))
 
 
-def _build_recaller(args: argparse.Namespace, provider, store) -> Recaller:
+def _normalize_source_filter(sources: list[str] | None) -> set[str] | None:
+    if sources is None:
+        return None
+    aliases = {"graph": "memgraph"}
+    return {aliases.get(source.lower(), source.lower()) for source in sources}
+
+
+def _source_enabled_for_cli(name: str, source_filter: set[str] | None) -> bool:
+    return source_filter is None or name in source_filter
+
+
+def _build_recaller(
+    args: argparse.Namespace,
+    provider,
+    store,
+    source_filter: set[str] | None = None,
+) -> Recaller:
     """Build the same retriever-mode Recaller used by the service surfaces."""
-    bm25_docs = build_bm25_docs(list(getattr(args, "bm25_path", []) or []))
-    retrievers = [
-        VectorRetriever(embedding=provider, vector_store=store),
-        BM25Retriever(docs=bm25_docs) if bm25_docs else None,
-        MemgraphRetriever(uri=getattr(args, "memgraph_uri", None))
-        if getattr(args, "memgraph_uri", None)
-        else None,
-        TemporalRetriever(embedding=provider, vector_store=store),
-    ]
+    retrievers = []
+    if provider is not None and store is not None and _source_enabled_for_cli(
+        "vector", source_filter
+    ):
+        retrievers.append(VectorRetriever(embedding=provider, vector_store=store))
+    if _source_enabled_for_cli("bm25", source_filter):
+        bm25_docs = build_bm25_docs(list(getattr(args, "bm25_path", []) or []))
+        if bm25_docs:
+            retrievers.append(BM25Retriever(docs=bm25_docs))
+    if _source_enabled_for_cli("memgraph", source_filter) and getattr(
+        args, "memgraph_uri", None
+    ):
+        retrievers.append(MemgraphRetriever(uri=getattr(args, "memgraph_uri", None)))
+    if provider is not None and store is not None and _source_enabled_for_cli(
+        "temporal", source_filter
+    ):
+        retrievers.append(TemporalRetriever(embedding=provider, vector_store=store))
     return Recaller(retrievers=[r for r in retrievers if r is not None])
 
 
@@ -421,6 +488,51 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_search.set_defaults(func=cmd_search)
+
+    p_synthesize = sub.add_parser(
+        "synthesize",
+        parents=[common],
+        help="Collect all known information about an entity",
+    )
+    p_synthesize.add_argument("entity", help="Entity name, handle, or identifier")
+    p_synthesize.add_argument("--limit", type=int, default=50, help="Max facts to include")
+    p_synthesize.add_argument(
+        "--source",
+        action="append",
+        choices=["vector", "bm25", "graph", "memgraph", "temporal"],
+        help="Retriever source to use (can be given multiple times; default: all available)",
+    )
+    p_synthesize.add_argument(
+        "--bm25-path",
+        action="append",
+        default=list(cfg.recall.bm25_paths),
+        help="Directory/file to index for the BM25 retriever (can be given multiple times)",
+    )
+    p_synthesize.add_argument(
+        "--memgraph-uri",
+        default=cfg.graph.uri,
+        help="Memgraph URI to enable graph synthesis (e.g. bolt://localhost:7687)",
+    )
+    p_synthesize.add_argument(
+        "--format",
+        choices=["markdown", "json"],
+        default="markdown",
+        help="Output format",
+    )
+    p_synthesize.add_argument(
+        "--llm-summarize",
+        action="store_true",
+        help="Run an optional LLM pass to produce a coherent summary",
+    )
+    p_synthesize.add_argument(
+        "--llm", default=cfg.llm.provider, choices=list_llms(), help="LLM provider for summaries"
+    )
+    p_synthesize.add_argument(
+        "--llm-model",
+        default=cfg.llm.model,
+        help="LLM model override (default: provider default or config value)",
+    )
+    p_synthesize.set_defaults(func=cmd_synthesize)
 
     p_answer = sub.add_parser(
         "answer", parents=[common], help="Synthesize concise answer from memories"
