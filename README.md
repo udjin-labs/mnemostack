@@ -116,11 +116,13 @@ We are not a replacement for your agent framework and not a full platform runtim
 - ⚡ **Async-friendly** — `Recaller.recall_async` dispatches retrievers in parallel; five concurrent HTTP recalls finish in roughly one single-recall wall-clock.
 - 🌍 **Unicode-aware entity resolution** — Memgraph retriever probes by `telegram_id`, handle, and precomputed `name_lower` so non-ASCII names match correctly (Memgraph's `toLower()` lower-cases ASCII only).
 - 📥 **Streaming `Ingestor` API** — batched, idempotent, LRU-cached ingest from any Python code. Same `(source, offset, text)` → same deterministic UUID-shaped content id, so re-runs are no-ops.
+- 📝 **Document wrappers** — optional markdown wrapper notes generated during ingest, with frontmatter, source links, tags, and Qdrant point IDs for navigation from a notes app or graph.
 - 🌐 **HTTP API** (optional) — `pip install 'mnemostack[server]'` gives you `/recall`, `/answer`, `/health`, `/docs`, plus `/metrics` in Prometheus text format. See the HTTP server section below.
 - 🔌 **Pluggable embeddings** — Gemini, Ollama, or HuggingFace (local GPU), via provider registry
 - 🤖 **Pluggable LLM** — Gemini Flash / Ollama for answer generation and reranking
 - 📚 **Temporal knowledge graph** — facts have `valid_from`/`valid_until`, query point-in-time state; graph resurrection stage recovers evicted-but-relevant memories.
 - 💬 **Answer mode** — inference layer synthesizes concise factual answers with source citations and confidence
+- 🧩 **Entity synthesis** — `synthesize(entity=...)` gathers everything known about one person/project/topic across vector, BM25, graph, and temporal sources, with related entities and optional LLM summarization.
 - 📏 **Progressive Tiers API** — `search --tier {1,2,3}` and `answer --tier {1,2,3}` bound output size (~50 / ~200 / ~500 tokens) so agents can pay only for the detail they actually need. Omit `--tier` for unchanged full output.
 - ✂️ **Chunkers** — plain, fixed-size, and `MessagePairChunker` for chat transcripts (keeps user↔assistant pairs together).
 - 🔎 **Query expansion** — optional `QueryExpander` rewrites short queries for better recall before fusion.
@@ -310,6 +312,57 @@ for item in your_firehose():
     }))
 ```
 
+#### Document wrappers
+
+If your canonical memory lives in markdown, pass `wrapper_dir` to `Ingestor` to create navigational wrapper notes while indexing. Each wrapper points back to the original source and the Qdrant point id, so a notes app, static site, or graph sync can link from human-readable files to the indexed chunks.
+
+```python
+from mnemostack import Ingestor, IngestItem
+
+ing = Ingestor(
+    embedding=emb,
+    vector_store=store,
+    wrapper_dir="memory/files",
+)
+
+stats = ing.ingest([
+    IngestItem(
+        text="Project Alpha moved auth rollout to May.",
+        source="notes/project-alpha.md",
+        tags=["project-alpha", "auth"],
+    ),
+])
+print(stats.wrappers_created, stats.wrappers_updated)
+```
+
+The generated file is intentionally plain markdown:
+
+```markdown
+---
+title: project-alpha
+original_path: notes/project-alpha.md
+indexed_date: 2026-05-02T09:00:00+00:00
+tags: [project-alpha, auth]
+qdrant_point_id: 6a5f...
+---
+
+# project-alpha
+
+**Original path:** `notes/project-alpha.md`
+
+**Indexed date:** 2026-05-02T09:00:00+00:00
+
+**Tags:** project-alpha, auth
+
+**Qdrant point ID:** `6a5f...`
+
+## Summary
+
+Project Alpha moved auth rollout to May.
+```
+
+If you also pass a graph store to the `Ingestor`, tags can be synced as `File` → `Tag` edges, giving Memgraph another path for navigation and entity lookup.
+
 ### Python API
 
 ```python
@@ -334,6 +387,36 @@ gen = AnswerGenerator(llm=get_llm("gemini"))
 answer = gen.generate("what did we decide", results)
 print(answer.text, answer.confidence, answer.sources)
 ```
+
+#### Entity synthesis
+
+Use `synthesize()` when the question is entity-centric: "collect everything we know about Project Alpha", not "answer this one query". It queries the available backends, deduplicates evidence, builds a timeline when timestamps are present, and returns related entities discovered in metadata or graph results. Missing sources are skipped, so a graph outage or absent BM25 corpus degrades the result instead of failing the whole call.
+
+```python
+from mnemostack import synthesize
+
+profile = synthesize(
+    entity="Project Alpha",
+    sources=["vector", "bm25", "graph", "temporal"],
+    format="markdown",
+    recaller=recaller,
+    llm_summarize=True,  # optional: requires a configured/pass-through LLM
+    llm=get_llm("gemini"),
+)
+
+print(profile.markdown())
+```
+
+From the CLI:
+
+```bash
+mnemostack synthesize "Project Alpha" --provider gemini --collection my-memory
+
+# Optional coherent summary pass
+mnemostack synthesize "Project Alpha" --llm-summarize --llm gemini
+```
+
+Markdown output includes facts with source/score metadata, related entities, and a timeline section when time metadata is available. Use `--format json` / `format="json"` if a downstream agent or service needs structured data.
 
 #### Full stack: 4-source retrieval + 8-stage pipeline + reranker
 
@@ -632,6 +715,8 @@ Any retriever can fail (Memgraph down, Qdrant unreachable, BM25 corpus empty). `
 - [x] Async `Recaller.recall_async` and parallel retriever dispatch (proven: 5 concurrent HTTP recalls complete in ~1x single-request wall-clock)
 - [x] Benchmarks on longer-horizon synthetic corpora (`benchmarks/synthetic_longhorizon.py`)
 - [x] Streaming `Ingestor` API (`mnemostack.ingest`)
+- [x] MD wrapper generation on ingest (`Ingestor(wrapper_dir=...)`, `IngestItem.tags`)
+- [x] Entity-centric synthesis (`synthesize()`, `mnemostack synthesize <entity>`)
 - [x] Prometheus `/metrics` endpoint on the HTTP server
 - [x] Unicode-aware `MemgraphRetriever` probes (`telegram_id`, handle, `name_lower`)
 - [x] Community health: Code of Conduct, Security policy, issue/PR templates
