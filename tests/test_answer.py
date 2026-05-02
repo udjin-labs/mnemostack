@@ -72,6 +72,35 @@ def test_answer_no_confidence_line_defaults_to_half(sample_memories):
     assert answer.confidence == 0.5  # default
 
 
+def test_grounded_answer_parses_step_3_only():
+    text, confidence = AnswerGenerator._parse_response(
+        "STEP 1 - EVIDENCE: [2024-01-15] migrated to Postgres\n"
+        "STEP 2 - REASONING: The quoted evidence names Postgres.\n"
+        "STEP 3 - ANSWER: Postgres\n"
+        "CONFIDENCE: 0.95"
+    )
+    assert text == "Postgres"
+    assert confidence == 0.95
+
+
+def test_grounded_answer_falls_back_without_step_3():
+    text, confidence = AnswerGenerator._parse_response("Postgres\nCONFIDENCE: 0.8")
+    assert text == "Postgres"
+    assert confidence == 0.8
+
+
+def test_temporal_prompt_requires_date_calculation(sample_memories):
+    llm = FakeLLM(response_text="7 May 2023\nCONFIDENCE: 0.9")
+    gen = AnswerGenerator(llm=llm)
+    gen.generate("when did we migrate to Postgres", sample_memories)
+    assert "For relative dates, SHOW YOUR WORK:" in llm.last_prompt
+    assert '- Memory timestamp: [date]' in llm.last_prompt
+    assert '- Relative phrase: "last Saturday"' in llm.last_prompt
+    assert '- Calculation: [date] minus [interval] = [result]' in llm.last_prompt
+    assert "STEP 1 - EVIDENCE" in llm.last_prompt
+    assert "STEP 3 - ANSWER" in llm.last_prompt
+
+
 def test_answer_confidence_clamped(sample_memories):
     llm = FakeLLM(response_text="foo\nCONFIDENCE: 2.5")
     gen = AnswerGenerator(llm=llm)

@@ -20,7 +20,11 @@ from .specificity import detect_placeholders, resolve_specificity
 if TYPE_CHECKING:
     from .recaller import Recaller
 
-_CONFIDENCE_RULES = """After your answer, on a NEW line, output ONLY:
+_GROUNDING_STEPS = """STEP 1 - EVIDENCE: Quote the exact phrase(s) from the memories that are most relevant to the question. Copy verbatim, with the memory timestamp.
+STEP 2 - REASONING: Based on the quoted evidence, derive the answer. For dates, show your calculation.
+STEP 3 - ANSWER: Give the final short answer."""
+
+_CONFIDENCE_RULES = """After STEP 3, on a NEW line, output ONLY:
 CONFIDENCE: <float 0.0-1.0>
 
 Where:
@@ -45,16 +49,23 @@ RULES:
    - "[2023-05-08] I went to the group yesterday" → 7 May 2023
    If the question asks "when", NEVER return the memory's own timestamp when that memory uses words like "yesterday", "last week", "a few weeks ago", "the week before" — subtract the implied interval first.
    Prefer the phrasing the ground truth likely uses (e.g. "December 2022" vs "1 January 2023" — if the event was in the previous month, answer with the month-year of the event, not the session date that describes it).
+   For relative dates, SHOW YOUR WORK:
+   - Memory timestamp: [date]
+   - Relative phrase: "last Saturday"
+   - Calculation: [date] minus [interval] = [result]
+   - Answer: [result]
 4. For identity/label questions: exact label, no explanation.
 5. If multiple memories contradict, prefer the most recent one.
 6. Say "Not in memory" ONLY when NONE of the memories contain ANY relevant information. If even ONE memory mentions something related to the question, extract and provide the best answer you can. Partial/uncertain answers are better than "Not in memory".
    For hypothetical or inference questions ("might be", "would be", "likely", "probably", "what if"): attempt a reasonable inference from available evidence rather than defaulting to "Not in memory." Only say "Not in memory" when there is truly zero relevant context.
 7. If the answer requires inference from multiple memories, do it. For cross-hop questions ("common between X and Y", "what do both..."), connect facts from different memories before answering.
-8. NO meta commentary, NO explanation, JUST the answer.
+8. NO extra meta commentary outside the required steps.
 
 IMPORTANT: "Not in memory" is only appropriate when the memories contain ZERO relevant information about the question topic. If any memory mentions the person, event, or topic — extract what you can.
 
-After your answer, on a NEW line, output ONLY:
+{grounding_steps}
+
+After STEP 3, on a NEW line, output ONLY:
 CONFIDENCE: <float 0.0-1.0>
 
 Where:
@@ -81,9 +92,12 @@ RULES:
 6. For count questions, count all matching distinct items after scanning all memories.
 7. If multiple memories contradict, prefer the most recent one.
 8. If the memories genuinely don't contain an answer, reply: "Not in memory."
-9. NO meta commentary, NO explanation, JUST the answer.
+9. Before answering, list ALL memories that mention the topic. Then extract items from EACH one. Do not stop after finding the first match.
+10. NO extra meta commentary outside the required steps.
 
 IMPORTANT: "Not in memory" is only appropriate when the memories contain ZERO relevant information about the question topic. If any memory mentions the person, event, or topic — extract what you can.
+
+{grounding_steps}
 
 {confidence_rules}
 
@@ -100,14 +114,15 @@ MEMORIES:
 
 INSTRUCTIONS:
 1. Read EVERY memory. Don't skip.
-2. Extract every distinct item that directly matches the question's predicate (e.g. 'pets' = animals owned, 'activities' = things actively done by the person, 'cities visited' = explicit travel destinations).
-3. Return JSON: {{"items": ["item1", "item2", ...]}}
-4. Each item must be:
+2. Before answering, list ALL memories that mention the topic. Then extract items from EACH one. Do not stop after finding the first match.
+3. Extract every distinct item that directly matches the question's predicate (e.g. 'pets' = animals owned, 'activities' = things actively done by the person, 'cities visited' = explicit travel destinations).
+4. Return JSON: {{"items": ["item1", "item2", ...]}}
+5. Each item must be:
    - Specific (use exact names, not 'her dog' → 'Luna')
    - Distinct (no duplicates or near-duplicates like 'cat' and 'cats')
    - Directly supported by memory text (don't infer or generalize)
-5. If question asks for a count rather than list — still return all items, count derived from list length.
-6. If no items match — return {{"items": []}}
+6. If question asks for a count rather than list — still return all items, count derived from list length.
+7. If no items match — return {{"items": []}}
 
 JSON_OUTPUT:"""
 
@@ -139,9 +154,11 @@ RULES:
 3. Answer format: short answer + (if uncertain) qualifier like 'likely', 'probably', 'leans towards'.
 4. Only say 'Not in memory' when there is ZERO relevant evidence at all.
 5. If multiple memories contradict, prefer the most recent one.
-6. NO meta commentary, NO explanation, JUST the answer.
+6. NO extra meta commentary outside the required steps.
 
 IMPORTANT: "Not in memory" is only appropriate when the memories contain ZERO relevant information about the question topic. If any memory mentions the person, event, or topic — extract what you can.
+
+{grounding_steps}
 
 {confidence_rules}
 
@@ -161,9 +178,11 @@ RULES:
 4. Answer in 1-2 sentences with key entities, actions, and reasons explicitly named.
 5. If multiple aspects exist (e.g. 'what motivated X' has emotional + practical reasons), list both.
 6. Say "Not in memory" ONLY when NONE of the memories contain ANY relevant information. If even ONE memory mentions something related to the question, extract and provide the best answer you can. Partial/uncertain answers are better than "Not in memory".
-7. NO meta commentary, NO explanation, JUST the answer.
+7. NO extra meta commentary outside the required steps.
 
 IMPORTANT: "Not in memory" is only appropriate when the memories contain ZERO relevant information about the question topic. If any memory mentions the person, event, or topic — extract what you can.
+
+{grounding_steps}
 
 {confidence_rules}
 
@@ -187,12 +206,19 @@ RULES:
    - "[2023-05-08] I went to the group yesterday" → 7 May 2023
    If the question asks "when", NEVER return the memory's own timestamp when that memory uses words like "yesterday", "last week", "a few weeks ago", "the week before" — subtract the implied interval first.
    Prefer the phrasing the ground truth likely uses (e.g. "December 2022" vs "1 January 2023" — if the event was in the previous month, answer with the month-year of the event, not the session date that describes it).
+   For relative dates, SHOW YOUR WORK:
+   - Memory timestamp: [date]
+   - Relative phrase: "last Saturday"
+   - Calculation: [date] minus [interval] = [result]
+   - Answer: [result]
 4. Always answer with absolute date (e.g. '7 May 2023', 'June 2022').
 5. If multiple memories contradict, prefer the most recent one.
 6. Say "Not in memory" ONLY when NONE of the memories contain ANY relevant information. If even ONE memory mentions something related to the question, extract and provide the best answer you can. Partial/uncertain answers are better than "Not in memory".
-7. NO meta commentary, NO explanation, JUST the answer.
+7. NO extra meta commentary outside the required steps.
 
 IMPORTANT: "Not in memory" is only appropriate when the memories contain ZERO relevant information about the question topic. If any memory mentions the person, event, or topic — extract what you can.
+
+{grounding_steps}
 
 {confidence_rules}
 
@@ -210,9 +236,11 @@ RULES:
 2. If ANY memory contains information relevant to the question, provide an answer. Say "Not in memory" only when there is truly zero relevant context. When evidence is indirect but present, attempt a reasonable answer.
 3. Do not infer for adversarial questions when there is truly zero relevant context.
 4. If multiple memories contradict, prefer the most recent one.
-5. NO meta commentary, NO explanation, JUST the answer.
+5. NO extra meta commentary outside the required steps.
 
 IMPORTANT: "Not in memory" is only appropriate when the memories contain ZERO relevant information about the question topic. If any memory mentions the person, event, or topic — extract what you can.
+
+{grounding_steps}
 
 {confidence_rules}
 
@@ -676,6 +704,7 @@ class AnswerGenerator:
             context=context,
             query=query,
             confidence_rules=_CONFIDENCE_RULES,
+            grounding_steps=_GROUNDING_STEPS,
         )
 
         with histogram("mnemostack.answer.llm_latency_ms"):
@@ -755,7 +784,7 @@ class AnswerGenerator:
 
     @staticmethod
     def _parse_response(raw: str) -> tuple[str, float]:
-        """Extract answer and confidence from LLM output."""
+        """Extract STEP 3 answer and confidence from LLM output."""
         lines = raw.strip().split("\n")
         answer_lines: list[str] = []
         confidence = 0.5
@@ -768,4 +797,17 @@ class AnswerGenerator:
                     pass
             else:
                 answer_lines.append(line)
-        return "\n".join(answer_lines).strip(), confidence
+        answer_text = "\n".join(answer_lines).strip()
+        return AnswerGenerator._extract_grounded_answer(answer_text), confidence
+
+    @staticmethod
+    def _extract_grounded_answer(text: str) -> str:
+        """Return STEP 3 content when present, otherwise preserve legacy output."""
+        match = re.search(
+            r"(?ims)^\s*STEP\s*3\s*(?:-|:)?\s*ANSWER\s*:?\s*(.*)\s*$",
+            text,
+        )
+        if not match:
+            return text
+        answer = match.group(1).strip()
+        return answer or text
