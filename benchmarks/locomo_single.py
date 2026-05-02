@@ -16,6 +16,7 @@ from pathlib import Path
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, PayloadSchemaType, VectorParams
 
+from mnemostack.chunking import MessagePairChunker
 from mnemostack.embeddings import get_provider
 from mnemostack.llm import get_llm
 from mnemostack.recall import (
@@ -42,7 +43,7 @@ def parse_date(s: str) -> datetime:
         return datetime(2023, 1, 1, tzinfo=timezone.utc)
 
 
-def ingest_sample(sample, provider, client, collection, log):
+def ingest_sample(sample, provider, client, collection, log, window_size=1):
     try:
         client.delete_collection(collection)
     except Exception:
@@ -73,13 +74,20 @@ def ingest_sample(sample, provider, client, collection, log):
                 "dia_id": msg.get("dia_id", ""),
             })
 
-    log(f"  embedding {len(texts)} messages (batch)...")
+    if window_size < 1:
+        raise ValueError("window_size must be >= 1")
+    if window_size > 1:
+        chunks = MessagePairChunker(window_size=window_size).chunk_messages(texts, records)
+        texts = [chunk.text for chunk in chunks]
+        records = [chunk.metadata for chunk in chunks]
+
+    log(f"  embedding {len(texts)} chunks (window_size={window_size}, batch)...")
     t0 = time.time()
     vectors = provider.embed_batch(texts)
     log(f"  embedded in {time.time() - t0:.1f}s")
 
     points, bm25 = [], []
-    for i, (text, vec, rec) in enumerate(zip(texts, vectors, records), start=1):
+    for i, (text, vec, rec) in enumerate(zip(texts, vectors, records, strict=False), start=1):
         if not vec:
             continue
         points.append((i, vec, {"text": text, **rec}))
@@ -146,6 +154,12 @@ def main():
         help="Use Recaller(adaptive_weights=True) with per-query-shape weights",
     )
     ap.add_argument("--only-sample", default=None, help="Run only the specified sample_id (e.g. conv-43)")
+    ap.add_argument(
+        "--window-size",
+        type=int,
+        default=1,
+        help="Adjacent messages to concatenate into overlapping chunks (1 disables)",
+    )
     args = ap.parse_args()
 
     with open(DATASET) as f:
@@ -180,7 +194,7 @@ def main():
         sid = sample["sample_id"]
         collection = f"locomo_single_{sid}"
         log(f"\n=== Sample {si+1}/{len(dataset)}: {sid} ===")
-        store, bm25 = ingest_sample(sample, provider, client, collection, log)
+        store, bm25 = ingest_sample(sample, provider, client, collection, log, args.window_size)
         # Three modes:
         # 1. Neither --hyde nor --adaptive-weights: classic legacy
         #    2-retriever Recaller (Vector + BM25, equal weight RRF).

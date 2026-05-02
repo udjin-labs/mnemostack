@@ -36,11 +36,16 @@ class MessagePairChunker(Chunker):
     def __init__(
         self,
         include_solo: bool = True,
-        window: int = 2,
+        window: int | None = 2,
         separator: str = "\n",
+        window_size: int | None = None,
     ):
-        if window < 2:
-            raise ValueError("window must be >= 2 for pair chunking")
+        if window_size is not None:
+            window = window_size
+        if window is None:
+            window = 2
+        if window < 1:
+            raise ValueError("window_size must be >= 1")
         self.include_solo = include_solo
         self.window = window
         self.separator = separator
@@ -55,7 +60,7 @@ class MessagePairChunker(Chunker):
         Args:
             messages: ordered list of message strings
             metadata: optional per-message metadata; paired chunks inherit
-                      the metadata of the first message in the window.
+                      the metadata of the middle message in the window.
         """
         chunks: list[Chunk] = []
         md = metadata or [{} for _ in messages]
@@ -63,9 +68,11 @@ class MessagePairChunker(Chunker):
         for i, msg in enumerate(messages):
             if self.include_solo:
                 chunks.append(Chunk(text=msg, offset=offset, metadata=dict(md[i])))
-            if i + self.window - 1 < len(messages):
-                combined = self.separator.join(messages[i : i + self.window])
-                meta = dict(md[i])
+            if self.window > 1 and i + self.window - 1 < len(messages):
+                window = messages[i : i + self.window]
+                middle = i + self.window // 2
+                combined = self.separator.join(window)
+                meta = dict(md[middle])
                 meta["chunk_window"] = self.window
                 chunks.append(Chunk(text=combined, offset=offset, metadata=meta))
             offset += len(msg) + 1
