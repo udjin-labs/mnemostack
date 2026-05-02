@@ -28,6 +28,7 @@ from .recall import (
     VectorRetriever,
     build_bm25_docs,
 )
+from .synthesis import synthesize
 from .vector import VectorStore
 
 # -- Progressive tiers --------------------------------------------------------
@@ -152,6 +153,41 @@ def cmd_search(args: argparse.Namespace) -> int:
             print(f"[{i}] score={r.score:.4f} ({sources})")
             if preview:
                 print(f"    {preview}")
+    return 0
+
+
+def cmd_synthesize(args: argparse.Namespace) -> int:
+    provider = get_provider(args.provider, **model_kwargs(_embedding_model(args)))
+    store = VectorStore(
+        collection=args.collection,
+        dimension=provider.dimension,
+        host=args.qdrant,
+    )
+    if not store.collection_exists():
+        print(
+            f"error: collection '{args.collection}' does not exist. "
+            f"Run `mnemostack index` first.",
+            file=sys.stderr,
+        )
+        return 2
+
+    recaller = _build_recaller(args, provider, store)
+    llm = None
+    if args.llm_summarize:
+        llm = get_llm(args.llm, **model_kwargs(_llm_model(args)))
+    result = synthesize(
+        args.entity,
+        sources=list(args.source) if args.source else None,
+        format=args.format,
+        max_results=args.limit,
+        llm_summarize=args.llm_summarize,
+        recaller=recaller,
+        llm=llm,
+    )
+    if args.format == "json":
+        print(json.dumps(result.to_json(), ensure_ascii=False, indent=2))
+    else:
+        print(result.markdown(), end="")
     return 0
 
 
@@ -421,6 +457,51 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_search.set_defaults(func=cmd_search)
+
+    p_synthesize = sub.add_parser(
+        "synthesize",
+        parents=[common],
+        help="Collect all known information about an entity",
+    )
+    p_synthesize.add_argument("entity", help="Entity name, handle, or identifier")
+    p_synthesize.add_argument("--limit", type=int, default=50, help="Max facts to include")
+    p_synthesize.add_argument(
+        "--source",
+        action="append",
+        choices=["vector", "bm25", "graph", "memgraph", "temporal"],
+        help="Retriever source to use (can be given multiple times; default: all available)",
+    )
+    p_synthesize.add_argument(
+        "--bm25-path",
+        action="append",
+        default=list(cfg.recall.bm25_paths),
+        help="Directory/file to index for the BM25 retriever (can be given multiple times)",
+    )
+    p_synthesize.add_argument(
+        "--memgraph-uri",
+        default=cfg.graph.uri,
+        help="Memgraph URI to enable graph synthesis (e.g. bolt://localhost:7687)",
+    )
+    p_synthesize.add_argument(
+        "--format",
+        choices=["markdown", "json"],
+        default="markdown",
+        help="Output format",
+    )
+    p_synthesize.add_argument(
+        "--llm-summarize",
+        action="store_true",
+        help="Run an optional LLM pass to produce a coherent summary",
+    )
+    p_synthesize.add_argument(
+        "--llm", default=cfg.llm.provider, choices=list_llms(), help="LLM provider for summaries"
+    )
+    p_synthesize.add_argument(
+        "--llm-model",
+        default=cfg.llm.model,
+        help="LLM model override (default: provider default or config value)",
+    )
+    p_synthesize.set_defaults(func=cmd_synthesize)
 
     p_answer = sub.add_parser(
         "answer", parents=[common], help="Synthesize concise answer from memories"
