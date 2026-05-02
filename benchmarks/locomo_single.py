@@ -99,6 +99,21 @@ def ingest_sample(sample, provider, client, collection, log):
 
 
 def evaluate(q, pred, truth, llm):
+    # Empty GT means the question is unanswerable — "Not in memory" variants are correct.
+    if not truth.strip():
+        pred_lower = pred.lower().strip().rstrip(".")
+        if pred_lower in ("not in memory", "unknown", "n/a", "none", "no information", ""):
+            return {
+                "correct": True,
+                "partial": False,
+                "reason": "empty GT, predicted unanswerable — correct",
+            }
+        return {
+            "correct": False,
+            "partial": False,
+            "reason": f"empty GT (unanswerable) but predicted: {pred[:80]}",
+        }
+
     prompt = (
         f"Evaluate factual answer. Query: {q}\nGround truth: {truth}\n"
         f"Predicted: {pred}\n\nRespond JSON only: "
