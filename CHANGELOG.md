@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-05-02
+
+### Added
+
+- MD wrapper generation on document ingestion (`Ingestor(wrapper_dir=...)`) — issue #29.
+- `IngestItem.tags` and per-item `wrapper_dir` override.
+- `IngestStats.wrappers_created` and `wrappers_updated` counters.
+- Optional graph integration for File→Tag linking.
+
+### Changed
+
+- Wrapper failures are warning-only and never break ingest.
+
 ## [0.2.0] - 2026-04-26
 
 ### Changed
