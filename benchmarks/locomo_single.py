@@ -8,7 +8,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -158,6 +157,11 @@ def main():
         action="store_true",
         help="Expand each question with an LLM and fuse recall over original + variants",
     )
+    ap.add_argument(
+        "--retry-expansion",
+        action="store_true",
+        help="Retry weak answers with cheaper batch-vector query expansion",
+    )
     ap.add_argument("--only-sample", default=None, help="Run only the specified sample_id (e.g. conv-43)")
     ap.add_argument(
         "--window-size",
@@ -240,6 +244,8 @@ def main():
             specificity_resolver=True,
             inference_retry=True,
             recaller=recaller,
+            retry_with_expansion=args.retry_expansion,
+            expansion_llm=llm if args.retry_expansion else None,
         )
 
         qa_list = sample["qa"] if args.qa is None else sample["qa"][: args.qa]

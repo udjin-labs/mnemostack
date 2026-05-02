@@ -290,7 +290,7 @@ class Recaller:
             return results
 
 
-    def _expanded_queries(self, query: str, n_variants: int = 3) -> list[str]:
+    def _expanded_queries(self, query: str, n_variants: int = 2) -> list[str]:
         if not self.expansion_llm:
             raise ValueError("query_expansion=True requires expansion_llm")
         if query not in self._query_expansion_cache:
@@ -305,6 +305,83 @@ class Recaller:
                 queries.append(key)
                 seen.add(key)
         return queries
+
+
+    def recall_with_expanded_vectors(
+        self,
+        query: str,
+        limit: int = 10,
+        vector_limit: int = 20,
+        filters: dict[str, Any] | None = None,
+        n_variants: int = 2,
+    ) -> list[RecallResult]:
+        """Expand query, batch-embed variants, batch-search vectors, RRF-merge hits.
+
+        This is the cheaper retry path used by AnswerGenerator: one expansion LLM
+        call, one embed_batch(original + variants), and one Qdrant batch request.
+        Legacy Recaller(query_expansion=True) remains available for full hybrid
+        expansion across all retrievers.
+        """
+        queries = self._expanded_queries(query, n_variants=n_variants)
+        embedding, vector = self._vector_components()
+        if embedding is None or vector is None:
+            raise ValueError("expanded vector retry requires a vector embedding provider/store")
+
+        with histogram("mnemostack.recall.embed_latency_ms"):
+            vectors = embedding.embed_batch(queries)
+        vectors = [vec for vec in vectors if vec]
+        if not vectors:
+            return []
+
+        with histogram("mnemostack.recall.vector_latency_ms"):
+            if hasattr(vector, "search_many"):
+                hit_lists = vector.search_many(vectors, limit=vector_limit, filters=filters)
+            else:
+                hit_lists = [vector.search(vec, limit=vector_limit, filters=filters) for vec in vectors]
+
+        ranked_lists: list[list[tuple[Any, float]]] = []
+        id_to_result: dict[Any, RecallResult] = {}
+        for hits in hit_lists:
+            counter("mnemostack.recall.vector_hits", len(hits))
+            ranked: list[tuple[Any, float]] = []
+            for hit in hits:
+                result = RecallResult(
+                    id=hit.id,
+                    text=hit.payload.get("text", ""),
+                    score=hit.score,
+                    payload=hit.payload,
+                    sources=["vector"],
+                )
+                if result.id in id_to_result:
+                    existing = id_to_result[result.id]
+                    if "vector" not in existing.sources:
+                        existing.sources.append("vector")
+                else:
+                    id_to_result[result.id] = result
+                ranked.append((result.id, result.score))
+            ranked_lists.append(ranked)
+
+        fused = reciprocal_rank_fusion(ranked_lists, k=self.rrf_k, limit=limit)
+        merged: list[RecallResult] = []
+        for key, rrf_score in fused:
+            result = id_to_result.get(key)
+            if result is None:
+                continue
+            result.score = rrf_score
+            merged.append(result)
+        counter("mnemostack.recall.results", len(merged))
+        return merged
+
+    def _vector_components(self):
+        if self.embedding is not None and self.vector is not None:
+            return self.embedding, self.vector
+        for retriever in self.retrievers:
+            if getattr(retriever, "name", None) == "vector":
+                embedding = getattr(retriever, "embedding", None)
+                vector = getattr(retriever, "vector_store", None)
+                if embedding is not None and vector is not None:
+                    return embedding, vector
+        return None, None
 
     def _recall_with_query_expansion(
         self,

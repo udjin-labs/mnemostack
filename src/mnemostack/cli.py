@@ -218,7 +218,17 @@ def cmd_answer(args: argparse.Namespace) -> int:
     results = recaller.recall(args.query, limit=args.limit)
 
     llm = get_llm(args.llm, **model_kwargs(_llm_model(args)))
-    gen = AnswerGenerator(llm=llm, confidence_threshold=args.min_confidence)
+    answer_kwargs = {
+        "llm": llm,
+        "confidence_threshold": args.min_confidence,
+    }
+    if getattr(args, "retry_expansion", False):
+        answer_kwargs.update(
+            recaller=recaller,
+            retry_with_expansion=True,
+            expansion_llm=llm,
+        )
+    gen = AnswerGenerator(**answer_kwargs)
     answer = gen.generate(args.query, results)
 
     # Tier caps how many sources we emit (answer text itself is model-sized).
@@ -634,6 +644,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--query-expansion",
         action="store_true",
         help="Expand query with an LLM and fuse recall over original + variants",
+    )
+    p_answer.add_argument(
+        "--retry-expansion",
+        action="store_true",
+        help="Retry weak answers with cheaper batch-vector query expansion",
     )
     p_answer.add_argument("--json", action="store_true", help="JSON output")
     p_answer.set_defaults(func=cmd_answer)
