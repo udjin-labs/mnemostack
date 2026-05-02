@@ -367,7 +367,7 @@ class Ingestor:
         """
         stats = IngestStats()
         buffer: list[tuple[str, IngestItem]] = []
-        for item in _window_items(list(items), self.window_size, self.window_separator):
+        for item in _iter_window_items(items, self.window_size, self.window_separator):
             stats.seen += 1
             pid = stable_chunk_id(item.source, item.offset, item.text)
             if self.skip_seen and self._seen is not None and pid in self._seen:
