@@ -154,6 +154,31 @@ def test_stream_does_not_materialize_full_iterator():
     assert consumed == [0]
 
 
+def test_ingest_does_not_materialize_full_iterator():
+    emb = _FakeEmbedding()
+    store = _FakeStore()
+    ing = Ingestor(
+        embedding=emb,
+        vector_store=store,
+        batch_size=1,
+        skip_seen=False,
+        window_size=2,
+    )
+    consumed: list[int] = []
+
+    def items():
+        for i in range(3):
+            consumed.append(i)
+            yield IngestItem(text=f"t{i}", source="s.md", offset=i)
+            if i == 0:
+                assert len(store.upserts) == 1
+
+    stats = ing.ingest(items())
+
+    assert stats.upserted == 5
+    assert consumed == [0, 1, 2]
+
+
 def test_ingest_one_shortcut():
     emb = _FakeEmbedding()
     store = _FakeStore()
