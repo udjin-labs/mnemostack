@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-05-02
+
+### Added
+
+- Entity-centric knowledge synthesis (`synthesize()`) — issue #30.
+- `SynthesisFact` / `SynthesisResult` with markdown/JSON rendering.
+- CLI command `mnemostack synthesize <entity>`.
+- Graceful degradation — works with any subset of backends.
+- Related entities extraction from graph.
+- Optional LLM summarization pass.
+
 ## [0.2.1] - 2026-05-02
 
 ### Added
