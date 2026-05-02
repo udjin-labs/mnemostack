@@ -438,7 +438,7 @@ class AnswerGenerator:
         prompt_template: str,
         recall_filters: dict[str, object] | None,
     ) -> tuple[Answer, list[RecallResult]]:
-        """Retry weak answers with expanded batch-vector recall."""
+        """Retry weak answers with expanded + HyDE batch-vector recall."""
         if self.expansion_llm is None and getattr(self.recaller, "expansion_llm", None) is None:
             return draft, memories
 

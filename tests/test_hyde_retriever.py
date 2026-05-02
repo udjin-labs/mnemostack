@@ -129,3 +129,12 @@ def test_hyde_forwards_filters():
     r.search("q", limit=5, filters={"chunk_type": "transcript"})
     assert store.last_filters == {"chunk_type": "transcript"}
     assert store.last_limit == 5
+
+
+def test_hyde_generates_hypothetical_answer():
+    llm = _FakeLLM("A plausible memory-shaped answer.")
+
+    hypo = HyDERetriever.generate_hypothetical("what happened?", llm)
+
+    assert hypo == "A plausible memory-shaped answer."
+    assert llm.calls == 1
