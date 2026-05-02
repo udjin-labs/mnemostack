@@ -344,14 +344,20 @@ def cmd_index(args: argparse.Namespace) -> int:
         print(f"error: no .md/.txt files found under {target}", file=sys.stderr)
         return 2
 
+    if args.window_size < 1:
+        print("error: --window-size must be >= 1", file=sys.stderr)
+        return 2
+
     chunks: list[tuple[str, str, dict]] = []  # (id, text, payload) triples
     for f in files:
         text = f.read_text(encoding="utf-8", errors="ignore")
         source = str(f.relative_to(target if target.is_dir() else target.parent))
+        file_chunks: list[tuple[int, str]] = []
         for i in range(0, len(text), args.chunk_size):
             chunk = text[i : i + args.chunk_size]
             if not chunk.strip():
                 continue
+            file_chunks.append((i, chunk))
             cid = _stable_chunk_id(source, i, chunk)
             chunks.append(
                 (
@@ -364,6 +370,27 @@ def cmd_index(args: argparse.Namespace) -> int:
                     },
                 )
             )
+        if args.window_size > 1:
+            for start in range(0, len(file_chunks) - args.window_size + 1):
+                window = file_chunks[start : start + args.window_size]
+                middle_offset, _middle_text = window[args.window_size // 2]
+                chunk = "\n".join(piece for _offset, piece in window)
+                cid = _stable_chunk_id(source, middle_offset, chunk)
+                chunks.append(
+                    (
+                        cid,
+                        chunk,
+                        {
+                            "text": chunk,
+                            "source": source,
+                            "offset": middle_offset,
+                            "chunk_window": args.window_size,
+                            "chunk_kind": "sliding_window",
+                            "chunk_start_offset": window[0][0],
+                            "chunk_end_offset": window[-1][0],
+                        },
+                    )
+                )
 
     # Load existing point IDs once so re-runs skip unchanged chunks without
     # re-embedding (saves API quota / local GPU time).
@@ -580,6 +607,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_index = sub.add_parser("index", parents=[common], help="Index files into vector store")
     p_index.add_argument("path", help="File or directory to index")
     p_index.add_argument("--chunk-size", type=int, default=cfg.vector.chunk_size, help="Chunk size in chars")
+    p_index.add_argument(
+        "--window-size",
+        type=int,
+        default=cfg.vector.window_size,
+        help="Adjacent chunks to concatenate into overlapping context chunks (1 disables)",
+    )
     p_index.add_argument("--recreate", action="store_true", help="Drop existing collection")
     p_index.set_defaults(func=cmd_index)
 
