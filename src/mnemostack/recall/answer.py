@@ -355,7 +355,7 @@ class AnswerGenerator:
         self,
         llm: LLMProvider,
         max_memories: int = 15,
-        max_tokens: int = 200,
+        max_tokens: int = 500,
         confidence_threshold: float = 0.5,
         prompt_template: str | None = None,
         category_aware_prompts: bool = True,
