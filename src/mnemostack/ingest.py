@@ -367,18 +367,20 @@ class Ingestor:
     ) -> None:
         for pid, _vec, _payload, item in points:
             wrapper_dir = item.wrapper_dir or self.wrapper_dir
-            if wrapper_dir is None:
-                continue
-            try:
-                existed = _write_wrapper_file(Path(wrapper_dir), item, pid)
-                if existed:
-                    stats.wrappers_updated += 1
-                else:
-                    stats.wrappers_created += 1
-                if self.graph is not None:
+            if wrapper_dir is not None:
+                try:
+                    existed = _write_wrapper_file(Path(wrapper_dir), item, pid)
+                    if existed:
+                        stats.wrappers_updated += 1
+                    else:
+                        stats.wrappers_created += 1
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("failed to write markdown wrapper for %s: %s", item.source, exc)
+            if self.graph is not None:
+                try:
                     _sync_wrapper_graph(self.graph, item, pid)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("failed to write markdown wrapper for %s: %s", item.source, exc)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("failed to sync wrapper graph for %s: %s", item.source, exc)
 
 
 __all__ = ["Ingestor", "IngestItem", "IngestStats", "stable_chunk_id"]

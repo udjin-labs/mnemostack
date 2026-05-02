@@ -133,6 +133,29 @@ def test_graph_integration_is_optional(tmp_path):
     ]
 
 
+def test_graph_sync_runs_without_wrapper_dir():
+    graph = _FakeGraph()
+    ing = Ingestor(
+        embedding=_FakeEmbedding(),
+        vector_store=_FakeStore(),
+        graph=graph,
+        skip_seen=False,
+    )
+
+    stats = ing.ingest([IngestItem(text="hello", source="docs/hello.md", tags=["docs"])])
+
+    assert stats.wrappers_created == 0
+    assert stats.wrappers_updated == 0
+    assert graph.file_tags == [
+        {
+            "name": "hello.md",
+            "path": "docs/hello.md",
+            "indexed_date": graph.file_tags[0]["indexed_date"],
+            "tags": ["docs"],
+        }
+    ]
+
+
 def test_wrapper_failure_logs_warning_without_failing_ingest(tmp_path, caplog):
     blocking_file = tmp_path / "not-a-directory"
     blocking_file.write_text("blocks mkdir", encoding="utf-8")
