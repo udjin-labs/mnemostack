@@ -4,8 +4,10 @@ import json
 
 import pytest
 
+from mnemostack import cli
 from mnemostack.cli import build_parser
 from mnemostack.llm.base import LLMResponse
+from mnemostack.recall import Recaller
 from mnemostack.recall.recaller import RecallResult
 from mnemostack.synthesis import SynthesisFact, SynthesisResult, dumps, synthesize
 
@@ -38,6 +40,23 @@ class FakeLLM:
 
     def generate(self, prompt, max_tokens=200, temperature=0.0):
         return LLMResponse(text="Alice is connected to Project Atlas.")
+
+
+class RecordingRetriever:
+    def __init__(self, name: str):
+        self.name = name
+        self.calls = 0
+
+    def search(self, query, limit=20, filters=None):
+        self.calls += 1
+        return [
+            RecallResult(
+                id=self.name,
+                text=f"{self.name} fact",
+                score=1.0,
+                sources=[self.name],
+            )
+        ]
 
 
 def test_synthesize_builds_structured_result_and_deduplicates():
@@ -87,6 +106,18 @@ def test_synthesize_filters_sources():
     assert [f.text for f in out.facts] == ["graph fact"]
 
 
+def test_synthesize_filters_recaller_retrievers_before_query():
+    vector = RecordingRetriever("vector")
+    memgraph = RecordingRetriever("memgraph")
+    recaller = Recaller(retrievers=[vector, memgraph])
+
+    out = synthesize("Alice", sources=["vector"], recaller=recaller)
+
+    assert [f.source for f in out.facts] == ["vector"]
+    assert vector.calls == 1
+    assert memgraph.calls == 0
+
+
 def test_synthesize_gracefully_degrades_without_backends():
     out = synthesize("Missing Entity")
 
@@ -129,6 +160,46 @@ def test_cli_has_synthesize_command():
     assert args.entity == "Alice"
     assert args.format == "json"
     assert args.source == ["graph"]
+
+
+def test_cli_synthesize_graph_only_skips_vector_setup(monkeypatch, capsys):
+    def fail_get_provider(*args, **kwargs):
+        raise AssertionError("embedding provider should not be initialized")
+
+    class FakeMemgraphRetriever:
+        name = "memgraph"
+
+        def __init__(self, uri=None):
+            self.uri = uri
+
+        def search(self, query, limit=20, filters=None):
+            return [
+                RecallResult(
+                    id="g",
+                    text=f"{query}-[KNOWS]->Bob",
+                    score=1.0,
+                    sources=["memgraph"],
+                )
+            ]
+
+    monkeypatch.setattr(cli, "get_provider", fail_get_provider)
+    monkeypatch.setattr(cli, "MemgraphRetriever", FakeMemgraphRetriever)
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "synthesize",
+        "Alice",
+        "--source",
+        "graph",
+        "--memgraph-uri",
+        "bolt://example:7687",
+        "--format",
+        "json",
+    ])
+
+    assert cli.cmd_synthesize(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["facts"][0]["source"] == "memgraph"
 
 
 def test_synthesize_validates_inputs():

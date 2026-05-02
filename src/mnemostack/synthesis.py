@@ -140,7 +140,9 @@ def synthesize(
         raise ValueError("max_results must be >= 1")
 
     source_filter = _normalize_sources(sources)
-    recaller = kwargs.get("recaller") or _build_recaller_from_kwargs(source_filter, kwargs)
+    recaller = _filter_recaller(kwargs.get("recaller"), source_filter) or _build_recaller_from_kwargs(
+        source_filter, kwargs
+    )
     raw_results = _query_recaller(recaller, entity, max_results, kwargs.get("filters"))
     raw_results.extend(_query_retrievers(kwargs.get("retrievers"), entity, max_results, source_filter, kwargs.get("filters")))
     raw_results = [r for r in raw_results if _result_source_enabled(r, source_filter)]
@@ -196,6 +198,25 @@ def _build_recaller_from_kwargs(source_filter: set[str] | None, kwargs: dict[str
 
 def _source_enabled(name: str, source_filter: set[str] | None) -> bool:
     return source_filter is None or name in source_filter
+
+
+def _filter_recaller(recaller: Any, source_filter: set[str] | None) -> Any:
+    if recaller is None or source_filter is None:
+        return recaller
+    retrievers = getattr(recaller, "retrievers", None)
+    if not retrievers:
+        return recaller
+    filtered = [
+        retr
+        for retr in retrievers
+        if _source_enabled(str(getattr(retr, "name", "")).lower(), source_filter)
+    ]
+    return Recaller(
+        retrievers=filtered,
+        rrf_k=getattr(recaller, "rrf_k", 60),
+        retriever_weights=getattr(recaller, "retriever_weights", None),
+        adaptive_weights=getattr(recaller, "adaptive_weights", False),
+    )
 
 
 def _result_source_enabled(result: RecallResult, source_filter: set[str] | None) -> bool:

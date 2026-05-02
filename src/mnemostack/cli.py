@@ -157,27 +157,34 @@ def cmd_search(args: argparse.Namespace) -> int:
 
 
 def cmd_synthesize(args: argparse.Namespace) -> int:
-    provider = get_provider(args.provider, **model_kwargs(_embedding_model(args)))
-    store = VectorStore(
-        collection=args.collection,
-        dimension=provider.dimension,
-        host=args.qdrant,
-    )
-    if not store.collection_exists():
-        print(
-            f"error: collection '{args.collection}' does not exist. "
-            f"Run `mnemostack index` first.",
-            file=sys.stderr,
+    sources = list(args.source) if args.source else None
+    source_filter = _normalize_source_filter(sources)
+    provider = None
+    store = None
+    if _source_enabled_for_cli("vector", source_filter) or _source_enabled_for_cli(
+        "temporal", source_filter
+    ):
+        provider = get_provider(args.provider, **model_kwargs(_embedding_model(args)))
+        store = VectorStore(
+            collection=args.collection,
+            dimension=provider.dimension,
+            host=args.qdrant,
         )
-        return 2
+        if not store.collection_exists():
+            print(
+                f"error: collection '{args.collection}' does not exist. "
+                f"Run `mnemostack index` first.",
+                file=sys.stderr,
+            )
+            return 2
 
-    recaller = _build_recaller(args, provider, store)
+    recaller = _build_recaller(args, provider, store, source_filter=source_filter)
     llm = None
     if args.llm_summarize:
         llm = get_llm(args.llm, **model_kwargs(_llm_model(args)))
     result = synthesize(
         args.entity,
-        sources=list(args.source) if args.source else None,
+        sources=sources,
         format=args.format,
         max_results=args.limit,
         llm_summarize=args.llm_summarize,
@@ -277,17 +284,41 @@ def _stable_chunk_id(source: str, offset: int, text: str) -> str:
     return str(uuid.UUID(digest[:32]))
 
 
-def _build_recaller(args: argparse.Namespace, provider, store) -> Recaller:
+def _normalize_source_filter(sources: list[str] | None) -> set[str] | None:
+    if sources is None:
+        return None
+    aliases = {"graph": "memgraph"}
+    return {aliases.get(source.lower(), source.lower()) for source in sources}
+
+
+def _source_enabled_for_cli(name: str, source_filter: set[str] | None) -> bool:
+    return source_filter is None or name in source_filter
+
+
+def _build_recaller(
+    args: argparse.Namespace,
+    provider,
+    store,
+    source_filter: set[str] | None = None,
+) -> Recaller:
     """Build the same retriever-mode Recaller used by the service surfaces."""
-    bm25_docs = build_bm25_docs(list(getattr(args, "bm25_path", []) or []))
-    retrievers = [
-        VectorRetriever(embedding=provider, vector_store=store),
-        BM25Retriever(docs=bm25_docs) if bm25_docs else None,
-        MemgraphRetriever(uri=getattr(args, "memgraph_uri", None))
-        if getattr(args, "memgraph_uri", None)
-        else None,
-        TemporalRetriever(embedding=provider, vector_store=store),
-    ]
+    retrievers = []
+    if provider is not None and store is not None and _source_enabled_for_cli(
+        "vector", source_filter
+    ):
+        retrievers.append(VectorRetriever(embedding=provider, vector_store=store))
+    if _source_enabled_for_cli("bm25", source_filter):
+        bm25_docs = build_bm25_docs(list(getattr(args, "bm25_path", []) or []))
+        if bm25_docs:
+            retrievers.append(BM25Retriever(docs=bm25_docs))
+    if _source_enabled_for_cli("memgraph", source_filter) and getattr(
+        args, "memgraph_uri", None
+    ):
+        retrievers.append(MemgraphRetriever(uri=getattr(args, "memgraph_uri", None)))
+    if provider is not None and store is not None and _source_enabled_for_cli(
+        "temporal", source_filter
+    ):
+        retrievers.append(TemporalRetriever(embedding=provider, vector_store=store))
     return Recaller(retrievers=[r for r in retrievers if r is not None])
 
 
