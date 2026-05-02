@@ -290,6 +290,44 @@ class Recaller:
             return results
 
 
+    def search_many(self, vectors: list[list[float]], limit: int) -> list[RecallResult]:
+        """Search Qdrant for multiple vectors and RRF-merge the ranked hits."""
+        if not self.vector:
+            return []
+
+        ranked_lists: list[list[tuple[Any, float]]] = []
+        id_to_hit: dict[Any, Hit] = {}
+        for vector in vectors:
+            if not vector:
+                continue
+            try:
+                hits = self.vector.search(vector, limit=limit)
+            except Exception:
+                hits = []
+            ranked: list[tuple[Any, float]] = []
+            for hit in hits:
+                id_to_hit.setdefault(hit.id, hit)
+                ranked.append((hit.id, hit.score))
+            ranked_lists.append(ranked)
+
+        fused = reciprocal_rank_fusion(ranked_lists, k=self.rrf_k, limit=limit)
+        results: list[RecallResult] = []
+        for key, rrf_score in fused:
+            hit = id_to_hit.get(key)
+            if hit is None:
+                continue
+            results.append(
+                RecallResult(
+                    id=hit.id,
+                    text=hit.payload.get("text", ""),
+                    score=rrf_score,
+                    payload=hit.payload,
+                    sources=["vector"],
+                )
+            )
+        counter("mnemostack.recall.results", len(results))
+        return results
+
     def _expanded_queries(self, query: str, n_variants: int = 3) -> list[str]:
         if not self.expansion_llm:
             raise ValueError("query_expansion=True requires expansion_llm")

@@ -203,6 +203,8 @@ def main():
                     HyDERetriever(llm=llm, embedding=provider, vector_store=store)
                 )
             recaller = Recaller(
+                embedding_provider=provider,
+                vector_store=store,
                 retrievers=retrievers,
                 adaptive_weights=args.adaptive_weights,
                 query_expansion=args.query_expansion,
@@ -225,6 +227,8 @@ def main():
             specificity_resolver=True,
             inference_retry=True,
             recaller=recaller,
+            retry_with_expansion=args.query_expansion,
+            expansion_llm=llm if args.query_expansion else None,
         )
 
         qa_list = sample["qa"] if args.qa is None else sample["qa"][: args.qa]
