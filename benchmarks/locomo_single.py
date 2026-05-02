@@ -153,6 +153,11 @@ def main():
         action="store_true",
         help="Use Recaller(adaptive_weights=True) with per-query-shape weights",
     )
+    ap.add_argument(
+        "--query-expansion",
+        action="store_true",
+        help="Expand each question with an LLM and fuse recall over original + variants",
+    )
     ap.add_argument("--only-sample", default=None, help="Run only the specified sample_id (e.g. conv-43)")
     ap.add_argument(
         "--window-size",
@@ -202,7 +207,7 @@ def main():
         #    but with per-query-shape weight profiles from Recaller.
         # 3. --hyde (with or without --adaptive-weights): adds HyDE as
         #    a 3rd retriever in retrievers mode.
-        need_retrievers_mode = args.hyde or args.adaptive_weights
+        need_retrievers_mode = args.hyde or args.adaptive_weights or args.query_expansion
         if need_retrievers_mode:
             retrievers = [
                 VectorRetriever(embedding=provider, vector_store=store),
@@ -215,10 +220,16 @@ def main():
             recaller = Recaller(
                 retrievers=retrievers,
                 adaptive_weights=args.adaptive_weights,
+                query_expansion=args.query_expansion,
+                expansion_llm=llm if args.query_expansion else None,
             )
         else:
             recaller = Recaller(
-                embedding_provider=provider, vector_store=store, bm25_docs=bm25
+                embedding_provider=provider,
+                vector_store=store,
+                bm25_docs=bm25,
+                query_expansion=args.query_expansion,
+                expansion_llm=llm if args.query_expansion else None,
             )
 
         answer_gen = AnswerGenerator(
