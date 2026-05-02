@@ -6,6 +6,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-05-02
+
+### Added
+
+- Sliding window chunking (`window_size` parameter in Ingestor and CLI).
+- Query expansion (`Recaller(query_expansion=True)`) with RRF fusion.
+- Smart retry with expansion + HyDE (`AnswerGenerator(retry_with_expansion=True)`).
+- Batch vector search (`search_many`) for multi-query retrieval.
+- LoCoMo error analysis script (`benchmarks/error_analysis.py`).
+
+### Changed
+
+- Relaxed conservative 'Not in memory' answer prompts — partial evidence now yields answers.
+- Evidence guard for low-confidence answers — anti-hallucination check.
+- Forced grounding (STEP 1-2-3) for all answer prompts — cite evidence before answering.
+- Temporal chain-of-thought for date calculations.
+- List exhaustiveness instructions.
+
+### Fixed
+
+- Judge handling of empty ground truth in benchmarks.
+- max_tokens increased to 500 for grounded answers.
+- ruff B905 zip strict parameter.
+
 ## [0.3.0] - 2026-05-02
 
 ### Added
