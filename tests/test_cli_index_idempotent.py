@@ -67,3 +67,18 @@ def test_index_validates_path_before_recreate(monkeypatch, tmp_path):
     )
 
     assert cli.cmd_index(args) == 2
+
+
+def test_build_recaller_keeps_vector_handles_for_retry():
+    provider = object()
+    store = object()
+    args = argparse.Namespace(
+        query_expansion=False,
+        bm25_path=[],
+        memgraph_uri=None,
+    )
+
+    recaller = cli._build_recaller(args, provider, store)
+
+    assert recaller.embedding is provider
+    assert recaller.vector is store

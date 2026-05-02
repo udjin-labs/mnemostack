@@ -218,7 +218,19 @@ def cmd_answer(args: argparse.Namespace) -> int:
     results = recaller.recall(args.query, limit=args.limit)
 
     llm = get_llm(args.llm, **model_kwargs(_llm_model(args)))
-    gen = AnswerGenerator(llm=llm, confidence_threshold=args.min_confidence)
+    answer_generator_kwargs = {
+        "llm": llm,
+        "confidence_threshold": args.min_confidence,
+    }
+    if getattr(args, "query_expansion", False):
+        answer_generator_kwargs.update(
+            {
+                "recaller": recaller,
+                "retry_with_expansion": True,
+                "expansion_llm": llm,
+            }
+        )
+    gen = AnswerGenerator(**answer_generator_kwargs)
     answer = gen.generate(args.query, results)
 
     # Tier caps how many sources we emit (answer text itself is model-sized).
@@ -319,7 +331,20 @@ def _build_recaller(
         "temporal", source_filter
     ):
         retrievers.append(TemporalRetriever(embedding=provider, vector_store=store))
-    return Recaller(retrievers=[r for r in retrievers if r is not None])
+    query_expansion = bool(getattr(args, "query_expansion", False))
+    expansion_llm = None
+    if query_expansion:
+        expansion_llm = get_llm(
+            getattr(args, "llm", "gemini"),
+            **model_kwargs(_llm_model(args)),
+        )
+    return Recaller(
+        embedding_provider=provider,
+        vector_store=store,
+        retrievers=[r for r in retrievers if r is not None],
+        query_expansion=query_expansion,
+        expansion_llm=expansion_llm,
+    )
 
 
 def cmd_index(args: argparse.Namespace) -> int:
@@ -344,14 +369,20 @@ def cmd_index(args: argparse.Namespace) -> int:
         print(f"error: no .md/.txt files found under {target}", file=sys.stderr)
         return 2
 
+    if args.window_size < 1:
+        print("error: --window-size must be >= 1", file=sys.stderr)
+        return 2
+
     chunks: list[tuple[str, str, dict]] = []  # (id, text, payload) triples
     for f in files:
         text = f.read_text(encoding="utf-8", errors="ignore")
         source = str(f.relative_to(target if target.is_dir() else target.parent))
+        file_chunks: list[tuple[int, str]] = []
         for i in range(0, len(text), args.chunk_size):
             chunk = text[i : i + args.chunk_size]
             if not chunk.strip():
                 continue
+            file_chunks.append((i, chunk))
             cid = _stable_chunk_id(source, i, chunk)
             chunks.append(
                 (
@@ -364,6 +395,27 @@ def cmd_index(args: argparse.Namespace) -> int:
                     },
                 )
             )
+        if args.window_size > 1:
+            for start in range(0, len(file_chunks) - args.window_size + 1):
+                window = file_chunks[start : start + args.window_size]
+                middle_offset, _middle_text = window[args.window_size // 2]
+                chunk = "\n".join(piece for _offset, piece in window)
+                cid = _stable_chunk_id(source, middle_offset, chunk)
+                chunks.append(
+                    (
+                        cid,
+                        chunk,
+                        {
+                            "text": chunk,
+                            "source": source,
+                            "offset": middle_offset,
+                            "chunk_window": args.window_size,
+                            "chunk_kind": "sliding_window",
+                            "chunk_start_offset": window[0][0],
+                            "chunk_end_offset": window[-1][0],
+                        },
+                    )
+                )
 
     # Load existing point IDs once so re-runs skip unchanged chunks without
     # re-embedding (saves API quota / local GPU time).
@@ -487,6 +539,19 @@ def build_parser() -> argparse.ArgumentParser:
             "3=detail (~500 tok). Omit for full output (back-compat)."
         ),
     )
+    p_search.add_argument(
+        "--llm", default=cfg.llm.provider, choices=list_llms(), help="LLM provider for query expansion"
+    )
+    p_search.add_argument(
+        "--llm-model",
+        default=cfg.llm.model,
+        help="LLM model override (default: provider default or config value)",
+    )
+    p_search.add_argument(
+        "--query-expansion",
+        action="store_true",
+        help="Expand query with an LLM and fuse recall over original + variants",
+    )
     p_search.set_defaults(func=cmd_search)
 
     p_synthesize = sub.add_parser(
@@ -532,6 +597,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=cfg.llm.model,
         help="LLM model override (default: provider default or config value)",
     )
+    p_synthesize.add_argument(
+        "--query-expansion",
+        action="store_true",
+        help="Expand entity query with an LLM and fuse recall over original + variants",
+    )
     p_synthesize.set_defaults(func=cmd_synthesize)
 
     p_answer = sub.add_parser(
@@ -574,12 +644,23 @@ def build_parser() -> argparse.ArgumentParser:
         default=cfg.recall.confidence_threshold,
         help="Fallback suggestion threshold",
     )
+    p_answer.add_argument(
+        "--query-expansion",
+        action="store_true",
+        help="Expand query with an LLM and fuse recall over original + variants",
+    )
     p_answer.add_argument("--json", action="store_true", help="JSON output")
     p_answer.set_defaults(func=cmd_answer)
 
     p_index = sub.add_parser("index", parents=[common], help="Index files into vector store")
     p_index.add_argument("path", help="File or directory to index")
     p_index.add_argument("--chunk-size", type=int, default=cfg.vector.chunk_size, help="Chunk size in chars")
+    p_index.add_argument(
+        "--window-size",
+        type=int,
+        default=cfg.vector.window_size,
+        help="Adjacent chunks to concatenate into overlapping context chunks (1 disables)",
+    )
     p_index.add_argument("--recreate", action="store_true", help="Drop existing collection")
     p_index.set_defaults(func=cmd_index)
 

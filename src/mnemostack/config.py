@@ -63,6 +63,7 @@ class VectorConfig:
     collection: str = "mnemostack"
     chunk_size: int = 800
     overlap: int = 100
+    window_size: int = 1
 
 
 @dataclass
@@ -247,6 +248,7 @@ vector:
   collection: mnemostack
   chunk_size: 800
   overlap: 100
+  window_size: 1
 
 llm:
   provider: gemini
