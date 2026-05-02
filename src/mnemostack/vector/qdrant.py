@@ -14,6 +14,7 @@ from qdrant_client.models import (
     MatchValue,
     PayloadSchemaType,
     PointStruct,
+    QueryRequest,
     Range,
     VectorParams,
 )
@@ -210,6 +211,43 @@ class VectorStore:
                 continue
             hits.append(Hit(id=pt.id, score=pt.score, payload=pt.payload or {}))
         return hits
+
+    def search_many(
+        self,
+        query_vectors: list[list[float]],
+        limit: int = 10,
+        filters: dict[str, Any] | None = None,
+        min_score: float = 0.0,
+    ) -> list[list[Hit]]:
+        """Run multiple vector searches in one Qdrant batch request."""
+        if not query_vectors:
+            return []
+        qfilter = self._build_filter(filters) if filters else None
+        requests = [
+            QueryRequest(
+                query=query_vector,
+                limit=limit,
+                filter=qfilter,
+                with_payload=True,
+            )
+            for query_vector in query_vectors
+            if query_vector
+        ]
+        if not requests:
+            return []
+        responses = self.client.query_batch_points(
+            collection_name=self.collection,
+            requests=requests,
+        )
+        all_hits: list[list[Hit]] = []
+        for response in responses:
+            hits = []
+            for pt in response.points:
+                if pt.score < min_score:
+                    continue
+                hits.append(Hit(id=pt.id, score=pt.score, payload=pt.payload or {}))
+            all_hits.append(hits)
+        return all_hits
 
     def _build_filter(self, filters: dict[str, Any]) -> Filter:
         must = []

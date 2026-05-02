@@ -335,6 +335,8 @@ class AnswerGenerator:
         specificity_resolver: bool = True,
         inference_retry: bool = True,
         recaller: Recaller | None = None,
+        retry_with_expansion: bool = False,
+        expansion_llm: LLMProvider | None = None,
     ):
         self.llm = llm
         self.max_memories = max_memories
@@ -347,6 +349,8 @@ class AnswerGenerator:
         self.specificity_resolver = specificity_resolver
         self.inference_retry = inference_retry
         self.recaller = recaller
+        self.retry_with_expansion = retry_with_expansion
+        self.expansion_llm = expansion_llm
 
     def generate(
         self,
@@ -356,15 +360,6 @@ class AnswerGenerator:
     ) -> Answer:
         """Synthesize answer from retrieved memories."""
         counter("mnemostack.answer.calls", 1)
-        if not memories:
-            counter("mnemostack.answer.empty_memory", 1)
-            return Answer(
-                text="Not in memory.",
-                confidence=0.0,
-                sources=[],
-                raw="",
-            )
-
         prompt_template = self.prompt_template
         category = "general"
         if self.category_aware_prompts:
@@ -374,18 +369,39 @@ class AnswerGenerator:
                 1,
                 labels={"category": category},
             )
-            if self.list_extract_mode and category in {"list", "count"}:
-                answer = self._generate_list_extract(query, memories)
-                return self._apply_specificity_resolver(query, answer, memories, category)
             if not self._custom_prompt_template:
                 prompt_template = _PROMPT_BY_CATEGORY[category]
 
-        answer = self._generate_single_prompt(
-            query=query,
-            memories=memories[: self.max_memories],
-            prompt_template=prompt_template,
-        )
+        if not memories:
+            counter("mnemostack.answer.empty_memory", 1)
+            answer = Answer(
+                text="Not in memory.",
+                confidence=0.0,
+                sources=[],
+                raw="",
+            )
+        elif self.list_extract_mode and category in {"list", "count"}:
+            answer = self._generate_list_extract(query, memories)
+        else:
+            answer = self._generate_single_prompt(
+                query=query,
+                memories=memories[: self.max_memories],
+                prompt_template=prompt_template,
+            )
+
         specificity_memories = memories
+        if (
+            self.retry_with_expansion
+            and self.recaller is not None
+            and self._is_weak_answer(answer)
+        ):
+            answer, specificity_memories = self._retry_answer_with_expansion(
+                query=query,
+                memories=memories,
+                draft=answer,
+                prompt_template=prompt_template,
+                recall_filters=recall_filters,
+            )
         if (
             self.category_aware_prompts
             and self.inference_retry
@@ -395,7 +411,7 @@ class AnswerGenerator:
         ):
             answer, specificity_memories = self._retry_inference_answer(
                 query=query,
-                memories=memories,
+                memories=specificity_memories,
                 draft=answer,
                 prompt_template=prompt_template,
                 recall_filters=recall_filters,
@@ -404,6 +420,59 @@ class AnswerGenerator:
             query, answer, specificity_memories, category
         )
         return self._apply_evidence_guard(query, answer, specificity_memories, category)
+
+    @staticmethod
+    def _is_weak_answer(answer: Answer) -> bool:
+        if not answer.ok:
+            return False
+        return (
+            answer.confidence < 0.5
+            or answer.text.lower().strip() in {"not in memory", "not in memory."}
+        )
+
+    def _retry_answer_with_expansion(
+        self,
+        query: str,
+        memories: list[RecallResult],
+        draft: Answer,
+        prompt_template: str,
+        recall_filters: dict[str, object] | None,
+    ) -> tuple[Answer, list[RecallResult]]:
+        """Retry weak answers with expanded batch-vector recall."""
+        if self.expansion_llm is None and getattr(self.recaller, "expansion_llm", None) is None:
+            return draft, memories
+
+        old_expansion_llm = getattr(self.recaller, "expansion_llm", None)
+        if old_expansion_llm is None and self.expansion_llm is not None:
+            self.recaller.expansion_llm = self.expansion_llm
+        try:
+            expanded_memories = self.recaller.recall_with_expanded_vectors(
+                query,
+                limit=max(self.max_memories, 10),
+                vector_limit=max(self.max_memories, 20),
+                filters=dict(recall_filters) if recall_filters is not None else None,
+                n_variants=2,
+            )
+        except Exception:
+            expanded_memories = []
+        finally:
+            if old_expansion_llm is None and self.expansion_llm is not None:
+                self.recaller.expansion_llm = None
+
+        merged_memories = merge_results(memories, expanded_memories)
+        if not merged_memories:
+            return draft, memories
+
+        retry_answer = self._generate_single_prompt(
+            query=query,
+            memories=merged_memories[: self.max_memories],
+            prompt_template=prompt_template,
+        )
+        if retry_answer.ok and not self._is_weak_answer(retry_answer):
+            counter("mnemostack.answer.retry_expansion_success", 1)
+            return retry_answer, merged_memories
+        counter("mnemostack.answer.retry_expansion_no_improvement", 1)
+        return draft, memories
 
     def _retry_inference_answer(
         self,
