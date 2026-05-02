@@ -47,10 +47,12 @@ RULES:
    Prefer the phrasing the ground truth likely uses (e.g. "December 2022" vs "1 January 2023" — if the event was in the previous month, answer with the month-year of the event, not the session date that describes it).
 4. For identity/label questions: exact label, no explanation.
 5. If multiple memories contradict, prefer the most recent one.
-6. If the memories genuinely don't contain an answer, reply: "Not in memory."
+6. Say "Not in memory" ONLY when NONE of the memories contain ANY relevant information. If even ONE memory mentions something related to the question, extract and provide the best answer you can. Partial/uncertain answers are better than "Not in memory".
    For hypothetical or inference questions ("might be", "would be", "likely", "probably", "what if"): attempt a reasonable inference from available evidence rather than defaulting to "Not in memory." Only say "Not in memory" when there is truly zero relevant context.
 7. If the answer requires inference from multiple memories, do it. For cross-hop questions ("common between X and Y", "what do both..."), connect facts from different memories before answering.
 8. NO meta commentary, NO explanation, JUST the answer.
+
+IMPORTANT: "Not in memory" is only appropriate when the memories contain ZERO relevant information about the question topic. If any memory mentions the person, event, or topic — extract what you can.
 
 After your answer, on a NEW line, output ONLY:
 CONFIDENCE: <float 0.0-1.0>
@@ -80,6 +82,8 @@ RULES:
 7. If multiple memories contradict, prefer the most recent one.
 8. If the memories genuinely don't contain an answer, reply: "Not in memory."
 9. NO meta commentary, NO explanation, JUST the answer.
+
+IMPORTANT: "Not in memory" is only appropriate when the memories contain ZERO relevant information about the question topic. If any memory mentions the person, event, or topic — extract what you can.
 
 {confidence_rules}
 
@@ -137,6 +141,8 @@ RULES:
 5. If multiple memories contradict, prefer the most recent one.
 6. NO meta commentary, NO explanation, JUST the answer.
 
+IMPORTANT: "Not in memory" is only appropriate when the memories contain ZERO relevant information about the question topic. If any memory mentions the person, event, or topic — extract what you can.
+
 {confidence_rules}
 
 QUESTION: {query}
@@ -154,8 +160,10 @@ RULES:
 3. Be specific about WHO did WHAT and WHY when stating motivations or causes.
 4. Answer in 1-2 sentences with key entities, actions, and reasons explicitly named.
 5. If multiple aspects exist (e.g. 'what motivated X' has emotional + practical reasons), list both.
-6. If the memories genuinely don't contain an answer, reply: "Not in memory."
+6. Say "Not in memory" ONLY when NONE of the memories contain ANY relevant information. If even ONE memory mentions something related to the question, extract and provide the best answer you can. Partial/uncertain answers are better than "Not in memory".
 7. NO meta commentary, NO explanation, JUST the answer.
+
+IMPORTANT: "Not in memory" is only appropriate when the memories contain ZERO relevant information about the question topic. If any memory mentions the person, event, or topic — extract what you can.
 
 {confidence_rules}
 
@@ -181,8 +189,10 @@ RULES:
    Prefer the phrasing the ground truth likely uses (e.g. "December 2022" vs "1 January 2023" — if the event was in the previous month, answer with the month-year of the event, not the session date that describes it).
 4. Always answer with absolute date (e.g. '7 May 2023', 'June 2022').
 5. If multiple memories contradict, prefer the most recent one.
-6. If the memories genuinely don't contain an answer, reply: "Not in memory."
+6. Say "Not in memory" ONLY when NONE of the memories contain ANY relevant information. If even ONE memory mentions something related to the question, extract and provide the best answer you can. Partial/uncertain answers are better than "Not in memory".
 7. NO meta commentary, NO explanation, JUST the answer.
+
+IMPORTANT: "Not in memory" is only appropriate when the memories contain ZERO relevant information about the question topic. If any memory mentions the person, event, or topic — extract what you can.
 
 {confidence_rules}
 
@@ -197,10 +207,12 @@ MEMORIES:
 
 RULES:
 1. This may be an adversarial question — the asked entity/fact might not exist in memories.
-2. Answer 'Not in memory' UNLESS there is direct, specific, unambiguous evidence in the memories.
-3. Do not infer for adversarial questions.
+2. If ANY memory contains information relevant to the question, provide an answer. Say "Not in memory" only when there is truly zero relevant context. When evidence is indirect but present, attempt a reasonable answer.
+3. Do not infer for adversarial questions when there is truly zero relevant context.
 4. If multiple memories contradict, prefer the most recent one.
 5. NO meta commentary, NO explanation, JUST the answer.
+
+IMPORTANT: "Not in memory" is only appropriate when the memories contain ZERO relevant information about the question topic. If any memory mentions the person, event, or topic — extract what you can.
 
 {confidence_rules}
 
