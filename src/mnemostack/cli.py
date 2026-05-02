@@ -319,7 +319,18 @@ def _build_recaller(
         "temporal", source_filter
     ):
         retrievers.append(TemporalRetriever(embedding=provider, vector_store=store))
-    return Recaller(retrievers=[r for r in retrievers if r is not None])
+    query_expansion = bool(getattr(args, "query_expansion", False))
+    expansion_llm = None
+    if query_expansion:
+        expansion_llm = get_llm(
+            getattr(args, "llm", "gemini"),
+            **model_kwargs(_llm_model(args)),
+        )
+    return Recaller(
+        retrievers=[r for r in retrievers if r is not None],
+        query_expansion=query_expansion,
+        expansion_llm=expansion_llm,
+    )
 
 
 def cmd_index(args: argparse.Namespace) -> int:
@@ -514,6 +525,19 @@ def build_parser() -> argparse.ArgumentParser:
             "3=detail (~500 tok). Omit for full output (back-compat)."
         ),
     )
+    p_search.add_argument(
+        "--llm", default=cfg.llm.provider, choices=list_llms(), help="LLM provider for query expansion"
+    )
+    p_search.add_argument(
+        "--llm-model",
+        default=cfg.llm.model,
+        help="LLM model override (default: provider default or config value)",
+    )
+    p_search.add_argument(
+        "--query-expansion",
+        action="store_true",
+        help="Expand query with an LLM and fuse recall over original + variants",
+    )
     p_search.set_defaults(func=cmd_search)
 
     p_synthesize = sub.add_parser(
@@ -559,6 +583,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=cfg.llm.model,
         help="LLM model override (default: provider default or config value)",
     )
+    p_synthesize.add_argument(
+        "--query-expansion",
+        action="store_true",
+        help="Expand entity query with an LLM and fuse recall over original + variants",
+    )
     p_synthesize.set_defaults(func=cmd_synthesize)
 
     p_answer = sub.add_parser(
@@ -600,6 +629,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=cfg.recall.confidence_threshold,
         help="Fallback suggestion threshold",
+    )
+    p_answer.add_argument(
+        "--query-expansion",
+        action="store_true",
+        help="Expand query with an LLM and fuse recall over original + variants",
     )
     p_answer.add_argument("--json", action="store_true", help="JSON output")
     p_answer.set_defaults(func=cmd_answer)
