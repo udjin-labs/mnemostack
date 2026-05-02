@@ -70,6 +70,11 @@ def test_pair_chunker_window_size_1_solo_only():
     assert [c.text for c in chunks] == ["A", "B"]
 
 
+def test_pair_chunker_rejects_window_size_1_without_solo():
+    with pytest.raises(ValueError):
+        MessagePairChunker(include_solo=False, window_size=1)
+
+
 def test_pair_chunker_invalid_window():
     with pytest.raises(ValueError):
         MessagePairChunker(window=0)

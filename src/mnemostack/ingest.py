@@ -9,8 +9,6 @@ That is what this module provides.
 
     from mnemostack.embeddings import get_provider
     from mnemostack.vector import VectorStore
-
-DEFAULT_WINDOW_SEPARATOR = "\n"
     from mnemostack.ingest import Ingestor, IngestItem
 
     emb = get_provider("gemini")
@@ -37,7 +35,7 @@ import hashlib
 import logging
 import re
 import uuid
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -237,6 +235,54 @@ def _window_items(
     return expanded
 
 
+def _make_window_item(
+    window: Sequence[IngestItem],
+    window_size: int,
+    separator: str,
+) -> IngestItem:
+    middle = window[window_size // 2]
+    metadata = dict(middle.metadata)
+    metadata.update(
+        {
+            "chunk_window": window_size,
+            "chunk_kind": "sliding_window",
+            "chunk_start_offset": window[0].offset,
+            "chunk_end_offset": window[-1].offset,
+        }
+    )
+    return IngestItem(
+        text=separator.join(item.text for item in window),
+        source=middle.source,
+        offset=middle.offset,
+        metadata=metadata,
+        tags=list(middle.tags),
+        wrapper_dir=middle.wrapper_dir,
+    )
+
+
+def _iter_window_items(
+    items: Iterable[IngestItem],
+    window_size: int,
+    separator: str = DEFAULT_WINDOW_SEPARATOR,
+) -> Iterator[IngestItem]:
+    if window_size < 1:
+        raise ValueError("window_size must be >= 1")
+    if window_size == 1:
+        yield from items
+        return
+
+    window: deque[IngestItem] = deque(maxlen=window_size)
+    current_source: str | None = None
+    for item in items:
+        if item.source != current_source:
+            window.clear()
+            current_source = item.source
+        yield item
+        window.append(item)
+        if len(window) == window_size:
+            yield _make_window_item(list(window), window_size, separator)
+
+
 class _SeenCache:
     """Bounded LRU of point ids we've recently upserted in this process.
 
@@ -351,7 +397,7 @@ class Ingestor:
         """
         buffer: list[tuple[str, IngestItem]] = []
         total_seen = 0
-        for item in _window_items(list(item_iter), self.window_size, self.window_separator):
+        for item in _iter_window_items(item_iter, self.window_size, self.window_separator):
             total_seen += 1
             pid = stable_chunk_id(item.source, item.offset, item.text)
             if self.skip_seen and self._seen is not None and pid in self._seen:

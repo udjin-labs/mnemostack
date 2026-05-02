@@ -218,7 +218,19 @@ def cmd_answer(args: argparse.Namespace) -> int:
     results = recaller.recall(args.query, limit=args.limit)
 
     llm = get_llm(args.llm, **model_kwargs(_llm_model(args)))
-    gen = AnswerGenerator(llm=llm, confidence_threshold=args.min_confidence)
+    answer_generator_kwargs = {
+        "llm": llm,
+        "confidence_threshold": args.min_confidence,
+    }
+    if getattr(args, "query_expansion", False):
+        answer_generator_kwargs.update(
+            {
+                "recaller": recaller,
+                "retry_with_expansion": True,
+                "expansion_llm": llm,
+            }
+        )
+    gen = AnswerGenerator(**answer_generator_kwargs)
     answer = gen.generate(args.query, results)
 
     # Tier caps how many sources we emit (answer text itself is model-sized).
@@ -327,6 +339,8 @@ def _build_recaller(
             **model_kwargs(_llm_model(args)),
         )
     return Recaller(
+        embedding_provider=provider,
+        vector_store=store,
         retrievers=[r for r in retrievers if r is not None],
         query_expansion=query_expansion,
         expansion_llm=expansion_llm,

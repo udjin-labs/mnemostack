@@ -46,6 +46,8 @@ class MessagePairChunker(Chunker):
             window = 2
         if window < 1:
             raise ValueError("window_size must be >= 1")
+        if window == 1 and not include_solo:
+            raise ValueError("window_size=1 requires include_solo=True")
         self.include_solo = include_solo
         self.window = window
         self.separator = separator
