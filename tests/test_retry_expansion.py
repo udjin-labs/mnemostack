@@ -65,7 +65,10 @@ def test_weak_answer_triggers_retry_with_expansion():
         "Not in memory.\nCONFIDENCE: 0.0",
         "Expanded answer\nCONFIDENCE: 0.8",
     ])
-    expansion_llm = SequenceLLM(["variant one\nvariant two"])
+    expansion_llm = SequenceLLM([
+        "variant one\nvariant two",
+        "hypothetical answer",
+    ])
     embedding = FakeEmbedding()
     vector = FakeVectorStore()
     recaller = Recaller(embedding_provider=embedding, vector_store=vector, expansion_llm=expansion_llm)
@@ -81,8 +84,13 @@ def test_weak_answer_triggers_retry_with_expansion():
 
     assert answer.text == "Expanded answer"
     assert len(answer_llm.prompts) == 2
-    assert expansion_llm.prompts
-    assert embedding.embed_batch_calls == [["original question", "variant one", "variant two"]]
+    assert len(expansion_llm.prompts) == 2
+    assert embedding.embed_batch_calls == [[
+        "original question",
+        "variant one",
+        "variant two",
+        "hypothetical answer",
+    ]]
     assert len(vector.search_many_calls) == 1
 
 
@@ -110,14 +118,17 @@ def test_strong_answer_skips_retry_with_expansion():
 
 
 def test_expanded_vector_retry_batch_matches_individual_vector_results():
-    expansion_llm = SequenceLLM(["variant one\nvariant two"])
+    expansion_llm = SequenceLLM([
+        "variant one\nvariant two",
+        "hypothetical answer",
+    ])
     embedding = FakeEmbedding()
     vector = FakeVectorStore()
     recaller = Recaller(embedding_provider=embedding, vector_store=vector, expansion_llm=expansion_llm)
 
     batch_results = recaller.recall_with_expanded_vectors("original", limit=10, vector_limit=5)
 
-    queries = ["original", "variant one", "variant two"]
+    queries = ["original", "variant one", "variant two", "hypothetical answer"]
     individual_ids = set()
     individual_vectors = []
     for query in queries:
@@ -129,3 +140,36 @@ def test_expanded_vector_retry_batch_matches_individual_vector_results():
     assert vector.search_many_calls[0][0] == individual_vectors
     assert embedding.embed_batch_calls == [queries]
     assert len(vector.search_many_calls) == 1
+    assert any("hyde" in result.sources for result in batch_results)
+
+
+def test_combined_retry_returns_more_results_than_expansion_alone():
+    embedding = FakeEmbedding()
+    vector = FakeVectorStore()
+    expansion_only = Recaller(
+        embedding_provider=embedding,
+        vector_store=vector,
+        expansion_llm=SequenceLLM(["alpha\nbravo!!"]),
+    )
+    expansion_results = expansion_only.recall_with_expanded_vectors(
+        "original",
+        limit=10,
+        vector_limit=5,
+        include_hyde=False,
+    )
+
+    embedding = FakeEmbedding()
+    vector = FakeVectorStore()
+    combined = Recaller(
+        embedding_provider=embedding,
+        vector_store=vector,
+        expansion_llm=SequenceLLM(["alpha\nbravo!!", "hypothetical answer"]),
+    )
+    combined_results = combined.recall_with_expanded_vectors(
+        "original",
+        limit=10,
+        vector_limit=5,
+    )
+
+    assert len(combined_results) > len(expansion_results)
+    assert any("hyde" in result.sources for result in combined_results)

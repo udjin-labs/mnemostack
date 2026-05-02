@@ -160,7 +160,7 @@ def main():
     ap.add_argument(
         "--retry-expansion",
         action="store_true",
-        help="Retry weak answers with cheaper batch-vector query expansion",
+        help="Retry weak answers with combined batch-vector query expansion + HyDE",
     )
     ap.add_argument("--only-sample", default=None, help="Run only the specified sample_id (e.g. conv-43)")
     ap.add_argument(

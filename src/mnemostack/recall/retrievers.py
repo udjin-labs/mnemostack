@@ -338,17 +338,31 @@ class HyDERetriever(Retriever):
         self.vector_store = vector_store
         self.max_tokens = max_tokens
 
-    def _generate_hypothetical(self, query: str) -> str | None:
+    @classmethod
+    def generate_hypothetical(
+        cls,
+        query: str,
+        llm: LLMProvider,
+        max_tokens: int = 120,
+    ) -> str | None:
+        """Generate the HyDE seed text used for vector search."""
         try:
-            resp = self.llm.generate(
-                self._PROMPT.format(query=query),
-                max_tokens=self.max_tokens,
+            resp = llm.generate(
+                cls._PROMPT.format(query=query),
+                max_tokens=max_tokens,
                 temperature=0.0,
             )
             text = (getattr(resp, "text", None) or "").strip()
             return text or None
         except Exception:
             return None
+
+    def _generate_hypothetical(self, query: str) -> str | None:
+        return self.generate_hypothetical(
+            query=query,
+            llm=self.llm,
+            max_tokens=self.max_tokens,
+        )
 
     def search(self, query, limit=20, filters=None):
         hypo = self._generate_hypothetical(query)

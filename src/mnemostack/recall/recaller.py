@@ -314,22 +314,37 @@ class Recaller:
         vector_limit: int = 20,
         filters: dict[str, Any] | None = None,
         n_variants: int = 2,
+        include_hyde: bool = True,
     ) -> list[RecallResult]:
-        """Expand query, batch-embed variants, batch-search vectors, RRF-merge hits.
+        """Expand query + HyDE, batch-embed all variants, batch-search vectors.
 
         This is the cheaper retry path used by AnswerGenerator: one expansion LLM
-        call, one embed_batch(original + variants), and one Qdrant batch request.
-        Legacy Recaller(query_expansion=True) remains available for full hybrid
-        expansion across all retrievers.
+        call, one HyDE LLM call, one embed_batch(original + variants + hypothetical),
+        and one Qdrant batch request. Legacy Recaller(query_expansion=True) remains
+        available for full hybrid expansion across all retrievers.
         """
         queries = self._expanded_queries(query, n_variants=n_variants)
+        labels = ["vector"] * len(queries)
+        if include_hyde:
+            from .retrievers import HyDERetriever
+
+            hypo = HyDERetriever.generate_hypothetical(query, self.expansion_llm)
+            if hypo:
+                queries.append(hypo)
+                labels.append("hyde")
+
         embedding, vector = self._vector_components()
         if embedding is None or vector is None:
             raise ValueError("expanded vector retry requires a vector embedding provider/store")
 
         with histogram("mnemostack.recall.embed_latency_ms"):
-            vectors = embedding.embed_batch(queries)
-        vectors = [vec for vec in vectors if vec]
+            raw_vectors = embedding.embed_batch(queries)
+        vectors: list[Any] = []
+        vector_labels: list[str] = []
+        for vec, label in zip(raw_vectors, labels):
+            if vec:
+                vectors.append(vec)
+                vector_labels.append(label)
         if not vectors:
             return []
 
@@ -341,7 +356,7 @@ class Recaller:
 
         ranked_lists: list[list[tuple[Any, float]]] = []
         id_to_result: dict[Any, RecallResult] = {}
-        for hits in hit_lists:
+        for hits, source in zip(hit_lists, vector_labels):
             counter("mnemostack.recall.vector_hits", len(hits))
             ranked: list[tuple[Any, float]] = []
             for hit in hits:
@@ -350,12 +365,12 @@ class Recaller:
                     text=hit.payload.get("text", ""),
                     score=hit.score,
                     payload=hit.payload,
-                    sources=["vector"],
+                    sources=[source],
                 )
                 if result.id in id_to_result:
                     existing = id_to_result[result.id]
-                    if "vector" not in existing.sources:
-                        existing.sources.append("vector")
+                    if source not in existing.sources:
+                        existing.sources.append(source)
                 else:
                     id_to_result[result.id] = result
                 ranked.append((result.id, result.score))
