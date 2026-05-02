@@ -341,7 +341,7 @@ class Recaller:
             raw_vectors = embedding.embed_batch(queries)
         vectors: list[Any] = []
         vector_labels: list[str] = []
-        for vec, label in zip(raw_vectors, labels):
+        for vec, label in zip(raw_vectors, labels, strict=False):
             if vec:
                 vectors.append(vec)
                 vector_labels.append(label)
@@ -356,7 +356,7 @@ class Recaller:
 
         ranked_lists: list[list[tuple[Any, float]]] = []
         id_to_result: dict[Any, RecallResult] = {}
-        for hits, source in zip(hit_lists, vector_labels):
+        for hits, source in zip(hit_lists, vector_labels, strict=False):
             counter("mnemostack.recall.vector_hits", len(hits))
             ranked: list[tuple[Any, float]] = []
             for hit in hits:
