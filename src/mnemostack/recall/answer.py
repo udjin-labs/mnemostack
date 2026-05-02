@@ -400,7 +400,10 @@ class AnswerGenerator:
                 prompt_template=prompt_template,
                 recall_filters=recall_filters,
             )
-        return self._apply_specificity_resolver(query, answer, specificity_memories, category)
+        answer = self._apply_specificity_resolver(
+            query, answer, specificity_memories, category
+        )
+        return self._apply_evidence_guard(query, answer, specificity_memories, category)
 
     def _retry_inference_answer(
         self,
@@ -447,6 +450,74 @@ class AnswerGenerator:
         ):
             return retry_answer, merged_memories
         return draft, memories
+
+    def _apply_evidence_guard(
+        self,
+        query: str,
+        answer: Answer,
+        memories: list[RecallResult],
+        category: str,
+    ) -> Answer:
+        """Override low-confidence ungrounded general/adversarial answers."""
+        if (
+            not answer.ok
+            or category not in {"general", "adversarial"}
+            or answer.confidence >= 0.3
+            or answer.text.lower().strip() in {"not in memory.", "not in memory", "unknown"}
+        ):
+            return answer
+
+        if not memories or memories[0].score < 0.2 or not self._evidence_check(
+            query, answer.text, memories
+        ):
+            counter("mnemostack.answer.evidence_guard", 1, labels={"category": category})
+            return Answer(
+                text="Not in memory.",
+                confidence=0.1,
+                sources=[],
+                raw=answer.raw,
+            )
+        return answer
+
+    @staticmethod
+    def _evidence_check(
+        query: str,
+        answer_text: str,
+        memories: list[RecallResult],
+    ) -> bool:
+        """Return True if answer is grounded in memories, False if likely hallucinated."""
+        if not memories:
+            return False
+
+        def tokenize(text: str) -> set[str]:
+            return set(re.findall(r"[a-z0-9]+", text.lower()))
+
+        answer_tokens = tokenize(answer_text)
+        stopwords = {
+            "the", "a", "an", "is", "was", "are", "were", "in", "on", "at",
+            "to", "for", "of", "and", "or", "not", "it", "its", "i", "my",
+            "me", "he", "she", "they", "we", "you", "this", "that", "with",
+            "from", "by", "as", "but", "if", "so", "no", "yes",
+        }
+        answer_content = answer_tokens - stopwords
+        if len(answer_content) < 2:
+            return True
+
+        all_memory_text = " ".join(m.text.lower() for m in memories[:10])
+        memory_tokens = tokenize(all_memory_text)
+
+        query_tokens = tokenize(query)
+        claim_tokens = {
+            token
+            for token in answer_content
+            if token.isdigit() or token not in query_tokens
+        }
+        if claim_tokens and not claim_tokens <= memory_tokens:
+            return False
+
+        overlap = answer_content & memory_tokens
+        ratio = len(overlap) / len(answer_content) if answer_content else 0
+        return ratio >= 0.3
 
     def _apply_specificity_resolver(
         self,

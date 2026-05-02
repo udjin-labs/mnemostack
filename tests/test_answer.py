@@ -216,3 +216,45 @@ def test_prompt_allows_hypothetical_inference(sample_memories):
     # Must instruct to attempt inference for hypothetical questions
     assert "might be" in p and "would be" in p
     assert "reasonable inference" in p
+
+
+def test_evidence_guard_replaces_low_confidence_hallucination(sample_memories):
+    llm = FakeLLM(response_text="Atlantis and Zanzibar\nCONFIDENCE: 0.2")
+    gen = AnswerGenerator(llm=llm)
+
+    answer = gen.generate("What fictional country is never mentioned?", sample_memories)
+
+    assert answer.text == "Not in memory."
+    assert answer.confidence == 0.1
+    assert answer.sources == []
+
+
+def test_evidence_guard_keeps_low_confidence_grounded_answer(sample_memories):
+    llm = FakeLLM(response_text="Postgres migration\nCONFIDENCE: 0.2")
+    gen = AnswerGenerator(llm=llm)
+
+    answer = gen.generate("What project is mentioned?", sample_memories)
+
+    assert answer.text == "Postgres migration"
+    assert answer.confidence == 0.2
+    assert answer.sources == ["notes/2024-01-15.md", "notes/2024-03-30.md"]
+
+
+def test_evidence_guard_replaces_answer_when_top_memory_score_is_very_low(sample_memories):
+    memories = [
+        RecallResult(
+            id=m.id,
+            text=m.text,
+            score=0.05,
+            payload=m.payload,
+            sources=m.sources,
+        )
+        for m in sample_memories
+    ]
+    llm = FakeLLM(response_text="Postgres migration\nCONFIDENCE: 0.2")
+    gen = AnswerGenerator(llm=llm)
+
+    answer = gen.generate("What project is mentioned?", memories)
+
+    assert answer.text == "Not in memory."
+    assert answer.confidence == 0.1
