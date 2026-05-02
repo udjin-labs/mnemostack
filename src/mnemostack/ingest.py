@@ -35,8 +35,8 @@ import hashlib
 import logging
 import re
 import uuid
-from collections import OrderedDict
-from collections.abc import Iterable, Iterator
+from collections import OrderedDict, deque
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,6 +45,8 @@ from typing import Any
 from mnemostack.embeddings.base import EmbeddingProvider
 from mnemostack.observability.recorder import counter, histogram
 from mnemostack.vector import VectorStore
+
+DEFAULT_WINDOW_SEPARATOR = "\n"
 
 log = logging.getLogger(__name__)
 
@@ -186,6 +188,101 @@ def _sync_wrapper_graph(graph: Any, item: IngestItem, point_id: str) -> None:
         )
 
 
+def _window_items(
+    items: Sequence[IngestItem],
+    window_size: int,
+    separator: str = DEFAULT_WINDOW_SEPARATOR,
+) -> list[IngestItem]:
+    if window_size < 1:
+        raise ValueError("window_size must be >= 1")
+    if window_size == 1 or len(items) < window_size:
+        return list(items)
+
+    expanded = list(items)
+    group_start = 0
+    while group_start < len(items):
+        source = items[group_start].source
+        group_end = group_start + 1
+        while group_end < len(items) and items[group_end].source == source:
+            group_end += 1
+
+        group = items[group_start:group_end]
+        if len(group) >= window_size:
+            for start in range(0, len(group) - window_size + 1):
+                window = group[start : start + window_size]
+                middle = window[window_size // 2]
+                metadata = dict(middle.metadata)
+                metadata.update(
+                    {
+                        "chunk_window": window_size,
+                        "chunk_kind": "sliding_window",
+                        "chunk_start_offset": window[0].offset,
+                        "chunk_end_offset": window[-1].offset,
+                    }
+                )
+                expanded.append(
+                    IngestItem(
+                        text=separator.join(item.text for item in window),
+                        source=middle.source,
+                        offset=middle.offset,
+                        metadata=metadata,
+                        tags=list(middle.tags),
+                        wrapper_dir=middle.wrapper_dir,
+                    )
+                )
+        group_start = group_end
+
+    return expanded
+
+
+def _make_window_item(
+    window: Sequence[IngestItem],
+    window_size: int,
+    separator: str,
+) -> IngestItem:
+    middle = window[window_size // 2]
+    metadata = dict(middle.metadata)
+    metadata.update(
+        {
+            "chunk_window": window_size,
+            "chunk_kind": "sliding_window",
+            "chunk_start_offset": window[0].offset,
+            "chunk_end_offset": window[-1].offset,
+        }
+    )
+    return IngestItem(
+        text=separator.join(item.text for item in window),
+        source=middle.source,
+        offset=middle.offset,
+        metadata=metadata,
+        tags=list(middle.tags),
+        wrapper_dir=middle.wrapper_dir,
+    )
+
+
+def _iter_window_items(
+    items: Iterable[IngestItem],
+    window_size: int,
+    separator: str = DEFAULT_WINDOW_SEPARATOR,
+) -> Iterator[IngestItem]:
+    if window_size < 1:
+        raise ValueError("window_size must be >= 1")
+    if window_size == 1:
+        yield from items
+        return
+
+    window: deque[IngestItem] = deque(maxlen=window_size)
+    current_source: str | None = None
+    for item in items:
+        if item.source != current_source:
+            window.clear()
+            current_source = item.source
+        yield item
+        window.append(item)
+        if len(window) == window_size:
+            yield _make_window_item(list(window), window_size, separator)
+
+
 class _SeenCache:
     """Bounded LRU of point ids we've recently upserted in this process.
 
@@ -227,6 +324,8 @@ class Ingestor:
         seen_cache_size: how many ids to keep in the LRU cache
         wrapper_dir: optional directory where markdown wrapper files are written
         graph: optional graph store used to link indexed files to tag nodes
+        window_size: number of adjacent items to concatenate into overlapping
+            context chunks. 1 preserves the current one-item-per-chunk behavior.
 
     The ingestor does NOT create the Qdrant collection — call `store.ensure_collection()`
     yourself. This keeps the ingestor cheap to instantiate in servers where
@@ -242,13 +341,19 @@ class Ingestor:
         seen_cache_size: int = 10_000,
         wrapper_dir: str | Path | None = None,
         graph: Any | None = None,
+        window_size: int = 1,
+        window_separator: str = DEFAULT_WINDOW_SEPARATOR,
     ):
         self.embedding = embedding
         self.store = vector_store
         self.batch_size = batch_size
         self.skip_seen = skip_seen
         self.wrapper_dir = Path(wrapper_dir) if wrapper_dir is not None else None
+        if window_size < 1:
+            raise ValueError("window_size must be >= 1")
         self.graph = graph
+        self.window_size = window_size
+        self.window_separator = window_separator
         self._seen = _SeenCache(seen_cache_size) if skip_seen else None
 
     # ---- Public API ----
@@ -262,7 +367,7 @@ class Ingestor:
         """
         stats = IngestStats()
         buffer: list[tuple[str, IngestItem]] = []
-        for item in items:
+        for item in _window_items(list(items), self.window_size, self.window_separator):
             stats.seen += 1
             pid = stable_chunk_id(item.source, item.offset, item.text)
             if self.skip_seen and self._seen is not None and pid in self._seen:
@@ -292,7 +397,7 @@ class Ingestor:
         """
         buffer: list[tuple[str, IngestItem]] = []
         total_seen = 0
-        for item in item_iter:
+        for item in _iter_window_items(item_iter, self.window_size, self.window_separator):
             total_seen += 1
             pid = stable_chunk_id(item.source, item.offset, item.text)
             if self.skip_seen and self._seen is not None and pid in self._seen:

@@ -11,8 +11,10 @@ from ..observability.recorder import get_recorder
 from ..vector.qdrant import Hit, VectorStore
 from .bm25 import BM25, BM25Doc
 from .fusion import reciprocal_rank_fusion
+from .query_expansion import expand_query
 
 if TYPE_CHECKING:
+    from ..llm.base import LLMProvider
     from .retrievers import Retriever
 
 
@@ -105,6 +107,8 @@ class Recaller:
         retrievers: list[Retriever] | None = None,
         retriever_weights: dict[str, float] | None = None,
         adaptive_weights: bool = False,
+        query_expansion: bool = False,
+        expansion_llm: LLMProvider | None = None,
     ):
         """Two modes:
 
@@ -136,6 +140,9 @@ class Recaller:
         self.retrievers = retrievers or []
         self.retriever_weights = dict(retriever_weights) if retriever_weights else {}
         self.adaptive_weights = adaptive_weights
+        self.query_expansion = query_expansion
+        self.expansion_llm = expansion_llm
+        self._query_expansion_cache: dict[str, list[str]] = {}
 
     # --- adaptive weight helpers ---
 
@@ -203,6 +210,24 @@ class Recaller:
     ) -> list[RecallResult]:
         """Run hybrid recall and return fused top-K results."""
         counter("mnemostack.recall.calls", 1)
+        if self.query_expansion:
+            return self._recall_with_query_expansion(
+                query=query,
+                limit=limit,
+                vector_limit=vector_limit,
+                bm25_limit=bm25_limit,
+                filters=filters,
+            )
+        return self._recall_once(query, limit, vector_limit, bm25_limit, filters)
+
+    def _recall_once(
+        self,
+        query: str,
+        limit: int,
+        vector_limit: int,
+        bm25_limit: int,
+        filters: dict[str, Any] | None,
+    ) -> list[RecallResult]:
         # Retrievers mode: fuse N arbitrary ranked lists
         if self.retrievers:
             return self._recall_via_retrievers(query, limit, vector_limit, filters)
@@ -263,6 +288,102 @@ class Recaller:
                     )
             counter("mnemostack.recall.results", len(results))
             return results
+
+
+    def search_many(self, vectors: list[list[float]], limit: int) -> list[RecallResult]:
+        """Search Qdrant for multiple vectors and RRF-merge the ranked hits."""
+        if not self.vector:
+            return []
+
+        ranked_lists: list[list[tuple[Any, float]]] = []
+        id_to_hit: dict[Any, Hit] = {}
+        for vector in vectors:
+            if not vector:
+                continue
+            try:
+                hits = self.vector.search(vector, limit=limit)
+            except Exception:
+                hits = []
+            ranked: list[tuple[Any, float]] = []
+            for hit in hits:
+                id_to_hit.setdefault(hit.id, hit)
+                ranked.append((hit.id, hit.score))
+            ranked_lists.append(ranked)
+
+        fused = reciprocal_rank_fusion(ranked_lists, k=self.rrf_k, limit=limit)
+        results: list[RecallResult] = []
+        for key, rrf_score in fused:
+            hit = id_to_hit.get(key)
+            if hit is None:
+                continue
+            results.append(
+                RecallResult(
+                    id=hit.id,
+                    text=hit.payload.get("text", ""),
+                    score=rrf_score,
+                    payload=hit.payload,
+                    sources=["vector"],
+                )
+            )
+        counter("mnemostack.recall.results", len(results))
+        return results
+
+    def _expanded_queries(self, query: str, n_variants: int = 3) -> list[str]:
+        if not self.expansion_llm:
+            raise ValueError("query_expansion=True requires expansion_llm")
+        if query not in self._query_expansion_cache:
+            self._query_expansion_cache[query] = expand_query(
+                query, self.expansion_llm, n_variants=n_variants
+            )
+        seen = {query.strip()}
+        queries = [query]
+        for variant in self._query_expansion_cache[query]:
+            key = variant.strip()
+            if key and key not in seen:
+                queries.append(key)
+                seen.add(key)
+        return queries
+
+    def _recall_with_query_expansion(
+        self,
+        query: str,
+        limit: int,
+        vector_limit: int,
+        bm25_limit: int,
+        filters: dict[str, Any] | None,
+    ) -> list[RecallResult]:
+        ranked_lists: list[list[tuple[Any, float]]] = []
+        id_to_result: dict[Any, RecallResult] = {}
+        for expanded_query in self._expanded_queries(query):
+            results = self._recall_once(
+                expanded_query,
+                limit=max(limit, vector_limit, bm25_limit),
+                vector_limit=vector_limit,
+                bm25_limit=bm25_limit,
+                filters=filters,
+            )
+            ranked: list[tuple[Any, float]] = []
+            for result in results:
+                if result.id in id_to_result:
+                    existing = id_to_result[result.id]
+                    for source in result.sources:
+                        if source not in existing.sources:
+                            existing.sources.append(source)
+                else:
+                    id_to_result[result.id] = result
+                ranked.append((result.id, result.score))
+            ranked_lists.append(ranked)
+
+        fused = reciprocal_rank_fusion(ranked_lists, k=self.rrf_k, limit=limit)
+        merged: list[RecallResult] = []
+        for key, rrf_score in fused:
+            result = id_to_result.get(key)
+            if result is None:
+                continue
+            result.score = rrf_score
+            merged.append(result)
+        counter("mnemostack.recall.results", len(merged))
+        return merged
 
     @staticmethod
     def _sources_for(

@@ -37,6 +37,7 @@ from .pipeline import (
     build_full_pipeline,
     build_stateless_pipeline,
 )
+from .query_expansion import expand_query
 from .recaller import Recaller, RecallResult
 from .render import compact_format, full_format
 from .reranker import Reranker
@@ -63,6 +64,7 @@ __all__ = [
     "compact_format",
     "full_format",
     "QueryExpander",
+    "expand_query",
     "Retriever",
     "VectorRetriever",
     "BM25Retriever",
