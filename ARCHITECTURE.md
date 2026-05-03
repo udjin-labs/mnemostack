@@ -53,7 +53,7 @@ Qdrant wrapper. Collection holds chunked documents with payload:
 }
 ```
 
-Chunking depends on the ingest surface. The CLI uses deterministic character windows by default; the Python chunking package also provides fixed-size, paragraph, markdown, and message-pair chunkers for applications that need richer boundaries. Timestamp payloads are indexed as datetime for temporal queries.
+Chunking depends on the ingest surface. The CLI uses deterministic character windows by default; the Python chunking package also provides fixed-size, paragraph, markdown, and message-pair chunkers for applications that need richer boundaries. The `vector.window_size` config (default `1`) carries adjacent-turn context inside each message chunk — `window_size=3` was worth **+5.8pp strict / +4.1pp combined** on LoCoMo in v0.4.0. Timestamp payloads are indexed as datetime for temporal queries.
 
 ### Knowledge graph
 
@@ -65,18 +65,20 @@ Memgraph (Cypher-compatible) with temporal validity:
 
 ### Recall pipeline (hybrid)
 
-Query goes through staged pipeline:
+Query goes through a staged pipeline:
 
-1. Parallel retrieval: Qdrant vector, Temporal vector, optional BM25, optional Memgraph
-2. Reciprocal Rank Fusion (RRF) to merge ranked lists
-3. Graph spreading activation (optional)
-4. Reranker (cross-encoder or LLM) for top-K
-5. Optional: inference layer — LLM synthesizes concise answer from top memories
+1. Optional **query expansion** (`Recaller(expansion_llm=...)`) — reformulate the query into multiple variants before retrieval (v0.4.0).
+2. **Parallel retrieval**: Qdrant vector, Temporal vector, optional BM25, optional Memgraph.
+3. **Reciprocal Rank Fusion (RRF)** — equal-weight by default; optionally weighted (`reciprocal_rank_fusion(weights=...)`) or per-query-shape adaptive (`Recaller(adaptive_weights=True)`).
+4. **8-stage pipeline** (opt-in): ClassifyQuery → ExactTokenRescue → GravityDampen → HubDampen → FreshnessBlend → InhibitionOfReturn → CuriosityBoost → QLearningReranker. The final stage and IoR pull from a `StateStore`; `/feedback` (HTTP, CLI, MCP) drives Q-learning updates.
+5. **Graph spreading activation** — optional `GraphResurrection` stage walks 1 hop in Memgraph from RRF seeds.
+6. **LLM reranker** for top-K.
+7. **Inference layer** (Answer mode) — LLM synthesizes a concise factual answer from top memories, with category-aware prompts, specificity resolver, and `cat_3` inference retry on by default. With `retry_with_expansion=True`, low-confidence answers are retried with an expanded query and a HyDE-style hypothetical before giving up.
 
 Output:
 
-- Raw mode: top-K snippets with scores and sources
-- Answer mode: short factual answer + confidence + source citations
+- Raw mode: top-K snippets with scores and sources.
+- Answer mode: short factual answer + confidence + source citations.
 
 ### Consolidation / decay
 
@@ -93,10 +95,12 @@ Nightly lifecycle runtime:
 
 Expose mnemostack tools over Model Context Protocol so LLM clients (Claude Desktop, Cursor, etc.) can call:
 
-- `mnemostack_search(query, limit)`
-- `mnemostack_answer(query, limit)` — with confidence + sources
-- `mnemostack_graph_query(subject, predicate, obj, as_of)` — point-in-time graph query
-- `mnemostack_graph_add_triple(subject, predicate, obj, valid_from, valid_until)`
+- `mnemostack_health()` — config + reachability summary
+- `mnemostack_search(query, limit)` — hybrid recall
+- `mnemostack_answer(query, limit)` — concise answer with confidence + source citations
+- `mnemostack_feedback(hit_id, signal, query, ...)` — explicit feedback into the stateful pipeline (Q-learning + inhibition-of-return)
+- `mnemostack_graph_query(subject, predicate, obj, as_of)` — point-in-time graph query *(only registered when `--memgraph-uri` is set)*
+- `mnemostack_graph_add_triple(subject, predicate, obj, valid_from, valid_until)` *(only registered when `--memgraph-uri` is set)*
 
 ## Configuration
 
@@ -110,6 +114,7 @@ vector:
   collection: mnemostack
   chunk_size: 600
   overlap: 100
+  window_size: 1            # v0.4.0+: sliding-window context across neighbouring turns
 
 graph:
   uri: bolt://localhost:7687
@@ -154,13 +159,20 @@ services:
 
 ## Status
 
-**Alpha.** See CHANGELOG.md for progress.
+**Actively developed.** Public API is stable; new functionality lands additively in minor releases. Breaking changes are rare and called out in `CHANGELOG.md`.
 
 - [x] Embedding provider registry (Gemini, Ollama, HuggingFace)
-- [x] Vector store wrapper
-- [x] Hybrid recall pipeline
-- [x] Inference layer (answer mode)
-- [x] Graph client
+- [x] Vector store wrapper (sync + async)
+- [x] Hybrid recall pipeline (Vector + BM25 + Memgraph + Temporal + RRF)
+- [x] 8-stage pipeline with stateful learning (Q-learning + inhibition-of-return)
+- [x] LLM reranker
+- [x] Inference layer (answer mode) with category-aware prompts and inference retry
+- [x] Graph client with temporal validity
 - [x] Consolidation runtime
 - [x] CLI
-- [x] MCP server
+- [x] MCP server (6 tools)
+- [x] HTTP server with `/metrics` (Prometheus)
+- [x] Streaming `Ingestor` with lazy iterator
+- [x] Sliding-window message chunking (`window_size`) — v0.4.0
+- [x] Query expansion + smart retry on low-confidence answers — v0.4.0
+- [x] Knowledge synthesis (`synthesize()`) — v0.3.0

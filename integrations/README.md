@@ -25,11 +25,14 @@ the integration only wires the host up to the existing server process.
 
 ## What the MCP server exposes
 
-Tools (names may evolve; check `mnemostack mcp-serve --help` for the current list):
+Tools are prefixed with `mnemostack_` in the wire protocol:
 
+- `health` — config + reachability summary
 - `search` — hybrid recall over indexed content
-- `answer` — LLM-synthesized answer with citations
-- `graph_query` *(if `--memgraph-uri` is set)* — direct Cypher over the graph
+- `answer` — LLM-synthesized answer with confidence + source citations
+- `feedback` — record explicit click/usefulness feedback into the stateful pipeline
+- `graph_query` *(only when `--memgraph-uri` is set)* — point-in-time Cypher over the graph
+- `graph_add_triple` *(only when `--memgraph-uri` is set)* — add a temporal fact
 
-All tools accept the same `--tier {1,2,3}` semantics that the CLI exposes, so
+`search` and `answer` accept the same `--tier {1,2,3}` semantics as the CLI, so
 agents can bound output size per call.

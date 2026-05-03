@@ -49,8 +49,8 @@ In a new chat, ask Claude:
 
 > List the MCP tools you have available from mnemostack.
 
-You should see `search` and `answer` (plus `graph_query` if Memgraph URI was
-passed). Then:
+You should see `health`, `search`, `answer`, and `feedback` (plus `graph_query`
+and `graph_add_triple` if a Memgraph URI was passed). Then:
 
 > Use mnemostack to search for "VPN failover" with tier 1.
 
