@@ -9,9 +9,9 @@
 
 `mnemostack` is a hybrid memory system combining BM25, vector search (Qdrant), and knowledge graph (Memgraph) with a unified recall pipeline, reranker, and optional LLM inference layer.
 
-**Status:** 🚧 alpha — API may change between 0.2.x releases.
+**Status:** Actively developed — public API is stable; new functionality lands additively in minor releases. Breaking changes are rare and called out in [CHANGELOG.md](CHANGELOG.md).
 
-### Who is this for?
+## Who is this for?
 
 Build it in if you need:
 
@@ -21,7 +21,7 @@ Build it in if you need:
 
 Not the best fit if you only need a single call to `text-embedding-3-small` + cosine similarity — something simpler will do. mnemostack earns its complexity on mixed, long-horizon workloads.
 
-### Mental model
+## Mental model
 
 Think of it as a storage hierarchy for agent memory:
 
@@ -31,7 +31,7 @@ Think of it as a storage hierarchy for agent memory:
 
 The practical effect: you stop re-explaining your project to the agent after every `/compact`. You stop losing momentum to the re-orientation tax that shows up in any agent with session compaction. mnemostack solves it at the library level, not tied to any single agent runtime.
 
-### How it works, in one paragraph
+## How it works, in one paragraph
 
 On each `recall(query)`: the configured retrievers (Vector and Temporal by default, with BM25 and Memgraph when configured) run in parallel and return ranked lists. Reciprocal Rank Fusion merges them. The optional 8-stage pipeline can reweight results using query classification, exact-token rescue, gravity/hub dampening, freshness, inhibition-of-return, curiosity boosts, Q-learning weights supplied through its state store, and graph resurrection. An optional LLM reranker does a final ordering pass. You get a list of `RecallResult` with source, score, and provenance — ready to hand to a model.
 
@@ -39,24 +39,28 @@ On each `recall(query)`: the configured retrievers (Vector and Temporal by defau
 
 ## Benchmarks
 
-Full LoCoMo runs use the official SNAP-Research dataset (10 samples / **1986 QA**) from a clean state.
+Full LoCoMo runs use the official SNAP-Research dataset (10 samples / **1986 QA**) from a clean state. Across the tables below: **Strict** = exact match, **Combined** = strict + partial. Counts in cells are `correct / total`.
+
+A note specific to the `gemini-3-flash-preview` run: 446 of the 1986 questions belong to `cat_5` (adversarial open-domain) and have **empty ground truth**, so the harness auto-scores them as correct. That's noise in the aggregate. The two `signal-only` columns below remove those 446 questions, leaving the 1540 questions that actually have a ground-truth answer to retrieve — that's what the system is genuinely scoring on.
 
 ### LoCoMo, current judge (`gemini-3-flash-preview`)
 
-| Run | Strict | Combined (strict + partial) | Strict excluding `cat_5` empty-ground-truth QA (1540 QA) | Combined excluding `cat_5` (1540 QA) |
+| Run | Strict (full) | Combined (full) | Strict (signal-only) | Combined (signal-only) |
 | --- | --- | --- | --- | --- |
 | Baseline v0.3.0 (Vector + BM25 + 8-stage pipeline) | 76.7% (1524 / 1986) | 88.1% (1750 / 1986) | 70.0% (1078 / 1540) | 84.7% (1304 / 1540) |
-| Retrieval improvements (`window_size=3`, query expansion, top-K 25) | **82.5%** (1639 / 1986) | **92.2%** (1832 / 1986) | **77.5%** (1193 / 1540) | **90.0%** (1386 / 1540) |
+| **Retrieval improvements** (`window_size=3`, query expansion, top-K 25) | **82.5%** (1639 / 1986) | **92.2%** (1832 / 1986) | **77.5%** (1193 / 1540) | **90.0%** (1386 / 1540) |
 
-Per-category breakdown for the retrieval-improvements branch:
+> **Honest numbers disclaimer.** `(full)` is the headline aggregate across **all 1986 questions**, the format vendors typically report — some publish only their strongest sub-category, we publish the full aggregate because it's what actually predicts behavior on mixed workloads. `(signal-only)` strips the `cat_5` auto-pass artifact described above, so what you read there is the real recall quality on questions that have a ground-truth answer.
 
-| Category | Strict / combined |
-| --- | ---: |
-| `cat_1` single-hop lists | 53.9% / 90.1% |
-| `cat_2` temporal | 79.8% / 84.7% |
-| `cat_3` open-domain reasoning | 63.5% / 77.1% |
-| `cat_4` multi-hop reasoning | 86.1% / 93.5% |
-| `cat_5` adversarial open-domain | 100.0% / 100.0% |
+**Per-category breakdown** (retrieval-improvements run):
+
+| Category | Strict | Combined |
+| --- | --- | --- |
+| `cat_1` single-hop lists | 53.9% | 90.1% |
+| `cat_2` temporal | 79.8% | 84.7% |
+| `cat_3` open-domain reasoning | 63.5% | 77.1% |
+| `cat_4` multi-hop reasoning | 86.1% | 93.5% |
+| `cat_5` adversarial open-domain | 100.0% | 100.0% |
 
 Notes:
 
@@ -64,30 +68,30 @@ Notes:
 - `cat_5` questions have empty ground truth in this new run and are auto-scored as correct by the benchmark harness. That makes the new `cat_5` strict score (446 / 446, 100.0%) useful for aggregate harness accounting, but not directly comparable to the historical `cat_5` strict score (89.7%) from the older adversarial-question evaluation.
 - Pipeline: Vector retrieval with Gemini embeddings + BM25 + RRF + 8-stage reranking pipeline + Gemini Flash reranker.
 
-> **Honest numbers disclaimer.** The table above is our full-benchmark number across **all 1986 questions and all 5 categories**. Some vendors report their strongest sub-category only; we publish the full aggregate because that's what actually predicts how the system behaves on mixed workloads, and also show the 1540-QA score excluding `cat_5` questions.
-
 ### Historical LoCoMo results (`gemini-2.5-flash` judge)
 
-| Metric | mnemostack 0.2.1 | First full run |
+| Metric | First full run | mnemostack 0.2.1 |
 | --- | --- | --- |
-| **Correct (strict)** | **67.8%** (1346 / 1986) | 66.4% (1319 / 1986) |
-| Partial | 12.6% (250 / 1986) | 12.8% (254 / 1986) |
-| Wrong | 19.6% (390 / 1986) | 20.8% (413 / 1986) |
-| **Combined (correct + partial)** | **80.4%** (1596 / 1986) | 79.2% (1573 / 1986) |
+| **Strict** | 66.4% (1319 / 1986) | **67.8%** (1346 / 1986) |
+| Partial | 12.8% (254 / 1986) | 12.6% (250 / 1986) |
+| Wrong | 20.8% (413 / 1986) | 19.6% (390 / 1986) |
+| **Combined** | 79.2% (1573 / 1986) | **80.4%** (1596 / 1986) |
 
-By question category:
+By question category (`combined` not tracked for the first full run):
 
-| Category | 0.2.1 (strict / combined) | First full run strict | Δ strict |
-| --- | --- | --- | --- |
-| `cat_5` adversarial open-domain | 89.7% / 89.7% | 90.1% | −0.4pp |
-| `cat_4` multi-hop reasoning | **69.6%** / 82.0% | 69.2% | +0.4pp |
-| `cat_2` temporal | **69.8%** / 77.9% | 64.5% | **+5.3pp** |
-| `cat_1` single-hop lists | 34.4% / 74.1% | 34.8% | −0.4pp |
-| `cat_3` open-domain reasoning | **41.7%** / 49.0% | 31.2% | **+10.5pp** |
+| Category | First run Strict | 0.2.1 Strict | 0.2.1 Combined | Δ Strict |
+| --- | --- | --- | --- | --- |
+| `cat_1` single-hop lists | 34.8% | 34.4% | 74.1% | −0.4pp |
+| `cat_2` temporal | 64.5% | **69.8%** | 77.9% | **+5.3pp** |
+| `cat_3` open-domain reasoning | 31.2% | **41.7%** | 49.0% | **+10.5pp** |
+| `cat_4` multi-hop reasoning | 69.2% | **69.6%** | 82.0% | +0.4pp |
+| `cat_5` adversarial open-domain | 90.1% | 89.7% | 89.7% | −0.4pp |
 
 _Last historical run: 2026-04-27, mnemostack 0.2.1, same dataset, judged by `gemini-2.5-flash`._
 
-How mnemostack compares with reported numbers from other systems on LoCoMo (caveat: different judges, evaluation protocols, and in some cases category cherry-picking):
+### Comparison with reported numbers from other systems
+
+Caveat: different judges, evaluation protocols, and in some cases category cherry-picking. Vendor numbers below are taken at face value from their published material.
 
 | System | LoCoMo correct |
 | --- | --- |
@@ -109,6 +113,8 @@ LoCoMo measures generic long-term dialogue recall. We also run a private needle-
 | recall@10 | 100% (10/10) |
 | Query latency p50 | 1.26 s |
 | Query latency max | 1.70 s |
+
+> **Honest numbers disclaimer.** Reporting only `recall@5 = 100%` would look impressive and also be cherry-picking — some vendors do exactly that. `recall@1 = 90%` is what an agent reading only the top hit actually experiences, and the gap between `@1` and `@5` is where reranker quality (or the lack of it) shows up. We publish all three so you can read the metric that matches your downstream usage.
 
 Useful because LoCoMo's failure modes (list exhaustion, open-domain reasoning) are orthogonal to what production memory stacks actually spend time on (find the specific fact the user mentioned weeks ago). This benchmark is not in the public repo; its methodology is in `benchmarks/synthetic_longhorizon.py`, which is the closest reproducible approximation.
 
@@ -136,38 +142,27 @@ We are not a replacement for your agent framework and not a full platform runtim
 - 🧠 **4-source hybrid retrieval** — Vector (Qdrant) + BM25 (exact tokens) + Memgraph (knowledge graph) + Temporal (time-aware vector), all fused via Reciprocal Rank Fusion. Pluggable `Retriever` abstraction — add your own sources.
 - ⚖️ **Weighted & adaptive RRF fusion** — `reciprocal_rank_fusion(weights=[...])` lets you lift sources you trust more; `Recaller(adaptive_weights=True)` picks a per-query-shape profile (exact-token / person / temporal / general). See the honest write-up below for where this helps and where it doesn't.
 - 🧪 **HyDE retriever (opt-in)** — embeds a hypothetical answer instead of the query. Useful for query↔document vocabulary gaps in documentation-style corpora; does **not** reliably help on dialogue-backed memory and always costs one extra LLM roundtrip per `search()`. Not included in the default `Recaller`.
-- ⚡ **8-stage recall pipeline** — ClassifyQuery → ExactTokenRescue → GravityDampen → HubDampen → FreshnessBlend → InhibitionOfReturn → CuriosityBoost → QLearningReranker. Opt-in; stateful HTTP feedback is explicit via `/feedback`, and recall exposure logging is off unless `--auto-record-ior` is enabled.
+- 🪜 **8-stage recall pipeline** — ClassifyQuery → ExactTokenRescue → GravityDampen → HubDampen → FreshnessBlend → InhibitionOfReturn → CuriosityBoost → QLearningReranker. Opt-in; stateful HTTP feedback is explicit via `/feedback`, and recall exposure logging is off unless `--auto-record-ior` is enabled.
 - 🔁 **LLM reranker** — Gemini Flash (or any LLM) reorders top-K by relevance; catches cases where embedding similarity alone is too broad.
 - ⚡ **Async-friendly** — `Recaller.recall_async` dispatches retrievers in parallel; five concurrent HTTP recalls finish in roughly one single-recall wall-clock.
 - 🌍 **Unicode-aware entity resolution** — Memgraph retriever probes by `telegram_id`, handle, and precomputed `name_lower` so non-ASCII names match correctly (Memgraph's `toLower()` lower-cases ASCII only).
-- 📥 **Streaming `Ingestor` API** — batched, idempotent, LRU-cached ingest from any Python code. Same `(source, offset, text)` → same deterministic UUID-shaped content id, so re-runs are no-ops.
+- 📥 **Streaming `Ingestor` API** — batched, idempotent, LRU-cached ingest from any Python code. Lazy iterator means large corpora ingest with bounded memory. Same `(source, offset, text)` → same deterministic UUID-shaped content id, so re-runs are no-ops.
 - 🌐 **HTTP API** (optional) — `pip install 'mnemostack[server]'` gives you `/recall`, `/answer`, `/health`, `/docs`, plus `/metrics` in Prometheus text format. See the HTTP server section below.
 - 🔌 **Pluggable embeddings** — Gemini, Ollama, or HuggingFace (local GPU), via provider registry
 - 🤖 **Pluggable LLM** — Gemini Flash / Ollama for answer generation and reranking
 - 📚 **Temporal knowledge graph** — facts have `valid_from`/`valid_until`, query point-in-time state; graph resurrection stage recovers evicted-but-relevant memories.
-- 💬 **Answer mode** — inference layer synthesizes concise factual answers with source citations and confidence
+- 💬 **Answer mode** — inference layer synthesizes concise factual answers with source citations and confidence. Category-aware prompts (lists / temporal / multi-hop / inference / adversarial), specificity resolver, and `cat_3` inference retry with query decomposition are on by default.
+- 📋 **Knowledge synthesis** — `synthesize(entity)` rolls up everything memory knows about a person, project, or topic into a structured profile (`SynthesisFact` / `SynthesisResult`, markdown or JSON). CLI: `mnemostack synthesize <entity>`. Optional related-entities expansion via graph and LLM summarization pass.
 - 📏 **Progressive Tiers API** — `search --tier {1,2,3}` and `answer --tier {1,2,3}` bound output size (~50 / ~200 / ~500 tokens) so agents can pay only for the detail they actually need. Omit `--tier` for unchanged full output.
-- ✂️ **Chunkers** — plain, fixed-size, and `MessagePairChunker` for chat transcripts (keeps user↔assistant pairs together).
-- 🔎 **Query expansion** — optional `QueryExpander` rewrites short queries for better recall before fusion.
+- ✂️ **Chunkers + sliding window** — plain, fixed-size, and `MessagePairChunker` for chat transcripts (keeps user↔assistant pairs together). The new `vector.window_size` config carries adjacent-turn context inside each chunk; `window_size=3` was worth **+5.8pp strict / +4.1pp combined** on LoCoMo (v0.4.0).
+- 🔎 **Query expansion + smart retry** — `Recaller(expansion_llm=...)` widens recall with reformulated queries; `AnswerGenerator(retry_with_expansion=True)` retries low-confidence answers with the expanded query and a HyDE-style hypothetical before giving up. Opt-in via `--query-expansion` on `mnemostack answer`.
 - ⚙ **Consolidation runtime** — phase orchestrator for nightly memory lifecycle
 - 🔌 **MCP server** — expose memory tools to Claude Desktop, ChatGPT, Cursor, etc.
 - 🛡 **Graceful degradation** — retrieval keeps working if graph or any retriever is down
 
-## Utilities
+## Recall tuning: fusion weights & HyDE
 
-Agent runtimes often wrap transcript messages in metadata envelopes before the real body, which can dominate embeddings and make unrelated turns look similar. Clean messages before chunking/indexing with `strip_metadata_blocks()`:
-
-```python
-from mnemostack.utils import strip_metadata_blocks
-
-clean = strip_metadata_blocks(raw_message)
-```
-
-Built-in profiles cover OpenClaw webchat and Telegram envelopes; pass `profiles=` or `extra_patterns=` to tune the cleanup for your runtime.
-
-### Fusion weights & HyDE — honest notes
-
-Some of the newer knobs help in specific workloads and do nothing (or mildly hurt) in others. Measured, not promised:
+Some of the newer knobs help in specific workloads and do nothing (or mildly hurt) in others. Measured, not promised — both are opt-in by design, and the default `Recaller` stays classical equal-weight RRF over Vector + BM25 (+ Memgraph + Temporal when supplied).
 
 **`Recaller(adaptive_weights=True)`** — picks a weight profile per query shape:
 
@@ -180,9 +175,19 @@ Some of the newer knobs help in specific workloads and do nothing (or mildly hur
 
 Measured on a real production corpus with 10 needle probes: **recall@1 went 50% → 60%, recall@5 stayed at 90%** (zero regression). On LoCoMo (pure dialogue questions, all classified `general`), adaptive weights had no effect — the profile simply isn't triggered. Rule of thumb: turn it on for production ops-style workloads (IPs, tickers, IDs, named entities); leave it off, or don't expect a lift, for dialogue benchmarks. Static `retriever_weights={...}` always wins over adaptive when both are set.
 
-**`HyDERetriever`** — opt-in. Generates a short hypothetical answer via your LLM and embeds that instead of the raw query, then fuses alongside the other retrievers. Useful when the question and the stored answer use very different vocabulary (documentation corpora, FAQ-style content). On our LoCoMo cat_3 smoke (`conv-43`, 14 open-domain reasoning questions) it moved accuracy from 14.3% to 21.4% (+1 correct answer); on dialogue-backed memory overall it's roughly a wash. It **always** costs one extra LLM call per `search()`, so budget accordingly and treat it as a tool for specific workloads rather than a default.
+**`HyDERetriever`** — generates a short hypothetical answer via your LLM and embeds that instead of the raw query, then fuses alongside the other retrievers. Useful when the question and the stored answer use very different vocabulary (documentation corpora, FAQ-style content). On our LoCoMo cat_3 smoke (`conv-43`, 14 open-domain reasoning questions) it moved accuracy from 14.3% to 21.4% (+1 correct answer); on dialogue-backed memory overall it's roughly a wash. It **always** costs one extra LLM call per `search()`, so budget accordingly and treat it as a tool for specific workloads rather than a default.
 
-Both knobs are opt-in by design — the default `Recaller` stays classical equal-weight RRF over Vector + BM25 (+ Memgraph + Temporal when supplied).
+## Utilities
+
+Agent runtimes often wrap transcript messages in metadata envelopes before the real body, which can dominate embeddings and make unrelated turns look similar. Clean messages before chunking/indexing with `strip_metadata_blocks()`:
+
+```python
+from mnemostack.utils import strip_metadata_blocks
+
+clean = strip_metadata_blocks(raw_message)
+```
+
+Built-in profiles cover OpenClaw webchat and Telegram envelopes; pass `profiles=` or `extra_patterns=` to tune the cleanup for your runtime.
 
 ## Environment
 
@@ -516,7 +521,11 @@ created graph data with an older release, run
 
 ### MCP server for Claude Desktop
 
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+Add the entry below to your Claude Desktop config file:
+
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+- Linux: `~/.config/Claude/claude_desktop_config.json`
 
 ```json
 {
