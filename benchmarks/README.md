@@ -1,7 +1,8 @@
 # mnemostack benchmarks
 
 Reproducible LoCoMo benchmark harness for mnemostack. Used to produce the
-67.8% / 80.4% numbers on the main README.
+**82.5%** strict / **92.2%** combined headline numbers on the main README,
+plus the earlier `gemini-2.5-flash`-judged 67.8% / 80.4% historical run.
 
 ## What gets measured
 
@@ -14,10 +15,10 @@ decides.
 
 We report:
 
-- **correct** — strict exact-answer match, as judged by the configured LLM
+- **correct** — strict exact-answer match, as judged by the configured LLM (the main README calls this **Strict**)
 - **partial** — judge accepts the answer as partially correct
 - **wrong** — judge rejects
-- **combined** — correct + partial, as a softer aggregate
+- **combined** — correct + partial, as a softer aggregate (the main README calls this **Combined**)
 
 ## Prerequisites
 
@@ -72,6 +73,16 @@ The first three honour `LOCOMO_DATASET` for the dataset path.
   This is the standard LoCoMo setup and matches what Zep / Mem0 / Letta
   publish; a different judge would give different absolute numbers but
   similar relative rankings.
+- The current judge is `gemini-3-flash-preview` (since v0.4.0). Earlier
+  runs used `gemini-2.5-flash` and are **not directly comparable** on
+  absolute scores — the new judge is more lenient on synonyms, partial
+  matches, and empty ground truth (that change alone moves v0.3.0 from
+  67.8% to 76.7% strict).
+- In the current run, the 446 `cat_5` (adversarial open-domain) questions
+  have **empty ground truth** and are auto-scored as correct by the
+  harness. That inflates the headline aggregate; the main README's
+  `signal-only` columns drop those 446 so the score reflects only the
+  1540 questions that actually have a ground-truth answer.
 - We publish the full aggregate across all 5 categories and all 1986 QA.
   Some vendors publish a single best sub-category. See the "Honest numbers
   disclaimer" in the main README.
