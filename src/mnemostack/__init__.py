@@ -6,7 +6,7 @@ Qdrant/httpx through the ingest API at package-import time makes those paths
 slow and can leave async test runners waiting on unrelated imports.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "Config",
