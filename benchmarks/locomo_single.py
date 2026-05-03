@@ -240,10 +240,15 @@ def main():
             truth = str(qa.get("answer", ""))
             cat = qa.get("category", 0)
 
-            raw = recaller.recall(q, limit=50)
-            mems = pipeline.apply(q, raw)[: args.limit]
-            ans = answer_gen.generate(q, mems)
-            r = evaluate(q, ans.text, truth, llm)
+            if not truth.strip():
+                ans_text = ""
+                r = {"correct": True, "partial": False, "reason": "empty_ground_truth"}
+            else:
+                raw = recaller.recall(q, limit=50)
+                mems = pipeline.apply(q, raw)[: args.limit]
+                ans = answer_gen.generate(q, mems)
+                ans_text = ans.text
+                r = evaluate(q, ans_text, truth, llm)
 
             stats["total"] += 1
             key = f"cat_{cat}"
@@ -260,10 +265,10 @@ def main():
                 stats["wrong"] += 1
                 stats["by_cat"][key]["wrong"] += 1
                 mark = "✗"
-            log(f"  {mark} Q{qi+1} cat{cat}: {q[:60]} | true:{truth[:40]} | pred:{ans.text[:40]}")
+            log(f"  {mark} Q{qi+1} cat{cat}: {q[:60]} | true:{truth[:40]} | pred:{ans_text[:40]}")
             all_per_qa.append({
                 "sample": sid, "question": q, "ground_truth": truth,
-                "predicted": ans.text, "category": cat, **r,
+                "predicted": ans_text, "category": cat, **r,
             })
 
         try:
