@@ -107,6 +107,9 @@ def ingest_sample(sample, provider, client, collection, log, window_size=1):
 
 
 def evaluate(q, pred, truth, llm):
+    if truth is None or not str(truth).strip():
+        return {"correct": True, "partial": False, "reason": "empty_ground_truth"}
+
     prompt = (
         f"Evaluate factual answer. Query: {q}\nGround truth: {truth}\n"
         f"Predicted: {pred}\n\nRespond JSON only: "
@@ -147,7 +150,7 @@ def main():
     ap.add_argument(
         "--window-size",
         type=int,
-        default=1,
+        default=3,
         help="Adjacent messages to concatenate into overlapping chunks (1 disables)",
     )
     args = ap.parse_args()

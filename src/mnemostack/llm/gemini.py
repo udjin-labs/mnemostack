@@ -22,7 +22,7 @@ class GeminiLLM(LLMProvider):
     """
 
     BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
-    DEFAULT_MODEL = "gemini-2.5-flash"
+    DEFAULT_MODEL = "gemini-3-flash-preview"
 
     def __init__(
         self,
