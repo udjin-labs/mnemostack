@@ -43,37 +43,37 @@ Full LoCoMo runs use the official SNAP-Research dataset (10 samples / **1986 QA*
 
 ### LoCoMo, current judge (`gemini-3-flash-preview`)
 
-| Run | Strict | Combined (strict + partial) | Strict excluding `cat_5` empty-ground-truth QA (1542 QA) | Combined excluding `cat_5` (1542 QA) |
+| Run | Strict | Combined (strict + partial) | Strict excluding `cat_5` empty-ground-truth QA (1540 QA) | Combined excluding `cat_5` (1540 QA) |
 | --- | --- | --- | --- | --- |
-| Baseline v0.3.0 (Vector + BM25 + 8-stage pipeline) | 76.7% (1524 / 1986) | 88.1% | 70.0% | 84.7% |
-| Retrieval improvements (`window_size=3`, query expansion, top-K 25) | **82.5%** (1639 / 1986) | **92.2%** | **77.5%** | **90.0%** |
+| Baseline v0.3.0 (Vector + BM25 + 8-stage pipeline) | 76.7% (1524 / 1986) | 88.1% (1750 / 1986) | 70.0% (1078 / 1540) | 84.7% (1304 / 1540) |
+| Retrieval improvements (`window_size=3`, query expansion, top-K 25) | **82.5%** (1639 / 1986) | **92.2%** (1832 / 1986) | **77.5%** (1193 / 1540) | **90.0%** (1386 / 1540) |
 
 Per-category breakdown for the retrieval-improvements branch:
 
-| Category | Correct | Partial | Wrong |
-| --- | ---: | ---: | ---: |
-| `cat_1` factual | 152 / 282 | 102 | 28 |
-| `cat_2` temporal | 256 / 321 | 16 | 49 |
-| `cat_3` reasoning | 61 / 96 | 13 | 22 |
-| `cat_4` detailed | 724 / 841 | 62 | 55 |
-| `cat_5` unannotated | 446 / 446 | 0 | 0 |
+| Category | Strict / combined |
+| --- | ---: |
+| `cat_1` single-hop lists | 53.9% / 90.1% |
+| `cat_2` temporal | 79.8% / 84.7% |
+| `cat_3` open-domain reasoning | 63.5% / 77.1% |
+| `cat_4` multi-hop reasoning | 86.1% / 93.5% |
+| `cat_5` adversarial open-domain | 100.0% / 100.0% |
 
 Notes:
 
 - Judge model matters: `gemini-3-flash-preview` is more accurate than the previous Gemini Flash judge on synonyms, partial matches, and empty ground truth.
-- `cat_5` questions have empty ground truth in the LoCoMo dataset and are auto-scored as correct, which is the standard practice for this benchmark harness. The 1542-QA columns exclude those questions for a stricter view.
+- `cat_5` questions have empty ground truth in this new run and are auto-scored as correct by the benchmark harness. That makes the new `cat_5` strict score (446 / 446, 100.0%) useful for aggregate harness accounting, but not directly comparable to the historical `cat_5` strict score (89.7%) from the older adversarial-question evaluation.
 - Pipeline: Vector retrieval with Gemini embeddings + BM25 + RRF + 8-stage reranking pipeline + Gemini Flash reranker.
 
-> **Honest numbers disclaimer.** The table above is our full-benchmark number across **all 1986 questions and all 5 categories**. Some vendors report their strongest sub-category only; we publish the full aggregate because that's what actually predicts how the system behaves on mixed workloads, and also show the 1542-QA score excluding unannotated `cat_5` questions.
+> **Honest numbers disclaimer.** The table above is our full-benchmark number across **all 1986 questions and all 5 categories**. Some vendors report their strongest sub-category only; we publish the full aggregate because that's what actually predicts how the system behaves on mixed workloads, and also show the 1540-QA score excluding `cat_5` questions.
 
 ### Historical LoCoMo results (`gemini-2.5-flash` judge)
 
 | Metric | mnemostack 0.2.1 | First full run |
 | --- | --- | --- |
 | **Correct (strict)** | **67.8%** (1346 / 1986) | 66.4% (1319 / 1986) |
-| Partial | 12.6% (250) | 12.8% (254) |
-| Wrong | 19.6% (390) | 20.8% (413) |
-| **Combined (correct + partial)** | **80.4%** | 79.2% |
+| Partial | 12.6% (250 / 1986) | 12.8% (254 / 1986) |
+| Wrong | 19.6% (390 / 1986) | 20.8% (413 / 1986) |
+| **Combined (correct + partial)** | **80.4%** (1596 / 1986) | 79.2% (1573 / 1986) |
 
 By question category:
 
@@ -180,7 +180,7 @@ Some of the newer knobs help in specific workloads and do nothing (or mildly hur
 
 Measured on a real production corpus with 10 needle probes: **recall@1 went 50% → 60%, recall@5 stayed at 90%** (zero regression). On LoCoMo (pure dialogue questions, all classified `general`), adaptive weights had no effect — the profile simply isn't triggered. Rule of thumb: turn it on for production ops-style workloads (IPs, tickers, IDs, named entities); leave it off, or don't expect a lift, for dialogue benchmarks. Static `retriever_weights={...}` always wins over adaptive when both are set.
 
-**`HyDERetriever`** — opt-in. Generates a short hypothetical answer via your LLM and embeds that instead of the raw query, then fuses alongside the other retrievers. Useful when the question and the stored answer use very different vocabulary (documentation corpora, FAQ-style content). On our LoCoMo cat_3 smoke (`conv-43`, 14 reasoning questions) it moved accuracy from 14.3% to 21.4% (+1 correct answer); on dialogue-backed memory overall it's roughly a wash. It **always** costs one extra LLM call per `search()`, so budget accordingly and treat it as a tool for specific workloads rather than a default.
+**`HyDERetriever`** — opt-in. Generates a short hypothetical answer via your LLM and embeds that instead of the raw query, then fuses alongside the other retrievers. Useful when the question and the stored answer use very different vocabulary (documentation corpora, FAQ-style content). On our LoCoMo cat_3 smoke (`conv-43`, 14 open-domain reasoning questions) it moved accuracy from 14.3% to 21.4% (+1 correct answer); on dialogue-backed memory overall it's roughly a wash. It **always** costs one extra LLM call per `search()`, so budget accordingly and treat it as a tool for specific workloads rather than a default.
 
 Both knobs are opt-in by design — the default `Recaller` stays classical equal-weight RRF over Vector + BM25 (+ Memgraph + Temporal when supplied).
 
