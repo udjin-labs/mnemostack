@@ -2,13 +2,13 @@
 
 ## Supported Versions
 
-mnemostack is in alpha (0.2.x). Only the latest alpha release receives
-security fixes.
+mnemostack is pre-1.0 and actively developed. Only the latest minor release
+receives security fixes.
 
 | Version | Supported |
 | --- | --- |
-| 0.2.0a3+ | ✅ |
-| < 0.2.0a3 | ❌ |
+| 0.4.x   | ✅ |
+| < 0.4.0 | ❌ |
 
 ## Reporting a Vulnerability
 

@@ -43,7 +43,8 @@ Open the Cursor chat and ask:
 
 > What MCP tools do you have from mnemostack?
 
-Expected: `search`, `answer` (and `graph_query` if Memgraph URI was set).
+Expected: `health`, `search`, `answer`, `feedback` (and `graph_query` plus
+`graph_add_triple` if a Memgraph URI was set).
 
 Quick smoke test:
 
