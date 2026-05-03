@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05-03
+
+### Changed
+
+- Improved retrieval with sliding windows (`window_size=3`), query expansion, and top-K 25.
+- Switched the default LLM model to `gemini-3-flash-preview`.
+- Merged the `feat/retrieval-improvements` branch.
+
+### Benchmarks
+
+- LoCoMo benchmark improved to strict 82.5% / combined 92.2%, up from 67.8% / 80.4% on v0.3.0.
+
 ## [0.3.0] - 2026-05-02
 
 ### Added
