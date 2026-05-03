@@ -8,15 +8,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.4.0] - 2026-05-03
 
+### Added
+
+- Sliding-window message chunking on ingest, controlled by a new `vector.window_size` config (default `1`, i.e. legacy behavior). Larger windows widen the context each chunk carries, improving recall on questions whose evidence spans neighboring turns — PR #33.
+- Opt-in query expansion for recall via the new `--query-expansion` flag on `mnemostack answer`. When enabled, the recaller widens the search with reformulated queries before answering.
+- Smart retry on low-confidence answers: when query expansion is on, `AnswerGenerator` retries with an expanded query and a HyDE-style hypothetical answer before giving up. Exposed as `retry_with_expansion` / `expansion_llm` constructor args on `AnswerGenerator`.
+- New `mnemostack.recall.query_expansion` module and `Recaller` constructor support for query expansion (`embedding_provider`, `vector_store`, `expansion_llm`).
+
 ### Changed
 
-- Improved retrieval with sliding windows (`window_size=3`), query expansion, and top-K 25.
-- Switched the default LLM model to `gemini-3-flash-preview`.
-- Merged the `feat/retrieval-improvements` branch.
+- `Ingestor.ingest()` no longer materializes the input iterator up-front; it streams items lazily so large corpora ingest with bounded memory.
+- `AnswerGenerator.generate()` now resolves the question category before short-circuiting on empty memories, so category-aware behavior runs even when retrieval returns nothing.
 
 ### Benchmarks
 
-- LoCoMo benchmark improved to strict 82.5% / combined 92.2%, up from 67.8% / 80.4% on v0.3.0.
+- LoCoMo, all numbers re-measured with the new `gemini-3-flash-preview` judge (apples-to-apples):
+  - v0.3.0 baseline: **76.7%** strict (1524/1986) / **88.1%** combined.
+  - v0.4.0 with `window_size=3`, `top_k=25`, `gemini-3-flash-preview` answerer: **82.5%** strict / **92.2%** combined.
+  - Delta attributable to the v0.4.0 retrieval improvements: **+5.8pp strict / +4.1pp combined**.
+- Earlier `gemini-2.5-flash`-judge numbers (e.g. 67.8% / 80.4% on v0.3.0) are not directly comparable — the new judge is more lenient on partials, which alone moves v0.3.0 from 67.8% to 76.7% strict.
+
+### Docs
+
+- Refreshed LoCoMo benchmark numbers using the `gemini-3-flash-preview` judge.
+- Fixed category names and aligned table formatting across benchmark documents.
 
 ## [0.3.0] - 2026-05-02
 
