@@ -19,6 +19,7 @@ from .bm25 import BM25, BM25Doc, tokenize
 from .corpus import build_bm25_docs
 from .expansion import QueryExpander
 from .fusion import reciprocal_rank_fusion
+from .mca_prefilter import extract_exact_tokens, mca_prefilter
 from .pipeline import (
     ClassifyQuery,
     CuriosityBoost,
@@ -59,6 +60,8 @@ __all__ = [
     "build_bm25_docs",
     "tokenize",
     "reciprocal_rank_fusion",
+    "extract_exact_tokens",
+    "mca_prefilter",
     "Recaller",
     "RecallResult",
     "compact_format",
