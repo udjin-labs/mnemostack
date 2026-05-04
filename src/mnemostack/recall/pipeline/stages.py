@@ -11,6 +11,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from ..mca_prefilter import extract_exact_tokens
 from .base import Stage
 from .state import StateStore
 
@@ -123,6 +124,32 @@ class ExactTokenRescue(Stage):
 
 
 # ---------- dampening ----------
+
+
+class ExactTokenProtection(Stage):
+    """Protect strong vector hits on exact-token queries from over-dampening."""
+
+    FLOOR = 0.25
+    RAW_SCORE_GATE = 0.75
+
+    def apply(self, context, results):
+        if not extract_exact_tokens(context.query):
+            return results
+
+        changed = False
+        for r in results:
+            try:
+                raw = float(r.payload.get("raw_vector_score", 0.0))
+            except (TypeError, ValueError):
+                raw = 0.0
+            if raw >= self.RAW_SCORE_GATE and "vector" in r.sources:
+                old_score = r.score
+                r.score = max(r.score, self.FLOOR)
+                changed = changed or r.score != old_score
+
+        if changed:
+            results.sort(key=lambda x: -x.score)
+        return results
 
 
 class GravityDampen(Stage):

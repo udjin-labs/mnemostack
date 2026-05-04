@@ -25,6 +25,7 @@ from .resurrection import GraphResurrection
 from .stages import (
     ClassifyQuery,
     CuriosityBoost,
+    ExactTokenProtection,
     ExactTokenRescue,
     FreshnessBlend,
     GravityDampen,
@@ -51,6 +52,7 @@ __all__ = [
     "InhibitionOfReturn",
     "CuriosityBoost",
     "QLearningReranker",
+    "ExactTokenProtection",
     "is_exact_token_query",
     "build_full_pipeline",
     "build_stateless_pipeline",
