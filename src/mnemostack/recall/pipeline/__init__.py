@@ -31,7 +31,7 @@ from .stages import (
     HubDampen,
     InhibitionOfReturn,
     QLearningReranker,
-    TechnicalScoreFloor,
+    ExactTokenProtection,
     is_exact_token_query,
 )
 from .state import FileStateStore, InMemoryStateStore, StateStore
@@ -52,7 +52,7 @@ __all__ = [
     "InhibitionOfReturn",
     "CuriosityBoost",
     "QLearningReranker",
-    "TechnicalScoreFloor",
+    "ExactTokenProtection",
     "is_exact_token_query",
     "build_full_pipeline",
     "build_stateless_pipeline",

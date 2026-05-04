@@ -75,7 +75,7 @@ class VectorRetriever(Retriever):
         results: list[RecallResult] = []
         for h in hits:
             payload = dict(h.payload or {})
-            payload.setdefault("raw_vector_score", h.score)
+            payload["raw_vector_score"] = h.score
             results.append(
                 RecallResult(
                     id=h.id,

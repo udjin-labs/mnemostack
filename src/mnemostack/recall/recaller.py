@@ -281,7 +281,7 @@ class Recaller:
             for item, rrf_score in fused:
                 if isinstance(item, Hit):
                     payload = dict(item.payload or {})
-                    payload.setdefault("raw_vector_score", item.score)
+                    payload["raw_vector_score"] = item.score
                     results.append(
                         RecallResult(
                             id=item.id,
@@ -295,7 +295,7 @@ class Recaller:
                     payload = dict(item.payload or {})
                     raw_vector_score = self._raw_vector_score_for(item.id, vector_hits)
                     if raw_vector_score is not None:
-                        payload.setdefault("raw_vector_score", raw_vector_score)
+                        payload["raw_vector_score"] = raw_vector_score
                     results.append(
                         RecallResult(
                             id=item.id,
@@ -311,7 +311,7 @@ class Recaller:
                             item.sources.append(source)
                     raw_vector_score = self._raw_vector_score_for(item.id, vector_hits)
                     if raw_vector_score is not None:
-                        item.payload.setdefault("raw_vector_score", raw_vector_score)
+                        item.payload["raw_vector_score"] = raw_vector_score
                     item.score = rrf_score
                     results.append(item)
                 else:
@@ -354,7 +354,7 @@ class Recaller:
             if hit is None:
                 continue
             payload = dict(hit.payload or {})
-            payload.setdefault("raw_vector_score", hit.score)
+            payload["raw_vector_score"] = hit.score
             results.append(
                 RecallResult(
                     id=hit.id,
@@ -508,9 +508,19 @@ class Recaller:
                             if s not in existing.sources:
                                 existing.sources.append(s)
                         if "raw_vector_score" in r.payload:
-                            existing.payload.setdefault(
-                                "raw_vector_score", r.payload["raw_vector_score"]
-                            )
+                            try:
+                                incoming_raw = float(r.payload["raw_vector_score"])
+                                existing_raw = float(
+                                    existing.payload.get("raw_vector_score", incoming_raw)
+                                )
+                            except (TypeError, ValueError):
+                                existing.payload.setdefault(
+                                    "raw_vector_score", r.payload["raw_vector_score"]
+                                )
+                            else:
+                                existing.payload["raw_vector_score"] = max(
+                                    existing_raw, incoming_raw
+                                )
                     else:
                         id_to_result[r.id] = r
                     ranked.append((r.id, r.score))
@@ -566,7 +576,7 @@ class Recaller:
             results: list[RecallResult] = []
             for hit in hits:
                 payload = dict(hit.payload or {})
-                payload.setdefault("raw_vector_score", hit.score)
+                payload["raw_vector_score"] = hit.score
                 results.append(
                     RecallResult(
                         id=hit.id,

@@ -18,7 +18,7 @@ from .stages import (
     GravityDampen,
     HubDampen,
     InhibitionOfReturn,
-    TechnicalScoreFloor,
+    ExactTokenProtection,
     QLearningReranker,
 )
 from .state import InMemoryStateStore, StateStore
@@ -39,7 +39,6 @@ def build_full_pipeline(
     graph_password: str = "",
     graph_limit: int = 3,
     graph_timeout: float = 5.0,
-    technical_query_dampening_scale: float = 0.6,
 ) -> Pipeline:
     """Build the full 8-stage reranking pipeline.
 
@@ -73,17 +72,11 @@ def build_full_pipeline(
     stages = [
         ClassifyQuery(),
         ExactTokenRescue(boost=rescue_boost),
-        GravityDampen(
-            penalty=gravity_penalty,
-            technical_query_dampening_scale=technical_query_dampening_scale,
-        ),
+        GravityDampen(penalty=gravity_penalty),
     ]
 
     if hub_degrees:
-        stages.append(HubDampen(
-            hub_degrees=hub_degrees,
-            technical_query_dampening_scale=technical_query_dampening_scale,
-        ))
+        stages.append(HubDampen(hub_degrees=hub_degrees))
 
     if enable_q_learning:
         stages.append(QLearningReranker(state_store=store))
@@ -102,7 +95,7 @@ def build_full_pipeline(
             limit=graph_limit, timeout=graph_timeout,
         ))
 
-    stages.append(TechnicalScoreFloor())
+    stages.append(ExactTokenProtection())
 
     return Pipeline(stages)
 
@@ -112,7 +105,6 @@ def build_stateless_pipeline(
     freshness_weight: float = 0.2,
     gravity_penalty: float = 0.5,
     rescue_boost: float = 0.5,
-    technical_query_dampening_scale: float = 0.6,
 ) -> Pipeline:
     """Minimal pipeline with stateless stages only.
 
@@ -124,16 +116,10 @@ def build_stateless_pipeline(
     stages = [
         ClassifyQuery(),
         ExactTokenRescue(boost=rescue_boost),
-        GravityDampen(
-            penalty=gravity_penalty,
-            technical_query_dampening_scale=technical_query_dampening_scale,
-        ),
+        GravityDampen(penalty=gravity_penalty),
     ]
     if hub_degrees:
-        stages.append(HubDampen(
-            hub_degrees=hub_degrees,
-            technical_query_dampening_scale=technical_query_dampening_scale,
-        ))
+        stages.append(HubDampen(hub_degrees=hub_degrees))
     stages.append(FreshnessBlend(weight=freshness_weight))
-    stages.append(TechnicalScoreFloor())
+    stages.append(ExactTokenProtection())
     return Pipeline(stages)
