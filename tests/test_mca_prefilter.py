@@ -5,19 +5,35 @@ from mnemostack.recall.mca_prefilter import extract_exact_tokens, mca_prefilter
 
 def test_extract_exact_tokens_finds_technical_shapes():
     query = (
-        "Find snake_case_id in /var/log/app.log from 10.0.0.42, "
-        "uuid 123e4567-e89b-12d3-a456-426614174000, branch feat-123-fix, "
-        "and camelCaseIdentifier"
+        "Find snake_case_id in /var/log/app.log and src/mnemostack/recall/recaller.py "
+        "from 10.0.0.42, uuid 123e4567-e89b-12d3-a456-426614174000, "
+        "branch feat-123-fix or feat/retrieval-improvements from main/develop, module "
+        "mnemostack.recall.pipeline, and camelCaseIdentifier"
     )
 
     tokens = extract_exact_tokens(query)
 
     assert "snake_case_id" in tokens
     assert "/var/log/app.log" in tokens
+    assert "src/mnemostack/recall/recaller.py" in tokens
     assert "10.0.0.42" in tokens
     assert "123e4567-e89b-12d3-a456-426614174000" in tokens
     assert "feat-123-fix" in tokens
+    assert "feat/retrieval-improvements" in tokens
+    assert "main" in tokens
+    assert "develop" in tokens
+    assert "mnemostack.recall.pipeline" in tokens
     assert "camelCaseIdentifier" in tokens
+
+
+def test_extract_exact_tokens_skips_common_path_and_dot_false_positives():
+    query = "choose и/или maybe e.g. or i.e. but not technical tokens"
+
+    tokens = extract_exact_tokens(query)
+
+    assert "и/или" not in tokens
+    assert "e.g." not in tokens
+    assert "i.e." not in tokens
 
 
 def test_mca_prefilter_returns_bm25_matches_as_recall_results():
