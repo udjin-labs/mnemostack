@@ -27,12 +27,43 @@ def test_english_relative_weeks_ago():
     assert parsed.date_focused is True
 
 
+def test_english_common_relative_dates():
+    cases = {
+        "what happened yesterday": date(2026, 5, 3),
+        "what happened today": date(2026, 5, 4),
+        "what happened day before yesterday": date(2026, 5, 2),
+        "what happened a day ago": date(2026, 5, 3),
+        "what happened one day ago": date(2026, 5, 3),
+        "what happened a week ago": date(2026, 4, 27),
+        "what happened one week ago": date(2026, 4, 27),
+        "what happened last week": date(2026, 4, 27),
+    }
+
+    for query, expected in cases.items():
+        parsed = extract_temporal_query(query, now=NOW)
+        assert parsed is not None
+        assert parsed.target_date == expected
+        assert parsed.date_focused is True
+
+
 def test_russian_one_week_ago():
     parsed = extract_temporal_query("что было неделю назад", now=NOW)
 
     assert parsed is not None
     assert parsed.target_date == date(2026, 4, 27)
     assert parsed.date_focused is True
+
+
+def test_russian_singular_relative_dates():
+    day = extract_temporal_query("что было 1 день назад", now=NOW)
+    week = extract_temporal_query("что было 1 неделя назад", now=NOW)
+
+    assert day is not None
+    assert day.target_date == date(2026, 5, 3)
+    assert day.date_focused is True
+    assert week is not None
+    assert week.target_date == date(2026, 4, 27)
+    assert week.date_focused is True
 
 
 def test_specific_non_date_query_is_not_date_focused():
