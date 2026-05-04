@@ -1,3 +1,5 @@
+import pytest
+
 from mnemostack.observability import get_recorder, set_recorder
 from mnemostack.observability.recorder import InMemoryRecorder
 from mnemostack.recall import BM25Doc, Recaller
@@ -89,7 +91,7 @@ def test_fallback_does_not_trigger_when_top_score_is_high():
         set_recorder(original)
 
 
-def test_fallback_does_not_trigger_for_nonempty_rrf_pipeline_results():
+def test_fallback_only_results_rank_below_pipeline_results():
     store = FakeVectorStoreSequence([
         [],
         [Hit("fallback", 0.99, {"text": "fallback vector match"})],
@@ -102,8 +104,9 @@ def test_fallback_does_not_trigger_for_nonempty_rrf_pipeline_results():
 
     results = recaller.recall("lexical", limit=5, vector_limit=5)
 
-    assert store.calls == 1
-    assert [result.id for result in results] == ["bm25"]
+    assert store.calls == 2
+    assert [result.id for result in results] == ["bm25", "fallback"]
+    assert results[1].score == pytest.approx(results[0].score - 0.01)
 
 
 def test_fallback_dedupes_and_keeps_higher_score():

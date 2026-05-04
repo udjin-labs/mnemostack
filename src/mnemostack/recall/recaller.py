@@ -569,11 +569,6 @@ class Recaller:
         vector_limit: int,
         filters: dict[str, Any] | None,
     ) -> list[RecallResult]:
-        top_score = max((result.score for result in results), default=0.0)
-        top_confidence = min(1.0, top_score * (self.rrf_k + 1))
-        if top_confidence >= self.fallback_threshold:
-            return results
-
         fallback_hits = self._vector_fallback_hits(
             query, limit=max(limit, vector_limit), filters=filters
         )
@@ -582,9 +577,7 @@ class Recaller:
 
         counter("mnemostack.recall.fallback_triggered", 1)
         logger.info(
-            "Low-confidence fallback triggered: top_score=%.3f < %.3f",
-            top_confidence,
-            self.fallback_threshold,
+            "Low-confidence fallback triggered after primary vector recall returned no hits"
         )
         pipeline_results = list(results)
         by_id: dict[Any, RecallResult] = {result.id: result for result in pipeline_results}
