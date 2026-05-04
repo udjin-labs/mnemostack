@@ -116,17 +116,27 @@ class _NoopEmbedding:
 
 
 class _ScrollableStore:
-    def __init__(self):
+    def __init__(self, scroll_results=None):
+        self.scroll_results = scroll_results or [
+            _Hit("diary-1", 1.0, {"text": "diary entry", "timestamp": "2026-04-30T10:00:00Z"}),
+        ]
         self.last_filters = None
+        self.filters_seen = []
         self.last_batch_size = None
         self.search_called = False
 
     def scroll(self, batch_size=256, filters=None, with_vectors=False):
         self.last_batch_size = batch_size
         self.last_filters = filters
-        return iter([
-            _Hit("diary-1", 1.0, {"text": "diary entry", "timestamp": "2026-04-30T10:00:00Z"}),
-        ])
+        self.filters_seen.append(filters)
+        gte = (filters or {}).get("timestamp", {}).get("gte", "")
+        lte = (filters or {}).get("timestamp", {}).get("lte", "")
+
+        def in_window(hit):
+            ts = (hit.payload or {}).get("timestamp", "")
+            return (not gte or ts >= gte) and (not lte or ts <= lte)
+
+        return iter([hit for hit in self.scroll_results if in_window(hit)])
 
     def search(self, vector, limit=10, filters=None):
         self.search_called = True
@@ -142,12 +152,92 @@ def test_date_focused_query_uses_timestamp_scroll_instead_of_semantic_search():
         extractor=lambda q: extract_temporal_query(q, now=NOW),
     )
 
-    results = retriever.search("что делали 30 апреля", limit=5)
+    results = retriever.search("что делали 30 апреля", limit=1)
 
     assert len(results) == 1
     assert results[0].id == "diary-1"
     assert results[0].payload["temporal_match"] is True
     assert embedding.called is False
     assert store.search_called is False
-    assert store.last_filters["timestamp"]["gte"].startswith("2026-04-29")
-    assert store.last_filters["timestamp"]["lte"].startswith("2026-05-01")
+    assert store.last_filters["timestamp"]["gte"].startswith("2026-04-30")
+    assert store.last_filters["timestamp"]["lte"].startswith("2026-04-30")
+
+
+def test_date_focused_query_prefers_same_day_over_previous_day():
+    hits = [
+        _Hit("prev", 1.0, {"text": "previous", "timestamp": "2026-04-12T12:00:00+00:00"}),
+        _Hit("same", 1.0, {"text": "same", "timestamp": "2026-04-13T12:00:00+00:00"}),
+    ]
+    store = _ScrollableStore(hits)
+    retriever = TemporalRetriever(
+        embedding=_NoopEmbedding(),
+        vector_store=store,
+        extractor=lambda q: extract_temporal_query(q, now=NOW),
+    )
+
+    results = retriever.search("что делали 13 апреля", limit=2)
+
+    assert [result.id for result in results] == ["same", "prev"]
+    assert store.filters_seen[0]["timestamp"]["gte"].startswith("2026-04-13")
+
+
+def test_date_focused_query_prefers_same_day_diary_over_transcripts():
+    hits = [
+        _Hit("transcript", 1.0, {
+            "text": "call transcript",
+            "timestamp": "2026-04-13T09:00:00+00:00",
+            "source_file": "transcripts/meeting.md",
+        }),
+        _Hit("diary", 1.0, {
+            "text": "diary",
+            "timestamp": "2026-04-13T22:00:00+00:00",
+            "source_file": "memory/2026-04-13.md",
+        }),
+    ]
+    store = _ScrollableStore(hits)
+    retriever = TemporalRetriever(
+        embedding=_NoopEmbedding(),
+        vector_store=store,
+        extractor=lambda q: extract_temporal_query(q, now=NOW),
+    )
+
+    results = retriever.search("что делали 13 апреля", limit=2)
+
+    assert [result.id for result in results] == ["diary", "transcript"]
+
+
+def test_date_focused_neighbor_days_only_after_exact_day_hits():
+    hits = [
+        _Hit("prev", 1.0, {"text": "previous", "timestamp": "2026-04-12T12:00:00+00:00"}),
+        _Hit("next", 1.0, {"text": "next", "timestamp": "2026-04-14T12:00:00+00:00"}),
+        _Hit("exact-1", 1.0, {"text": "exact 1", "timestamp": "2026-04-13T09:00:00+00:00"}),
+        _Hit("exact-2", 1.0, {"text": "exact 2", "timestamp": "2026-04-13T18:00:00+00:00"}),
+    ]
+    store = _ScrollableStore(hits)
+    retriever = TemporalRetriever(
+        embedding=_NoopEmbedding(),
+        vector_store=store,
+        extractor=lambda q: extract_temporal_query(q, now=NOW),
+    )
+
+    results = retriever.search("что делали 13 апреля", limit=4)
+
+    assert [result.id for result in results][:2] == ["exact-1", "exact-2"]
+    assert {result.id for result in results[2:]} == {"prev", "next"}
+
+
+def test_non_date_focused_temporal_query_keeps_semantic_search_path():
+    embedding = _NoopEmbedding()
+    store = _ScrollableStore()
+    retriever = TemporalRetriever(
+        embedding=embedding,
+        vector_store=store,
+        extractor=lambda q: extract_temporal_query(q, now=NOW),
+    )
+
+    results = retriever.search("openEMS 30 апреля", limit=5)
+
+    assert results == []
+    assert embedding.called is True
+    assert store.search_called is True
+    assert store.filters_seen == []
