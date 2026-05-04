@@ -128,7 +128,8 @@ class ExactTokenRescue(Stage):
 
 DEFAULT_TECHNICAL_QUERY_DAMPENING_SCALE = 0.6
 TECHNICAL_QUERY_SCORE_FLOOR_RAW_THRESHOLD = 0.75
-TECHNICAL_QUERY_SCORE_FLOOR_RATIO = 0.5
+# Disabled: keep the stage/helper wired for compatibility, but make it no-op.
+TECHNICAL_QUERY_SCORE_FLOOR_RATIO = 0.0
 
 
 def _exact_tokens_for_context(context: PipelineContext) -> list[str]:

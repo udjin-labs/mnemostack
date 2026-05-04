@@ -52,7 +52,7 @@ def test_technical_query_with_exact_tokens_gets_reduced_hub_dampening():
     assert hub.payload["dampened"] == "hub"
 
 
-def test_score_floor_applied_when_raw_vector_score_high_and_technical_query():
+def test_score_floor_is_disabled_for_technical_query():
     pipe = Pipeline([
         GravityDampen(penalty=0.1),
         TechnicalScoreFloor(),
@@ -61,8 +61,8 @@ def test_score_floor_applied_when_raw_vector_score_high_and_technical_query():
 
     out = pipe.apply("lookup /var/log/app.log", rs)
 
-    assert out[0].score == 0.4
-    assert out[0].payload["score_floor"] == "technical_raw_vector"
+    assert out[0].score == 0.092
+    assert "score_floor" not in out[0].payload
 
 
 def test_raw_vector_score_preserved_in_vector_retriever_payload():
