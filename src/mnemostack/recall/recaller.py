@@ -113,7 +113,7 @@ class Recaller:
         adaptive_weights: bool = False,
         query_expansion: bool = False,
         expansion_llm: LLMProvider | None = None,
-        fallback_threshold: float = 0.45,
+        fallback_threshold: float = 0.35,
         mca_prefilter: bool = False,
     ):
         """Two modes:
@@ -465,6 +465,7 @@ class Recaller:
             all_lists: list[list[tuple[Any, float]]] = []
             per_list_weights: list[float] = []
             id_to_result: dict[Any, RecallResult] = {}
+            has_vector_results = False
             if self.mca_prefilter_enabled:
                 mca_hits = self._mca_hits(query, per_source_limit)
                 if mca_hits:
@@ -478,6 +479,8 @@ class Recaller:
                 retriever_hits = list(ex.map(_run, self.retrievers))
             for retr, hits in retriever_hits:
                 counter(f"mnemostack.recall.{retr.name}_hits", len(hits))
+                if retr.name == "vector" and hits:
+                    has_vector_results = True
                 ranked: list[tuple[Any, float]] = []
                 for r in hits:
                     if r.id in id_to_result:
@@ -501,9 +504,10 @@ class Recaller:
                     continue
                 r.score = rrf_score
                 results.append(r)
-            results = self._maybe_apply_fallback(
-                query, results, limit=limit, vector_limit=per_source_limit, filters=filters
-            )
+            if not has_vector_results:
+                results = self._maybe_apply_fallback(
+                    query, results, limit=limit, vector_limit=per_source_limit, filters=filters
+                )
             counter("mnemostack.recall.results", len(results))
             return results
 
@@ -571,19 +575,35 @@ class Recaller:
             top_score,
             self.fallback_threshold,
         )
-        by_id: dict[Any, RecallResult] = {result.id: result for result in results}
+        pipeline_results = list(results)
+        by_id: dict[Any, RecallResult] = {result.id: result for result in pipeline_results}
+        id_to_index: dict[Any, int] = {
+            result.id: index for index, result in enumerate(pipeline_results)
+        }
+        pipeline_scores = [result.score for result in pipeline_results]
+        fallback_only_penalty_ceiling = (
+            min(pipeline_scores) - 0.01 if pipeline_scores else None
+        )
+        fallback_only: list[RecallResult] = []
+
         for fallback in fallback_hits:
             existing = by_id.get(fallback.id)
             if existing is None:
+                if fallback_only_penalty_ceiling is not None:
+                    fallback.score = min(fallback.score * 0.5, fallback_only_penalty_ceiling)
                 by_id[fallback.id] = fallback
+                fallback_only.append(fallback)
                 continue
-            for source in fallback.sources:
-                if source not in existing.sources:
-                    existing.sources.append(source)
-            if fallback.score > existing.score:
-                fallback.sources = existing.sources
-                by_id[fallback.id] = fallback
 
-        merged = list(by_id.values())
-        merged.sort(key=lambda result: result.score, reverse=True)
-        return merged[:limit]
+            merged_sources = list(existing.sources)
+            for source in fallback.sources:
+                if source not in merged_sources:
+                    merged_sources.append(source)
+            if fallback.score > existing.score:
+                fallback.sources = merged_sources
+                by_id[fallback.id] = fallback
+                pipeline_results[id_to_index[fallback.id]] = fallback
+            else:
+                existing.sources = merged_sources
+
+        return (pipeline_results + fallback_only)[:limit]
