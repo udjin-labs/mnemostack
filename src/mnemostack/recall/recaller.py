@@ -1,6 +1,7 @@
 """High-level Recaller — orchestrates embedding + vector + BM25 + RRF fusion."""
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -11,7 +12,10 @@ from ..observability.recorder import get_recorder
 from ..vector.qdrant import Hit, VectorStore
 from .bm25 import BM25, BM25Doc
 from .fusion import reciprocal_rank_fusion
+from .mca_prefilter import mca_prefilter as run_mca_prefilter
 from .query_expansion import expand_query
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ..llm.base import LLMProvider
@@ -109,6 +113,8 @@ class Recaller:
         adaptive_weights: bool = False,
         query_expansion: bool = False,
         expansion_llm: LLMProvider | None = None,
+        fallback_threshold: float = 0.45,
+        mca_prefilter: bool = False,
     ):
         """Two modes:
 
@@ -142,6 +148,8 @@ class Recaller:
         self.adaptive_weights = adaptive_weights
         self.query_expansion = query_expansion
         self.expansion_llm = expansion_llm
+        self.fallback_threshold = fallback_threshold
+        self.mca_prefilter_enabled = mca_prefilter
         self._query_expansion_cache: dict[str, list[str]] = {}
 
     # --- adaptive weight helpers ---
@@ -255,10 +263,15 @@ class Recaller:
             # Build id→source map and per-list tuples for RRF
             vector_list = [(hit, hit.score) for hit in vector_hits]
             bm25_list = [(doc, score) for doc, score in bm25_hits]
+            mca_hits = self._mca_hits(query, bm25_limit) if self.mca_prefilter_enabled else []
+            mca_by_id = {hit.id: hit for hit in mca_hits}
+            ranked_lists = [vector_list, bm25_list]
+            if mca_hits:
+                ranked_lists.insert(0, [(hit, hit.score) for hit in mca_hits])
 
             # Two separate fusions — RRF by rank
             fused = reciprocal_rank_fusion(
-                [vector_list, bm25_list],
+                ranked_lists,
                 k=self.rrf_k,
                 limit=limit,
             )
@@ -286,6 +299,20 @@ class Recaller:
                             sources=self._sources_for(item, vector_hits, bm25_hits),
                         )
                     )
+                elif isinstance(item, RecallResult):
+                    for source in self._sources_for(item, vector_hits, bm25_hits):
+                        if source not in item.sources:
+                            item.sources.append(source)
+                    item.score = rrf_score
+                    results.append(item)
+                else:
+                    mca_result = mca_by_id.get(item)
+                    if mca_result is not None:
+                        mca_result.score = rrf_score
+                        results.append(mca_result)
+            results = self._maybe_apply_fallback(
+                query, results, limit=limit, vector_limit=vector_limit, filters=filters
+            )
             counter("mnemostack.recall.results", len(results))
             return results
 
@@ -438,6 +465,13 @@ class Recaller:
             all_lists: list[list[tuple[Any, float]]] = []
             per_list_weights: list[float] = []
             id_to_result: dict[Any, RecallResult] = {}
+            if self.mca_prefilter_enabled:
+                mca_hits = self._mca_hits(query, per_source_limit)
+                if mca_hits:
+                    all_lists.append([(hit, hit.score) for hit in mca_hits])
+                    per_list_weights.append(self._weight_for("mca", query))
+                    for hit in mca_hits:
+                        id_to_result[hit.id] = hit
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=max(len(self.retrievers), 1)
             ) as ex:
@@ -460,11 +494,96 @@ class Recaller:
                 all_lists, k=self.rrf_k, limit=limit, weights=per_list_weights
             )
             results: list[RecallResult] = []
-            for key, rrf_score in fused:
+            for item, rrf_score in fused:
+                key = getattr(item, "id", item)
                 r = id_to_result.get(key)
                 if not r:
                     continue
                 r.score = rrf_score
                 results.append(r)
+            results = self._maybe_apply_fallback(
+                query, results, limit=limit, vector_limit=per_source_limit, filters=filters
+            )
             counter("mnemostack.recall.results", len(results))
             return results
+
+    def _mca_hits(self, query: str, limit: int) -> list[RecallResult]:
+        bm25 = self.bm25
+        if bm25 is None:
+            for retriever in self.retrievers:
+                bm25 = getattr(retriever, "bm25", None)
+                if bm25 is not None:
+                    break
+        if bm25 is None:
+            return []
+        return run_mca_prefilter(query, bm25, limit=limit)
+
+    def _vector_fallback_hits(
+        self,
+        query: str,
+        *,
+        limit: int,
+        filters: dict[str, Any] | None,
+    ) -> list[RecallResult]:
+        if self.embedding and self.vector:
+            query_vec = self.embedding.embed(query)
+            if not query_vec:
+                return []
+            hits = self.vector.search(query_vec, limit=limit, filters=filters)
+            return [
+                RecallResult(
+                    id=hit.id,
+                    text=hit.payload.get("text", ""),
+                    score=hit.score,
+                    payload=hit.payload,
+                    sources=["vector"],
+                )
+                for hit in hits
+            ]
+
+        for retriever in self.retrievers:
+            if getattr(retriever, "name", None) == "vector":
+                return retriever.search(query, limit=limit, filters=filters)
+        return []
+
+    def _maybe_apply_fallback(
+        self,
+        query: str,
+        results: list[RecallResult],
+        *,
+        limit: int,
+        vector_limit: int,
+        filters: dict[str, Any] | None,
+    ) -> list[RecallResult]:
+        top_score = max((result.score for result in results), default=0.0)
+        if top_score >= self.fallback_threshold:
+            return results
+
+        fallback_hits = self._vector_fallback_hits(
+            query, limit=max(limit, vector_limit), filters=filters
+        )
+        if not fallback_hits:
+            return results
+
+        counter("mnemostack.recall.fallback_triggered", 1)
+        logger.info(
+            "Low-confidence fallback triggered: top_score=%.3f < %.3f",
+            top_score,
+            self.fallback_threshold,
+        )
+        by_id: dict[Any, RecallResult] = {result.id: result for result in results}
+        for fallback in fallback_hits:
+            existing = by_id.get(fallback.id)
+            if existing is None:
+                by_id[fallback.id] = fallback
+                continue
+            for source in fallback.sources:
+                if source not in existing.sources:
+                    existing.sources.append(source)
+            if fallback.score > existing.score:
+                fallback.sources = existing.sources
+                by_id[fallback.id] = fallback
+
+        merged = list(by_id.values())
+        merged.sort(key=lambda result: result.score, reverse=True)
+        return merged[:limit]
