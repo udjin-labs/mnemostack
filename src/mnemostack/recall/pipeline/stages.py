@@ -214,19 +214,62 @@ class HubDampen(Stage):
 # ---------- freshness ----------
 
 
+def compute_decay(
+    last_accessed: str | None,
+    access_count: int = 0,
+    half_life_days: float = 30.0,
+) -> float:
+    """Ebbinghaus-style decay with reinforcement.
+
+    Returns a multiplier between 0.1 and 1.0.
+    - Missing/invalid last_accessed is a no-op for backwards compatibility
+    - Decays exponentially based on days since last access
+    - Each access_count extends effective half-life (reinforcement)
+    - Minimum floor of 0.1 (never fully forgotten)
+    """
+    if not last_accessed:
+        return 1.0
+
+    try:
+        last_dt = datetime.fromisoformat(last_accessed.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return 1.0
+
+    if last_dt.tzinfo is None:
+        last_dt = last_dt.replace(tzinfo=timezone.utc)
+
+    now = datetime.now(timezone.utc)
+    days_elapsed = max(0, (now - last_dt).total_seconds() / 86400)
+
+    # Reinforcement: each access extends half-life by 20% (capped to avoid runaway).
+    # Clamp defensive inputs so bad metadata/config cannot invert or explode decay.
+    safe_access_count = max(0, min(access_count, 10))
+    safe_half_life_days = max(0.001, half_life_days)
+    effective_half_life = safe_half_life_days * (1 + 0.2 * safe_access_count)
+
+    # Exponential decay.
+    decay = math.exp(-0.693 * days_elapsed / effective_half_life)
+
+    return max(0.1, decay)
+
+
 class FreshnessBlend(Stage):
-    """Blend similarity with recency decay.
+    """Blend similarity with recency decay and confidence decay.
 
     Score becomes `(1-weight)*old_score + weight*freshness`, where freshness
     is `exp(-ln(2) * age_days / halflife_days)`. Items from the last
     `echo_window_minutes` are penalized (likely meta-noise from current
-    conversation).
+    conversation). The blended score is then multiplied by an Ebbinghaus-style
+    confidence decay based on `last_accessed` and `access_count`.
     """
+
+    half_life_days: float = 30.0
 
     def __init__(
         self,
         weight: float = 0.2,
         halflife_days: int = 14,
+        confidence_half_life_days: float | None = None,
         echo_window_minutes: int = 10,
         echo_penalty: float = 0.5,
         always_current_files: tuple[str, ...] = (
@@ -243,6 +286,8 @@ class FreshnessBlend(Stage):
     ):
         self.weight = weight
         self.halflife_days = halflife_days
+        if confidence_half_life_days is not None:
+            self.half_life_days = confidence_half_life_days
         self.echo_window_minutes = echo_window_minutes
         self.echo_penalty = echo_penalty
         self.always_current_files = always_current_files
@@ -273,6 +318,17 @@ class FreshnessBlend(Stage):
                 freshness *= self.echo_penalty
                 r.payload["echo_penalty"] = True
             r.score = (1 - self.weight) * r.score + self.weight * freshness
+            try:
+                access_count = int(r.payload.get("access_count", 0))
+            except (TypeError, ValueError):
+                access_count = 0
+            decay_factor = compute_decay(
+                r.payload.get("last_accessed"),
+                access_count=access_count,
+                half_life_days=self.half_life_days,
+            )
+            r.score *= decay_factor
+            r.payload["decay_factor"] = round(decay_factor, 3)
             r.payload["freshness"] = round(freshness, 3)
         results.sort(key=lambda x: -x.score)
         return results
