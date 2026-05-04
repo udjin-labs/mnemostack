@@ -126,7 +126,7 @@ class ExactTokenRescue(Stage):
 # ---------- dampening ----------
 
 
-DEFAULT_TECHNICAL_QUERY_DAMPENING_SCALE = 0.4
+DEFAULT_TECHNICAL_QUERY_DAMPENING_SCALE = 0.6
 TECHNICAL_QUERY_SCORE_FLOOR_RAW_THRESHOLD = 0.75
 TECHNICAL_QUERY_SCORE_FLOOR_RATIO = 0.5
 
@@ -146,7 +146,7 @@ def _is_technical_exact_query(context: PipelineContext) -> bool:
 def _scale_dampening_factor(factor: float, dampening_scale: float) -> float:
     """Move a multiplicative penalty factor toward 1.0 by dampening_scale.
 
-    A normal factor of 0.5 with scale=0.4 becomes 0.8, i.e. only 40% of the
+    A normal factor of 0.5 with scale=0.6 becomes 0.7, i.e. only 60% of the
     original score reduction is applied.
     """
     scale = max(0.0, min(1.0, dampening_scale))

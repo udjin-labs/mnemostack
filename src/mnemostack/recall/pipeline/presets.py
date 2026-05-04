@@ -39,7 +39,7 @@ def build_full_pipeline(
     graph_password: str = "",
     graph_limit: int = 3,
     graph_timeout: float = 5.0,
-    technical_query_dampening_scale: float = 0.4,
+    technical_query_dampening_scale: float = 0.6,
 ) -> Pipeline:
     """Build the full 8-stage reranking pipeline.
 
@@ -112,7 +112,7 @@ def build_stateless_pipeline(
     freshness_weight: float = 0.2,
     gravity_penalty: float = 0.5,
     rescue_boost: float = 0.5,
-    technical_query_dampening_scale: float = 0.4,
+    technical_query_dampening_scale: float = 0.6,
 ) -> Pipeline:
     """Minimal pipeline with stateless stages only.
 
