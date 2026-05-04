@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -154,6 +155,13 @@ def main():
         help="Adjacent messages to concatenate into overlapping chunks (1 disables)",
     )
     args = ap.parse_args()
+    run_started_at = datetime.now(timezone.utc).isoformat()
+
+    def git_value(*cmd: str) -> str:
+        try:
+            return subprocess.check_output(cmd, text=True).strip()
+        except Exception:
+            return "unknown"
 
     with open(DATASET) as f:
         full = json.load(f)
@@ -287,7 +295,19 @@ def main():
         t = v["correct"] + v["partial"] + v["wrong"]
         log(f"  {k}: correct={v['correct']}/{t} partial={v['partial']} wrong={v['wrong']}")
 
-    Path(args.output).write_text(json.dumps({"stats": stats, "per_qa": all_per_qa}, ensure_ascii=False, indent=2))
+    config = {
+        "git_sha": git_value("git", "rev-parse", "--short", "HEAD"),
+        "git_branch": git_value("git", "branch", "--show-current"),
+        "limit": args.limit,
+        "query_expansion": bool(args.query_expansion),
+        "window_size": args.window_size,
+        "samples": args.samples,
+        "timestamp": run_started_at,
+        "dataset": DATASET,
+    }
+    Path(args.output).write_text(
+        json.dumps({"config": config, "stats": stats, "per_qa": all_per_qa}, ensure_ascii=False, indent=2)
+    )
     log(f"Saved: {args.output}")
 
 
