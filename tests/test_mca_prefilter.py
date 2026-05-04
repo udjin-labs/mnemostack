@@ -36,6 +36,17 @@ def test_extract_exact_tokens_skips_common_path_and_dot_false_positives():
     assert "i.e." not in tokens
 
 
+def test_extract_exact_tokens_does_not_duplicate_absolute_paths_as_relative_paths():
+    tokens = extract_exact_tokens("look at /etc/hosts")
+
+    assert "/etc/hosts" in tokens
+    assert "etc/hosts" not in tokens
+
+
+def test_extract_exact_tokens_does_not_treat_common_branch_words_as_exact_tokens():
+    assert extract_exact_tokens("what is the main issue") == []
+
+
 def test_mca_prefilter_returns_bm25_matches_as_recall_results():
     bm25 = BM25([
         BM25Doc("rare", "Deployment mentions snake_case_id and /var/log/app.log"),
