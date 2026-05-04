@@ -1,7 +1,15 @@
 from copy import deepcopy
 
 from mnemostack.recall import RecallResult
-from mnemostack.recall.pipeline import ExactTokenProtection, Pipeline, PipelineContext
+from mnemostack.recall.pipeline import (
+    ExactTokenProtection,
+    GravityDampen,
+    HubDampen,
+    InhibitionOfReturn,
+    Pipeline,
+    PipelineContext,
+    build_full_pipeline,
+)
 
 
 def _result(id_, *, score=0.1, raw_vector_score=None, sources=None, text="unrelated"):
@@ -69,3 +77,30 @@ def test_exact_token_protection_does_not_change_scores_above_floor():
     )
 
     assert out[0].score == 0.3
+
+
+def test_exact_token_protection_runs_after_dampening_stages_in_full_pipeline():
+    pipeline = build_full_pipeline(
+        hub_degrees={"strong": 100, "other": 1},
+        enable_q_learning=False,
+        enable_curiosity=False,
+    )
+    stage_types = [type(stage) for stage in pipeline.stages]
+
+    protection_idx = stage_types.index(ExactTokenProtection)
+    assert protection_idx > stage_types.index(GravityDampen)
+    assert protection_idx > stage_types.index(HubDampen)
+    assert protection_idx > stage_types.index(InhibitionOfReturn)
+
+    result = _result(
+        "strong",
+        score=0.2,
+        raw_vector_score=0.9,
+        sources=["vector"],
+        text="no matching terms here",
+    )
+
+    out = pipeline.apply("lookup api_key_backup", [result])
+
+    assert out[0].payload["dampened"] == "gravity"
+    assert out[0].score == 0.25
