@@ -659,12 +659,18 @@ def extract_temporal_query(query: str, now: datetime | None = None) -> TemporalQ
         (r"\bпозавчера\b", 2),
         (r"\bвчера\b", 1),
         (r"\bсегодня\b", 0),
+        (r"\bday\s+before\s+yesterday\b", 2),
+        (r"\byesterday\b", 1),
+        (r"\btoday\b", 0),
         (r"\bнеделю\s+назад\b", 7),
         (r"\bна\s+прошлой\s+неделе\b", 7),
+        (r"\b(?:a|one)\s+day\s+ago\b", 1),
+        (r"\b(?:a|one)\s+week\s+ago\b", 7),
+        (r"\blast\s+week\b", 7),
         (r"\b(\d+)\s+days?\s+ago\b", -1),
         (r"\b(\d+)\s+weeks?\s+ago\b", -7),
-        (r"\b(\d+)\s+дн(?:я|ей|ь)?\s+назад\b", -1),
-        (r"\b(\d+)\s+недел(?:ю|и|ь)?\s+назад\b", -7),
+        (r"\b(\d+)\s+(?:день|дн(?:я|ей|ь)?)\s+назад\b", -1),
+        (r"\b(\d+)\s+(?:неделя|недел(?:ю|и|ь)?)\s+назад\b", -7),
     ]
     for pattern, days in relative_patterns:
         m = re.search(pattern, q)
