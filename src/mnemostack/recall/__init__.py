@@ -34,6 +34,7 @@ from .pipeline import (
     PipelineContext,
     QLearningReranker,
     Stage,
+    TechnicalScoreFloor,
     StateStore,
     build_full_pipeline,
     build_stateless_pipeline,
@@ -97,6 +98,7 @@ __all__ = [
     "InhibitionOfReturn",
     "CuriosityBoost",
     "QLearningReranker",
+    "TechnicalScoreFloor",
     "build_full_pipeline",
     "build_stateless_pipeline",
 ]

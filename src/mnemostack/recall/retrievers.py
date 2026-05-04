@@ -72,16 +72,20 @@ class VectorRetriever(Retriever):
         if not vec:
             return []
         hits = self.vector_store.search(vec, limit=limit, filters=filters)
-        return [
-            RecallResult(
-                id=h.id,
-                text=h.payload.get("text", ""),
-                score=h.score,
-                payload=h.payload,
-                sources=["vector"],
+        results: list[RecallResult] = []
+        for h in hits:
+            payload = dict(h.payload or {})
+            payload.setdefault("raw_vector_score", h.score)
+            results.append(
+                RecallResult(
+                    id=h.id,
+                    text=payload.get("text", ""),
+                    score=h.score,
+                    payload=payload,
+                    sources=["vector"],
+                )
             )
-            for h in hits
-        ]
+        return results
 
 
 def _with_timestamp_range_filter(

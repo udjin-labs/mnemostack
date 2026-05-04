@@ -280,22 +280,28 @@ class Recaller:
             results = []
             for item, rrf_score in fused:
                 if isinstance(item, Hit):
+                    payload = dict(item.payload or {})
+                    payload.setdefault("raw_vector_score", item.score)
                     results.append(
                         RecallResult(
                             id=item.id,
-                            text=item.payload.get("text", ""),
+                            text=payload.get("text", ""),
                             score=rrf_score,
-                            payload=item.payload,
+                            payload=payload,
                             sources=self._sources_for(item, vector_hits, bm25_hits),
                         )
                     )
                 elif isinstance(item, BM25Doc):
+                    payload = dict(item.payload or {})
+                    raw_vector_score = self._raw_vector_score_for(item.id, vector_hits)
+                    if raw_vector_score is not None:
+                        payload.setdefault("raw_vector_score", raw_vector_score)
                     results.append(
                         RecallResult(
                             id=item.id,
                             text=item.text,
                             score=rrf_score,
-                            payload=item.payload or {},
+                            payload=payload,
                             sources=self._sources_for(item, vector_hits, bm25_hits),
                         )
                     )
@@ -303,6 +309,9 @@ class Recaller:
                     for source in self._sources_for(item, vector_hits, bm25_hits):
                         if source not in item.sources:
                             item.sources.append(source)
+                    raw_vector_score = self._raw_vector_score_for(item.id, vector_hits)
+                    if raw_vector_score is not None:
+                        item.payload.setdefault("raw_vector_score", raw_vector_score)
                     item.score = rrf_score
                     results.append(item)
                 else:
@@ -344,12 +353,14 @@ class Recaller:
             hit = id_to_hit.get(key)
             if hit is None:
                 continue
+            payload = dict(hit.payload or {})
+            payload.setdefault("raw_vector_score", hit.score)
             results.append(
                 RecallResult(
                     id=hit.id,
-                    text=hit.payload.get("text", ""),
+                    text=payload.get("text", ""),
                     score=rrf_score,
-                    payload=hit.payload,
+                    payload=payload,
                     sources=["vector"],
                 )
             )
@@ -412,6 +423,13 @@ class Recaller:
             merged.append(result)
         counter("mnemostack.recall.results", len(merged))
         return merged
+
+    @staticmethod
+    def _raw_vector_score_for(item_id: Any, vector_hits: list[Hit]) -> float | None:
+        for hit in vector_hits:
+            if hit.id == item_id:
+                return hit.score
+        return None
 
     @staticmethod
     def _sources_for(
@@ -489,6 +507,10 @@ class Recaller:
                         for s in r.sources:
                             if s not in existing.sources:
                                 existing.sources.append(s)
+                        if "raw_vector_score" in r.payload:
+                            existing.payload.setdefault(
+                                "raw_vector_score", r.payload["raw_vector_score"]
+                            )
                     else:
                         id_to_result[r.id] = r
                     ranked.append((r.id, r.score))
@@ -541,16 +563,20 @@ class Recaller:
                 hits = self.vector.search(query_vec, limit=limit, filters=filters)
             except Exception:
                 return []
-            return [
-                RecallResult(
-                    id=hit.id,
-                    text=hit.payload.get("text", ""),
-                    score=hit.score,
-                    payload=hit.payload,
-                    sources=["vector"],
+            results: list[RecallResult] = []
+            for hit in hits:
+                payload = dict(hit.payload or {})
+                payload.setdefault("raw_vector_score", hit.score)
+                results.append(
+                    RecallResult(
+                        id=hit.id,
+                        text=payload.get("text", ""),
+                        score=hit.score,
+                        payload=payload,
+                        sources=["vector"],
+                    )
                 )
-                for hit in hits
-            ]
+            return results
 
         for retriever in self.retrievers:
             if getattr(retriever, "name", None) == "vector":

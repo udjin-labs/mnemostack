@@ -11,7 +11,8 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .base import Stage
+from ..mca_prefilter import extract_exact_tokens
+from .base import PipelineContext, Stage
 from .state import StateStore
 
 # ---------- defaults / stopwords ----------
@@ -125,6 +126,70 @@ class ExactTokenRescue(Stage):
 # ---------- dampening ----------
 
 
+DEFAULT_TECHNICAL_QUERY_DAMPENING_SCALE = 0.4
+TECHNICAL_QUERY_SCORE_FLOOR_RAW_THRESHOLD = 0.75
+TECHNICAL_QUERY_SCORE_FLOOR_RATIO = 0.5
+
+
+def _exact_tokens_for_context(context: PipelineContext) -> list[str]:
+    tokens = context.extras.get("exact_tokens")
+    if tokens is None:
+        tokens = extract_exact_tokens(context.query)
+        context.extras["exact_tokens"] = tokens
+    return list(tokens)
+
+
+def _is_technical_exact_query(context: PipelineContext) -> bool:
+    return bool(_exact_tokens_for_context(context))
+
+
+def _scale_dampening_factor(factor: float, dampening_scale: float) -> float:
+    """Move a multiplicative penalty factor toward 1.0 by dampening_scale.
+
+    A normal factor of 0.5 with scale=0.4 becomes 0.8, i.e. only 40% of the
+    original score reduction is applied.
+    """
+    scale = max(0.0, min(1.0, dampening_scale))
+    return 1.0 - (1.0 - factor) * scale
+
+
+def _raw_vector_score(result) -> float | None:
+    try:
+        raw = result.payload.get("raw_vector_score")
+    except Exception:
+        return None
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _apply_technical_score_floor(context: PipelineContext, result) -> None:
+    if not _is_technical_exact_query(context):
+        return
+    raw = _raw_vector_score(result)
+    if raw is None or raw < TECHNICAL_QUERY_SCORE_FLOOR_RAW_THRESHOLD:
+        return
+    floor = raw * TECHNICAL_QUERY_SCORE_FLOOR_RATIO
+    if result.score < floor:
+        result.score = floor
+        result.payload["score_floor"] = "technical_raw_vector"
+
+
+class TechnicalScoreFloor(Stage):
+    """Protect strong vector hits for exact-token queries after all reranking."""
+
+    def apply(self, context, results):
+        if not results or not _is_technical_exact_query(context):
+            return results
+        for r in results:
+            _apply_technical_score_floor(context, r)
+        results.sort(key=lambda x: -x.score)
+        return results
+
+
 class GravityDampen(Stage):
     """Penalize results that don't actually contain any query key term.
 
@@ -132,9 +197,15 @@ class GravityDampen(Stage):
     similarity without really containing the information we asked for.
     """
 
-    def __init__(self, penalty: float = 0.5, min_score: float = 0.1):
+    def __init__(
+        self,
+        penalty: float = 0.5,
+        min_score: float = 0.1,
+        technical_query_dampening_scale: float = DEFAULT_TECHNICAL_QUERY_DAMPENING_SCALE,
+    ):
         self.penalty = penalty
         self.min_score = min_score
+        self.technical_query_dampening_scale = technical_query_dampening_scale
 
     def apply(self, context, results):
         key_terms = set(context.query_tokens) or (
@@ -142,12 +213,18 @@ class GravityDampen(Stage):
         )
         if not key_terms:
             return results
+        dampening_factor = self.penalty
+        if _is_technical_exact_query(context):
+            dampening_factor = _scale_dampening_factor(
+                self.penalty, self.technical_query_dampening_scale
+            )
         for r in results:
             if r.score <= self.min_score:
                 continue
             text_lower = r.text.lower()
             if not any(t in text_lower for t in key_terms):
-                r.score *= self.penalty
+                r.score *= dampening_factor
+                _apply_technical_score_floor(context, r)
                 r.payload["dampened"] = "gravity"
         results.sort(key=lambda x: -x.score)
         return results
@@ -159,9 +236,15 @@ class HubDampen(Stage):
     Requires `hub_degrees` (dict of id → node degree). If empty, stage is a no-op.
     """
 
-    def __init__(self, hub_degrees: dict[Any, int] | None = None, p90_floor: float = 0.4):
+    def __init__(
+        self,
+        hub_degrees: dict[Any, int] | None = None,
+        p90_floor: float = 0.4,
+        technical_query_dampening_scale: float = DEFAULT_TECHNICAL_QUERY_DAMPENING_SCALE,
+    ):
         self.hub_degrees = hub_degrees or {}
         self.p90_floor = p90_floor
+        self.technical_query_dampening_scale = technical_query_dampening_scale
 
     def apply(self, context, results):
         if not self.hub_degrees:
@@ -173,12 +256,19 @@ class HubDampen(Stage):
         max_deg = degrees[-1]
         if max_deg <= p90:
             return results
+        technical_query = _is_technical_exact_query(context)
         for r in results:
             deg = self.hub_degrees.get(r.id, 0)
             if deg > p90:
                 ratio = (deg - p90) / (max_deg - p90)
                 penalty = 1.0 - (1.0 - self.p90_floor) * ratio
-                r.score *= max(self.p90_floor, penalty)
+                dampening_factor = max(self.p90_floor, penalty)
+                if technical_query:
+                    dampening_factor = _scale_dampening_factor(
+                        dampening_factor, self.technical_query_dampening_scale
+                    )
+                r.score *= dampening_factor
+                _apply_technical_score_floor(context, r)
                 r.payload["dampened"] = "hub"
         results.sort(key=lambda x: -x.score)
         return results
