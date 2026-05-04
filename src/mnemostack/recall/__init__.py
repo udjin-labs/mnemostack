@@ -23,6 +23,7 @@ from .mca_prefilter import extract_exact_tokens, mca_prefilter
 from .pipeline import (
     ClassifyQuery,
     CuriosityBoost,
+    ExactTokenProtection,
     ExactTokenRescue,
     FileStateStore,
     FreshnessBlend,
@@ -97,6 +98,7 @@ __all__ = [
     "InhibitionOfReturn",
     "CuriosityBoost",
     "QLearningReranker",
+    "ExactTokenProtection",
     "build_full_pipeline",
     "build_stateless_pipeline",
 ]
