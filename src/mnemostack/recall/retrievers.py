@@ -600,6 +600,12 @@ def _day_window(day: date) -> tuple[str, str]:
     return start.isoformat(), end.isoformat()
 
 
+def _strict_day_window(day: date) -> tuple[str, str]:
+    start = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
+    end = datetime.combine(day, datetime.max.time(), tzinfo=timezone.utc)
+    return start.isoformat(), end.isoformat()
+
+
 def _month_window(year: int, month: int) -> tuple[str, str]:
     start = datetime(year, month, 1, tzinfo=timezone.utc)
     end_month = month + 1
@@ -768,9 +774,11 @@ class TemporalRetriever(Retriever):
             return []
         if isinstance(parsed_or_window, TemporalQuery):
             start, end = parsed_or_window.window
+            target_date = parsed_or_window.target_date
             date_focused = parsed_or_window.date_focused
         else:
             start, end = parsed_or_window
+            target_date = None
             date_focused = False
 
         # Flat filter shape understood by VectorStore._build_filter. Preserve
@@ -779,17 +787,34 @@ class TemporalRetriever(Retriever):
         temporal_filter = dict(filters or {})
         temporal_filter["timestamp"] = {"gte": start, "lte": end}
 
-        if date_focused and hasattr(self.vector_store, "scroll"):
+        if date_focused and target_date is not None and hasattr(self.vector_store, "scroll"):
             try:
-                hits = []
-                for hit in self.vector_store.scroll(
+                strict_start, strict_end = _strict_day_window(target_date)
+                strict_filter = dict(temporal_filter)
+                strict_filter["timestamp"] = {"gte": strict_start, "lte": strict_end}
+
+                exact_hits = list(self.vector_store.scroll(
                     batch_size=max(limit, 100),
-                    filters=temporal_filter,
+                    filters=strict_filter,
                     with_vectors=False,
-                ):
-                    hits.append(hit)
-                    if len(hits) >= limit:
-                        break
+                ))
+                exact_hits = self._sort_date_focused_hits(exact_hits, target_date)
+
+                hits = exact_hits[:limit]
+                if len(hits) < limit:
+                    seen = {hit.id for hit in hits}
+                    neighbor_hits = []
+                    for hit in self.vector_store.scroll(
+                        batch_size=max(limit, 100),
+                        filters=temporal_filter,
+                        with_vectors=False,
+                    ):
+                        if hit.id in seen or self._hit_date(hit) == target_date:
+                            continue
+                        neighbor_hits.append(hit)
+                    neighbor_hits = self._sort_date_focused_hits(neighbor_hits, target_date)
+                    hits.extend(neighbor_hits[: limit - len(hits)])
+
                 return self._to_results(hits)
             except Exception as exc:  # noqa: BLE001 — defensive; log then fall back
                 logger.warning(
@@ -809,6 +834,59 @@ class TemporalRetriever(Retriever):
             )
             return []
         return self._to_results(hits)
+
+    @staticmethod
+    def _hit_date(hit) -> date | None:
+        timestamp = (hit.payload or {}).get("timestamp")
+        if isinstance(timestamp, datetime):
+            return timestamp.astimezone(timezone.utc).date() if timestamp.tzinfo else timestamp.date()
+        if isinstance(timestamp, str) and len(timestamp) >= 10:
+            try:
+                return datetime.fromisoformat(timestamp.replace("Z", "+00:00")).astimezone(timezone.utc).date()
+            except ValueError:
+                try:
+                    return date.fromisoformat(timestamp[:10])
+                except ValueError:
+                    return None
+        return None
+
+    @staticmethod
+    def _is_diary_source_for_date(hit, target_date: date) -> bool:
+        payload = hit.payload or {}
+        expected = f"{target_date.isoformat()}.md"
+        for key in ("source_file", "source", "file", "path"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.replace("\\", "/").endswith(expected):
+                return True
+        return False
+
+    @classmethod
+    def _sort_date_focused_hits(cls, hits, target_date: date):
+        noon = datetime.combine(target_date, datetime.min.time(), tzinfo=timezone.utc) + timedelta(hours=12)
+
+        def timestamp_distance(hit) -> float:
+            timestamp = (hit.payload or {}).get("timestamp")
+            if isinstance(timestamp, datetime):
+                dt = timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
+            elif isinstance(timestamp, str):
+                try:
+                    dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                except ValueError:
+                    return float("inf")
+            else:
+                return float("inf")
+            return abs((dt.astimezone(timezone.utc) - noon).total_seconds())
+
+        return sorted(
+            hits,
+            key=lambda hit: (
+                cls._hit_date(hit) != target_date,
+                not cls._is_diary_source_for_date(hit, target_date),
+                timestamp_distance(hit),
+            ),
+        )
 
     @staticmethod
     def _to_results(hits) -> list[RecallResult]:
