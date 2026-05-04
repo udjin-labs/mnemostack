@@ -310,9 +310,10 @@ class Recaller:
                     if mca_result is not None:
                         mca_result.score = rrf_score
                         results.append(mca_result)
-            results = self._maybe_apply_fallback(
-                query, results, limit=limit, vector_limit=vector_limit, filters=filters
-            )
+            if not vector_hits:
+                results = self._maybe_apply_fallback(
+                    query, results, limit=limit, vector_limit=vector_limit, filters=filters
+                )
             counter("mnemostack.recall.results", len(results))
             return results
 
@@ -530,10 +531,16 @@ class Recaller:
         filters: dict[str, Any] | None,
     ) -> list[RecallResult]:
         if self.embedding and self.vector:
-            query_vec = self.embedding.embed(query)
+            try:
+                query_vec = self.embedding.embed(query)
+            except Exception:
+                return []
             if not query_vec:
                 return []
-            hits = self.vector.search(query_vec, limit=limit, filters=filters)
+            try:
+                hits = self.vector.search(query_vec, limit=limit, filters=filters)
+            except Exception:
+                return []
             return [
                 RecallResult(
                     id=hit.id,
@@ -547,7 +554,10 @@ class Recaller:
 
         for retriever in self.retrievers:
             if getattr(retriever, "name", None) == "vector":
-                return retriever.search(query, limit=limit, filters=filters)
+                try:
+                    return retriever.search(query, limit=limit, filters=filters)
+                except Exception:
+                    return []
         return []
 
     def _maybe_apply_fallback(
@@ -560,7 +570,8 @@ class Recaller:
         filters: dict[str, Any] | None,
     ) -> list[RecallResult]:
         top_score = max((result.score for result in results), default=0.0)
-        if top_score >= self.fallback_threshold:
+        top_confidence = min(1.0, top_score * (self.rrf_k + 1))
+        if top_confidence >= self.fallback_threshold:
             return results
 
         fallback_hits = self._vector_fallback_hits(
@@ -572,7 +583,7 @@ class Recaller:
         counter("mnemostack.recall.fallback_triggered", 1)
         logger.info(
             "Low-confidence fallback triggered: top_score=%.3f < %.3f",
-            top_score,
+            top_confidence,
             self.fallback_threshold,
         )
         pipeline_results = list(results)

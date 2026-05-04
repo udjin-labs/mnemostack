@@ -1,5 +1,3 @@
-import pytest
-
 from mnemostack.observability import get_recorder, set_recorder
 from mnemostack.observability.recorder import InMemoryRecorder
 from mnemostack.recall import BM25Doc, Recaller
@@ -32,7 +30,21 @@ class FakeVectorStoreSequence:
         return self.hit_sequences[sequence_index][:limit]
 
 
-def test_default_fallback_threshold_is_035_and_triggers_when_top_score_is_low():
+class FailingVectorRetriever:
+    name = "vector"
+
+    def search(self, query, limit=10, filters=None):
+        raise RuntimeError("vector backend unavailable")
+
+
+class FixedRetriever:
+    name = "bm25"
+
+    def search(self, query, limit=10, filters=None):
+        return []
+
+
+def test_default_fallback_threshold_is_035_and_does_not_duplicate_vector_retrieval():
     original = get_recorder()
     recorder = InMemoryRecorder()
     set_recorder(recorder)
@@ -48,10 +60,10 @@ def test_default_fallback_threshold_is_035_and_triggers_when_top_score_is_low():
 
         results = recaller.recall("lexical", limit=5, vector_limit=5)
 
-        assert store.calls == 2  # normal vector retrieval + fallback retrieval
+        assert store.calls == 1
         assert results[0].id == "v1"
-        assert results[0].score == 0.80
-        assert recorder.counter_value("mnemostack.recall.fallback_triggered") == 1
+        assert results[0].score < 0.45  # RRF score from normal path, not raw vector score
+        assert recorder.counter_value("mnemostack.recall.fallback_triggered") == 0
     finally:
         set_recorder(original)
 
@@ -77,7 +89,7 @@ def test_fallback_does_not_trigger_when_top_score_is_high():
         set_recorder(original)
 
 
-def test_fallback_only_results_rank_below_pipeline_results():
+def test_fallback_does_not_trigger_for_nonempty_rrf_pipeline_results():
     store = FakeVectorStoreSequence([
         [],
         [Hit("fallback", 0.99, {"text": "fallback vector match"})],
@@ -90,9 +102,8 @@ def test_fallback_only_results_rank_below_pipeline_results():
 
     results = recaller.recall("lexical", limit=5, vector_limit=5)
 
-    assert store.calls == 2
-    assert [result.id for result in results] == ["bm25", "fallback"]
-    assert results[1].score == pytest.approx(results[0].score - 0.01)
+    assert store.calls == 1
+    assert [result.id for result in results] == ["bm25"]
 
 
 def test_fallback_dedupes_and_keeps_higher_score():
@@ -107,6 +118,15 @@ def test_fallback_dedupes_and_keeps_higher_score():
     results = recaller.recall("bm25", limit=5, vector_limit=5)
 
     assert [result.id for result in results].count("same") == 1
-    assert results[0].score == 0.80
+    assert results[0].score < 0.45
     assert results[0].text == "better vector text"
     assert results[0].sources == ["vector", "bm25"]
+
+
+def test_retriever_fallback_keeps_vector_errors_non_fatal():
+    recaller = Recaller(
+        retrievers=[FixedRetriever(), FailingVectorRetriever()],
+        fallback_threshold=0.35,
+    )
+
+    assert recaller.recall("query", limit=5) == []
