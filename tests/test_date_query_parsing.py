@@ -143,6 +143,28 @@ class _ScrollableStore:
         return []
 
 
+class _CountingScrollableStore(_ScrollableStore):
+    def __init__(self, scroll_results=None):
+        super().__init__(scroll_results)
+        self.yielded = 0
+
+    def scroll(self, batch_size=256, filters=None, with_vectors=False):
+        self.last_batch_size = batch_size
+        self.last_filters = filters
+        self.filters_seen.append(filters)
+        gte = (filters or {}).get("timestamp", {}).get("gte", "")
+        lte = (filters or {}).get("timestamp", {}).get("lte", "")
+
+        def generate():
+            for hit in self.scroll_results:
+                ts = (hit.payload or {}).get("timestamp", "")
+                if (not gte or ts >= gte) and (not lte or ts <= lte):
+                    self.yielded += 1
+                    yield hit
+
+        return generate()
+
+
 def test_date_focused_query_uses_timestamp_scroll_instead_of_semantic_search():
     embedding = _NoopEmbedding()
     store = _ScrollableStore()
@@ -224,6 +246,29 @@ def test_date_focused_neighbor_days_only_after_exact_day_hits():
 
     assert [result.id for result in results][:2] == ["exact-1", "exact-2"]
     assert {result.id for result in results[2:]} == {"prev", "next"}
+
+
+def test_date_focused_scroll_collection_is_bounded_before_sorting():
+    hits = [
+        _Hit(
+            f"exact-{i}",
+            1.0,
+            {"text": f"exact {i}", "timestamp": "2026-04-13T12:00:00+00:00"},
+        )
+        for i in range(200)
+    ]
+    store = _CountingScrollableStore(hits)
+    retriever = TemporalRetriever(
+        embedding=_NoopEmbedding(),
+        vector_store=store,
+        extractor=lambda q: extract_temporal_query(q, now=NOW),
+    )
+
+    results = retriever.search("что делали 13 апреля", limit=1)
+
+    assert len(results) == 1
+    assert store.yielded == retriever.DATE_FOCUSED_SCROLL_BUFFER_MIN
+    assert store.yielded < len(hits)
 
 
 def test_non_date_focused_temporal_query_keeps_semantic_search_path():

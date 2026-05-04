@@ -757,6 +757,8 @@ class TemporalRetriever(Retriever):
     """
 
     name = "temporal"
+    DATE_FOCUSED_SCROLL_BUFFER_MIN = 25
+    DATE_FOCUSED_SCROLL_BUFFER_MULTIPLIER = 5
 
     def __init__(
         self,
@@ -793,26 +795,31 @@ class TemporalRetriever(Retriever):
                 strict_filter = dict(temporal_filter)
                 strict_filter["timestamp"] = {"gte": strict_start, "lte": strict_end}
 
-                exact_hits = list(self.vector_store.scroll(
-                    batch_size=max(limit, 100),
-                    filters=strict_filter,
-                    with_vectors=False,
-                ))
-                exact_hits = self._sort_date_focused_hits(exact_hits, target_date)
+                buffer_limit = max(limit * self.DATE_FOCUSED_SCROLL_BUFFER_MULTIPLIER, self.DATE_FOCUSED_SCROLL_BUFFER_MIN)
+                exact_hits = self._collect_sorted_date_focused_hits(
+                    self.vector_store.scroll(
+                        batch_size=max(limit, 100),
+                        filters=strict_filter,
+                        with_vectors=False,
+                    ),
+                    target_date,
+                    max_hits=buffer_limit,
+                )
 
                 hits = exact_hits[:limit]
                 if len(hits) < limit:
                     seen = {hit.id for hit in hits}
-                    neighbor_hits = []
-                    for hit in self.vector_store.scroll(
-                        batch_size=max(limit, 100),
-                        filters=temporal_filter,
-                        with_vectors=False,
-                    ):
-                        if hit.id in seen or self._hit_date(hit) == target_date:
-                            continue
-                        neighbor_hits.append(hit)
-                    neighbor_hits = self._sort_date_focused_hits(neighbor_hits, target_date)
+                    neighbor_hits = self._collect_sorted_date_focused_hits(
+                        self.vector_store.scroll(
+                            batch_size=max(limit, 100),
+                            filters=temporal_filter,
+                            with_vectors=False,
+                        ),
+                        target_date,
+                        max_hits=buffer_limit,
+                        skip_ids=seen,
+                        exclude_target_date=True,
+                    )
                     hits.extend(neighbor_hits[: limit - len(hits)])
 
                 return self._to_results(hits)
@@ -859,6 +866,28 @@ class TemporalRetriever(Retriever):
             if isinstance(value, str) and value.replace("\\", "/").endswith(expected):
                 return True
         return False
+
+    @classmethod
+    def _collect_sorted_date_focused_hits(
+        cls,
+        hits,
+        target_date: date,
+        *,
+        max_hits: int,
+        skip_ids: set[Any] | None = None,
+        exclude_target_date: bool = False,
+    ):
+        collected = []
+        skip_ids = skip_ids or set()
+        for hit in hits:
+            if hit.id in skip_ids:
+                continue
+            if exclude_target_date and cls._hit_date(hit) == target_date:
+                continue
+            collected.append(hit)
+            if len(collected) >= max_hits:
+                break
+        return cls._sort_date_focused_hits(collected, target_date)
 
     @classmethod
     def _sort_date_focused_hits(cls, hits, target_date: date):
