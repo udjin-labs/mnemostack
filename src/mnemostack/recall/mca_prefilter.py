@@ -20,7 +20,7 @@ _COMMON_BRANCH_PAIR_RE = re.compile(r"\b(?:main|develop)/(?:main|develop)\b")
 _SNAKE_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]*\b")
 _HYPHEN_DIGIT_RE = re.compile(r"\b[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*-\d+[A-Za-z0-9-]*\b|\b[A-Za-z0-9]*\d[A-Za-z0-9]*(?:-[A-Za-z0-9]+)+\b")
 _CAMEL_RE = re.compile(r"\b[A-Za-z]+[a-z][A-Z][A-Za-z0-9]*\b")
-_COMMON_REL_PATH_FALSE_POSITIVES = {"и/или"}
+_COMMON_REL_PATH_FALSE_POSITIVES = {"and/or", "or/and", "и/или"}
 _COMMON_BRANCHES = {"main", "develop"}
 _COMMON_BRANCH_PAIRS = {"main/develop", "develop/main"}
 
@@ -29,6 +29,10 @@ def _is_noise_exact_token(token: str) -> bool:
     token_key = token.lower()
     if token_key in _COMMON_BRANCH_PAIRS:
         return True
+    if "/" in token:
+        parts = [part for part in token.split("/") if part]
+        if parts and all(part.isdigit() for part in parts):
+            return True
     return token_key not in _COMMON_BRANCHES and (
         len(token) < 5 or token_key in _COMMON_REL_PATH_FALSE_POSITIVES
     )

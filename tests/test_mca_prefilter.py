@@ -47,6 +47,17 @@ def test_extract_exact_tokens_does_not_treat_common_branch_words_as_exact_tokens
     assert extract_exact_tokens("what is the main issue") == []
 
 
+def test_extract_exact_tokens_skips_dates_fractions_and_common_slash_words():
+    query = "between 2024/10/20 and 10/100 choose and/or maybe or/and"
+
+    tokens = extract_exact_tokens(query)
+
+    assert "2024/10/20" not in tokens
+    assert "10/100" not in tokens
+    assert "and/or" not in tokens
+    assert "or/and" not in tokens
+
+
 def test_mca_prefilter_returns_bm25_matches_as_recall_results():
     bm25 = BM25([
         BM25Doc("rare", "Deployment mentions snake_case_id and /var/log/app.log"),
