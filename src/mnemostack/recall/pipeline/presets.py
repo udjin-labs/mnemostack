@@ -13,12 +13,12 @@ from .resurrection import GraphResurrection
 from .stages import (
     ClassifyQuery,
     CuriosityBoost,
+    ExactTokenProtection,
     ExactTokenRescue,
     FreshnessBlend,
     GravityDampen,
     HubDampen,
     InhibitionOfReturn,
-    ExactTokenProtection,
     QLearningReranker,
 )
 from .state import InMemoryStateStore, StateStore
@@ -66,7 +66,7 @@ def build_full_pipeline(
     enable_curiosity = enable_stateful_stages and enable_curiosity
 
     # Stage order mirrors legacy enhanced-recall.py pipeline:
-    #   Gravity → Hub → Q-learning → Curiosity → Freshness → IOR → Graph
+    #   Gravity → Hub → Q-learning → Curiosity → Freshness → IOR → Protection → Graph
     # Q-learning applies BEFORE Freshness so BM25/graph results get the
     # source-utility boost while scores are still in raw RRF range.
     stages = [
@@ -89,13 +89,13 @@ def build_full_pipeline(
     if enable_ior:
         stages.append(InhibitionOfReturn(state_store=store))
 
+    stages.append(ExactTokenProtection())
+
     if graph_uri:
         stages.append(GraphResurrection(
             uri=graph_uri, user=graph_user, password=graph_password,
             limit=graph_limit, timeout=graph_timeout,
         ))
-
-    stages.append(ExactTokenProtection())
 
     return Pipeline(stages)
 

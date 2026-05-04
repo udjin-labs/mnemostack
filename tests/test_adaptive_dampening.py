@@ -3,6 +3,7 @@ from copy import deepcopy
 from mnemostack.recall import RecallResult
 from mnemostack.recall.pipeline import (
     ExactTokenProtection,
+    GraphResurrection,
     GravityDampen,
     HubDampen,
     InhibitionOfReturn,
@@ -84,6 +85,7 @@ def test_exact_token_protection_runs_after_dampening_stages_in_full_pipeline():
         hub_degrees={"strong": 100, "other": 1},
         enable_q_learning=False,
         enable_curiosity=False,
+        graph_uri="bolt://localhost:7687",
     )
     stage_types = [type(stage) for stage in pipeline.stages]
 
@@ -91,6 +93,7 @@ def test_exact_token_protection_runs_after_dampening_stages_in_full_pipeline():
     assert protection_idx > stage_types.index(GravityDampen)
     assert protection_idx > stage_types.index(HubDampen)
     assert protection_idx > stage_types.index(InhibitionOfReturn)
+    assert protection_idx < stage_types.index(GraphResurrection)
 
     result = _result(
         "strong",

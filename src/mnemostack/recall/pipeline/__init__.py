@@ -25,13 +25,13 @@ from .resurrection import GraphResurrection
 from .stages import (
     ClassifyQuery,
     CuriosityBoost,
+    ExactTokenProtection,
     ExactTokenRescue,
     FreshnessBlend,
     GravityDampen,
     HubDampen,
     InhibitionOfReturn,
     QLearningReranker,
-    ExactTokenProtection,
     is_exact_token_query,
 )
 from .state import FileStateStore, InMemoryStateStore, StateStore
