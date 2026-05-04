@@ -222,17 +222,18 @@ def compute_decay(
     """Ebbinghaus-style decay with reinforcement.
 
     Returns a multiplier between 0.1 and 1.0.
+    - Missing/invalid last_accessed is a no-op for backwards compatibility
     - Decays exponentially based on days since last access
     - Each access_count extends effective half-life (reinforcement)
     - Minimum floor of 0.1 (never fully forgotten)
     """
     if not last_accessed:
-        return 0.5  # unknown access time, neutral
+        return 1.0
 
     try:
         last_dt = datetime.fromisoformat(last_accessed.replace("Z", "+00:00"))
     except (ValueError, AttributeError):
-        return 0.5
+        return 1.0
 
     if last_dt.tzinfo is None:
         last_dt = last_dt.replace(tzinfo=timezone.utc)

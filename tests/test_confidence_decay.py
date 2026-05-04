@@ -34,8 +34,12 @@ def test_reinforcement_extends_effective_half_life():
     assert reinforced == pytest.approx(0.63, abs=0.05)
 
 
-def test_no_last_accessed_is_neutral_half():
-    assert compute_decay(None) == 0.5
+def test_no_last_accessed_is_neutral_noop():
+    assert compute_decay(None) == 1.0
+
+
+def test_invalid_last_accessed_is_neutral_noop():
+    assert compute_decay("not-a-date") == 1.0
 
 
 def test_very_old_access_uses_floor():
