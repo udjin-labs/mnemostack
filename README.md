@@ -5,43 +5,159 @@
 [![CI](https://github.com/udjin-labs/mnemostack/actions/workflows/ci.yml/badge.svg)](https://github.com/udjin-labs/mnemostack/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-> Memory stack for AI agents — durable, structured, semantically searchable.
+> Durable, searchable memory for AI agents.
 
-`mnemostack` is a hybrid memory system combining BM25, vector search (Qdrant), and knowledge graph (Memgraph) with a unified recall pipeline, reranker, and optional LLM inference layer.
+Mnemostack was built to solve a real problem: AI agents forget useful context between sessions.
+
+Every long-running agent eventually hits the same wall: context gets compacted, sessions restart, useful decisions disappear, and the next run pays the re-orientation tax again.
+
+`mnemostack` gives agents a persistent memory layer they can query when the current context window is not enough. It is designed for agent workflows where memory needs to be durable, searchable, scoped, and explainable — not just embedded and hoped for.
+
+Under the hood, Mnemostack uses hybrid retrieval across semantic search, keyword search, and graph relationships, then ranks results through a unified recall pipeline.
 
 **Status:** Actively developed — public API is stable; new functionality lands additively in minor releases. Breaking changes are rare and called out in [CHANGELOG.md](CHANGELOG.md).
 
-## Who is this for?
+## MCP quickstart
 
-Build it in if you need:
+This is the main entrypoint if you want to give Claude Desktop, Claude Code, Cursor, ChatGPT, or another MCP-capable agent durable memory.
 
-- Long-lived agent memory that survives session restarts and doesn't drift into irrelevance as the corpus grows.
-- Recall quality on **mixed workloads** — exact-token lookups (IDs, tickers, error strings), semantic queries, temporal questions, multi-hop reasoning — not just one of them.
-- A stack you can **plug into your own infrastructure**: bring your own embedding model, LLM, vector store, or graph DB.
+### 1. Install
 
-Not the best fit if you only need a single call to `text-embedding-3-small` + cosine similarity — something simpler will do. mnemostack earns its complexity on mixed, long-horizon workloads.
+```bash
+pip install 'mnemostack[mcp]'
+```
 
-## Mental model
+Run a local Qdrant for the vector store:
+
+```bash
+docker run -p 6333:6333 qdrant/qdrant:latest
+```
+
+Optional: run Memgraph for graph-backed memory:
+
+```bash
+docker run -p 7687:7687 memgraph/memgraph:latest
+```
+
+### 2. Start the MCP server
+
+```bash
+export GEMINI_API_KEY=your-key-here
+mnemostack mcp-serve --provider gemini --collection my-memory
+```
+
+Claude Desktop config example:
+
+```json
+{
+  "mcpServers": {
+    "mnemostack": {
+      "command": "mnemostack",
+      "args": ["mcp-serve", "--provider", "gemini", "--collection", "my-memory"],
+      "env": {
+        "GEMINI_API_KEY": "your-key-here"
+      }
+    }
+  }
+}
+```
+
+Claude will then be able to call `mnemostack_search`, `mnemostack_answer`, and graph tools.
+
+### 3. Store memory
+
+Index a folder of notes, docs, transcripts, or project context:
+
+```bash
+mnemostack index ./my-notes/ --provider gemini --collection my-memory --recreate
+```
+
+For a running app or assistant, use the streaming `Ingestor` API shown below to store messages as they arrive.
+
+### 4. Recall memory
+
+From an agent, ask a memory-style question and let the MCP tools retrieve the right facts.
+
+From the shell, test the same collection directly:
+
+```bash
+mnemostack search "what did we decide about auth" --provider gemini --collection my-memory
+mnemostack answer "what did we decide about auth" --provider gemini --collection my-memory
+```
+
+## Why hybrid memory?
+
+Vector search answers "what sounds similar?" Agent memory needs to answer "what matters in this context?" That requires exact matches, semantic similarity, relationship tracking, recency, user/project scope, and feedback from past recalls. Mnemostack uses hybrid retrieval so memory recall is reliable instead of embedding roulette.
+
+## Use cases
+
+- Long-running coding agents that need to survive compaction and session restarts.
+- Personal assistant memory for preferences, decisions, recurring tasks, and long-horizon context.
+- Team or project knowledge recall across docs, notes, tickets, and chat history.
+- Multi-agent context sharing through one durable memory backend.
+- Session compaction recovery when the useful details no longer fit in the prompt.
+
+## Three ways to use Mnemostack
+
+1. **MCP server — for agent users.** Start `mnemostack mcp-serve`, connect your agent, and use memory tools from the chat/runtime you already use.
+2. **HTTP API — for app developers.** Run `mnemostack serve` and call `/recall`, `/answer`, `/feedback`, `/health`, `/metrics`, or `/docs` from any language.
+3. **Python SDK — for library users.** Compose retrievers, stores, rerankers, graph tools, and the streaming ingest API inside your own Python application.
+
+## Architecture
+
+### Mental model
 
 Think of it as a storage hierarchy for agent memory:
 
-- **Context window = RAM.** Fast, limited (typically 200K tokens for most agent models; up to 1M in frontier offerings like Claude Opus 4.6/4.7 or GPT-5.4 Codex), often far less usable after MCP/instructions/context rot — ~45K on a 200K window is a realistic working number. Clears on session restart.
+- **Context window = RAM.** Fast, limited (typically 100K–200K tokens for many agent models; larger windows exist, but usable working context is often much smaller after tools, instructions, MCP output, and context rot — ~45K usable tokens on a 200K window is a realistic working number in long-running agent sessions. Clears on session restart.
 - **mnemostack corpus = Disk.** Persistent, searchable, grows forever — every fact the agent has ever seen, queryable on demand.
 - **`recall(query)` = page fault handler.** When the agent needs something that isn't in the current context, it pulls the exact fact from storage with a single hybrid query — not a grep, not a reload of the whole corpus.
 
 The practical effect: you stop re-explaining your project to the agent after every `/compact`. You stop losing momentum to the re-orientation tax that shows up in any agent with session compaction. mnemostack solves it at the library level, not tied to any single agent runtime.
 
-## How it works, in one paragraph
+### How it works, in one paragraph
 
 On each `recall(query)`: the configured retrievers (Vector and Temporal by default, with BM25 and Memgraph when configured) run in parallel and return ranked lists. Reciprocal Rank Fusion merges them. The optional 8-stage pipeline can reweight results using query classification, exact-token rescue, gravity/hub dampening, freshness, inhibition-of-return, curiosity boosts, Q-learning weights supplied through its state store, and graph resurrection. An optional LLM reranker does a final ordering pass. You get a list of `RecallResult` with source, score, and provenance — ready to hand to a model.
 
 ![mnemostack architecture](docs/images/mnemostack-architecture.jpg)
 
-## Benchmarks
+### Where mnemostack fits
+
+Most memory tools in the agent ecosystem pick one axis and optimize for it: simple vector similarity for RAG, framework-bound memory tied to a specific agent library, platform-level runtimes with audit and compliance features, or CLI wrappers over a single vendor's session store. Each makes sense for its scope.
+
+mnemostack takes a different slice: it is a **recall quality layer**, offered as a plain Python package. Four retrievers (Vector + BM25 + Memgraph + Temporal), RRF fusion, an 8-stage pipeline, and an optional LLM reranker — composed to handle mixed workloads on the same corpus: exact-token lookups, semantic queries, temporal questions, and multi-hop reasoning, without forcing you to choose one mode over another.
+
+We are not a replacement for your agent framework and not a full platform runtime. We are the piece that actually finds the right fact in a growing corpus. Drop mnemostack into your own Python agent, or let a higher-level memory service call `recall()` over a plain function boundary. The retrievers, pipeline, and reranker are individually composable — take only the parts you need.
+
+### Design
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed design: pipeline stages, Qdrant schema, Memgraph temporal model, consolidation runtime, MCP tools.
+
+### Storage, index, and retrieval layers
+
+- **Storage/index layer:** Qdrant stores vector points and payloads; BM25 indexes exact-token corpora; Memgraph stores temporal graph facts; the Temporal retriever handles time-aware vector recall.
+- **Fusion layer:** Reciprocal Rank Fusion merges ranked lists from Vector, BM25, Memgraph, and Temporal retrievers, with optional static or adaptive weights.
+- **Recall pipeline:** the 8-stage pipeline can classify the query, rescue exact tokens, dampen gravity/hubs, blend freshness, apply inhibition-of-return, add curiosity boosts, use Q-learning state, and resurrect graph-linked memories.
+- **Feedback loop:** HTTP and MCP recall can apply existing state; explicit `/feedback` or `mnemostack feedback` updates usefulness signals without silently training on every response.
+- **Inference layer:** optional LLM reranking and answer generation sit on top of recall, so retrieval still works when the LLM is unavailable.
+
+### Pipeline state
+
+The 8-stage pipeline can use a small state store between calls (Q-learning weights, inhibition-of-return history, per-document gravity/hub counters). `FileStateStore(path)` persists it to a JSON file. HTTP recall applies existing state and can record inhibition-of-return exposure with `--auto-record-ior`; Q-learning updates only through explicit `/feedback` calls. CLI/MCP recall still apply existing state but do not collect feedback automatically. For deterministic benchmarks, call `build_full_pipeline(enable_stateful_stages=False)` so IoR/Q-learning/curiosity state cannot affect scores. For multi-process servers, implement your own `StateStore` (three methods: `get()`, `set()`, `update()`) backed by Redis or your database.
+
+### Graceful degradation
+
+Any retriever can fail (Memgraph down, Qdrant unreachable, BM25 corpus empty). `Recaller` logs and continues with the remaining sources. The LLM reranker is wrapped in try/except by convention — if the LLM is rate-limited, the pre-rerank order is returned. This is deliberate: a memory stack that goes dark because one component hiccuped is worse than a slightly degraded one.
+
+## Comparison and benchmarks
+
+On LoCoMo, Mnemostack reaches **82.5% strict accuracy** in our evaluation setup. The table below includes our baseline runs and externally reported numbers for context. Results depend on dataset version, configuration, judge model, scoring rules, and query type. Treat externally reported numbers as directional unless they were run with the same harness and settings.
+
+### Benchmarks
 
 Full LoCoMo runs use the official SNAP-Research dataset (10 samples / **1986 QA**) from a clean state. Across the tables below: **Strict** = exact match, **Combined** = strict + partial. Counts in cells are `correct / total`.
 
-A note specific to the `gemini-3-flash-preview` run: 446 of the 1986 questions belong to `cat_5` (adversarial open-domain) and have **empty ground truth**, so the harness auto-scores them as correct. That's noise in the aggregate. The two `signal-only` columns below remove those 446 questions, leaving the 1540 questions that actually have a ground-truth answer to retrieve — that's what the system is genuinely scoring on.
+Some LoCoMo `cat_5` questions have empty ground-truth answers. Under the current scorer, these are counted as correct because there is no expected answer to match. To avoid overstating recall quality, we also report **signal-only** scores with those questions removed. Signal-only scores are computed on the 1,540 questions with non-empty ground-truth answers.
 
 ### LoCoMo, current judge (`gemini-3-flash-preview`)
 
@@ -95,7 +211,7 @@ Caveat: different judges, evaluation protocols, and in some cases category cherr
 
 | System | LoCoMo correct |
 | --- | --- |
-| Hindsight (leader) | 78–85% |
+| Hindsight (reported range) | 78–85% |
 | Memobase (temporal subset) | 85% |
 | **mnemostack** | **82.5%** |
 | Letta filesystem agent | 74% |
@@ -114,7 +230,7 @@ LoCoMo measures generic long-term dialogue recall. We also run a private needle-
 | Query latency p50 | 1.26 s |
 | Query latency max | 1.70 s |
 
-> **Honest numbers disclaimer.** Reporting only `recall@5 = 100%` would look impressive and also be cherry-picking — some vendors do exactly that. `recall@1 = 90%` is what an agent reading only the top hit actually experiences, and the gap between `@1` and `@5` is where reranker quality (or the lack of it) shows up. We publish all three so you can read the metric that matches your downstream usage.
+> **Honest numbers disclaimer.** Reporting only `recall@5 = 100%` would look impressive, but it would also hide the harder top-1 behavior. `recall@1 = 90%` is what an agent reading only the top hit actually experiences, and the gap between `@1` and `@5` is where reranker quality (or the lack of it) shows up. We publish all three so you can read the metric that matches your downstream usage.
 
 Useful because LoCoMo's failure modes (list exhaustion, open-domain reasoning) are orthogonal to what production memory stacks actually spend time on (find the specific fact the user mentioned weeks ago). This benchmark is not in the public repo; its methodology is in `benchmarks/synthetic_longhorizon.py`, which is the closest reproducible approximation.
 
@@ -129,13 +245,15 @@ bash benchmarks/run_locomo.sh        # full 10-sample run, writes results/ts.{js
 
 Details, category definitions, and notes on the judge protocol: [benchmarks/README.md](benchmarks/README.md).
 
-## Where mnemostack fits
+## Who is this for?
 
-Most memory tools in the agent ecosystem pick one axis and optimize for it: simple vector similarity for RAG, framework-bound memory tied to a specific agent library, platform-level runtimes with audit and compliance features, or CLI wrappers over a single vendor's session store. Each makes sense for its scope.
+Build it in if you need:
 
-mnemostack takes a different slice: it is a **recall quality layer**, offered as a plain Python package. Four retrievers (Vector + BM25 + Memgraph + Temporal), RRF fusion, an 8-stage pipeline, and an optional LLM reranker — composed to handle mixed workloads on the same corpus: exact-token lookups, semantic queries, temporal questions, and multi-hop reasoning, without forcing you to choose one mode over another.
+- Long-lived agent memory that survives session restarts and doesn't drift into irrelevance as the corpus grows.
+- Recall quality on **mixed workloads** — exact-token lookups (IDs, tickers, error strings), semantic queries, temporal questions, multi-hop reasoning — not just one of them.
+- A stack you can **plug into your own infrastructure**: bring your own embedding model, LLM, vector store, or graph DB.
 
-We are not a replacement for your agent framework and not a full platform runtime. We are the piece that actually finds the right fact in a growing corpus. Drop mnemostack into your own Python agent, or let a higher-level memory service call `recall()` over a plain function boundary. The retrievers, pipeline, and reranker are individually composable — take only the parts you need.
+Not the best fit if you only need a single call to `text-embedding-3-small` + cosine similarity — something simpler will do. mnemostack earns its complexity on mixed, long-horizon workloads.
 
 ## Features
 
@@ -205,7 +323,9 @@ Built-in profiles cover OpenClaw webchat and Telegram envelopes; pass `profiles=
 
 Only the providers you actually use need their keys. HuggingFace local-GPU embeddings need no keys at all. `mnemostack init` writes the same settings as YAML; explicit CLI flags override config/env defaults.
 
-## Try it in 30 seconds (Docker)
+## Setup and usage details
+
+### Try it in 30 seconds (Docker)
 
 Fastest way to kick the tyres. No Python install, no manual Qdrant / Memgraph setup.
 
@@ -229,7 +349,7 @@ Tear down with `docker compose -f examples/docker-compose.yml down -v` (the `-v`
 
 Prefer Ollama (no cloud key needed)? Run Ollama on the host, set `OLLAMA_HOST=http://host.docker.internal:11434`, and pass `--provider ollama` everywhere instead of `gemini`.
 
-## Installation
+### Installation
 
 ```bash
 # From PyPI
@@ -253,9 +373,7 @@ Optionally a Memgraph for the knowledge graph:
 docker run -p 7687:7687 memgraph/memgraph:latest
 ```
 
-## Quick start
-
-### CLI
+### CLI quick start
 
 ```bash
 # Health check
@@ -633,18 +751,6 @@ npm test
 
 The plugin defaults to `http://127.0.0.1:18793/answer`, supports English/Russian trigger defaults with extensible language-agnostic trigger lists, and can fall back to a Script backend such as `recall-selfeval.sh` when you are not running the daemon.
 
-## Design
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed design: pipeline stages, Qdrant schema, Memgraph temporal model, consolidation runtime, MCP tools.
-
-### Pipeline state
-
-The 8-stage pipeline can use a small state store between calls (Q-learning weights, inhibition-of-return history, per-document gravity/hub counters). `FileStateStore(path)` persists it to a JSON file. HTTP recall applies existing state and can record inhibition-of-return exposure with `--auto-record-ior`; Q-learning updates only through explicit `/feedback` calls. CLI/MCP recall still apply existing state but do not collect feedback automatically. For deterministic benchmarks, call `build_full_pipeline(enable_stateful_stages=False)` so IoR/Q-learning/curiosity state cannot affect scores. For multi-process servers, implement your own `StateStore` (three methods: `get()`, `set()`, `update()`) backed by Redis or your database.
-
-### Graceful degradation
-
-Any retriever can fail (Memgraph down, Qdrant unreachable, BM25 corpus empty). `Recaller` logs and continues with the remaining sources. The LLM reranker is wrapped in try/except by convention — if the LLM is rate-limited, the pre-rerank order is returned. This is deliberate: a memory stack that goes dark because one component hiccuped is worse than a slightly degraded one.
-
 ## Roadmap
 
 - [x] Embedding provider registry (Gemini / Ollama / HuggingFace)
@@ -678,10 +784,10 @@ Any retriever can fail (Memgraph down, Qdrant unreachable, BM25 corpus empty). `
 - [x] MCP integration guides for Claude Desktop/Code, Cursor, OpenClaw (`integrations/`)
 - [x] Silent-zero fix in `TemporalRetriever` + dispatch-by-type filter builder (`0.2.0a1`)
 
+## Contributing
+
+Issues and PRs are welcome. Public APIs are intended to remain stable; new functionality should land additively where possible.
+
 ## License
 
 Apache 2.0 — see [LICENSE](LICENSE).
-
-## Contributing
-
-Early days. Issues and PRs welcome once API stabilizes.
