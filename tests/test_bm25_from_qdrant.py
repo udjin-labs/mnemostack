@@ -150,6 +150,29 @@ def test_bm25_from_qdrant_fuses_with_vector_result_by_qdrant_id():
     assert set(results[0].sources) == {"vector", "bm25"}
 
 
+def test_recaller_accepts_legacy_search_only_retriever():
+    class LegacyRetriever:
+        name = "legacy"
+
+        def search(self, query, limit=20, filters=None):
+            return [
+                RecallResult(
+                    id="legacy-1",
+                    text=f"legacy result for {query}",
+                    score=1.0,
+                    payload={"text": "legacy"},
+                    sources=["legacy"],
+                )
+            ]
+
+    recaller = Recaller(retrievers=[LegacyRetriever()])
+    results = recaller.recall("compat", limit=1)
+
+    assert len(results) == 1
+    assert results[0].id == "legacy-1"
+    assert results[0].sources == ["legacy"]
+
+
 def test_bm25_from_qdrant_unbounded_by_default():
     client = FakeQdrantClient([
         point(f"p-{idx}", {"text": f"chunk {idx}"}) for idx in range(5_000)

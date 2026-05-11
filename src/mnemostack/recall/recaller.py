@@ -466,7 +466,10 @@ class Recaller:
         def _run(retr):
             start = time.monotonic()
             try:
-                hits = retr.search(query, limit=per_source_limit, filters=filters)
+                retrieve = getattr(retr, "retrieve", None)
+                if retrieve is None:
+                    retrieve = retr.search
+                hits = retrieve(query, limit=per_source_limit, filters=filters)
             except Exception:
                 hits = []
             elapsed_ms = (time.monotonic() - start) * 1000.0
@@ -591,7 +594,10 @@ class Recaller:
         for retriever in self.retrievers:
             if getattr(retriever, "name", None) == "vector":
                 try:
-                    return retriever.search(query, limit=limit, filters=filters)
+                    retrieve = getattr(retriever, "retrieve", None)
+                    if retrieve is None:
+                        retrieve = retriever.search
+                    return retrieve(query, limit=limit, filters=filters)
                 except Exception:
                     return []
         return []

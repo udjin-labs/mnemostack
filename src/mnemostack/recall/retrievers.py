@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+from pydantic import BaseModel, Field
+
 from ..embeddings.base import EmbeddingProvider
 from ..llm.base import LLMProvider
 from ..vector import VectorStore
@@ -34,6 +36,8 @@ except ImportError:  # pragma: no cover - qdrant-client is a runtime dependency
 from .bm25 import BM25, BM25Doc
 from .recaller import RecallResult
 
+Hit = RecallResult
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -43,20 +47,75 @@ except ImportError:
     _NEO4J_AVAILABLE = False
 
 
+class RetrieverConfig(BaseModel):
+    """Base configuration model for retrievers."""
+
+    enabled: bool = True
+
+
+class VectorRetrieverConfig(RetrieverConfig):
+    """Configuration for vector retrieval."""
+
+    name: str = "vector"
+
+
+class BM25RetrieverConfig(RetrieverConfig):
+    """Configuration for BM25 retrieval."""
+
+    name: str = "bm25"
+
+
+class HyDERetrieverConfig(RetrieverConfig):
+    """Configuration for HyDE retrieval."""
+
+    name: str = "hyde"
+    max_tokens: int = Field(120, ge=1)
+
+
+class MemgraphRetrieverConfig(RetrieverConfig):
+    """Configuration for Memgraph graph retrieval."""
+
+    name: str = "memgraph"
+    uri: str = "bolt://localhost:7687"
+    user: str = ""
+    password: str = ""
+    min_word: int = Field(3, ge=1)
+    contains_min: int = Field(5, ge=1)
+    max_nodes: int = Field(10, ge=1)
+    max_rels: int = Field(5, ge=0)
+    timeout: float = Field(5.0, gt=0)
+
+
+class TemporalRetrieverConfig(RetrieverConfig):
+    """Configuration for temporal retrieval."""
+
+    name: str = "temporal"
+
+
 class Retriever(ABC):
     """A ranked-list source. Called by Recaller for each query."""
 
     name: str = "retriever"
+    config: RetrieverConfig
 
     @abstractmethod
+    def retrieve(
+        self,
+        query: str,
+        limit: int = 20,
+        filters: dict[str, Any] | None = None,
+    ) -> list[Hit]:
+        """Return ranked results. May be empty. Must not raise on expected misses."""
+        ...
+
     def search(
         self,
         query: str,
         limit: int = 20,
         filters: dict[str, Any] | None = None,
-    ) -> list[RecallResult]:
-        """Return ranked results. May be empty. Must not raise on expected misses."""
-        ...
+    ) -> list[Hit]:
+        """Backward-compatible alias for callers still using search."""
+        return self.retrieve(query=query, limit=limit, filters=filters)
 
 
 class VectorRetriever(Retriever):
@@ -64,11 +123,17 @@ class VectorRetriever(Retriever):
 
     name = "vector"
 
-    def __init__(self, embedding: EmbeddingProvider, vector_store: VectorStore):
+    def __init__(
+        self,
+        embedding: EmbeddingProvider,
+        vector_store: VectorStore,
+        config: VectorRetrieverConfig | dict[str, Any] | None = None,
+    ):
         self.embedding = embedding
         self.vector_store = vector_store
+        self.config = VectorRetrieverConfig.model_validate(config or {})
 
-    def search(self, query, limit=20, filters=None):
+    def retrieve(self, query, limit=20, filters=None):
         vec = self.embedding.embed(query)
         if not vec:
             return []
@@ -204,8 +269,13 @@ class BM25Retriever(Retriever):
 
     name = "bm25"
 
-    def __init__(self, docs: list[BM25Doc]):
+    def __init__(
+        self,
+        docs: list[BM25Doc],
+        config: BM25RetrieverConfig | dict[str, Any] | None = None,
+    ):
         self.bm25 = BM25(docs)
+        self.config = BM25RetrieverConfig.model_validate(config or {})
 
     @classmethod
     def from_qdrant(
@@ -270,7 +340,7 @@ class BM25Retriever(Retriever):
         )
         return cls(docs=docs)
 
-    def search(self, query, limit=20, filters=None):
+    def retrieve(self, query, limit=20, filters=None):
         hits = self.bm25.search(query, limit=limit)
         return [
             RecallResult(
@@ -337,11 +407,13 @@ class HyDERetriever(Retriever):
         embedding: EmbeddingProvider,
         vector_store: VectorStore,
         max_tokens: int = 120,
+        config: HyDERetrieverConfig | dict[str, Any] | None = None,
     ):
+        self.config = HyDERetrieverConfig.model_validate(config or {"max_tokens": max_tokens})
         self.llm = llm
         self.embedding = embedding
         self.vector_store = vector_store
-        self.max_tokens = max_tokens
+        self.max_tokens = self.config.max_tokens
 
     def _generate_hypothetical(self, query: str) -> str | None:
         try:
@@ -355,7 +427,7 @@ class HyDERetriever(Retriever):
         except Exception:
             return None
 
-    def search(self, query, limit=20, filters=None):
+    def retrieve(self, query, limit=20, filters=None):
         hypo = self._generate_hypothetical(query)
         if not hypo:
             return []
@@ -396,15 +468,27 @@ class MemgraphRetriever(Retriever):
         max_rels: int = 5,
         driver: Any = None,
         timeout: float = 5.0,
+        config: MemgraphRetrieverConfig | dict[str, Any] | None = None,
     ):
-        self.uri = uri
-        self.user = user
-        self.password = password
-        self.min_word = min_word
-        self.contains_min = contains_min
-        self.max_nodes = max_nodes
-        self.max_rels = max_rels
-        self.timeout = timeout
+        config_data = config or {
+            "uri": uri,
+            "user": user,
+            "password": password,
+            "min_word": min_word,
+            "contains_min": contains_min,
+            "max_nodes": max_nodes,
+            "max_rels": max_rels,
+            "timeout": timeout,
+        }
+        self.config = MemgraphRetrieverConfig.model_validate(config_data)
+        self.uri = self.config.uri
+        self.user = self.config.user
+        self.password = self.config.password
+        self.min_word = self.config.min_word
+        self.contains_min = self.config.contains_min
+        self.max_nodes = self.config.max_nodes
+        self.max_rels = self.config.max_rels
+        self.timeout = self.config.timeout
         self._driver = driver
         self._own_driver = driver is None
 
@@ -432,7 +516,7 @@ class MemgraphRetriever(Retriever):
                 pass
             self._driver = None
 
-    def search(self, query, limit=20, filters=None):
+    def retrieve(self, query, limit=20, filters=None):
         driver = self._get_driver()
         if driver is None:
             return []
@@ -765,12 +849,14 @@ class TemporalRetriever(Retriever):
         embedding: EmbeddingProvider,
         vector_store: VectorStore,
         extractor=extract_temporal_query,
+        config: TemporalRetrieverConfig | dict[str, Any] | None = None,
     ):
         self.embedding = embedding
         self.vector_store = vector_store
         self.extractor = extractor
+        self.config = TemporalRetrieverConfig.model_validate(config or {})
 
-    def search(self, query, limit=10, filters=None):
+    def retrieve(self, query, limit=10, filters=None):
         parsed_or_window = self.extractor(query)
         if not parsed_or_window:
             return []

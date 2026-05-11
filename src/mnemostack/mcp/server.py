@@ -9,7 +9,7 @@ Design notes:
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Annotated, Any
 
 try:
     from fastmcp import FastMCP
@@ -18,6 +18,8 @@ try:
 except ImportError:  # pragma: no cover
     FastMCP = None  # type: ignore[assignment, misc]
     _FASTMCP_AVAILABLE = False
+
+from pydantic import BaseModel, Field, ValidationError
 
 from ..config import Config, model_kwargs
 from ..embeddings import get_provider
@@ -35,6 +37,56 @@ from ..recall import (
 )
 from ..recall.pipeline import FileStateStore
 from ..vector import VectorStore
+
+
+class SearchInput(BaseModel):
+    query: str = Field(..., min_length=1)
+    limit: int = Field(10, ge=1, le=100)
+
+
+class AnswerInput(BaseModel):
+    query: str = Field(..., min_length=1)
+    limit: int = Field(10, ge=1, le=100)
+
+
+class FeedbackInput(BaseModel):
+    hit_id: str = Field(..., min_length=1)
+    signal: str = Field(..., pattern="^(useful|irrelevant|clicked)$")
+    query: str | None = None
+    query_type: str | None = None
+    source: str | None = None
+    sources: list[str] = Field(default_factory=list)
+    reward: float | None = Field(None, ge=0.0, le=1.0)
+
+
+class GraphQueryInput(BaseModel):
+    subject: str | None = None
+    predicate: str | None = None
+    obj: str | None = None
+    as_of: str | None = None
+    limit: int = Field(50, ge=1, le=500)
+
+
+class GraphAddTripleInput(BaseModel):
+    subject: str = Field(..., min_length=1)
+    predicate: str = Field(..., min_length=1)
+    obj: str = Field(..., min_length=1)
+    valid_from: str | None = None
+    valid_until: str | None = None
+
+
+def _validate_tool_input(model: type[BaseModel], data: BaseModel | dict[str, Any]) -> BaseModel:
+    """Validate dict or already-typed MCP tool input."""
+    return model.model_validate(data)
+
+
+def _validation_error(error: ValidationError) -> dict[str, Any]:
+    details = []
+    for item in error.errors():
+        loc = ".".join(str(part) for part in item.get("loc", ()))
+        msg = item.get("msg", "invalid value")
+        details.append(f"{loc}: {msg}" if loc else msg)
+    return {"ok": False, "error": "invalid tool input: " + "; ".join(details)}
 
 
 def build_server(
@@ -131,7 +183,14 @@ def build_server(
 
     @mcp.tool()
     def mnemostack_health() -> dict:
-        """Check health of mnemostack components (embedding, vector store, optional graph)."""
+        """Check health of all mnemostack components.
+
+        Read-only, no side effects, no authentication required. Returns a JSON
+        object with ok (bool) and per-component status for the embedding
+        provider, Qdrant vector store, and optional Memgraph graph database.
+        Use this to verify the memory backend is reachable before issuing recall
+        queries.
+        """
         result: dict[str, Any] = {"ok": True, "components": {}}
         try:
             emb = _get_embedding()
@@ -184,18 +243,32 @@ def build_server(
         return result
 
     @mcp.tool()
-    def mnemostack_search(query: str, limit: int = 10) -> dict:
-        """Hybrid recall over indexed memories.
+    def mnemostack_search(
+        query: Annotated[
+            str,
+            Field(description="Natural language question or keyword to search memories for"),
+        ],
+        limit: Annotated[
+            int,
+            Field(description="Maximum number of results to return (default 10)"),
+        ] = 10,
+    ) -> dict:
+        """Search indexed memories with hybrid recall.
 
-        Returns top-K results ranked by reciprocal rank fusion of BM25 and
-        semantic search. Each result has id, text, score, sources, payload.
+        Read-only, no side effects, no authentication required. Use this when
+        you need raw memory matches rather than a synthesized answer. Returns a
+        JSON object with ok, query, count, and results. Results are ranked by
+        reciprocal rank fusion of BM25, semantic, graph, and temporal retrievers
+        when configured; each result includes id, text, score, sources, and
+        payload.
         """
         try:
+            params = _validate_tool_input(SearchInput, {"query": query, "limit": limit})
             recaller = _get_recaller()
-            results = recaller.recall(query, limit=limit)
+            results = recaller.recall(params.query, limit=params.limit)
             return {
                 "ok": True,
-                "query": query,
+                "query": params.query,
                 "count": len(results),
                 "results": [
                     {
@@ -208,32 +281,47 @@ def build_server(
                     for r in results
                 ],
             }
+        except ValidationError as e:
+            return {**_validation_error(e), "query": query}
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": str(e), "query": query}
 
     @mcp.tool()
-    def mnemostack_answer(query: str, limit: int = 10) -> dict:
-        """Generate concise factual answer from retrieved memories.
+    def mnemostack_answer(
+        query: Annotated[
+            str,
+            Field(description="Natural language question or keyword to search memories for"),
+        ],
+        limit: Annotated[
+            int,
+            Field(description="Maximum number of results to return (default 10)"),
+        ] = 10,
+    ) -> dict:
+        """Answer a question using retrieved memories.
 
-        Uses hybrid recall to find relevant memories, then an LLM inference
-        layer to synthesize a short answer with confidence score and citations.
-
-        Returns: answer text, confidence (0.0-1.0), sources, fallback_recommended.
+        Read-only, no side effects, no authentication required. Use this when
+        you want a concise factual answer synthesized from memory search results
+        instead of the raw matches returned by mnemostack_search. Returns a JSON
+        object with ok, query, answer text, confidence (0.0-1.0), sources,
+        fallback_recommended, and error.
         """
         try:
+            params = _validate_tool_input(AnswerInput, {"query": query, "limit": limit})
             recaller = _get_recaller()
-            memories = recaller.recall(query, limit=limit)
+            memories = recaller.recall(params.query, limit=params.limit)
             gen = _get_answer_gen()
-            answer = gen.generate(query, memories)
+            answer = gen.generate(params.query, memories)
             return {
                 "ok": answer.ok,
-                "query": query,
+                "query": params.query,
                 "answer": answer.text,
                 "confidence": round(answer.confidence, 3),
                 "sources": answer.sources,
                 "fallback_recommended": gen.should_fallback(answer),
                 "error": answer.error,
             }
+        except ValidationError as e:
+            return {**_validation_error(e), "query": query}
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": str(e), "query": query}
 
@@ -241,7 +329,10 @@ def build_server(
     def mnemostack_feedback(
         hit_id: str,
         signal: str,
-        query: str | None = None,
+        query: Annotated[
+            str | None,
+            Field(description="Natural language question or keyword associated with the feedback"),
+        ] = None,
         query_type: str | None = None,
         source: str | None = None,
         sources: list[str] | None = None,
@@ -253,25 +344,32 @@ def build_server(
         Pass retriever labels from mnemostack_search results as sources so
         Q-learning can update source weights.
         """
-        if signal not in {"useful", "irrelevant", "clicked"}:
-            return {
-                "ok": False,
-                "error": "signal must be one of: useful, irrelevant, clicked",
-            }
-        if reward is not None and not 0.0 <= reward <= 1.0:
-            return {"ok": False, "error": "reward must be in [0, 1]"}
         try:
+            params = _validate_tool_input(
+                FeedbackInput,
+                {
+                    "hit_id": hit_id,
+                    "signal": signal,
+                    "query": query,
+                    "query_type": query_type,
+                    "source": source,
+                    "sources": sources or [],
+                    "reward": reward,
+                },
+            )
             outcome = apply_feedback(
                 _get_feedback_pipeline(),
-                hit_id=hit_id,
-                signal=signal,
-                query=query,
-                query_type=query_type,
-                source=source,
-                sources=sources or [],
-                reward=reward,
+                hit_id=params.hit_id,
+                signal=params.signal,
+                query=params.query,
+                query_type=params.query_type,
+                source=params.source,
+                sources=params.sources,
+                reward=params.reward,
             )
             return outcome.to_dict()
+        except ValidationError as e:
+            return {**_validation_error(e), "hit_id": hit_id}
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": str(e), "hit_id": hit_id}
 
@@ -284,7 +382,10 @@ def build_server(
             predicate: str | None = None,
             obj: str | None = None,
             as_of: str | None = None,
-            limit: int = 50,
+            limit: Annotated[
+                int,
+                Field(description="Maximum number of graph triples to return (default 50)"),
+            ] = 50,
         ) -> dict:
             """Query knowledge graph with optional SPO filters and point-in-time.
 
@@ -292,12 +393,22 @@ def build_server(
             returns only facts valid at that date.
             """
             try:
+                params = _validate_tool_input(
+                    GraphQueryInput,
+                    {
+                        "subject": subject,
+                        "predicate": predicate,
+                        "obj": obj,
+                        "as_of": as_of,
+                        "limit": limit,
+                    },
+                )
                 from ..graph import GraphStore
 
                 gs = GraphStore(uri=memgraph_uri, timeout=graph_timeout)
                 triples = gs.query_triples(
-                    subject=subject, predicate=predicate, obj=obj,
-                    as_of=as_of, limit=limit,
+                    subject=params.subject, predicate=params.predicate, obj=params.obj,
+                    as_of=params.as_of, limit=params.limit,
                 )
                 gs.close()
                 return {
@@ -314,6 +425,8 @@ def build_server(
                         for t in triples
                     ],
                 }
+            except ValidationError as e:
+                return _validation_error(e)
             except Exception as e:  # noqa: BLE001
                 return {"ok": False, "error": str(e)}
 
@@ -331,15 +444,32 @@ def build_server(
             ISO date strings for point-in-time validity.
             """
             try:
+                params = _validate_tool_input(
+                    GraphAddTripleInput,
+                    {
+                        "subject": subject,
+                        "predicate": predicate,
+                        "obj": obj,
+                        "valid_from": valid_from,
+                        "valid_until": valid_until,
+                    },
+                )
                 from ..graph import GraphStore
 
                 gs = GraphStore(uri=memgraph_uri, timeout=graph_timeout)
                 gs.add_triple(
-                    subject=subject, predicate=predicate, obj=obj,
-                    valid_from=valid_from, valid_until=valid_until,
+                    subject=params.subject, predicate=params.predicate, obj=params.obj,
+                    valid_from=params.valid_from, valid_until=params.valid_until,
                 )
                 gs.close()
-                return {"ok": True, "subject": subject, "predicate": predicate, "obj": obj}
+                return {
+                    "ok": True,
+                    "subject": params.subject,
+                    "predicate": params.predicate,
+                    "obj": params.obj,
+                }
+            except ValidationError as e:
+                return _validation_error(e)
             except Exception as e:  # noqa: BLE001
                 return {"ok": False, "error": str(e)}
 

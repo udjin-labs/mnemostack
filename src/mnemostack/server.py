@@ -163,10 +163,12 @@ class ServerConfig:
     bm25_paths: list[str] | None = None  # optional markdown dirs for BM25 corpus
     state_path: str = "/tmp/mnemostack-server-state.json"
     auto_record_ior: bool = False
+    rerank_cache_ttl_seconds: float = 300.0
 
     @classmethod
     def from_env(cls) -> ServerConfig:
         cfg = Config.load()
+        rerank_cache_ttl = float(os.environ.get("MNEMOSTACK_RERANK_CACHE_TTL_SECONDS", "300"))
         return cls(
             provider_name=cfg.embedding.provider,
             embedding_model=cfg.embedding.model,
@@ -179,6 +181,7 @@ class ServerConfig:
             graph_timeout=cfg.graph.timeout,
             bm25_paths=list(cfg.recall.bm25_paths) or None,
             auto_record_ior=_env_bool("MNEMOSTACK_AUTO_RECORD_IOR"),
+            rerank_cache_ttl_seconds=rerank_cache_ttl,
         )
 
 
@@ -353,7 +356,11 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     try:
         llm = get_llm(cfg.llm_name, **model_kwargs(cfg.llm_model))
         answer_gen: AnswerGenerator | None = AnswerGenerator(llm=llm, recaller=recaller)
-        reranker: Reranker | None = Reranker(llm=llm, max_items=20)
+        reranker: Reranker | None = Reranker(
+            llm=llm,
+            max_items=20,
+            cache_ttl_seconds=cfg.rerank_cache_ttl_seconds,
+        )
     except Exception as exc:  # pragma: no cover - missing provider key
         log.warning("LLM init failed (%s); /answer and reranker disabled.", exc)
         answer_gen = None

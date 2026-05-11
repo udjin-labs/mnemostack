@@ -10,12 +10,14 @@ class FakeLLM(LLMProvider):
         self.response = response
         self.error = error
         self.last_prompt = ""
+        self.calls = 0
 
     @property
     def name(self):
         return "fake"
 
     def generate(self, prompt, max_tokens=200, temperature=0.0):
+        self.calls += 1
         self.last_prompt = prompt
         if self.error:
             return LLMResponse(text="", error=self.error)
@@ -103,3 +105,39 @@ def test_rerank_includes_query_and_text_in_prompt(sample_results):
     prompt = llm.last_prompt
     assert "capital of France" in prompt
     assert "Paris" in prompt
+
+
+def test_rerank_cache_hit_skips_llm_call(sample_results):
+    llm = FakeLLM(response="3 1")
+    reranker = Reranker(llm=llm, cache_ttl_seconds=300)
+
+    first = reranker.rerank("capital", sample_results)
+    second = reranker.rerank("capital", list(reversed(sample_results)))
+
+    assert [r.id for r in first] == ["3", "1", "2", "4"]
+    assert [r.id for r in second] == ["3", "1", "2", "4"]
+    assert llm.calls == 1
+    assert reranker.cache_hits == 1
+    assert reranker.cache_misses == 1
+
+
+def test_rerank_cache_key_ignores_candidate_order(sample_results):
+    key_a = Reranker._cache_key("q", sample_results)
+    key_b = Reranker._cache_key("q", list(reversed(sample_results)))
+
+    assert key_a == key_b
+
+
+def test_rerank_cache_expiry_misses_after_ttl(sample_results, monkeypatch):
+    now = 1000.0
+    monkeypatch.setattr("mnemostack.recall.reranker.time.monotonic", lambda: now)
+    llm = FakeLLM(response="2 1")
+    reranker = Reranker(llm=llm, cache_ttl_seconds=5)
+
+    reranker.rerank("q", sample_results)
+    now = 1006.0
+    reranker.rerank("q", sample_results)
+
+    assert llm.calls == 2
+    assert reranker.cache_hits == 0
+    assert reranker.cache_misses == 2
