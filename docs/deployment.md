@@ -211,7 +211,7 @@ docker run --rm caddy:2 caddy hash-password --plaintext 'your-long-password'
 
 `depends_on` controls startup order, not readiness. Keep `restart: unless-stopped`; if Qdrant or Memgraph is still starting, Mnemostack health checks may fail briefly until dependencies become reachable.
 
-If you do not need graph memory, remove the `memgraph` service and omit `--memgraph-uri` / `MNEMOSTACK_GRAPH_URI` from the command list. The default graph config is `None` (disabled), so omitting the flag is sufficient. Verify with `/health` after startup to confirm graph is not attempted.
+If you do not need graph memory, remove the `memgraph` service and explicitly pass `--memgraph-uri ""` to disable graph. **Important:** the `mnemostack serve` CLI defaults `--memgraph-uri` to `bolt://localhost:7687` when omitted, so simply removing the flag does **not** disable graph — the server will attempt Bolt connections and log repeated timeouts. Pass an empty string to force it off. The `mnemostack mcp-serve` entrypoint reads from config where the default is `None` (disabled), so omitting is safe there. Verify with `/health` after startup.
 
 ## Persistence model
 
@@ -477,12 +477,13 @@ mnemostack health \
 
 MCP clients can call `mnemostack_health`.
 
-Health should report:
+Health checks differ by entrypoint:
 
-- embedding provider reachable and correct dimension;
-- Qdrant collection exists;
-- point count is non-zero after indexing;
-- Memgraph reachable when configured.
+- **HTTP `/health`** checks Qdrant endpoint reachability and Memgraph ping (when configured). It does **not** validate embedding provider, collection existence, or point count.
+- **CLI `mnemostack health`** performs a deeper check: embedding provider reachable and correct dimension, Qdrant collection exists, point count non-zero, and Memgraph reachable when configured.
+- **MCP `mnemostack_health`** performs the same deep check as the CLI.
+
+For production monitoring, combine HTTP `/health` for liveness with periodic CLI `mnemostack health` for full validation.
 
 ### Prometheus metrics
 
