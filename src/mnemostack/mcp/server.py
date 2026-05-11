@@ -9,14 +9,16 @@ Design notes:
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Annotated, Any
 
 try:
     from fastmcp import FastMCP
+    from pydantic import Field
 
     _FASTMCP_AVAILABLE = True
 except ImportError:  # pragma: no cover
     FastMCP = None  # type: ignore[assignment, misc]
+    Field = None  # type: ignore[assignment, misc]
     _FASTMCP_AVAILABLE = False
 
 from ..config import Config, model_kwargs
@@ -131,7 +133,14 @@ def build_server(
 
     @mcp.tool()
     def mnemostack_health() -> dict:
-        """Check health of mnemostack components (embedding, vector store, optional graph)."""
+        """Check health of all mnemostack components.
+
+        Read-only, no side effects, no authentication required. Returns a JSON
+        object with ok (bool) and per-component status for the embedding
+        provider, Qdrant vector store, and optional Memgraph graph database.
+        Use this to verify the memory backend is reachable before issuing recall
+        queries.
+        """
         result: dict[str, Any] = {"ok": True, "components": {}}
         try:
             emb = _get_embedding()
@@ -184,11 +193,24 @@ def build_server(
         return result
 
     @mcp.tool()
-    def mnemostack_search(query: str, limit: int = 10) -> dict:
-        """Hybrid recall over indexed memories.
+    def mnemostack_search(
+        query: Annotated[
+            str,
+            Field(description="Natural language question or keyword to search memories for"),
+        ],
+        limit: Annotated[
+            int,
+            Field(description="Maximum number of results to return (default 10)"),
+        ] = 10,
+    ) -> dict:
+        """Search indexed memories with hybrid recall.
 
-        Returns top-K results ranked by reciprocal rank fusion of BM25 and
-        semantic search. Each result has id, text, score, sources, payload.
+        Read-only, no side effects, no authentication required. Use this when
+        you need raw memory matches rather than a synthesized answer. Returns a
+        JSON object with ok, query, count, and results. Results are ranked by
+        reciprocal rank fusion of BM25, semantic, graph, and temporal retrievers
+        when configured; each result includes id, text, score, sources, and
+        payload.
         """
         try:
             recaller = _get_recaller()
@@ -212,13 +234,23 @@ def build_server(
             return {"ok": False, "error": str(e), "query": query}
 
     @mcp.tool()
-    def mnemostack_answer(query: str, limit: int = 10) -> dict:
-        """Generate concise factual answer from retrieved memories.
+    def mnemostack_answer(
+        query: Annotated[
+            str,
+            Field(description="Natural language question or keyword to search memories for"),
+        ],
+        limit: Annotated[
+            int,
+            Field(description="Maximum number of results to return (default 10)"),
+        ] = 10,
+    ) -> dict:
+        """Answer a question using retrieved memories.
 
-        Uses hybrid recall to find relevant memories, then an LLM inference
-        layer to synthesize a short answer with confidence score and citations.
-
-        Returns: answer text, confidence (0.0-1.0), sources, fallback_recommended.
+        Read-only, no side effects, no authentication required. Use this when
+        you want a concise factual answer synthesized from memory search results
+        instead of the raw matches returned by mnemostack_search. Returns a JSON
+        object with ok, query, answer text, confidence (0.0-1.0), sources,
+        fallback_recommended, and error.
         """
         try:
             recaller = _get_recaller()
@@ -241,7 +273,10 @@ def build_server(
     def mnemostack_feedback(
         hit_id: str,
         signal: str,
-        query: str | None = None,
+        query: Annotated[
+            str | None,
+            Field(description="Natural language question or keyword associated with the feedback"),
+        ] = None,
         query_type: str | None = None,
         source: str | None = None,
         sources: list[str] | None = None,
@@ -284,7 +319,10 @@ def build_server(
             predicate: str | None = None,
             obj: str | None = None,
             as_of: str | None = None,
-            limit: int = 50,
+            limit: Annotated[
+                int,
+                Field(description="Maximum number of graph triples to return (default 50)"),
+            ] = 50,
         ) -> dict:
             """Query knowledge graph with optional SPO filters and point-in-time.
 
