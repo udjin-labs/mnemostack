@@ -586,7 +586,7 @@ These are the MCP-relevant environment variables read by `mnemostack mcp-serve` 
 | `MNEMOSTACK_MEMGRAPH_URI` | unset | Memgraph Bolt URI. If unset, graph tools are not registered. Alias of `MNEMOSTACK_GRAPH_URI`. |
 | `MNEMOSTACK_GRAPH_TIMEOUT` | `5.0` | Memgraph operation timeout in seconds. |
 | `MNEMOSTACK_BM25_PATHS` | unset | File or directory paths for BM25 exact-token retrieval, separated by `os.pathsep` (`:` on Unix, `;` on Windows). |
-| `MNEMOSTACK_STATE_PATH` | `/tmp/mnemostack-server-state.json` | JSON state file for feedback and stateful recall stages. |
+| `MNEMOSTACK_STATE_PATH` | `/tmp/mnemostack-server-state.json` | JSON state file for feedback and stateful recall stages. **Note:** only read by the module entrypoint (`python -m mnemostack.mcp.server`); the CLI `mnemostack mcp-serve` uses `--state-path` instead. |
 
 Common provider variables:
 
