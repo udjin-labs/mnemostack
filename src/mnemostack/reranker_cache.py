@@ -45,7 +45,7 @@ class RerankerCache:
     """
     Thread-safe in-memory cache for reranker results.
 
-    Cache key is derived from SHA256(query + sorted candidate IDs).
+    Cache key is derived from SHA256(query + candidate IDs in input order).
     Uses length-prefixed encoding to prevent separator collisions.
     """
 
@@ -58,15 +58,14 @@ class RerankerCache:
 
     @staticmethod
     def _make_key(query: str, candidate_ids: list[str]) -> str:
-        """Create a deterministic cache key from query + sorted candidate IDs.
+        """Create a deterministic cache key from query + ordered candidate IDs.
 
         Uses length-prefixed encoding to avoid collisions when IDs
         contain delimiter characters.
         """
-        sorted_ids = sorted(candidate_ids)
         # Length-prefix each component to prevent collisions
         parts = [f"{len(query)}:{query}"]
-        for cid in sorted_ids:
+        for cid in candidate_ids:
             parts.append(f"{len(cid)}:{cid}")
         raw = "|".join(parts)
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
