@@ -25,11 +25,12 @@ class TestRerankerCache:
         assert result == data
         assert cache.stats.hits == 1
 
-    def test_order_independent(self):
-        """Candidate ID order doesn't affect cache key."""
+    def test_order_sensitive(self):
+        """Candidate ID order affects cache key."""
         cache = RerankerCache(ttl_seconds=60)
         cache.put("q", ["b", "a"], [1])
-        assert cache.get("q", ["a", "b"]) == [1]
+        assert cache.get("q", ["a", "b"]) is None
+        assert cache.get("q", ["b", "a"]) == [1]
 
     def test_expiry(self):
         """Entries expire after TTL."""
@@ -78,11 +79,17 @@ class TestRerankerCache:
     def test_deterministic_key(self):
         """Same inputs always produce the same cache key."""
         key1 = RerankerCache._make_key("query", ["a", "b", "c"])
-        key2 = RerankerCache._make_key("query", ["c", "a", "b"])
-        assert key1 == key2  # sorted, so order doesn't matter
+        key2 = RerankerCache._make_key("query", ["a", "b", "c"])
+        assert key1 == key2
 
         key3 = RerankerCache._make_key("different", ["a", "b", "c"])
         assert key1 != key3  # different query
+
+    def test_candidate_order_affects_key(self):
+        """Candidate order matters because reranked output preserves input order."""
+        key1 = RerankerCache._make_key("query", ["a", "b", "c"])
+        key2 = RerankerCache._make_key("query", ["c", "a", "b"])
+        assert key1 != key2
 
     def test_no_separator_collision(self):
         """IDs containing delimiter chars don't cause key collisions."""

@@ -97,6 +97,25 @@ def test_rerank_cache_key_includes_tail_ids():
     assert llm.calls == 2
 
 
+def test_rerank_cache_key_preserves_input_order():
+    llm = FakeLLM(response="1")
+    reranker = Reranker(llm=llm, max_items=3)
+    first = [
+        RecallResult(id="1", text="one", score=0.9, payload={}),
+        RecallResult(id="2", text="two", score=0.8, payload={}),
+        RecallResult(id="3", text="three", score=0.7, payload={}),
+    ]
+    second = [
+        RecallResult(id="1", text="one", score=0.9, payload={}),
+        RecallResult(id="3", text="three", score=0.7, payload={}),
+        RecallResult(id="2", text="two", score=0.8, payload={}),
+    ]
+
+    assert [r.id for r in reranker.rerank("q", first)] == ["1", "2", "3"]
+    assert [r.id for r in reranker.rerank("q", second)] == ["1", "3", "2"]
+    assert llm.calls == 2
+
+
 def test_rerank_parses_ids_with_prose():
     llm = FakeLLM(response="The most relevant is 3\nthen 1")  # first line only
     reranker = Reranker(llm=llm)
