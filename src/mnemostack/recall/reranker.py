@@ -11,6 +11,7 @@ import re
 from dataclasses import dataclass
 
 from ..llm.base import LLMProvider
+from ..reranker_cache import RerankerCache
 from .recaller import RecallResult
 
 logger = logging.getLogger(__name__)
@@ -54,10 +55,12 @@ class Reranker:
         llm: LLMProvider,
         max_items: int = 20,
         max_tokens: int = 200,
+        cache_ttl: float = 300.0,
     ):
         self.llm = llm
         self.max_items = max_items
         self.max_tokens = max_tokens
+        self.cache = RerankerCache(ttl_seconds=cache_ttl)
 
     def rerank(
         self,
@@ -73,6 +76,16 @@ class Reranker:
             return []
         head = results[: self.max_items]
         tail = results[self.max_items :]
+
+        candidate_ids = [str(r.id) for r in results]
+        cached = self.cache.get(query, candidate_ids)
+        if cached is not None:
+            logger.info(
+                "reranker cache HIT (rate: %.1f%%, hits: %d)",
+                self.cache.stats.hit_rate,
+                self.cache.stats.hits,
+            )
+            return cached
 
         prompt = self._build_prompt(query, head)
         resp = self.llm.generate(prompt, max_tokens=self.max_tokens, temperature=0.0)
@@ -120,6 +133,14 @@ class Reranker:
             if str(r.id) not in seen:
                 reordered.append(r)
         reordered.extend(tail)
+
+        self.cache.put(query, candidate_ids, reordered)
+        logger.debug(
+            "reranker cache MISS (rate: %.1f%%, misses: %d)",
+            self.cache.stats.hit_rate,
+            self.cache.stats.misses,
+        )
+
         return reordered
 
     def _build_prompt(self, query: str, results: list[RecallResult]) -> str:
