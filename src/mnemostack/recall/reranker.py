@@ -77,7 +77,7 @@ class Reranker:
         head = results[: self.max_items]
         tail = results[self.max_items :]
 
-        candidate_ids = [str(r.id) for r in head]
+        candidate_ids = [str(r.id) for r in results]
         cached = self.cache.get(query, candidate_ids)
         if cached is not None:
             logger.info(

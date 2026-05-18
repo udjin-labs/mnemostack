@@ -8,17 +8,22 @@ Adding a new retriever = one subclass, no edits elsewhere.
 """
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any
-
-from pydantic import BaseModel, Field
 
 from .vector.qdrant import Hit
 
 
-class RetrieverConfig(BaseModel):
+@dataclass
+class RetrieverConfig:
     """Base configuration for all retrievers."""
-    enabled: bool = Field(default=True, description="Whether the retriever is active")
-    weight: float = Field(default=1.0, ge=0.0, description="Weight in RRF fusion")
+
+    enabled: bool = True
+    weight: float = 1.0
+
+    def __post_init__(self) -> None:
+        if self.weight < 0.0:
+            raise ValueError("weight must be >= 0.0")
 
 
 class Retriever(ABC):
@@ -30,7 +35,9 @@ class Retriever(ABC):
     """
 
     name: str = "base"
-    config: RetrieverConfig = RetrieverConfig()
+
+    def __init__(self, config: RetrieverConfig | None = None):
+        self.config = config or RetrieverConfig()
 
     @abstractmethod
     def retrieve(self, query: str, **kwargs: Any) -> list[Hit]:

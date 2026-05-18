@@ -5,8 +5,9 @@ Provides type-safe validation with clear error messages for all MCP tools.
 Accepts both dict and typed input (extra fields ignored).
 """
 
-from pydantic import BaseModel, Field, field_validator
 from typing import Any
+
+from pydantic import BaseModel, Field, field_validator
 
 
 class SearchInput(BaseModel, extra="ignore"):

@@ -3,18 +3,14 @@ Tests for MCP tool input Pydantic validation.
 """
 
 import pytest
-import sys
-import os
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
 from pydantic import ValidationError
+
 from mnemostack.mcp_models import (
-    SearchInput,
-    RecallInput,
-    GraphQueryInput,
-    StoreMemoryInput,
     GetContextInput,
+    GraphQueryInput,
+    RecallInput,
+    SearchInput,
+    StoreMemoryInput,
     validate_tool_input,
 )
 

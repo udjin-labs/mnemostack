@@ -2,12 +2,8 @@
 Tests for the reranker cache.
 """
 
-import time
 import threading
-import sys
-import os
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+import time
 
 from mnemostack.reranker_cache import RerankerCache
 
