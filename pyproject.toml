@@ -41,6 +41,7 @@ huggingface = [
 ]
 mcp = [
     "fastmcp>=0.2",
+    "pydantic>=2.5,<3",
 ]
 server = [
     "fastapi>=0.110,<1",

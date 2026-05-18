@@ -10,12 +10,14 @@ class FakeLLM(LLMProvider):
         self.response = response
         self.error = error
         self.last_prompt = ""
+        self.calls = 0
 
     @property
     def name(self):
         return "fake"
 
     def generate(self, prompt, max_tokens=200, temperature=0.0):
+        self.calls += 1
         self.last_prompt = prompt
         if self.error:
             return LLMResponse(text="", error=self.error)
@@ -74,6 +76,25 @@ def test_rerank_respects_max_items(sample_results):
     assert reranked[1].id == "2"
     assert reranked[2].id == "3"
     assert reranked[3].id == "4"
+
+
+def test_rerank_cache_key_includes_tail_ids():
+    llm = FakeLLM(response="2 1")
+    reranker = Reranker(llm=llm, max_items=2)
+    first = [
+        RecallResult(id="1", text="one", score=0.9, payload={}),
+        RecallResult(id="2", text="two", score=0.8, payload={}),
+        RecallResult(id="3", text="three", score=0.7, payload={}),
+    ]
+    second = [
+        RecallResult(id="1", text="one", score=0.9, payload={}),
+        RecallResult(id="2", text="two", score=0.8, payload={}),
+        RecallResult(id="4", text="four", score=0.7, payload={}),
+    ]
+
+    assert [r.id for r in reranker.rerank("q", first)] == ["2", "1", "3"]
+    assert [r.id for r in reranker.rerank("q", second)] == ["2", "1", "4"]
+    assert llm.calls == 2
 
 
 def test_rerank_parses_ids_with_prose():
