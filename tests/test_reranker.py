@@ -40,14 +40,34 @@ def sample_results():
 
 
 def test_rerank_reorders_by_llm_output(sample_results):
-    llm = FakeLLM(response="R0 R2")  # put result 0 first, then result 2
+    llm = FakeLLM(response="R2 R0 R3 R1")  # full reordered ordinal list
     reranker = Reranker(llm=llm)
     reranked = reranker.rerank("which city is capital of France", sample_results)
-    assert reranked[0].id == "1"
-    assert reranked[1].id == "3"
-    # Unranked (2, 4) should still be in the list
-    ids = [r.id for r in reranked]
-    assert set(ids) == {"1", "2", "3", "4"}
+    assert [r.id for r in reranked] == ["3", "1", "4", "2"]
+
+
+def test_rerank_partial_response_appends_unranked(sample_results):
+    llm = FakeLLM(response="R0 R2")
+    reranker = Reranker(llm=llm)
+    reranked = reranker.rerank("which city is capital of France", sample_results)
+
+    assert [r.id for r in reranked] == ["1", "3", "2", "4"]
+
+
+def test_rerank_ignores_duplicate_ordinals(sample_results):
+    llm = FakeLLM(response="R2 R2 R0 R3")
+    reranker = Reranker(llm=llm)
+    reranked = reranker.rerank("which city is capital of France", sample_results)
+
+    assert [r.id for r in reranked] == ["3", "1", "4", "2"]
+
+
+def test_rerank_ignores_echoed_ranked_ids_label(sample_results):
+    llm = FakeLLM(response="RANKED_IDS: R1 R0 R2 R3")
+    reranker = Reranker(llm=llm)
+    reranked = reranker.rerank("which city is capital of France", sample_results)
+
+    assert [r.id for r in reranked] == ["2", "1", "3", "4"]
 
 
 def test_rerank_none_response_keeps_original(sample_results):
@@ -70,6 +90,7 @@ def test_rerank_empty_input():
     reranker = Reranker(llm=llm)
     assert reranker.rerank("q", []) == []
     assert llm.last_prompt == ""
+    assert llm.calls == 0
 
 
 def test_rerank_respects_max_items(sample_results):
@@ -265,4 +286,4 @@ def test_rerank_scales_max_tokens_with_candidate_count():
 
     reranker.rerank("q", results)
 
-    assert llm.last_max_tokens == 240
+    assert llm.last_max_tokens == 300
