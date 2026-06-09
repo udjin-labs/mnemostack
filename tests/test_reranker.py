@@ -40,7 +40,7 @@ def sample_results():
 
 
 def test_rerank_reorders_by_llm_output(sample_results):
-    llm = FakeLLM(response="0 2")  # put result 0 first, then result 2
+    llm = FakeLLM(response="R0 R2")  # put result 0 first, then result 2
     reranker = Reranker(llm=llm)
     reranked = reranker.rerank("which city is capital of France", sample_results)
     assert reranked[0].id == "1"
@@ -73,7 +73,7 @@ def test_rerank_empty_input():
 
 
 def test_rerank_respects_max_items(sample_results):
-    llm = FakeLLM(response="0 1")
+    llm = FakeLLM(response="R0 R1")
     reranker = Reranker(llm=llm, max_items=2)  # only rerank top 2
     reranked = reranker.rerank("q", sample_results)
     # First 2 should be reranked, 3 and 4 should keep positions
@@ -84,7 +84,7 @@ def test_rerank_respects_max_items(sample_results):
 
 
 def test_rerank_cache_key_includes_tail_ids():
-    llm = FakeLLM(response="1 0")
+    llm = FakeLLM(response="R1 R0")
     reranker = Reranker(llm=llm, max_items=2)
     first = [
         RecallResult(id="1", text="one", score=0.9, payload={}),
@@ -103,7 +103,7 @@ def test_rerank_cache_key_includes_tail_ids():
 
 
 def test_rerank_cache_key_preserves_input_order():
-    llm = FakeLLM(response="0")
+    llm = FakeLLM(response="R0")
     reranker = Reranker(llm=llm, max_items=3)
     first = [
         RecallResult(id="1", text="one", score=0.9, payload={}),
@@ -122,7 +122,7 @@ def test_rerank_cache_key_preserves_input_order():
 
 
 def test_rerank_parses_ids_with_prose():
-    llm = FakeLLM(response="The most relevant is 1\nthen 0")  # first line only
+    llm = FakeLLM(response="The most relevant is R1\nthen R0")  # first line only
     reranker = Reranker(llm=llm)
     results = [
         RecallResult(id="1", text="foo", score=0.5, payload={}),
@@ -134,7 +134,7 @@ def test_rerank_parses_ids_with_prose():
 
 
 def test_rerank_ignores_unknown_ids(sample_results):
-    llm = FakeLLM(response="999 0 777")
+    llm = FakeLLM(response="999 R0 777")
     reranker = Reranker(llm=llm)
     reranked = reranker.rerank("q", sample_results)
     # Unknown IDs ignored, "1" comes first, rest in original order
@@ -142,15 +142,15 @@ def test_rerank_ignores_unknown_ids(sample_results):
 
 
 def test_rerank_includes_query_and_text_in_prompt(sample_results):
-    llm = FakeLLM(response="0")
+    llm = FakeLLM(response="R0")
     reranker = Reranker(llm=llm)
     reranker.rerank("capital of France", sample_results)
     prompt = llm.last_prompt
     assert "capital of France" in prompt
     assert "Paris" in prompt
-    assert "ID=0:" in prompt
-    assert "ID=1:" in prompt
-    assert "ID=1: Paris" not in prompt
+    assert "ID=R0:" in prompt
+    assert "ID=R1:" in prompt
+    assert "ID=R1: Paris" not in prompt
 
 
 def test_rerank_reorders_uuid_ids_from_ordinal_response():
@@ -160,7 +160,7 @@ def test_rerank_reorders_uuid_ids_from_ordinal_response():
         RecallResult(id=ids[1], text="target fact about Qdrant UUIDs", score=0.8, payload={}),
         RecallResult(id=ids[2], text="secondary fact", score=0.7, payload={}),
     ]
-    llm = FakeLLM(response="1 2")
+    llm = FakeLLM(response="R1 R2")
     reranker = Reranker(llm=llm)
 
     reranked = reranker.rerank("Qdrant UUID target", results)
@@ -168,6 +168,21 @@ def test_rerank_reorders_uuid_ids_from_ordinal_response():
     assert [r.id for r in reranked] == [ids[1], ids[2], ids[0]]
     for original_id in ids:
         assert original_id not in llm.last_prompt
+
+
+def test_rerank_preserves_numeric_raw_id_fallback():
+    results = [
+        RecallResult(id="1", text="one", score=0.9, payload={}),
+        RecallResult(id="2", text="two", score=0.8, payload={}),
+        RecallResult(id="3", text="three", score=0.7, payload={}),
+        RecallResult(id="4", text="four", score=0.6, payload={}),
+    ]
+    llm = FakeLLM(response="3 1")
+    reranker = Reranker(llm=llm)
+
+    reranked = reranker.rerank("legacy numeric response", results)
+
+    assert [r.id for r in reranked] == ["3", "1", "2", "4"]
 
 
 def test_rerank_keeps_composite_id_fuzzy_fallback():
@@ -184,7 +199,7 @@ def test_rerank_keeps_composite_id_fuzzy_fallback():
 
 
 def test_rerank_logs_partial_parse_warning(sample_results, caplog):
-    llm = FakeLLM(response="999 0")
+    llm = FakeLLM(response="999 R0")
     reranker = Reranker(llm=llm)
     reranker_logger = logging.getLogger("mnemostack.recall.reranker")
     mnemostack_logger = logging.getLogger("mnemostack")
@@ -229,7 +244,7 @@ def test_rerank_scales_max_tokens_with_candidate_count():
         RecallResult(id=str(i), text=f"memory {i}", score=1.0 - i * 0.01, payload={})
         for i in range(30)
     ]
-    llm = FakeLLM(response="0")
+    llm = FakeLLM(response="R0")
     reranker = Reranker(llm=llm, max_items=30, max_tokens=20)
 
     reranker.rerank("q", results)
