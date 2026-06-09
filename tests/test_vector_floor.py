@@ -181,3 +181,36 @@ def test_vector_floor_works_with_retriever_mode():
     ids = [result.id for result in results]
     assert "v-buried" in ids
     assert len(ids) == len(set(ids))
+
+
+def test_vector_floor_retriever_mode_preserves_raw_score_before_rrf_overwrite():
+    vector_results = [
+        RecallResult(
+            id="v-anchor",
+            text="top vector match",
+            score=0.95,
+            sources=["vector"],
+        ),
+        RecallResult(
+            id="v-buried",
+            text="lower vector match",
+            score=0.721,
+            sources=["vector"],
+        ),
+    ]
+    bm25_results = [
+        RecallResult(id="b1", text="lexical match", score=1.0, sources=["bm25"]),
+    ]
+    recaller = Recaller(
+        retrievers=[
+            FixedRetriever("vector", vector_results),
+            FixedRetriever("bm25", bm25_results),
+        ],
+        vector_floor=1,
+    )
+
+    results = recaller.recall("lexical", limit=2, vector_limit=3)
+
+    ids = [result.id for result in results]
+    assert ids == ["v-anchor", "b1"]
+    assert results[0].payload["raw_vector_score"] == 0.95
