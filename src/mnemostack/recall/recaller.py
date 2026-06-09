@@ -696,7 +696,7 @@ class Recaller:
             for candidate in vector_candidates
         ]
         for result in results:
-            result.payload.setdefault("_vector_floor_candidates", serialized)
+            result.payload["_vector_floor_candidates"] = serialized
 
     @staticmethod
     def _vector_floor_candidates_from_results(

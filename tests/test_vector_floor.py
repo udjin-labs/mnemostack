@@ -319,3 +319,51 @@ def test_vector_floor_after_rerank_extends_without_dropping_winners():
     assert ids[:2] == [result.id for result in reranked_winners]
     assert {"v-anchor", "v-second", "v-third", "v-tail"} <= set(ids)
     assert len(ids) == len(reranked_winners) + 4
+
+
+def test_vector_floor_metadata_replaces_stale_partial_candidates():
+    recaller = Recaller(
+        embedding_provider=FakeEmbedding(),
+        vector_store=FakeVectorStore(_many_vector_hits()),
+        bm25_docs=_bm25_docs(),
+        vector_floor=4,
+    )
+    result = RecallResult(
+        id="winner",
+        text="winner",
+        score=1.0,
+        payload={
+            "_vector_floor_candidates": [
+                {
+                    "id": "v-anchor",
+                    "text": "stale partial candidate",
+                    "score": 0.95,
+                    "payload": {"raw_vector_score": 0.95},
+                    "sources": ["vector"],
+                }
+            ]
+        },
+        sources=["bm25"],
+    )
+    candidates = [
+        RecallResult(
+            id="v-anchor",
+            text="top vector match",
+            score=0.95,
+            payload={"raw_vector_score": 0.95},
+            sources=["vector"],
+        ),
+        RecallResult(
+            id="v-tail",
+            text="tail vector match",
+            score=0.80,
+            payload={"raw_vector_score": 0.80},
+            sources=["vector"],
+        ),
+    ]
+
+    recaller._attach_vector_floor_candidates([result], candidates)
+    final = recaller.apply_vector_floor_after_rerank([result], [result])
+
+    ids = [item.id for item in final]
+    assert "v-tail" in ids
