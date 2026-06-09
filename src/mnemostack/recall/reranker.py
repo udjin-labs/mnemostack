@@ -87,7 +87,8 @@ class Reranker:
             )
             return cached
 
-        prompt = self._build_prompt(query, head)
+        prompt_ids = self._ordinal_ids(head)
+        prompt = self._build_prompt(query, head, prompt_ids)
         effective_max_tokens = max(self.max_tokens, len(head) * 8)
         resp = self.llm.generate(
             prompt, max_tokens=effective_max_tokens, temperature=0.0
@@ -101,7 +102,9 @@ class Reranker:
             logger.warning("rerank produced no usable ids, keeping original order")
             return results
 
-        ordinal_map = {f"R{i}": r for i, r in enumerate(head)}
+        ordinal_map = {
+            prompt_id: result for prompt_id, result in zip(prompt_ids, head, strict=True)
+        }
         # Build id → result map. Keep this as a fallback so LLMs that drop
         # trailing segments (e.g. `MEMORY.md` instead of `MEMORY.md:45`) still
         # resolve to the right result.
@@ -158,11 +161,31 @@ class Reranker:
 
         return reordered
 
-    def _build_prompt(self, query: str, results: list[RecallResult]) -> str:
+    @staticmethod
+    def _ordinal_ids(results: list[RecallResult]) -> list[str]:
+        raw_ids = {str(r.id) for r in results}
+        used: set[str] = set()
+        prompt_ids: list[str] = []
+        for i in range(len(results)):
+            prefix = "R"
+            prompt_id = f"{prefix}{i}"
+            while prompt_id in raw_ids or prompt_id in used:
+                prefix += "R"
+                prompt_id = f"{prefix}{i}"
+            used.add(prompt_id)
+            prompt_ids.append(prompt_id)
+        return prompt_ids
+
+    def _build_prompt(
+        self,
+        query: str,
+        results: list[RecallResult],
+        prompt_ids: list[str],
+    ) -> str:
         lines = []
-        for i, r in enumerate(results):
+        for prompt_id, r in zip(prompt_ids, results, strict=True):
             text = r.text.strip().replace("\n", " ")[:300]
-            lines.append(f"ID=R{i}: {text}")
+            lines.append(f"ID={prompt_id}: {text}")
         memories_str = "\n".join(lines)
         return _RERANK_PROMPT.format(query=query, memories=memories_str)
 

@@ -185,6 +185,22 @@ def test_rerank_preserves_numeric_raw_id_fallback():
     assert [r.id for r in reranked] == ["3", "1", "2", "4"]
 
 
+def test_rerank_avoids_synthetic_id_collisions_with_raw_ids():
+    results = [
+        RecallResult(id="A", text="first", score=0.9, payload={}),
+        RecallResult(id="R0", text="actual raw R0", score=0.8, payload={}),
+    ]
+    llm = FakeLLM(response="R0")
+    reranker = Reranker(llm=llm)
+
+    reranked = reranker.rerank("legacy raw R0 response", results)
+
+    assert [r.id for r in reranked] == ["R0", "A"]
+    assert "ID=RR0: first" in llm.last_prompt
+    assert "ID=R1: actual raw R0" in llm.last_prompt
+    assert "ID=R0:" not in llm.last_prompt
+
+
 def test_rerank_keeps_composite_id_fuzzy_fallback():
     results = [
         RecallResult(id="notes/MEMORY.md:45", text="target", score=0.9, payload={}),
