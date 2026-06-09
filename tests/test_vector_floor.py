@@ -36,6 +36,15 @@ def _vector_hits():
     ]
 
 
+def _many_vector_hits():
+    return [
+        Hit("v-anchor", 0.95, {"text": "top vector match"}),
+        Hit("v-second", 0.90, {"text": "second vector match"}),
+        Hit("v-third", 0.85, {"text": "third vector match"}),
+        Hit("v-tail", 0.80, {"text": "tail vector match"}),
+    ]
+
+
 def test_vector_floor_surfaces_buried_vector_strong_result():
     recaller = Recaller(
         embedding_provider=FakeEmbedding(),
@@ -136,6 +145,23 @@ def test_vector_floor_applies_once_after_query_expansion_fusion():
     recaller.recall("lexical", limit=2, vector_limit=3)
 
     assert len(calls) == 1
+
+
+def test_vector_floor_query_expansion_uses_raw_vector_candidates():
+    recaller = Recaller(
+        embedding_provider=FakeEmbedding(),
+        vector_store=FakeVectorStore(_many_vector_hits()),
+        bm25_docs=_bm25_docs(),
+        query_expansion=True,
+        expansion_llm=FakeExpansionLLM(),
+        vector_floor=4,
+    )
+
+    results = recaller.recall("lexical", limit=2, vector_limit=4, bm25_limit=4)
+
+    ids = [result.id for result in results]
+    assert "v-tail" in ids
+    assert len(ids) == len(set(ids))
 
 
 class FixedRetriever:

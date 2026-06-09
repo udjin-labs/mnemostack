@@ -239,6 +239,7 @@ class Recaller:
         filters: dict[str, Any] | None,
         *,
         apply_vector_floor: bool = True,
+        vector_floor_candidates: list[RecallResult] | None = None,
     ) -> list[RecallResult]:
         # Retrievers mode: fuse N arbitrary ranked lists
         if self.retrievers:
@@ -248,6 +249,7 @@ class Recaller:
                 vector_limit,
                 filters,
                 apply_vector_floor=apply_vector_floor,
+                vector_floor_candidates=vector_floor_candidates,
             )
         with histogram("mnemostack.recall.latency_ms"):
             # Vector search
@@ -262,6 +264,9 @@ class Recaller:
                 counter(
                     "mnemostack.recall.vector_hits", len(vector_hits)
                 )
+            raw_vector_candidates = self._vector_floor_candidates_from_hits(vector_hits)
+            if vector_floor_candidates is not None:
+                vector_floor_candidates.extend(raw_vector_candidates)
 
             # BM25 search
             bm25_hits: list[tuple[BM25Doc, float]] = []
@@ -335,7 +340,7 @@ class Recaller:
                 )
             if apply_vector_floor:
                 results = self._apply_vector_floor(
-                    results, self._vector_floor_candidates_from_hits(vector_hits)
+                    results, raw_vector_candidates
                 )
             counter("mnemostack.recall.results", len(results))
             return results
@@ -407,6 +412,7 @@ class Recaller:
     ) -> list[RecallResult]:
         ranked_lists: list[list[tuple[Any, float]]] = []
         id_to_result: dict[Any, RecallResult] = {}
+        vector_floor_candidates: list[RecallResult] = []
         for expanded_query in self._expanded_queries(query):
             results = self._recall_once(
                 expanded_query,
@@ -415,6 +421,7 @@ class Recaller:
                 bm25_limit=bm25_limit,
                 filters=filters,
                 apply_vector_floor=False,
+                vector_floor_candidates=vector_floor_candidates,
             )
             ranked: list[tuple[Any, float]] = []
             for result in results:
@@ -438,10 +445,7 @@ class Recaller:
             merged.append(result)
         merged = self._apply_vector_floor(
             merged,
-            [
-                result for result in id_to_result.values()
-                if "vector" in result.sources
-            ],
+            vector_floor_candidates,
         )
         counter("mnemostack.recall.results", len(merged))
         return merged
@@ -475,6 +479,7 @@ class Recaller:
         filters: dict[str, Any] | None,
         *,
         apply_vector_floor: bool = True,
+        vector_floor_candidates: list[RecallResult] | None = None,
     ) -> list[RecallResult]:
         """Fuse N retrievers' ranked lists via RRF. Preserves source tags.
 
@@ -528,6 +533,8 @@ class Recaller:
                 for r in hits:
                     if retr.name == "vector":
                         r.payload.setdefault("raw_vector_score", r.score)
+                        if vector_floor_candidates is not None:
+                            vector_floor_candidates.append(r)
                     if r.id in id_to_result:
                         existing = id_to_result[r.id]
                         for s in r.sources:
@@ -614,7 +621,13 @@ class Recaller:
             except (TypeError, ValueError):
                 return result.score
 
-        strongest = sorted(vector_candidates, key=_raw_score, reverse=True)
+        best_by_id: dict[Any, RecallResult] = {}
+        for candidate in vector_candidates:
+            existing = best_by_id.get(candidate.id)
+            if existing is None or _raw_score(candidate) > _raw_score(existing):
+                best_by_id[candidate.id] = candidate
+
+        strongest = sorted(best_by_id.values(), key=_raw_score, reverse=True)
         floor_score = min((result.score for result in output), default=None)
         for candidate in strongest[: self.vector_floor]:
             if candidate.id in seen_ids:
