@@ -115,6 +115,7 @@ class Recaller:
         expansion_llm: LLMProvider | None = None,
         fallback_threshold: float = 0.35,
         mca_prefilter: bool = False,
+        vector_floor: int = 0,
     ):
         """Two modes:
 
@@ -150,6 +151,7 @@ class Recaller:
         self.expansion_llm = expansion_llm
         self.fallback_threshold = fallback_threshold
         self.mca_prefilter_enabled = mca_prefilter
+        self.vector_floor = max(0, int(vector_floor))
         self._query_expansion_cache: dict[str, list[str]] = {}
 
     # --- adaptive weight helpers ---
@@ -235,10 +237,20 @@ class Recaller:
         vector_limit: int,
         bm25_limit: int,
         filters: dict[str, Any] | None,
+        *,
+        apply_vector_floor: bool = True,
+        vector_floor_candidates: list[RecallResult] | None = None,
     ) -> list[RecallResult]:
         # Retrievers mode: fuse N arbitrary ranked lists
         if self.retrievers:
-            return self._recall_via_retrievers(query, limit, vector_limit, filters)
+            return self._recall_via_retrievers(
+                query,
+                limit,
+                vector_limit,
+                filters,
+                apply_vector_floor=apply_vector_floor,
+                vector_floor_candidates=vector_floor_candidates,
+            )
         with histogram("mnemostack.recall.latency_ms"):
             # Vector search
             vector_hits: list[Hit] = []
@@ -252,6 +264,9 @@ class Recaller:
                 counter(
                     "mnemostack.recall.vector_hits", len(vector_hits)
                 )
+            raw_vector_candidates = self._vector_floor_candidates_from_hits(vector_hits)
+            if vector_floor_candidates is not None:
+                vector_floor_candidates.extend(raw_vector_candidates)
 
             # BM25 search
             bm25_hits: list[tuple[BM25Doc, float]] = []
@@ -323,6 +338,10 @@ class Recaller:
                 results = self._maybe_apply_fallback(
                     query, results, limit=limit, vector_limit=vector_limit, filters=filters
                 )
+            if apply_vector_floor:
+                results = self._apply_vector_floor(
+                    results, raw_vector_candidates
+                )
             counter("mnemostack.recall.results", len(results))
             return results
 
@@ -393,6 +412,7 @@ class Recaller:
     ) -> list[RecallResult]:
         ranked_lists: list[list[tuple[Any, float]]] = []
         id_to_result: dict[Any, RecallResult] = {}
+        vector_floor_candidates: list[RecallResult] = []
         for expanded_query in self._expanded_queries(query):
             results = self._recall_once(
                 expanded_query,
@@ -400,6 +420,8 @@ class Recaller:
                 vector_limit=vector_limit,
                 bm25_limit=bm25_limit,
                 filters=filters,
+                apply_vector_floor=False,
+                vector_floor_candidates=vector_floor_candidates,
             )
             ranked: list[tuple[Any, float]] = []
             for result in results:
@@ -421,6 +443,10 @@ class Recaller:
                 continue
             result.score = rrf_score
             merged.append(result)
+        merged = self._apply_vector_floor(
+            merged,
+            vector_floor_candidates,
+        )
         counter("mnemostack.recall.results", len(merged))
         return merged
 
@@ -451,6 +477,9 @@ class Recaller:
         limit: int,
         per_source_limit: int,
         filters: dict[str, Any] | None,
+        *,
+        apply_vector_floor: bool = True,
+        vector_floor_candidates: list[RecallResult] | None = None,
     ) -> list[RecallResult]:
         """Fuse N retrievers' ranked lists via RRF. Preserves source tags.
 
@@ -502,6 +531,10 @@ class Recaller:
                     has_vector_results = True
                 ranked: list[tuple[Any, float]] = []
                 for r in hits:
+                    if retr.name == "vector":
+                        r.payload.setdefault("raw_vector_score", r.score)
+                        if vector_floor_candidates is not None:
+                            vector_floor_candidates.append(r)
                     if r.id in id_to_result:
                         existing = id_to_result[r.id]
                         for s in r.sources:
@@ -541,8 +574,70 @@ class Recaller:
                 results = self._maybe_apply_fallback(
                     query, results, limit=limit, vector_limit=per_source_limit, filters=filters
                 )
+            if apply_vector_floor:
+                results = self._apply_vector_floor(
+                    results,
+                    [
+                        result for result in id_to_result.values()
+                        if "vector" in result.sources
+                    ],
+                )
             counter("mnemostack.recall.results", len(results))
             return results
+
+    def _vector_floor_candidates_from_hits(
+        self,
+        vector_hits: list[Hit],
+    ) -> list[RecallResult]:
+        candidates: list[RecallResult] = []
+        for hit in vector_hits:
+            payload = dict(hit.payload or {})
+            payload["raw_vector_score"] = hit.score
+            candidates.append(
+                RecallResult(
+                    id=hit.id,
+                    text=payload.get("text", ""),
+                    score=hit.score,
+                    payload=payload,
+                    sources=["vector"],
+                )
+            )
+        return candidates
+
+    def _apply_vector_floor(
+        self,
+        results: list[RecallResult],
+        vector_candidates: list[RecallResult],
+    ) -> list[RecallResult]:
+        if self.vector_floor <= 0 or not vector_candidates:
+            return results
+
+        output = list(results)
+        seen_ids = {result.id for result in output}
+
+        def _raw_score(result: RecallResult) -> float:
+            try:
+                return float(result.payload.get("raw_vector_score", result.score))
+            except (TypeError, ValueError):
+                return result.score
+
+        best_by_id: dict[Any, RecallResult] = {}
+        for candidate in vector_candidates:
+            existing = best_by_id.get(candidate.id)
+            if existing is None or _raw_score(candidate) > _raw_score(existing):
+                best_by_id[candidate.id] = candidate
+
+        strongest = sorted(best_by_id.values(), key=_raw_score, reverse=True)
+        floor_score = min((result.score for result in output), default=None)
+        for candidate in strongest[: self.vector_floor]:
+            if candidate.id in seen_ids:
+                continue
+            if floor_score is not None:
+                candidate.score = floor_score * 0.999
+                floor_score = candidate.score
+            output.append(candidate)
+            seen_ids.add(candidate.id)
+        return output
 
     def _mca_hits(self, query: str, limit: int) -> list[RecallResult]:
         bm25 = self.bm25
