@@ -28,6 +28,7 @@ Example config file:
       rrf_k: 60
       confidence_threshold: 0.5
 """
+
 from __future__ import annotations
 
 import os

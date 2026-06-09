@@ -1,4 +1,5 @@
 """LLM-backed query expansion for improving recall."""
+
 from __future__ import annotations
 
 from ..llm.base import LLMProvider

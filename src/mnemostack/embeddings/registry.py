@@ -1,4 +1,5 @@
 """Provider registry — factory pattern for embedding providers."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -29,9 +30,7 @@ def get_provider(name: str, **kwargs: Any) -> EmbeddingProvider:
     if key not in _REGISTRY:
         _lazy_register_builtins()
     if key not in _REGISTRY:
-        raise ValueError(
-            f"Unknown embedding provider: {name!r}. Registered: {list_providers()}"
-        )
+        raise ValueError(f"Unknown embedding provider: {name!r}. Registered: {list_providers()}")
     return _REGISTRY[key](**kwargs)
 
 

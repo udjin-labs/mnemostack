@@ -15,6 +15,7 @@ Usage:
 All mnemostack modules use namespaced loggers: mnemostack.embeddings,
 mnemostack.vector, mnemostack.recall, etc.
 """
+
 from __future__ import annotations
 
 import logging

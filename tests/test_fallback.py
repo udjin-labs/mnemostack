@@ -92,10 +92,12 @@ def test_fallback_does_not_trigger_when_top_score_is_high():
 
 
 def test_fallback_only_results_rank_below_pipeline_results():
-    store = FakeVectorStoreSequence([
-        [],
-        [Hit("fallback", 0.99, {"text": "fallback vector match"})],
-    ])
+    store = FakeVectorStoreSequence(
+        [
+            [],
+            [Hit("fallback", 0.99, {"text": "fallback vector match"})],
+        ]
+    )
     recaller = Recaller(
         embedding_provider=FakeEmbedding(),
         vector_store=store,

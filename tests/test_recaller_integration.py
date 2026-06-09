@@ -3,6 +3,7 @@
 These tests don't hit any external services. Use a fake deterministic
 embedding provider so search is reproducible.
 """
+
 import pytest
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance

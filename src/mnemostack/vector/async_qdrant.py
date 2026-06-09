@@ -4,6 +4,7 @@ Uses QdrantClient's async client variant. For single-shot applications the
 sync VectorStore is simpler; use this for FastAPI/Starlette/async MCP servers
 where blocking I/O would hurt concurrency.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -101,10 +102,7 @@ class AsyncVectorStore:
         total = 0
         for i in range(0, len(points), batch_size):
             chunk = points[i : i + batch_size]
-            structs = [
-                PointStruct(id=pid, vector=vec, payload=pl or {})
-                for pid, vec, pl in chunk
-            ]
+            structs = [PointStruct(id=pid, vector=vec, payload=pl or {}) for pid, vec, pl in chunk]
             await self.client.upsert(collection_name=self.collection, points=structs)
             total += len(structs)
         return total

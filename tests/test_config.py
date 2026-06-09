@@ -1,4 +1,5 @@
 """Tests for Config loader."""
+
 import os
 
 import pytest
@@ -213,6 +214,7 @@ def test_save_roundtrip(isolated_env, tmp_path):
 
 def test_generate_example_config_is_valid_yaml():
     import yaml
+
     data = yaml.safe_load(generate_example_config())
     assert "embedding" in data
     assert "vector" in data

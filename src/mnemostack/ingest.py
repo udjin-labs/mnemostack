@@ -29,6 +29,7 @@ Typical server integration: call `ingest_one()` per incoming message. The
 Ingestor keeps a small LRU cache of recently-seen ids so you don't hammer
 Qdrant with existence probes inside a single process.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -59,6 +60,7 @@ class IngestItem:
     them when ingesting chunks of a longer document; omit `offset` if each
     item is standalone.
     """
+
     text: str
     source: str = ""
     offset: int = 0
@@ -72,7 +74,7 @@ class IngestStats:
     seen: int = 0
     embedded: int = 0
     upserted: int = 0
-    skipped: int = 0         # already-seen id, skipped embedding
+    skipped: int = 0  # already-seen id, skipped embedding
     failed: int = 0
     wrappers_created: int = 0
     wrappers_updated: int = 0
@@ -290,6 +292,7 @@ class _SeenCache:
     soft — if you flush it, correctness is preserved (worst case one extra
     embedding call per item before Qdrant's own upsert-replace wins).
     """
+
     def __init__(self, max_size: int = 10_000):
         self.max_size = max_size
         self._data: OrderedDict[str, None] = OrderedDict()
@@ -448,7 +451,9 @@ class Ingestor:
         stats.embedded += len(points)
         with histogram("mnemostack.ingest.upsert_batch_ms"):
             try:
-                self.store.upsert_batch([(pid, vec, payload) for pid, vec, payload, _item in points])
+                self.store.upsert_batch(
+                    [(pid, vec, payload) for pid, vec, payload, _item in points]
+                )
             except AttributeError:
                 for pid, vec, payload, _item in points:
                     self.store.upsert(pid, vec, payload)

@@ -1,4 +1,5 @@
 """Tests for Reranker — uses FakeLLM for deterministic behavior."""
+
 import logging
 import uuid
 
@@ -50,9 +51,7 @@ def test_rerank_reorders_by_llm_output(sample_results):
     assert "ALL memory IDs" not in llm.last_prompt
 
 
-def test_rerank_default_partial_response_appends_unranked_without_warning(
-    sample_results, caplog
-):
+def test_rerank_default_partial_response_appends_unranked_without_warning(sample_results, caplog):
     llm = FakeLLM(response="R0 R2")
     reranker = Reranker(llm=llm)
     reranker_logger = logging.getLogger("mnemostack.recall.reranker")

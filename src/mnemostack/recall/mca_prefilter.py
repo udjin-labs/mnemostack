@@ -1,4 +1,5 @@
 """Exact-token prefilter for technical identifiers (MCA-lite)."""
+
 from __future__ import annotations
 
 import re
@@ -18,7 +19,9 @@ _REL_PATH_RE = re.compile(r"(?<![/\w])[\w.-]+/[\w./-]+\b")
 _DOTTED_MODULE_RE = re.compile(r"\b[a-zA-Z][a-zA-Z0-9]*(?:\.[a-zA-Z][a-zA-Z0-9]*){2,}\b")
 _COMMON_BRANCH_PAIR_RE = re.compile(r"\b(?:main|develop)/(?:main|develop)\b")
 _SNAKE_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]*\b")
-_HYPHEN_DIGIT_RE = re.compile(r"\b[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*-\d+[A-Za-z0-9-]*\b|\b[A-Za-z0-9]*\d[A-Za-z0-9]*(?:-[A-Za-z0-9]+)+\b")
+_HYPHEN_DIGIT_RE = re.compile(
+    r"\b[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*-\d+[A-Za-z0-9-]*\b|\b[A-Za-z0-9]*\d[A-Za-z0-9]*(?:-[A-Za-z0-9]+)+\b"
+)
 _CAMEL_RE = re.compile(r"\b[A-Za-z]+[a-z][A-Z][A-Za-z0-9]*\b")
 _COMMON_REL_PATH_FALSE_POSITIVES = {"and/or", "or/and", "и/или"}
 _COMMON_BRANCHES = {"main", "develop"}

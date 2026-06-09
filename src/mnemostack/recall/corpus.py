@@ -1,4 +1,5 @@
 """Small corpus helpers shared by HTTP, CLI, and MCP recall paths."""
+
 from __future__ import annotations
 
 from pathlib import Path

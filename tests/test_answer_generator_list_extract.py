@@ -50,10 +50,12 @@ def memories():
 
 
 def test_list_extract_pass_returns_items_from_extracted_json(memories):
-    llm = SequenceLLM([
-        '{"items": ["Luna", "Oliver"]}',
-        "Luna, Oliver",
-    ])
+    llm = SequenceLLM(
+        [
+            '{"items": ["Luna", "Oliver"]}',
+            "Luna, Oliver",
+        ]
+    )
     gen = AnswerGenerator(llm=llm, category_aware_prompts=True, list_extract_mode=True)
 
     answer = gen.generate("What are Melanie's pets?", memories)
@@ -66,10 +68,12 @@ def test_list_extract_pass_returns_items_from_extracted_json(memories):
 
 
 def test_list_extract_falls_back_on_empty_items(memories):
-    llm = SequenceLLM([
-        '{"items": []}',
-        "Not in memory.\nCONFIDENCE: 0.9",
-    ])
+    llm = SequenceLLM(
+        [
+            '{"items": []}',
+            "Not in memory.\nCONFIDENCE: 0.9",
+        ]
+    )
     gen = AnswerGenerator(llm=llm, category_aware_prompts=True, list_extract_mode=True)
 
     answer = gen.generate("What are Melanie's pets?", memories)
@@ -83,10 +87,12 @@ def test_list_extract_falls_back_on_empty_items(memories):
 
 @pytest.mark.parametrize("extract_output", ["not json", "[]", "{}"])
 def test_list_extract_falls_back_on_malformed_json(memories, extract_output):
-    llm = SequenceLLM([
-        extract_output,
-        "Luna, Oliver\nCONFIDENCE: 0.8",
-    ])
+    llm = SequenceLLM(
+        [
+            extract_output,
+            "Luna, Oliver\nCONFIDENCE: 0.8",
+        ]
+    )
     gen = AnswerGenerator(llm=llm, category_aware_prompts=True, list_extract_mode=True)
 
     answer = gen.generate("What are Melanie's pets?", memories)
@@ -98,11 +104,13 @@ def test_list_extract_falls_back_on_malformed_json(memories, extract_output):
 
 
 def test_list_extract_falls_back_when_finalize_call_fails(memories):
-    llm = SequenceMaybeFailLLM([
-        LLMResponse(text='{"items": ["Luna", "Oliver"]}', tokens_used=10),
-        LLMResponse(text="", error="rate limited"),
-        LLMResponse(text="Luna, Oliver\nCONFIDENCE: 0.8", tokens_used=10),
-    ])
+    llm = SequenceMaybeFailLLM(
+        [
+            LLMResponse(text='{"items": ["Luna", "Oliver"]}', tokens_used=10),
+            LLMResponse(text="", error="rate limited"),
+            LLMResponse(text="Luna, Oliver\nCONFIDENCE: 0.8", tokens_used=10),
+        ]
+    )
     gen = AnswerGenerator(llm=llm, category_aware_prompts=True, list_extract_mode=True)
 
     answer = gen.generate("What are Melanie's pets?", memories)
@@ -123,10 +131,12 @@ def test_parse_extracted_items_deduplicates_preserving_order():
 
 
 def test_list_extract_passes_more_memories_than_max_memories(memories):
-    llm = SequenceLLM([
-        '{"items": ["item"]}',
-        "item",
-    ])
+    llm = SequenceLLM(
+        [
+            '{"items": ["item"]}',
+            "item",
+        ]
+    )
     gen = AnswerGenerator(
         llm=llm,
         max_memories=15,
@@ -194,15 +204,19 @@ def test_list_extract_ignored_when_category_aware_disabled(memories):
 
 
 def test_list_extract_handles_specificity(memories):
-    llm = SequenceLLM([
-        '{"items": ["Oliver", "Luna", "Bailey"]}',
-        "Oliver, Luna, Bailey",
-    ])
+    llm = SequenceLLM(
+        [
+            '{"items": ["Oliver", "Luna", "Bailey"]}',
+            "Oliver, Luna, Bailey",
+        ]
+    )
     gen = AnswerGenerator(llm=llm, category_aware_prompts=True, list_extract_mode=True)
 
     answer = gen.generate("What are Melanie's pets?", memories)
 
     assert answer.text == "Oliver, Luna, Bailey"
-    items_line = next(line for line in llm.prompts[1].splitlines() if line.startswith("EXTRACTED ITEMS:"))
+    items_line = next(
+        line for line in llm.prompts[1].splitlines() if line.startswith("EXTRACTED ITEMS:")
+    )
     assert items_line == 'EXTRACTED ITEMS: ["Oliver", "Luna", "Bailey"]'
     assert "her dog" not in items_line

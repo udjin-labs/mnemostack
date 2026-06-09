@@ -1,4 +1,5 @@
 """Ollama LLM provider (local)."""
+
 from __future__ import annotations
 
 import json

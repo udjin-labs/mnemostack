@@ -1,4 +1,5 @@
 """Tests for VectorStore — uses in-memory Qdrant (no external server needed)."""
+
 import pytest
 from qdrant_client import QdrantClient
 
@@ -79,9 +80,7 @@ def test_search_with_filter(store):
 
 def test_upsert_batch(store):
     store.ensure_collection()
-    points = [
-        (i, [float(i) / 10, 0.0, 0.0, 0.0], {"idx": i}) for i in range(1, 26)
-    ]
+    points = [(i, [float(i) / 10, 0.0, 0.0, 0.0], {"idx": i}) for i in range(1, 26)]
     n = store.upsert_batch(points, batch_size=10)
     assert n == 25
     assert store.count() == 25
@@ -100,9 +99,7 @@ def test_search_min_score_filter(store):
 def test_scroll_iterates_all_points(store):
     store.ensure_collection()
     total = 50
-    points = [
-        (i, [float(i % 4) / 10, 0.0, 0.0, 0.0], {"idx": i}) for i in range(1, total + 1)
-    ]
+    points = [(i, [float(i % 4) / 10, 0.0, 0.0, 0.0], {"idx": i}) for i in range(1, total + 1)]
     store.upsert_batch(points, batch_size=10)
 
     collected = list(store.scroll(batch_size=15))

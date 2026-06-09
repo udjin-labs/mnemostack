@@ -3,6 +3,7 @@
 Uses a test-specific node label to avoid polluting production data.
 All tests clean up after themselves.
 """
+
 import uuid
 from unittest.mock import MagicMock
 
@@ -53,9 +54,12 @@ def test_add_and_query_triple(store):
     subj = f"{ns}-alice"
     obj = f"{ns}-project-x"
     s.add_triple(
-        subj, "WORKS_ON", obj,
+        subj,
+        "WORKS_ON",
+        obj,
         valid_from="2024-01-01",
-        subject_label=TEST_LABEL, obj_label=TEST_LABEL,
+        subject_label=TEST_LABEL,
+        obj_label=TEST_LABEL,
     )
     triples = s.query_triples(subject=subj)
     assert len(triples) == 1
@@ -72,9 +76,12 @@ def test_invalidate(store):
     subj = f"{ns}-bob"
     obj = f"{ns}-project-y"
     s.add_triple(
-        subj, "WORKS_ON", obj,
+        subj,
+        "WORKS_ON",
+        obj,
         valid_from="2024-01-01",
-        subject_label=TEST_LABEL, obj_label=TEST_LABEL,
+        subject_label=TEST_LABEL,
+        obj_label=TEST_LABEL,
     )
     n = s.invalidate(subj, "WORKS_ON", obj, ended="2024-06-30")
     assert n == 1
@@ -88,12 +95,23 @@ def test_point_in_time_query(store):
     o1 = f"{ns}-team-A"
     o2 = f"{ns}-team-B"
     # Carol was in team-A from Jan to June, then team-B from July
-    s.add_triple(subj, "MEMBER_OF", o1,
-                 valid_from="2024-01-01", valid_until="2024-06-30",
-                 subject_label=TEST_LABEL, obj_label=TEST_LABEL)
-    s.add_triple(subj, "MEMBER_OF", o2,
-                 valid_from="2024-07-01",
-                 subject_label=TEST_LABEL, obj_label=TEST_LABEL)
+    s.add_triple(
+        subj,
+        "MEMBER_OF",
+        o1,
+        valid_from="2024-01-01",
+        valid_until="2024-06-30",
+        subject_label=TEST_LABEL,
+        obj_label=TEST_LABEL,
+    )
+    s.add_triple(
+        subj,
+        "MEMBER_OF",
+        o2,
+        valid_from="2024-07-01",
+        subject_label=TEST_LABEL,
+        obj_label=TEST_LABEL,
+    )
 
     # Query as of March 2024 → should only find team-A
     march = s.query_triples(subject=subj, as_of="2024-03-15")
@@ -109,10 +127,8 @@ def test_point_in_time_query(store):
 def test_filter_by_predicate(store):
     s, ns = store
     subj = f"{ns}-dave"
-    s.add_triple(subj, "LIKES", f"{ns}-pizza",
-                 subject_label=TEST_LABEL, obj_label=TEST_LABEL)
-    s.add_triple(subj, "WORKS_ON", f"{ns}-project",
-                 subject_label=TEST_LABEL, obj_label=TEST_LABEL)
+    s.add_triple(subj, "LIKES", f"{ns}-pizza", subject_label=TEST_LABEL, obj_label=TEST_LABEL)
+    s.add_triple(subj, "WORKS_ON", f"{ns}-project", subject_label=TEST_LABEL, obj_label=TEST_LABEL)
 
     likes = s.query_triples(subject=subj, predicate="LIKES")
     assert len(likes) == 1
@@ -127,8 +143,9 @@ def test_neighbors(store):
     s, ns = store
     subj = f"{ns}-eve"
     for i in range(5):
-        s.add_triple(subj, "KNOWS", f"{ns}-person-{i}",
-                     subject_label=TEST_LABEL, obj_label=TEST_LABEL)
+        s.add_triple(
+            subj, "KNOWS", f"{ns}-person-{i}", subject_label=TEST_LABEL, obj_label=TEST_LABEL
+        )
     nbrs = s.neighbors(subj)
     assert len(nbrs) == 5
 

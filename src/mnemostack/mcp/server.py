@@ -6,6 +6,7 @@ Design notes:
 - All tools accept JSON-serializable args and return JSON-serializable output
 - Errors are returned as structured error objects, not exceptions
 """
+
 from __future__ import annotations
 
 import os
@@ -26,11 +27,12 @@ from ..embeddings import get_provider
 from ..feedback import apply_feedback
 from ..llm import get_llm
 from ..recall import (
+    RERANK_MODES,
     AnswerGenerator,
     BM25Retriever,
     MemgraphRetriever,
     Recaller,
-    RERANK_MODES,
+    Reranker,
     TemporalRetriever,
     VectorRetriever,
     build_bm25_docs,
@@ -43,10 +45,7 @@ from ..vector import VectorStore
 def _public_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
     if not payload:
         return {}
-    return {
-        key: value for key, value in payload.items()
-        if key != "_vector_floor_candidates"
-    }
+    return {key: value for key, value in payload.items() if key != "_vector_floor_candidates"}
 
 
 def build_server(
@@ -84,9 +83,7 @@ def build_server(
         ImportError: if fastmcp not installed (install with mnemostack[mcp])
     """
     if not _FASTMCP_AVAILABLE:
-        raise ImportError(
-            "fastmcp not installed. Install with: pip install 'mnemostack[mcp]'"
-        )
+        raise ImportError("fastmcp not installed. Install with: pip install 'mnemostack[mcp]'")
     if rerank_mode not in RERANK_MODES:
         allowed = ", ".join(sorted(RERANK_MODES))
         raise ValueError(f"rerank_mode must be one of: {allowed}")
@@ -138,6 +135,21 @@ def build_server(
                 recaller=_get_recaller(),
             )
         return _components["answer"]
+
+    def _get_reranker():
+        if "reranker" not in _components:
+            _components["reranker"] = Reranker(
+                llm=get_llm(llm_provider, **model_kwargs(llm_model)),
+                max_items=20,
+                rerank_mode=rerank_mode,
+            )
+        return _components["reranker"]
+
+    def _apply_rerank(query: str, results: list[Any]) -> list[Any]:
+        try:
+            return _get_reranker().rerank(query, results)
+        except Exception:  # noqa: BLE001
+            return results
 
     def _get_feedback_pipeline():
         if "feedback_pipeline" not in _components:
@@ -233,6 +245,7 @@ def build_server(
         try:
             recaller = _get_recaller()
             results = recaller.recall(query, limit=limit)
+            results = _apply_rerank(query, results)[:limit]
             return {
                 "ok": True,
                 "query": query,
@@ -273,6 +286,7 @@ def build_server(
         try:
             recaller = _get_recaller()
             memories = recaller.recall(query, limit=limit)
+            memories = _apply_rerank(query, memories)[:limit]
             gen = _get_answer_gen()
             answer = gen.generate(query, memories)
             return {
@@ -331,6 +345,7 @@ def build_server(
     # ---------- graph tools (optional) ----------
 
     if memgraph_uri:
+
         @mcp.tool()
         def mnemostack_graph_query(
             subject: str | None = None,
@@ -352,8 +367,11 @@ def build_server(
 
                 gs = GraphStore(uri=memgraph_uri, timeout=graph_timeout)
                 triples = gs.query_triples(
-                    subject=subject, predicate=predicate, obj=obj,
-                    as_of=as_of, limit=limit,
+                    subject=subject,
+                    predicate=predicate,
+                    obj=obj,
+                    as_of=as_of,
+                    limit=limit,
                 )
                 gs.close()
                 return {
@@ -391,8 +409,11 @@ def build_server(
 
                 gs = GraphStore(uri=memgraph_uri, timeout=graph_timeout)
                 gs.add_triple(
-                    subject=subject, predicate=predicate, obj=obj,
-                    valid_from=valid_from, valid_until=valid_until,
+                    subject=subject,
+                    predicate=predicate,
+                    obj=obj,
+                    valid_from=valid_from,
+                    valid_until=valid_until,
                 )
                 gs.close()
                 return {"ok": True, "subject": subject, "predicate": predicate, "obj": obj}

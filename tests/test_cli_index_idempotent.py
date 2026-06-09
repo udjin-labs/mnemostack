@@ -4,6 +4,7 @@ The important property: running `index` twice over the same content must
 not create duplicate points. We cover that by exercising `_stable_chunk_id`
 directly, since the full CLI path needs a live Qdrant.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -40,6 +41,7 @@ def test_stable_chunk_id_differs_on_source_change():
 
 def test_stable_chunk_id_is_valid_uuid_string():
     import uuid
+
     v = _stable_chunk_id("s", 0, "x")
     assert uuid.UUID(v)
 

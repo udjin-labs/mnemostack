@@ -1,4 +1,5 @@
 """Markdown chunker — splits on headers, preserves heading hierarchy."""
+
 from __future__ import annotations
 
 import re

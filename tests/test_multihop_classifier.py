@@ -33,7 +33,10 @@ def sample_memories():
 
 def test_classify_question_multihop_patterns():
     assert classify_question("What motivated Caroline to pursue counseling?") == "multihop"
-    assert classify_question('What did Caroline take away from the book "Becoming Nicole"?') == "multihop"
+    assert (
+        classify_question('What did Caroline take away from the book "Becoming Nicole"?')
+        == "multihop"
+    )
     assert classify_question("What did Caroline and Melanie both learn?") == "multihop"
     assert classify_question("What do Caroline and Melanie have in common?") == "multihop"
     assert classify_question("What pattern appears across sessions?") == "multihop"

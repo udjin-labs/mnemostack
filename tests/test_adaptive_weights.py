@@ -3,6 +3,7 @@
 We don't need a live Qdrant — the logic under test is pure string detection
 and weight lookup. The real-prod A/B check is run from a separate smoke script.
 """
+
 from mnemostack.recall.recaller import Recaller
 
 

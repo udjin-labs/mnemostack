@@ -7,6 +7,7 @@ for an inference question, this module:
 3. Fuses results via RRF.
 4. Re-runs answer generation on the merged context.
 """
+
 from __future__ import annotations
 
 import json

@@ -13,6 +13,7 @@ Design:
 - Uses the same LLM you use for AnswerGenerator; small prompt, low token cost.
 - Result is still a `list[RecallResult]` — drop-in for downstream pipelines.
 """
+
 from __future__ import annotations
 
 import re
@@ -108,24 +109,33 @@ class QueryExpander:
         if not self.apply_to(query):
             counter("mnemostack.query_expansion.skipped", 1)
             return self.recaller.recall(
-                query, limit=limit, vector_limit=vector_limit,
-                bm25_limit=bm25_limit, filters=filters,
+                query,
+                limit=limit,
+                vector_limit=vector_limit,
+                bm25_limit=bm25_limit,
+                filters=filters,
             )
 
         queries = [query] if self.include_original else []
         queries += self.generate_variants(query)
         if len(queries) <= 1:
             return self.recaller.recall(
-                query, limit=limit, vector_limit=vector_limit,
-                bm25_limit=bm25_limit, filters=filters,
+                query,
+                limit=limit,
+                vector_limit=vector_limit,
+                bm25_limit=bm25_limit,
+                filters=filters,
             )
 
         # Recall for each query, merge via RRF across queries
         ranked_lists: list[list[tuple[RecallResult, float]]] = []
         for q in queries:
             res = self.recaller.recall(
-                q, limit=limit * 2, vector_limit=vector_limit,
-                bm25_limit=bm25_limit, filters=filters,
+                q,
+                limit=limit * 2,
+                vector_limit=vector_limit,
+                bm25_limit=bm25_limit,
+                filters=filters,
             )
             ranked_lists.append([(r, r.score) for r in res])
 

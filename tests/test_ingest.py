@@ -9,6 +9,7 @@ assert on the observed calls. The point is to verify:
 - skip_seen LRU behaviour in a single process
 - graceful handling of embedding failures
 """
+
 from __future__ import annotations
 
 from mnemostack.ingest import (
@@ -46,6 +47,7 @@ def test_stable_chunk_id_deterministic():
     b = stable_chunk_id("src", 0, "hello")
     assert a == b
     import uuid
+
     assert uuid.UUID(a)
 
 
@@ -108,8 +110,12 @@ def test_ingest_does_not_dup_in_single_call():
 def test_ingest_records_failed_embeddings():
     class _EmbedEmpty:
         dimension = 3
-        def embed(self, t): return []
-        def embed_batch(self, ts): return [[] for _ in ts]
+
+        def embed(self, t):
+            return []
+
+        def embed_batch(self, ts):
+            return [[] for _ in ts]
 
     store = _FakeStore()
     ing = Ingestor(embedding=_EmbedEmpty(), vector_store=store, batch_size=2)

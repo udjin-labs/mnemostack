@@ -1,4 +1,5 @@
 """Tests for mnemostack.recall.render — compact/full rendering helpers."""
+
 from __future__ import annotations
 
 from mnemostack.recall import RecallResult, compact_format, full_format
@@ -15,8 +16,13 @@ def _make(id_: str, text: str, score: float, sources=None, source_path="") -> Re
 
 
 def test_compact_format_basic():
-    r = _make("abc-123", "Hello world this is a snippet that goes on and on", 0.42,
-              sources=["vector"], source_path="memory/test.md")
+    r = _make(
+        "abc-123",
+        "Hello world this is a snippet that goes on and on",
+        0.42,
+        sources=["vector"],
+        source_path="memory/test.md",
+    )
     out = compact_format([r], snippet_len=20, include_hint=False)
     assert "[id:abc-123]" in out
     assert "score=0.4200" in out
@@ -58,8 +64,13 @@ def test_compact_format_start_index():
 
 
 def test_compact_format_source_file_fallback():
-    r = RecallResult(id="y", text="t", score=0.2, sources=["vector"],
-                     payload={"source_file": "transcripts/foo.jsonl"})
+    r = RecallResult(
+        id="y",
+        text="t",
+        score=0.2,
+        sources=["vector"],
+        payload={"source_file": "transcripts/foo.jsonl"},
+    )
     out = compact_format([r], include_hint=False)
     assert "transcripts/foo.jsonl" in out
 

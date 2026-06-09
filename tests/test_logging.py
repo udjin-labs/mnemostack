@@ -1,4 +1,5 @@
 """Tests for logging configuration."""
+
 import io
 import logging
 

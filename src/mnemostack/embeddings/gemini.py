@@ -1,4 +1,5 @@
 """Gemini embedding provider."""
+
 from __future__ import annotations
 
 import json
@@ -73,7 +74,9 @@ class GeminiProvider(EmbeddingProvider):
                 if e.code in (429, 500, 502, 503, 504) and attempt < self.max_retries - 1:
                     logger.warning(
                         "gemini embed retry (HTTP %d), attempt %d/%d",
-                        e.code, attempt + 1, self.max_retries,
+                        e.code,
+                        attempt + 1,
+                        self.max_retries,
                     )
                     time.sleep(2**attempt)
                     continue
@@ -137,7 +140,9 @@ class GeminiProvider(EmbeddingProvider):
                 if e.code in (429, 500, 502, 503, 504) and attempt < self.max_retries - 1:
                     logger.warning(
                         "gemini batch retry (HTTP %d), attempt %d/%d",
-                        e.code, attempt + 1, self.max_retries,
+                        e.code,
+                        attempt + 1,
+                        self.max_retries,
                     )
                     time.sleep(2**attempt)
                     continue
