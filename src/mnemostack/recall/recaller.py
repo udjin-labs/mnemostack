@@ -526,6 +526,8 @@ class Recaller:
                     has_vector_results = True
                 ranked: list[tuple[Any, float]] = []
                 for r in hits:
+                    if retr.name == "vector":
+                        r.payload.setdefault("raw_vector_score", r.score)
                     if r.id in id_to_result:
                         existing = id_to_result[r.id]
                         for s in r.sources:
