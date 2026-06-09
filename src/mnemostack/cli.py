@@ -612,6 +612,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Expand entity query with an LLM and fuse recall over original + variants",
     )
+    p_synthesize.add_argument(
+        "--vector-floor",
+        type=int,
+        default=cfg.recall.vector_floor,
+        help="Append missing top-N raw-vector candidates after fusion/rerank",
+    )
     p_synthesize.set_defaults(func=cmd_synthesize)
 
     p_answer = sub.add_parser(
@@ -658,6 +664,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--query-expansion",
         action="store_true",
         help="Expand query with an LLM and fuse recall over original + variants",
+    )
+    p_answer.add_argument(
+        "--vector-floor",
+        type=int,
+        default=cfg.recall.vector_floor,
+        help="Append missing top-N raw-vector candidates after fusion/rerank",
     )
     p_answer.add_argument("--json", action="store_true", help="JSON output")
     p_answer.set_defaults(func=cmd_answer)
