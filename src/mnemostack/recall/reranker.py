@@ -47,7 +47,7 @@ class Reranker:
     Args:
         llm: LLM provider (Gemini Flash works well with thinkingBudget=0)
         max_items: how many top-K to rerank (reranking all is expensive)
-        max_tokens: LLM output budget (rerank returns just IDs, 200 is enough)
+        max_tokens: minimum LLM output budget for rerank responses
     """
 
     def __init__(
@@ -87,23 +87,32 @@ class Reranker:
             )
             return cached
 
-        prompt = self._build_prompt(query, head)
-        resp = self.llm.generate(prompt, max_tokens=self.max_tokens, temperature=0.0)
+        prompt_ids = self._ordinal_ids(head)
+        prompt = self._build_prompt(query, head, prompt_ids)
+        effective_max_tokens = max(self.max_tokens, len(head) * 8)
+        resp = self.llm.generate(
+            prompt, max_tokens=effective_max_tokens, temperature=0.0
+        )
         if not resp.ok:
             logger.warning("rerank failed, keeping original order: %s", resp.error)
             return results  # graceful fallback
 
         ranked_ids = self._parse_ids(resp.text)
         if not ranked_ids:
-            logger.debug("rerank returned no relevant ids, keeping original order")
+            logger.warning("rerank produced no usable ids, keeping original order")
             return results
 
-        # Build id → result map. Also keep a prefix-indexed fallback so
-        # LLMs that drop trailing segments (e.g. `MEMORY.md` instead of
-        # `MEMORY.md:45`) still resolve to the right result.
+        ordinal_map = {
+            prompt_id: result for prompt_id, result in zip(prompt_ids, head, strict=True)
+        }
+        # Build id → result map. Keep this as a fallback so LLMs that drop
+        # trailing segments (e.g. `MEMORY.md` instead of `MEMORY.md:45`) still
+        # resolve to the right result.
         id_map = {str(r.id): r for r in head}
 
         def _resolve(rid: str) -> RecallResult | None:
+            if rid in ordinal_map:
+                return ordinal_map[rid]
             if rid in id_map:
                 return id_map[rid]
             # Fuzzy fallback: longest full-id that starts with the candidate,
@@ -128,6 +137,15 @@ class Reranker:
             if r is not None and str(r.id) not in seen:
                 reordered.append(r)
                 seen.add(str(r.id))
+        if len(reordered) < len(head):
+            logger.warning(
+                "rerank parsed %d of %d candidate ids",
+                len(reordered),
+                len(head),
+            )
+        if not reordered:
+            logger.warning("rerank produced no usable ids, keeping original order")
+            return results
         # Append results the LLM didn't rank (keeps them available)
         for r in head:
             if str(r.id) not in seen:
@@ -143,11 +161,31 @@ class Reranker:
 
         return reordered
 
-    def _build_prompt(self, query: str, results: list[RecallResult]) -> str:
+    @staticmethod
+    def _ordinal_ids(results: list[RecallResult]) -> list[str]:
+        raw_ids = {str(r.id) for r in results}
+        used: set[str] = set()
+        prompt_ids: list[str] = []
+        for i in range(len(results)):
+            prefix = "R"
+            prompt_id = f"{prefix}{i}"
+            while prompt_id in raw_ids or prompt_id in used:
+                prefix += "R"
+                prompt_id = f"{prefix}{i}"
+            used.add(prompt_id)
+            prompt_ids.append(prompt_id)
+        return prompt_ids
+
+    def _build_prompt(
+        self,
+        query: str,
+        results: list[RecallResult],
+        prompt_ids: list[str],
+    ) -> str:
         lines = []
-        for r in results:
+        for prompt_id, r in zip(prompt_ids, results, strict=True):
             text = r.text.strip().replace("\n", " ")[:300]
-            lines.append(f"ID={r.id}: {text}")
+            lines.append(f"ID={prompt_id}: {text}")
         memories_str = "\n".join(lines)
         return _RERANK_PROMPT.format(query=query, memories=memories_str)
 
