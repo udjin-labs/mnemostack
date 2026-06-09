@@ -1,5 +1,7 @@
 """Tests for MCP server — verifies build_server wires up tools correctly."""
 import asyncio
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -44,3 +46,46 @@ def test_build_server_with_memgraph_adds_graph_tools():
     names = _list_tool_names(mcp)
     assert "mnemostack_graph_query" in names
     assert "mnemostack_graph_add_triple" in names
+
+
+def test_mcp_search_strips_internal_vector_floor_payload(monkeypatch):
+    import mnemostack.mcp.server as srv
+
+    class _FakeEmbedding:
+        dimension = 3
+
+    class _FakeVectorStore:
+        def __init__(self, **_):
+            pass
+
+    class _FakeRecaller:
+        def __init__(self, **_):
+            pass
+
+        def recall(self, query, limit=10):
+            return [
+                SimpleNamespace(
+                    id="a",
+                    text="text",
+                    score=0.9,
+                    sources=["vector"],
+                    payload={
+                        "public": "ok",
+                        "_vector_floor_candidates": [{"id": "hidden"}],
+                    },
+                )
+            ]
+
+    monkeypatch.setattr(srv, "get_provider", lambda *_args, **_kwargs: _FakeEmbedding())
+    monkeypatch.setattr(srv, "VectorStore", _FakeVectorStore)
+    monkeypatch.setattr(srv, "VectorRetriever", lambda **_: MagicMock())
+    monkeypatch.setattr(srv, "TemporalRetriever", lambda **_: MagicMock())
+    monkeypatch.setattr(srv, "build_bm25_docs", lambda _paths: [])
+    monkeypatch.setattr(srv, "Recaller", _FakeRecaller)
+
+    mcp = build_server(collection="test", embedding_provider="ollama", vector_floor=1)
+
+    result = asyncio.run(mcp.call_tool("mnemostack_search", {"query": "q", "limit": 1}))
+
+    payload = result.structured_content
+    assert payload["results"][0]["payload"] == {"public": "ok"}
