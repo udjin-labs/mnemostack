@@ -47,6 +47,7 @@ from mnemostack.recall import (
     BM25Retriever,
     MemgraphRetriever,
     Recaller,
+    RERANK_MODES,
     Reranker,
     TemporalRetriever,
     VectorRetriever,
@@ -162,8 +163,14 @@ class ServerConfig:
     graph_timeout: float = 5.0
     bm25_paths: list[str] | None = None  # optional markdown dirs for BM25 corpus
     vector_floor: int = 0
+    rerank_mode: str = "relevant_only"
     state_path: str = "/tmp/mnemostack-server-state.json"
     auto_record_ior: bool = False
+
+    def __post_init__(self) -> None:
+        if self.rerank_mode not in RERANK_MODES:
+            allowed = ", ".join(sorted(RERANK_MODES))
+            raise ValueError(f"rerank_mode must be one of: {allowed}")
 
     @classmethod
     def from_env(cls) -> ServerConfig:
@@ -180,6 +187,7 @@ class ServerConfig:
             graph_timeout=cfg.graph.timeout,
             bm25_paths=list(cfg.recall.bm25_paths) or None,
             vector_floor=max(0, int(cfg.recall.vector_floor)),
+            rerank_mode=cfg.recall.rerank_mode,
             auto_record_ior=_env_bool("MNEMOSTACK_AUTO_RECORD_IOR"),
         )
 
@@ -359,7 +367,11 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     try:
         llm = get_llm(cfg.llm_name, **model_kwargs(cfg.llm_model))
         answer_gen: AnswerGenerator | None = AnswerGenerator(llm=llm, recaller=recaller)
-        reranker: Reranker | None = Reranker(llm=llm, max_items=20)
+        reranker: Reranker | None = Reranker(
+            llm=llm,
+            max_items=20,
+            rerank_mode=cfg.rerank_mode,
+        )
     except Exception as exc:  # pragma: no cover - missing provider key
         log.warning("LLM init failed (%s); /answer and reranker disabled.", exc)
         answer_gen = None

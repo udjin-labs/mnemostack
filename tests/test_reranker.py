@@ -40,18 +40,48 @@ def sample_results():
 
 
 def test_rerank_reorders_by_llm_output(sample_results):
-    llm = FakeLLM(response="R2 R0 R3 R1")  # full reordered ordinal list
+    llm = FakeLLM(response="R2 R0 R3 R1")
     reranker = Reranker(llm=llm)
     reranked = reranker.rerank("which city is capital of France", sample_results)
     assert [r.id for r in reranked] == ["3", "1", "4", "2"]
+    assert reranker.rerank_mode == "relevant_only"
+    assert "RELEVANT_IDS:" in llm.last_prompt
+    assert "Include only memories that are actually relevant" in llm.last_prompt
+    assert "ALL memory IDs" not in llm.last_prompt
 
 
-def test_rerank_partial_response_appends_unranked(sample_results):
+def test_rerank_default_partial_response_appends_unranked_without_warning(
+    sample_results, caplog
+):
     llm = FakeLLM(response="R0 R2")
     reranker = Reranker(llm=llm)
-    reranked = reranker.rerank("which city is capital of France", sample_results)
+    reranker_logger = logging.getLogger("mnemostack.recall.reranker")
+    mnemostack_logger = logging.getLogger("mnemostack")
+    original_reranker = reranker_logger.propagate
+    original_mnemostack = mnemostack_logger.propagate
+    reranker_logger.propagate = True
+    mnemostack_logger.propagate = True
+
+    try:
+        with caplog.at_level("WARNING", logger="mnemostack.recall.reranker"):
+            reranked = reranker.rerank("which city is capital of France", sample_results)
+    finally:
+        reranker_logger.propagate = original_reranker
+        mnemostack_logger.propagate = original_mnemostack
 
     assert [r.id for r in reranked] == ["1", "3", "2", "4"]
+    assert "rerank parsed" not in caplog.text
+
+
+def test_rerank_full_reorder_requests_and_handles_full_list(sample_results):
+    llm = FakeLLM(response="R2 R0 R3 R1")
+    reranker = Reranker(llm=llm, rerank_mode="full_reorder")
+    reranked = reranker.rerank("which city is capital of France", sample_results)
+
+    assert [r.id for r in reranked] == ["3", "1", "4", "2"]
+    assert "RANKED_IDS:" in llm.last_prompt
+    assert "ALL memory IDs" in llm.last_prompt
+    assert "Include every memory ID exactly once" in llm.last_prompt
 
 
 def test_rerank_ignores_duplicate_ordinals(sample_results):
@@ -191,6 +221,23 @@ def test_rerank_reorders_uuid_ids_from_ordinal_response():
         assert original_id not in llm.last_prompt
 
 
+def test_rerank_reorders_uuid_ids_from_ordinal_response_in_full_reorder():
+    ids = [str(uuid.uuid4()) for _ in range(3)]
+    results = [
+        RecallResult(id=ids[0], text="irrelevant city note", score=0.9, payload={}),
+        RecallResult(id=ids[1], text="target fact about Qdrant UUIDs", score=0.8, payload={}),
+        RecallResult(id=ids[2], text="secondary fact", score=0.7, payload={}),
+    ]
+    llm = FakeLLM(response="R1 R2 R0")
+    reranker = Reranker(llm=llm, rerank_mode="full_reorder")
+
+    reranked = reranker.rerank("Qdrant UUID target", results)
+
+    assert [r.id for r in reranked] == [ids[1], ids[2], ids[0]]
+    for original_id in ids:
+        assert original_id not in llm.last_prompt
+
+
 def test_rerank_preserves_numeric_raw_id_fallback():
     results = [
         RecallResult(id="1", text="one", score=0.9, payload={}),
@@ -237,7 +284,7 @@ def test_rerank_keeps_composite_id_fuzzy_fallback():
 
 def test_rerank_logs_partial_parse_warning(sample_results, caplog):
     llm = FakeLLM(response="999 R0")
-    reranker = Reranker(llm=llm)
+    reranker = Reranker(llm=llm, rerank_mode="full_reorder")
     reranker_logger = logging.getLogger("mnemostack.recall.reranker")
     mnemostack_logger = logging.getLogger("mnemostack")
     original_reranker = reranker_logger.propagate
@@ -286,4 +333,29 @@ def test_rerank_scales_max_tokens_with_candidate_count():
 
     reranker.rerank("q", results)
 
+    assert llm.last_max_tokens == 240
+
+
+def test_rerank_full_reorder_scales_max_tokens_with_candidate_count():
+    results = [
+        RecallResult(id=str(i), text=f"memory {i}", score=1.0 - i * 0.01, payload={})
+        for i in range(30)
+    ]
+    llm = FakeLLM(response="R0")
+    reranker = Reranker(
+        llm=llm,
+        max_items=30,
+        max_tokens=20,
+        rerank_mode="full_reorder",
+    )
+
+    reranker.rerank("q", results)
+
     assert llm.last_max_tokens == 300
+
+
+def test_rerank_invalid_mode_raises_clear_error():
+    llm = FakeLLM(response="R0")
+
+    with pytest.raises(ValueError, match="rerank_mode must be one of"):
+        Reranker(llm=llm, rerank_mode="everything")

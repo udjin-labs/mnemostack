@@ -105,6 +105,7 @@ def test_env_aliases_cover_cli_http_mcp_surfaces(isolated_env, tmp_path, monkeyp
     isolated_env.setenv("MNEMOSTACK_GRAPH_HEALTH_TIMEOUT", "0.5")
     isolated_env.setenv("MNEMOSTACK_BM25_PATHS", f"/a{os.pathsep}/b")
     isolated_env.setenv("MNEMOSTACK_VECTOR_FLOOR", "4")
+    isolated_env.setenv("MNEMOSTACK_RERANK_MODE", "full_reorder")
 
     cfg = Config.load()
 
@@ -117,6 +118,7 @@ def test_env_aliases_cover_cli_http_mcp_surfaces(isolated_env, tmp_path, monkeyp
     assert cfg.graph.health_timeout == 0.5
     assert cfg.recall.bm25_paths == ["/a", "/b"]
     assert cfg.recall.vector_floor == 4
+    assert cfg.recall.rerank_mode == "full_reorder"
 
 
 def test_cli_parser_defaults_from_config_env(isolated_env, tmp_path, monkeypatch):
@@ -130,6 +132,7 @@ def test_cli_parser_defaults_from_config_env(isolated_env, tmp_path, monkeypatch
     isolated_env.setenv("MNEMOSTACK_MEMGRAPH_URI", "bolt://memgraph:7687")
     isolated_env.setenv("MNEMOSTACK_BM25_PATHS", "/notes")
     isolated_env.setenv("MNEMOSTACK_VECTOR_FLOOR", "3")
+    isolated_env.setenv("MNEMOSTACK_RERANK_MODE", "full_reorder")
 
     from mnemostack.cli import build_parser
 
@@ -149,9 +152,11 @@ def test_cli_parser_defaults_from_config_env(isolated_env, tmp_path, monkeypatch
 
     serve_args = build_parser().parse_args(["serve"])
     assert serve_args.vector_floor == 3
+    assert serve_args.rerank_mode == "full_reorder"
 
     mcp_args = build_parser().parse_args(["mcp-serve"])
     assert mcp_args.vector_floor == 3
+    assert mcp_args.rerank_mode == "full_reorder"
 
     answer_args = build_parser().parse_args(["answer", "hello"])
     assert answer_args.vector_floor == 3
@@ -174,6 +179,7 @@ def test_server_config_from_env_uses_config_aliases(isolated_env, tmp_path, monk
     isolated_env.setenv("MNEMOSTACK_BM25_PATHS", "/notes")
     isolated_env.setenv("MNEMOSTACK_AUTO_RECORD_IOR", "true")
     isolated_env.setenv("MNEMOSTACK_VECTOR_FLOOR", "2")
+    isolated_env.setenv("MNEMOSTACK_RERANK_MODE", "full_reorder")
 
     from mnemostack.server import ServerConfig
 
@@ -191,6 +197,7 @@ def test_server_config_from_env_uses_config_aliases(isolated_env, tmp_path, monk
     assert cfg.bm25_paths == ["/notes"]
     assert cfg.auto_record_ior is True
     assert cfg.vector_floor == 2
+    assert cfg.rerank_mode == "full_reorder"
 
 
 def test_save_roundtrip(isolated_env, tmp_path):

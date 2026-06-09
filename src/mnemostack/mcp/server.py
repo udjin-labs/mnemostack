@@ -30,6 +30,7 @@ from ..recall import (
     BM25Retriever,
     MemgraphRetriever,
     Recaller,
+    RERANK_MODES,
     TemporalRetriever,
     VectorRetriever,
     build_bm25_docs,
@@ -60,6 +61,7 @@ def build_server(
     bm25_paths: list[str] | None = None,
     state_path: str = "/tmp/mnemostack-server-state.json",
     vector_floor: int = 0,
+    rerank_mode: str = "relevant_only",
 ) -> Any:
     """Build and return a configured FastMCP server.
 
@@ -73,6 +75,7 @@ def build_server(
         memgraph_uri: if provided, register graph tools (e.g. bolt://localhost:7687)
         state_path: JSON state file for feedback / stateful recall stages
         vector_floor: protect top-N raw-vector candidates from later ranking stages
+        rerank_mode: LLM reranker mode for service parity
 
     Returns:
         FastMCP instance ready to .run()
@@ -84,6 +87,9 @@ def build_server(
         raise ImportError(
             "fastmcp not installed. Install with: pip install 'mnemostack[mcp]'"
         )
+    if rerank_mode not in RERANK_MODES:
+        allowed = ", ".join(sorted(RERANK_MODES))
+        raise ValueError(f"rerank_mode must be one of: {allowed}")
 
     mcp = FastMCP("mnemostack")
 
@@ -410,6 +416,7 @@ def main() -> None:
         MNEMOSTACK_GRAPH_TIMEOUT    (default: 5.0)
         MNEMOSTACK_BM25_PATHS       (default: none, os.pathsep-separated paths)
         MNEMOSTACK_STATE_PATH       (default: /tmp/mnemostack-server-state.json)
+        MNEMOSTACK_RERANK_MODE      (default: relevant_only)
     """
     cfg = Config.load()
     mcp = build_server(
@@ -423,6 +430,8 @@ def main() -> None:
         graph_timeout=cfg.graph.timeout,
         bm25_paths=list(cfg.recall.bm25_paths) or None,
         state_path=os.environ.get("MNEMOSTACK_STATE_PATH", "/tmp/mnemostack-server-state.json"),
+        vector_floor=max(0, int(cfg.recall.vector_floor)),
+        rerank_mode=cfg.recall.rerank_mode,
     )
     mcp.run()
 
