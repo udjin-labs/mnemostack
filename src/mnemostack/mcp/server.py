@@ -50,6 +50,7 @@ def build_server(
     graph_timeout: float = 5.0,
     bm25_paths: list[str] | None = None,
     state_path: str = "/tmp/mnemostack-server-state.json",
+    vector_floor: int = 0,
 ) -> Any:
     """Build and return a configured FastMCP server.
 
@@ -62,6 +63,7 @@ def build_server(
         qdrant_host: Qdrant URL
         memgraph_uri: if provided, register graph tools (e.g. bolt://localhost:7687)
         state_path: JSON state file for feedback / stateful recall stages
+        vector_floor: protect top-N raw-vector candidates from later ranking stages
 
     Returns:
         FastMCP instance ready to .run()
@@ -110,6 +112,7 @@ def build_server(
             ]
             _components["recaller"] = Recaller(
                 retrievers=[r for r in retrievers if r is not None],
+                vector_floor=max(0, int(vector_floor)),
             )
         return _components["recaller"]
 

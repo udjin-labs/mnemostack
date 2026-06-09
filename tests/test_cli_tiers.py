@@ -17,6 +17,7 @@ from mnemostack.cli import (
     _apply_tier,
     _build_recaller,
     cmd_answer,
+    cmd_mcp_serve,
     cmd_search,
 )
 
@@ -138,6 +139,52 @@ def test_tier2_snippet_length_capped():
     for entry in payload:
         assert "text" in entry
         assert len(entry["text"]) <= max_chars
+
+
+def test_search_json_strips_internal_vector_floor_payload():
+    results = [
+        FakeResult(
+            "a",
+            0.9,
+            "text",
+            ["vector"],
+            {
+                "public": "ok",
+                "_vector_floor_candidates": [{"id": "hidden", "text": "hidden"}],
+            },
+        )
+    ]
+
+    rc, out = _run_search_capture(tier=None, json_out=True, results=results)
+
+    assert rc == 0
+    payload = json.loads(out)
+    assert payload[0]["payload"] == {"public": "ok"}
+
+
+def test_mcp_serve_passes_vector_floor_to_build_server():
+    args = argparse.Namespace(
+        collection="test",
+        provider="fake",
+        embedding_model=None,
+        llm="fake-llm",
+        llm_model=None,
+        qdrant="http://localhost:6333",
+        memgraph_uri=None,
+        graph_timeout=5.0,
+        bm25_path=[],
+        state_path="/tmp/state.json",
+        vector_floor=3,
+    )
+    fake_mcp = MagicMock()
+
+    with patch("mnemostack.mcp.build_server", return_value=fake_mcp) as build_server:
+        rc = cmd_mcp_serve(args)
+
+    assert rc == 0
+    build_server.assert_called_once()
+    assert build_server.call_args.kwargs["vector_floor"] == 3
+    fake_mcp.run.assert_called_once()
 
 
 def test_tier3_more_results_longer_text():

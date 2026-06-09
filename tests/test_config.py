@@ -150,6 +150,9 @@ def test_cli_parser_defaults_from_config_env(isolated_env, tmp_path, monkeypatch
     serve_args = build_parser().parse_args(["serve"])
     assert serve_args.vector_floor == 3
 
+    mcp_args = build_parser().parse_args(["mcp-serve"])
+    assert mcp_args.vector_floor == 3
+
 
 def test_server_config_from_env_uses_config_aliases(isolated_env, tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
