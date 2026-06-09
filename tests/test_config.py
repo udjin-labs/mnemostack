@@ -104,6 +104,7 @@ def test_env_aliases_cover_cli_http_mcp_surfaces(isolated_env, tmp_path, monkeyp
     isolated_env.setenv("MNEMOSTACK_GRAPH_TIMEOUT", "2.5")
     isolated_env.setenv("MNEMOSTACK_GRAPH_HEALTH_TIMEOUT", "0.5")
     isolated_env.setenv("MNEMOSTACK_BM25_PATHS", f"/a{os.pathsep}/b")
+    isolated_env.setenv("MNEMOSTACK_VECTOR_FLOOR", "4")
 
     cfg = Config.load()
 
@@ -115,6 +116,7 @@ def test_env_aliases_cover_cli_http_mcp_surfaces(isolated_env, tmp_path, monkeyp
     assert cfg.graph.timeout == 2.5
     assert cfg.graph.health_timeout == 0.5
     assert cfg.recall.bm25_paths == ["/a", "/b"]
+    assert cfg.recall.vector_floor == 4
 
 
 def test_cli_parser_defaults_from_config_env(isolated_env, tmp_path, monkeypatch):
@@ -127,6 +129,7 @@ def test_cli_parser_defaults_from_config_env(isolated_env, tmp_path, monkeypatch
     isolated_env.setenv("MNEMOSTACK_LLM_MODEL", "llm-from-env")
     isolated_env.setenv("MNEMOSTACK_MEMGRAPH_URI", "bolt://memgraph:7687")
     isolated_env.setenv("MNEMOSTACK_BM25_PATHS", "/notes")
+    isolated_env.setenv("MNEMOSTACK_VECTOR_FLOOR", "3")
 
     from mnemostack.cli import build_parser
 
@@ -140,6 +143,21 @@ def test_cli_parser_defaults_from_config_env(isolated_env, tmp_path, monkeypatch
     assert args.collection == "memory"
     assert args.memgraph_uri == "bolt://memgraph:7687"
     assert args.bm25_path == ["/notes"]
+
+    search_args = build_parser().parse_args(["search", "hello"])
+    assert search_args.vector_floor == 3
+
+    serve_args = build_parser().parse_args(["serve"])
+    assert serve_args.vector_floor == 3
+
+    mcp_args = build_parser().parse_args(["mcp-serve"])
+    assert mcp_args.vector_floor == 3
+
+    answer_args = build_parser().parse_args(["answer", "hello"])
+    assert answer_args.vector_floor == 3
+
+    synthesize_args = build_parser().parse_args(["synthesize", "alice"])
+    assert synthesize_args.vector_floor == 3
 
 
 def test_server_config_from_env_uses_config_aliases(isolated_env, tmp_path, monkeypatch):
@@ -155,6 +173,7 @@ def test_server_config_from_env_uses_config_aliases(isolated_env, tmp_path, monk
     isolated_env.setenv("MNEMOSTACK_GRAPH_HEALTH_TIMEOUT", "0.5")
     isolated_env.setenv("MNEMOSTACK_BM25_PATHS", "/notes")
     isolated_env.setenv("MNEMOSTACK_AUTO_RECORD_IOR", "true")
+    isolated_env.setenv("MNEMOSTACK_VECTOR_FLOOR", "2")
 
     from mnemostack.server import ServerConfig
 
@@ -171,6 +190,7 @@ def test_server_config_from_env_uses_config_aliases(isolated_env, tmp_path, monk
     assert cfg.graph_health_timeout == 0.5
     assert cfg.bm25_paths == ["/notes"]
     assert cfg.auto_record_ior is True
+    assert cfg.vector_floor == 2
 
 
 def test_save_roundtrip(isolated_env, tmp_path):

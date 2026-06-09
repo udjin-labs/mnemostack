@@ -127,7 +127,10 @@ def cmd_search(args: argparse.Namespace) -> int:
             if snippet_chars is None:
                 # backward-compatible: full text + payload
                 entry["text"] = r.text
-                entry["payload"] = r.payload
+                entry["payload"] = {
+                    key: value for key, value in r.payload.items()
+                    if key != "_vector_floor_candidates"
+                }
             elif snippet_chars > 0:
                 entry["text"] = r.text[:snippet_chars]
             # tier 1 (snippet_chars == 0) emits no text at all
@@ -344,6 +347,7 @@ def _build_recaller(
         retrievers=[r for r in retrievers if r is not None],
         query_expansion=query_expansion,
         expansion_llm=expansion_llm,
+        vector_floor=max(0, int(getattr(args, "vector_floor", 0))),
     )
 
 
@@ -552,6 +556,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Expand query with an LLM and fuse recall over original + variants",
     )
+    p_search.add_argument(
+        "--vector-floor",
+        type=int,
+        default=cfg.recall.vector_floor,
+        help="Append missing top-N raw-vector candidates after fusion/rerank",
+    )
     p_search.set_defaults(func=cmd_search)
 
     p_synthesize = sub.add_parser(
@@ -602,6 +612,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Expand entity query with an LLM and fuse recall over original + variants",
     )
+    p_synthesize.add_argument(
+        "--vector-floor",
+        type=int,
+        default=cfg.recall.vector_floor,
+        help="Append missing top-N raw-vector candidates after fusion/rerank",
+    )
     p_synthesize.set_defaults(func=cmd_synthesize)
 
     p_answer = sub.add_parser(
@@ -648,6 +664,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--query-expansion",
         action="store_true",
         help="Expand query with an LLM and fuse recall over original + variants",
+    )
+    p_answer.add_argument(
+        "--vector-floor",
+        type=int,
+        default=cfg.recall.vector_floor,
+        help="Append missing top-N raw-vector candidates after fusion/rerank",
     )
     p_answer.add_argument("--json", action="store_true", help="JSON output")
     p_answer.set_defaults(func=cmd_answer)
@@ -741,6 +763,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="/tmp/mnemostack-server-state.json",
         help="Pipeline state file path for feedback",
     )
+    p_mcp.add_argument(
+        "--vector-floor",
+        type=int,
+        default=cfg.recall.vector_floor,
+        help="Append missing top-N raw-vector candidates after fusion/rerank",
+    )
     p_mcp.set_defaults(func=cmd_mcp_serve)
 
     p_init = sub.add_parser(
@@ -801,6 +829,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Record returned recall ids for inhibition-of-return state",
     )
     p_serve.add_argument(
+        "--vector-floor",
+        type=int,
+        default=cfg.recall.vector_floor,
+        help="Append missing top-N raw-vector candidates after fusion/rerank",
+    )
+    p_serve.add_argument(
         "--reload", action="store_true", help="Enable uvicorn auto-reload (dev only)"
     )
     p_serve.set_defaults(func=cmd_serve)
@@ -854,6 +888,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         graph_uri=args.memgraph_uri,
         graph_timeout=args.graph_timeout,
         bm25_paths=list(args.bm25_path) if args.bm25_path else None,
+        vector_floor=max(0, int(args.vector_floor)),
         state_path=args.state_path,
         auto_record_ior=args.auto_record_ior,
     )
@@ -941,6 +976,7 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
         graph_timeout=args.graph_timeout,
         bm25_paths=list(args.bm25_path) if args.bm25_path else None,
         state_path=args.state_path,
+        vector_floor=max(0, int(args.vector_floor)),
     )
     mcp.run()
     return 0

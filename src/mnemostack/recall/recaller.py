@@ -137,6 +137,13 @@ class Recaller:
           Falls back to classical equal-weight RRF on general queries.
         - **neither set** — classical equal-weight RRF.
 
+        `vector_floor` protects the strongest raw-vector candidates from being
+        lost in later ordering stages. When enabled, the top-N vector candidates
+        are appended after the otherwise final result set if they are missing,
+        preserving existing order and deduplicating by id. This can extend the
+        returned list beyond the requested top-K instead of replacing reranked
+        winners. The default `vector_floor=0` is a strict no-op.
+
         Static weights win over adaptive when both are given: operators who
         have already tuned their workload shouldn't be overridden implicitly.
         """
@@ -342,6 +349,7 @@ class Recaller:
                 results = self._apply_vector_floor(
                     results, raw_vector_candidates
                 )
+            self._attach_vector_floor_candidates(results, raw_vector_candidates)
             counter("mnemostack.recall.results", len(results))
             return results
 
@@ -447,6 +455,7 @@ class Recaller:
             merged,
             vector_floor_candidates,
         )
+        self._attach_vector_floor_candidates(merged, vector_floor_candidates)
         counter("mnemostack.recall.results", len(merged))
         return merged
 
@@ -582,6 +591,13 @@ class Recaller:
                         if "vector" in result.sources
                     ],
                 )
+            self._attach_vector_floor_candidates(
+                results,
+                [
+                    result for result in id_to_result.values()
+                    if "vector" in result.sources
+                ],
+            )
             counter("mnemostack.recall.results", len(results))
             return results
 
@@ -612,8 +628,13 @@ class Recaller:
         if self.vector_floor <= 0 or not vector_candidates:
             return results
 
-        output = list(results)
-        seen_ids = {result.id for result in output}
+        output: list[RecallResult] = []
+        seen_ids: set[Any] = set()
+        for result in results:
+            if result.id in seen_ids:
+                continue
+            output.append(result)
+            seen_ids.add(result.id)
 
         def _raw_score(result: RecallResult) -> float:
             try:
@@ -638,6 +659,73 @@ class Recaller:
             output.append(candidate)
             seen_ids.add(candidate.id)
         return output
+
+    def apply_vector_floor_after_rerank(
+        self,
+        results: list[RecallResult],
+        recalled_results: list[RecallResult],
+    ) -> list[RecallResult]:
+        """Apply the vector floor to the final post-rerank result set.
+
+        `recalled_results` should be the larger pre-rerank recall set returned
+        by this Recaller. It carries the raw vector candidates gathered during
+        recall. Missing floored candidates are appended after `results`, so the
+        final list may extend beyond top-K instead of replacing reranked
+        winners. With `vector_floor=0`, this is a strict no-op.
+        """
+        if self.vector_floor <= 0:
+            return results
+        vector_candidates = self._vector_floor_candidates_from_results(recalled_results)
+        return self._apply_vector_floor(results, vector_candidates)
+
+    def _attach_vector_floor_candidates(
+        self,
+        results: list[RecallResult],
+        vector_candidates: list[RecallResult],
+    ) -> None:
+        if self.vector_floor <= 0 or not results or not vector_candidates:
+            return
+        serialized = [
+            {
+                "id": candidate.id,
+                "text": candidate.text,
+                "score": candidate.score,
+                "payload": dict(candidate.payload or {}),
+                "sources": list(candidate.sources),
+            }
+            for candidate in vector_candidates
+        ]
+        for result in results:
+            result.payload["_vector_floor_candidates"] = serialized
+
+    @staticmethod
+    def _vector_floor_candidates_from_results(
+        results: list[RecallResult],
+    ) -> list[RecallResult]:
+        for result in results:
+            raw_candidates = result.payload.get("_vector_floor_candidates")
+            if not isinstance(raw_candidates, list):
+                continue
+            candidates: list[RecallResult] = []
+            for raw in raw_candidates:
+                if not isinstance(raw, dict) or "id" not in raw:
+                    continue
+                payload = raw.get("payload")
+                sources = raw.get("sources")
+                candidates.append(
+                    RecallResult(
+                        id=raw["id"],
+                        text=str(raw.get("text", "")),
+                        score=float(raw.get("score", 0.0)),
+                        payload=dict(payload) if isinstance(payload, dict) else {},
+                        sources=list(sources) if isinstance(sources, list) else ["vector"],
+                    )
+                )
+            return candidates
+        return [
+            result for result in results
+            if "vector" in result.sources and "raw_vector_score" in result.payload
+        ]
 
     def _mca_hits(self, query: str, limit: int) -> list[RecallResult]:
         bm25 = self.bm25
