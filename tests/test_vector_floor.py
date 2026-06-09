@@ -240,3 +240,82 @@ def test_vector_floor_retriever_mode_preserves_raw_score_before_rrf_overwrite():
     ids = [result.id for result in results]
     assert ids == ["v-anchor", "b1"]
     assert results[0].payload["raw_vector_score"] == 0.95
+
+
+def test_vector_floor_applies_after_rerank_and_top_k_slice():
+    recaller = Recaller(
+        embedding_provider=FakeEmbedding(),
+        vector_store=FakeVectorStore(_vector_hits()),
+        bm25_docs=_bm25_docs(),
+        vector_floor=2,
+    )
+
+    recalled = recaller.recall("lexical", limit=6, vector_limit=3)
+    reranked_and_sliced = [
+        result for result in recalled
+        if result.id not in {"v-anchor", "v-buried"}
+    ][:2]
+
+    final = recaller.apply_vector_floor_after_rerank(reranked_and_sliced, recalled)
+
+    ids = [result.id for result in final]
+    assert ids[:2] == [result.id for result in reranked_and_sliced]
+    assert "v-anchor" in ids
+    assert "v-buried" in ids
+    assert len(ids) > 2
+
+
+def test_vector_floor_after_rerank_default_is_noop():
+    recaller = Recaller(
+        embedding_provider=FakeEmbedding(),
+        vector_store=FakeVectorStore(_vector_hits()),
+        bm25_docs=_bm25_docs(),
+        vector_floor=0,
+    )
+
+    recalled = recaller.recall("lexical", limit=6, vector_limit=3)
+    sliced = recalled[:2]
+
+    assert recaller.apply_vector_floor_after_rerank(sliced, recalled) is sliced
+    assert [result.id for result in sliced] == [result.id for result in recalled[:2]]
+
+
+def test_vector_floor_after_rerank_deduplicates_ids():
+    recaller = Recaller(
+        embedding_provider=FakeEmbedding(),
+        vector_store=FakeVectorStore(_vector_hits()),
+        bm25_docs=_bm25_docs(),
+        vector_floor=2,
+    )
+
+    recalled = recaller.recall("lexical", limit=6, vector_limit=3)
+    reranked_and_sliced = [recalled[0], recalled[0], recalled[1]]
+
+    final = recaller.apply_vector_floor_after_rerank(reranked_and_sliced, recalled)
+
+    ids = [result.id for result in final]
+    assert ids.count("v-anchor") == 1
+    assert ids.count("v-buried") == 1
+    assert len(ids) == len(set(ids))
+
+
+def test_vector_floor_after_rerank_extends_without_dropping_winners():
+    recaller = Recaller(
+        embedding_provider=FakeEmbedding(),
+        vector_store=FakeVectorStore(_many_vector_hits()),
+        bm25_docs=_bm25_docs(),
+        vector_floor=4,
+    )
+
+    recalled = recaller.recall("lexical", limit=8, vector_limit=4)
+    reranked_winners = [
+        result for result in recalled
+        if result.id not in {"v-anchor", "v-second", "v-third", "v-tail"}
+    ][:2]
+
+    final = recaller.apply_vector_floor_after_rerank(reranked_winners, recalled)
+
+    ids = [result.id for result in final]
+    assert ids[:2] == [result.id for result in reranked_winners]
+    assert {"v-anchor", "v-second", "v-third", "v-tail"} <= set(ids)
+    assert len(ids) == len(reranked_winners) + 4

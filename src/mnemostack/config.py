@@ -88,6 +88,7 @@ class RecallConfig:
     top_k: int = 10
     confidence_threshold: float = 0.5
     bm25_paths: list[str] = field(default_factory=list)
+    vector_floor: int = 0
 
 
 @dataclass
@@ -180,6 +181,7 @@ def _apply_env_overrides(cfg: Config) -> Config:
         MNEMOSTACK_GRAPH_TIMEOUT
         MNEMOSTACK_GRAPH_HEALTH_TIMEOUT
         MNEMOSTACK_BM25_PATHS       (os.pathsep-separated)
+        MNEMOSTACK_VECTOR_FLOOR
         MNEMOSTACK_QDRANT_HOST  (alias for VECTOR_HOST)
         MNEMOSTACK_COLLECTION   (alias for VECTOR_COLLECTION)
         MNEMOSTACK_MEMGRAPH_URI (alias for GRAPH_URI)
@@ -228,6 +230,8 @@ def _apply_env_overrides(cfg: Config) -> Config:
     # Recall
     if v := env.get("MNEMOSTACK_BM25_PATHS"):
         cfg.recall.bm25_paths = [p for p in v.split(os.pathsep) if p]
+    if v := env.get("MNEMOSTACK_VECTOR_FLOOR"):
+        cfg.recall.vector_floor = max(0, int(v))
 
     return cfg
 
@@ -267,4 +271,5 @@ recall:
   top_k: 10
   confidence_threshold: 0.5
   bm25_paths: []
+  vector_floor: 0
 """
