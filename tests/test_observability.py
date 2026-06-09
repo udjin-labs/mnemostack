@@ -1,4 +1,5 @@
 """Tests for observability — counters, histograms, recorder swap."""
+
 import time
 
 import pytest
@@ -105,6 +106,7 @@ def test_in_memory_reset(in_memory):
 def test_logging_recorder_does_not_raise(caplog):
     """LoggingRecorder emits debug lines, no exceptions."""
     import logging
+
     set_recorder(LoggingRecorder())
     with caplog.at_level(logging.DEBUG, logger="mnemostack.observability.recorder"):
         counter("my.counter", 7, labels={"x": "y"})
@@ -126,11 +128,14 @@ def test_recaller_emits_metrics_via_observability():
         @property
         def dimension(self):
             return 4
+
         @property
         def name(self):
             return "fake"
+
         def embed(self, text):
             return [1.0, 0.0, 0.0, 0.0]
+
         def embed_batch(self, texts):
             return [self.embed(t) for t in texts]
 

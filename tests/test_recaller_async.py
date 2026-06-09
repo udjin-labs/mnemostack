@@ -4,6 +4,7 @@ We don't spin up Qdrant here — use a FakeRetriever so the test is hermetic.
 The point is to prove `recall_async` returns the same shape as `recall` and
 does not block the event loop (caller can `await` other coroutines alongside).
 """
+
 from __future__ import annotations
 
 import asyncio

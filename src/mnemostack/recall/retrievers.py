@@ -12,6 +12,7 @@ Built-in retrievers:
 - MemgraphRetriever   — knowledge graph exact/contains match on node names
 - TemporalRetriever   — vector search inside a date range extracted from query
 """
+
 from __future__ import annotations
 
 import logging
@@ -38,6 +39,7 @@ logger = logging.getLogger(__name__)
 
 try:
     from neo4j import GraphDatabase
+
     _NEO4J_AVAILABLE = True
 except ImportError:
     _NEO4J_AVAILABLE = False
@@ -439,9 +441,7 @@ class MemgraphRetriever(Retriever):
         words = [w.lower() for w in query.split() if len(w) >= self.min_word]
         if not words:
             return []
-        counts: dict[str, dict[str, Any]] = defaultdict(
-            lambda: {"count": 0, "type": "", "mc": ""}
-        )
+        counts: dict[str, dict[str, Any]] = defaultdict(lambda: {"count": 0, "type": "", "mc": ""})
         try:
             with driver.session() as session:
                 for w in words:
@@ -508,7 +508,8 @@ class MemgraphRetriever(Retriever):
                         "AND coalesce(r.valid_until, 'current') = 'current' "
                         "RETURN n.name AS from_n, type(r) AS rel, m.name AS to_n "
                         "LIMIT $lim",
-                        name=name, lim=self.max_rels,
+                        name=name,
+                        lim=self.max_rels,
                     ).data()
                     rel_text = "; ".join(
                         f"{r['from_n']}-[{r['rel']}]->{r['to_n']}" for r in rel_rows
@@ -542,27 +543,95 @@ class MemgraphRetriever(Retriever):
 # Port of legacy temporal_extractor.extract_temporal, extended for date-focused recall.
 
 _MONTHS = {
-    "январ": 1, "january": 1, "jan": 1,
-    "феврал": 2, "february": 2, "feb": 2,
-    "март": 3, "march": 3, "mar": 3,
-    "апрел": 4, "april": 4, "apr": 4,
-    "май": 5, "мая": 5, "мае": 5, "may": 5,
-    "июн": 6, "june": 6, "jun": 6,
-    "июл": 7, "july": 7, "jul": 7,
-    "август": 8, "august": 8, "aug": 8,
-    "сентябр": 9, "september": 9, "sep": 9, "sept": 9,
-    "октябр": 10, "october": 10, "oct": 10,
-    "ноябр": 11, "november": 11, "nov": 11,
-    "декабр": 12, "december": 12, "dec": 12,
+    "январ": 1,
+    "january": 1,
+    "jan": 1,
+    "феврал": 2,
+    "february": 2,
+    "feb": 2,
+    "март": 3,
+    "march": 3,
+    "mar": 3,
+    "апрел": 4,
+    "april": 4,
+    "apr": 4,
+    "май": 5,
+    "мая": 5,
+    "мае": 5,
+    "may": 5,
+    "июн": 6,
+    "june": 6,
+    "jun": 6,
+    "июл": 7,
+    "july": 7,
+    "jul": 7,
+    "август": 8,
+    "august": 8,
+    "aug": 8,
+    "сентябр": 9,
+    "september": 9,
+    "sep": 9,
+    "sept": 9,
+    "октябр": 10,
+    "october": 10,
+    "oct": 10,
+    "ноябр": 11,
+    "november": 11,
+    "nov": 11,
+    "декабр": 12,
+    "december": 12,
+    "dec": 12,
 }
 
 _MONTH_NAME_PATTERN = "|".join(sorted(map(re.escape, _MONTHS), key=len, reverse=True))
 _GENERIC_DATE_QUERY_WORDS = {
-    "что", "делали", "делал", "делала", "было", "случилось", "произошло", "события",
-    "событие", "работа", "работали", "задачи", "задача", "дела", "итоги", "дневник",
-    "what", "happened", "happen", "did", "do", "done", "worked", "work", "tasks",
-    "task", "events", "event", "notes", "note", "diary", "log", "logs", "anything",
-    "from", "on", "in", "at", "the", "a", "an", "за", "на", "в", "во", "и", "по",
+    "что",
+    "делали",
+    "делал",
+    "делала",
+    "было",
+    "случилось",
+    "произошло",
+    "события",
+    "событие",
+    "работа",
+    "работали",
+    "задачи",
+    "задача",
+    "дела",
+    "итоги",
+    "дневник",
+    "what",
+    "happened",
+    "happen",
+    "did",
+    "do",
+    "done",
+    "worked",
+    "work",
+    "tasks",
+    "task",
+    "events",
+    "event",
+    "notes",
+    "note",
+    "diary",
+    "log",
+    "logs",
+    "anything",
+    "from",
+    "on",
+    "in",
+    "at",
+    "the",
+    "a",
+    "an",
+    "за",
+    "на",
+    "в",
+    "во",
+    "и",
+    "по",
 }
 
 
@@ -658,7 +727,9 @@ def extract_temporal_query(query: str, now: datetime | None = None) -> TemporalQ
         target = _safe_date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
         if target is not None:
             start, end = _day_window(target)
-            return TemporalQuery(start, end, target, _date_focused(query, [m.span()], has_target_date=True))
+            return TemporalQuery(
+                start, end, target, _date_focused(query, [m.span()], has_target_date=True)
+            )
 
     # Relative single-date expressions.
     relative_patterns: list[tuple[str, int]] = [
@@ -685,12 +756,12 @@ def extract_temporal_query(query: str, now: datetime | None = None) -> TemporalQ
         delta_days = int(m.group(1)) * abs(days) if days < 0 else days
         target = today - timedelta(days=delta_days)
         start, end = _day_window(target)
-        return TemporalQuery(start, end, target, _date_focused(query, [m.span()], has_target_date=True))
+        return TemporalQuery(
+            start, end, target, _date_focused(query, [m.span()], has_target_date=True)
+        )
 
     # Absolute day/month: "30 апреля", "April 30", optional year.
-    day_month = re.search(
-        rf"\b([0-3]?\d)\s+({_MONTH_NAME_PATTERN})\w*\s*(20\d{{2}})?\b", q
-    )
+    day_month = re.search(rf"\b([0-3]?\d)\s+({_MONTH_NAME_PATTERN})\w*\s*(20\d{{2}})?\b", q)
     if day_month:
         day = int(day_month.group(1))
         month = _month_from_text(day_month.group(2))
@@ -700,7 +771,10 @@ def extract_temporal_query(query: str, now: datetime | None = None) -> TemporalQ
             if target is not None:
                 start, end = _day_window(target)
                 return TemporalQuery(
-                    start, end, target, _date_focused(query, [day_month.span()], has_target_date=True)
+                    start,
+                    end,
+                    target,
+                    _date_focused(query, [day_month.span()], has_target_date=True),
                 )
 
     month_day = re.search(
@@ -715,7 +789,10 @@ def extract_temporal_query(query: str, now: datetime | None = None) -> TemporalQ
             if target is not None:
                 start, end = _day_window(target)
                 return TemporalQuery(
-                    start, end, target, _date_focused(query, [month_day.span()], has_target_date=True)
+                    start,
+                    end,
+                    target,
+                    _date_focused(query, [month_day.span()], has_target_date=True),
                 )
 
     # Month-only expressions keep the legacy month-wide semantic path.
@@ -728,7 +805,7 @@ def extract_temporal_query(query: str, now: datetime | None = None) -> TemporalQ
             continue
         y_m = re.search(r"\b(20\d{2})\b", q)
         if stem == "may" and not y_m:
-            prefix = q[max(0, month_m.start() - 12): month_m.start()]
+            prefix = q[max(0, month_m.start() - 12) : month_m.start()]
             if not re.search(r"\b(in|from|during)\s+$", prefix):
                 continue
         y = int(y_m.group(1)) if y_m else today.year
@@ -795,7 +872,10 @@ class TemporalRetriever(Retriever):
                 strict_filter = dict(temporal_filter)
                 strict_filter["timestamp"] = {"gte": strict_start, "lte": strict_end}
 
-                buffer_limit = max(limit * self.DATE_FOCUSED_SCROLL_BUFFER_MULTIPLIER, self.DATE_FOCUSED_SCROLL_BUFFER_MIN)
+                buffer_limit = max(
+                    limit * self.DATE_FOCUSED_SCROLL_BUFFER_MULTIPLIER,
+                    self.DATE_FOCUSED_SCROLL_BUFFER_MIN,
+                )
                 exact_hits = self._collect_sorted_date_focused_hits(
                     self.vector_store.scroll(
                         batch_size=max(limit, 100),
@@ -826,7 +906,9 @@ class TemporalRetriever(Retriever):
             except Exception as exc:  # noqa: BLE001 — defensive; log then fall back
                 logger.warning(
                     "TemporalRetriever: vector_store.scroll failed (window=%s..%s): %s",
-                    start, end, exc,
+                    start,
+                    end,
+                    exc,
                 )
 
         vec = self.embedding.embed(query)
@@ -837,7 +919,9 @@ class TemporalRetriever(Retriever):
         except Exception as exc:  # noqa: BLE001 — defensive; log instead of silent
             logger.warning(
                 "TemporalRetriever: vector_store.search failed (window=%s..%s): %s",
-                start, end, exc,
+                start,
+                end,
+                exc,
             )
             return []
         return self._to_results(hits)
@@ -846,10 +930,16 @@ class TemporalRetriever(Retriever):
     def _hit_date(hit) -> date | None:
         timestamp = (hit.payload or {}).get("timestamp")
         if isinstance(timestamp, datetime):
-            return timestamp.astimezone(timezone.utc).date() if timestamp.tzinfo else timestamp.date()
+            return (
+                timestamp.astimezone(timezone.utc).date() if timestamp.tzinfo else timestamp.date()
+            )
         if isinstance(timestamp, str) and len(timestamp) >= 10:
             try:
-                return datetime.fromisoformat(timestamp.replace("Z", "+00:00")).astimezone(timezone.utc).date()
+                return (
+                    datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                    .astimezone(timezone.utc)
+                    .date()
+                )
             except ValueError:
                 try:
                     return date.fromisoformat(timestamp[:10])
@@ -891,7 +981,9 @@ class TemporalRetriever(Retriever):
 
     @classmethod
     def _sort_date_focused_hits(cls, hits, target_date: date):
-        noon = datetime.combine(target_date, datetime.min.time(), tzinfo=timezone.utc) + timedelta(hours=12)
+        noon = datetime.combine(target_date, datetime.min.time(), tzinfo=timezone.utc) + timedelta(
+            hours=12
+        )
 
         def timestamp_distance(hit) -> float:
             timestamp = (hit.payload or {}).get("timestamp")

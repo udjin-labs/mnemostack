@@ -4,6 +4,7 @@ Predefined stage compositions for common use-cases. Users who want a single
 line for reasonable defaults should import from here; advanced users can
 compose their own pipelines via `Pipeline([...])`.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -92,10 +93,15 @@ def build_full_pipeline(
     stages.append(ExactTokenProtection())
 
     if graph_uri:
-        stages.append(GraphResurrection(
-            uri=graph_uri, user=graph_user, password=graph_password,
-            limit=graph_limit, timeout=graph_timeout,
-        ))
+        stages.append(
+            GraphResurrection(
+                uri=graph_uri,
+                user=graph_user,
+                password=graph_password,
+                limit=graph_limit,
+                timeout=graph_timeout,
+            )
+        )
 
     return Pipeline(stages)
 

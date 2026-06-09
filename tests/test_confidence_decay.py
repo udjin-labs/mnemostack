@@ -1,4 +1,5 @@
 """Tests for Ebbinghaus-style confidence decay in FreshnessBlend."""
+
 from datetime import datetime, timedelta, timezone
 
 import pytest

@@ -5,6 +5,7 @@ Tier 2: ≤200 tokens (short snippets)
 Tier 3: ≤500 tokens (fuller detail)
 No tier: backward-compatible full output
 """
+
 from __future__ import annotations
 
 import argparse
@@ -92,13 +93,17 @@ def _run_search_capture(tier, json_out=False, results=None):
     mock_store = MagicMock()
     mock_store.collection_exists.return_value = True
     mock_recaller = MagicMock()
-    mock_recaller.recall.return_value = results[: args.limit if tier is None else TIER_PROFILES[tier]["limit"]]
+    mock_recaller.recall.return_value = results[
+        : args.limit if tier is None else TIER_PROFILES[tier]["limit"]
+    ]
 
     buf = StringIO()
-    with patch("mnemostack.cli.get_provider", return_value=mock_provider), \
-         patch("mnemostack.cli.VectorStore", return_value=mock_store), \
-         patch("mnemostack.cli.Recaller", return_value=mock_recaller), \
-         patch("sys.stdout", buf):
+    with (
+        patch("mnemostack.cli.get_provider", return_value=mock_provider),
+        patch("mnemostack.cli.VectorStore", return_value=mock_store),
+        patch("mnemostack.cli.Recaller", return_value=mock_recaller),
+        patch("sys.stdout", buf),
+    ):
         rc = cmd_search(args)
     return rc, buf.getvalue()
 
@@ -242,10 +247,12 @@ def test_search_passes_embedding_model_to_provider():
     mock_recaller = MagicMock()
     mock_recaller.recall.return_value = []
 
-    with patch("mnemostack.cli.get_provider", return_value=mock_provider) as get_provider_mock, \
-         patch("mnemostack.cli.VectorStore", return_value=mock_store), \
-         patch("mnemostack.cli.Recaller", return_value=mock_recaller), \
-         patch("sys.stdout", StringIO()):
+    with (
+        patch("mnemostack.cli.get_provider", return_value=mock_provider) as get_provider_mock,
+        patch("mnemostack.cli.VectorStore", return_value=mock_store),
+        patch("mnemostack.cli.Recaller", return_value=mock_recaller),
+        patch("sys.stdout", StringIO()),
+    ):
         rc = cmd_search(args)
 
     assert rc == 0
@@ -292,12 +299,14 @@ def test_answer_passes_llm_model_to_provider():
         def should_fallback(self, answer):
             return False
 
-    with patch("mnemostack.cli.get_provider", return_value=mock_provider), \
-         patch("mnemostack.cli.get_llm", return_value=object()) as get_llm_mock, \
-         patch("mnemostack.cli.VectorStore", return_value=mock_store), \
-         patch("mnemostack.cli.Recaller", return_value=mock_recaller), \
-         patch("mnemostack.cli.AnswerGenerator", _FakeAnswerGenerator), \
-         patch("sys.stdout", StringIO()):
+    with (
+        patch("mnemostack.cli.get_provider", return_value=mock_provider),
+        patch("mnemostack.cli.get_llm", return_value=object()) as get_llm_mock,
+        patch("mnemostack.cli.VectorStore", return_value=mock_store),
+        patch("mnemostack.cli.Recaller", return_value=mock_recaller),
+        patch("mnemostack.cli.AnswerGenerator", _FakeAnswerGenerator),
+        patch("sys.stdout", StringIO()),
+    ):
         rc = cmd_answer(args)
 
     assert rc == 0

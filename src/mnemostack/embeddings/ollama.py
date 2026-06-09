@@ -1,4 +1,5 @@
 """Ollama embedding provider (local, no API key)."""
+
 from __future__ import annotations
 
 import json

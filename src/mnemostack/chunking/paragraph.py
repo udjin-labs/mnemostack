@@ -1,4 +1,5 @@
 """Paragraph-based chunker — splits on blank lines, merges short paragraphs."""
+
 from __future__ import annotations
 
 import re

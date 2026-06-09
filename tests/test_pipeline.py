@@ -1,4 +1,5 @@
 """Tests for pipeline stages and orchestrator."""
+
 from datetime import datetime, timedelta, timezone
 
 from mnemostack.recall import RecallResult
@@ -130,9 +131,17 @@ def test_hub_dampen_penalizes_top_degree_nodes():
         _mk_result("leaf", "lonely node", score=0.85),
     ]
     hub_degrees = {
-        "hub": 100, "leaf": 1,
-        "n1": 5, "n2": 5, "n3": 5, "n4": 5, "n5": 5,
-        "n6": 5, "n7": 5, "n8": 5, "n9": 5,
+        "hub": 100,
+        "leaf": 1,
+        "n1": 5,
+        "n2": 5,
+        "n3": 5,
+        "n4": 5,
+        "n5": 5,
+        "n6": 5,
+        "n7": 5,
+        "n8": 5,
+        "n9": 5,
     }
     ctx = PipelineContext(query="x")
     out = HubDampen(hub_degrees=hub_degrees).apply(ctx, rs)
@@ -205,8 +214,7 @@ def test_curiosity_boosts_old_rarely_recalled():
     old = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
     rs = [
         _mk_result("rare", "old and rare", score=0.5, timestamp=old),
-        _mk_result("common", "recent", score=0.5,
-                   timestamp=datetime.now(timezone.utc).isoformat()),
+        _mk_result("common", "recent", score=0.5, timestamp=datetime.now(timezone.utc).isoformat()),
     ]
     out = CuriosityBoost(state_store=store, bonus=0.1, min_age_days=7).apply(
         PipelineContext(query="x"), rs
@@ -220,8 +228,11 @@ def test_qlearning_reranker_boosts_high_q_source():
     # Use blend=False (additive mode) so we can reason about absolute ordering.
     store = InMemoryStateStore()
     qlr = QLearningReranker(
-        state_store=store, default_q=0.5, boost_weight=1.0,
-        use_blend=False, min_samples=3,
+        state_store=store,
+        default_q=0.5,
+        boost_weight=1.0,
+        use_blend=False,
+        min_samples=3,
     )
     for _ in range(5):
         qlr.record_feedback("vector", "technical", reward=1.0)
@@ -262,11 +273,13 @@ def test_full_pipeline_integration():
         _mk_result(2, "auth system docs", score=0.85, timestamp=recent),
         _mk_result(3, "authentication setup", score=0.75, timestamp=recent),
     ]
-    pipe = Pipeline([
-        ClassifyQuery(),
-        GravityDampen(penalty=0.3),
-        FreshnessBlend(weight=0.2),
-    ])
+    pipe = Pipeline(
+        [
+            ClassifyQuery(),
+            GravityDampen(penalty=0.3),
+            FreshnessBlend(weight=0.2),
+        ]
+    )
     out = pipe.apply("how to do authentication", rs)
     assert out[-1].id == 1
 

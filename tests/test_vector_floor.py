@@ -73,9 +73,7 @@ def test_vector_floor_default_is_noop():
     baseline_results = baseline.recall("lexical", limit=2, vector_limit=3)
     disabled_results = disabled.recall("lexical", limit=2, vector_limit=3)
 
-    assert [result.id for result in disabled_results] == [
-        result.id for result in baseline_results
-    ]
+    assert [result.id for result in disabled_results] == [result.id for result in baseline_results]
     assert len(disabled_results) == len(baseline_results)
 
 
@@ -252,8 +250,7 @@ def test_vector_floor_applies_after_rerank_and_top_k_slice():
 
     recalled = recaller.recall("lexical", limit=6, vector_limit=3)
     reranked_and_sliced = [
-        result for result in recalled
-        if result.id not in {"v-anchor", "v-buried"}
+        result for result in recalled if result.id not in {"v-anchor", "v-buried"}
     ][:2]
 
     final = recaller.apply_vector_floor_after_rerank(reranked_and_sliced, recalled)
@@ -309,7 +306,8 @@ def test_vector_floor_after_rerank_extends_without_dropping_winners():
 
     recalled = recaller.recall("lexical", limit=8, vector_limit=4)
     reranked_winners = [
-        result for result in recalled
+        result
+        for result in recalled
         if result.id not in {"v-anchor", "v-second", "v-third", "v-tail"}
     ][:2]
 

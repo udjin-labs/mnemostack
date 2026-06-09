@@ -18,6 +18,7 @@ The chunker emits both solo chunks (each message on its own) AND paired chunks
 (msg[i] + msg[i+1]) so retrieval works for direct-match and context-bridging
 queries.
 """
+
 from __future__ import annotations
 
 from .base import Chunk, Chunker

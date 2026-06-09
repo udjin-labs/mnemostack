@@ -3,6 +3,7 @@
 Implementation is intentionally simple and standalone — no dependency on
 external BM25 libraries. Good enough for <100K documents.
 """
+
 from __future__ import annotations
 
 import math
@@ -57,9 +58,7 @@ class BM25:
         self.k1 = k1
         self.b = b
         self.doc_count = len(documents)
-        self.avgdl = (
-            sum(len(d.tokens) for d in documents) / max(self.doc_count, 1)
-        )
+        self.avgdl = sum(len(d.tokens) for d in documents) / max(self.doc_count, 1)
         # Document frequency per term
         self.df: dict[str, int] = defaultdict(int)
         for d in documents:
@@ -68,9 +67,7 @@ class BM25:
         # IDF per term
         self.idf: dict[str, float] = {}
         for term, df in self.df.items():
-            self.idf[term] = math.log(
-                1 + (self.doc_count - df + 0.5) / (df + 0.5)
-            )
+            self.idf[term] = math.log(1 + (self.doc_count - df + 0.5) / (df + 0.5))
 
     def _score(self, query_tokens: list[str], doc: BM25Doc) -> float:
         score = 0.0

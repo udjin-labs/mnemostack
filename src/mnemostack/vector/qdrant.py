@@ -1,4 +1,5 @@
 """Qdrant vector store wrapper."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -174,10 +175,7 @@ class VectorStore:
         total = 0
         for i in range(0, len(points), batch_size):
             chunk = points[i : i + batch_size]
-            structs = [
-                PointStruct(id=pid, vector=vec, payload=pl or {})
-                for pid, vec, pl in chunk
-            ]
+            structs = [PointStruct(id=pid, vector=vec, payload=pl or {}) for pid, vec, pl in chunk]
             self.client.upsert(collection_name=self.collection, points=structs)
             total += len(structs)
         return total
@@ -241,7 +239,5 @@ class VectorStore:
                         )
                     )
             else:
-                must.append(
-                    FieldCondition(key=key, match=MatchValue(value=value))
-                )
+                must.append(FieldCondition(key=key, match=MatchValue(value=value)))
         return Filter(must=must)

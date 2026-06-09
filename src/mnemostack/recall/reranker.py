@@ -4,6 +4,7 @@ Uses a ranking prompt instead of embedding similarity. Works well for
 queries where semantic similarity alone is too broad (e.g. 'when did X happen'
 can match any mention of X, but only specific dates are actually relevant).
 """
+
 from __future__ import annotations
 
 import logging
@@ -118,9 +119,7 @@ class Reranker:
         prompt_ids = self._ordinal_ids(head)
         prompt = self._build_prompt(query, head, prompt_ids)
         effective_max_tokens = max(self.max_tokens, self._token_floor(len(head)))
-        resp = self.llm.generate(
-            prompt, max_tokens=effective_max_tokens, temperature=0.0
-        )
+        resp = self.llm.generate(prompt, max_tokens=effective_max_tokens, temperature=0.0)
         if not resp.ok:
             logger.warning("rerank failed, keeping original order: %s", resp.error)
             return results  # graceful fallback
@@ -146,10 +145,7 @@ class Reranker:
             # Fuzzy fallback: longest full-id that starts with the candidate,
             # or that the candidate starts with. This catches composite ids
             # (paths / namespaced keys) when the LLM emits a shorter form.
-            matches = [
-                full for full in id_map
-                if full.startswith(rid) or rid.startswith(full)
-            ]
+            matches = [full for full in id_map if full.startswith(rid) or rid.startswith(full)]
             if len(matches) == 1:
                 return id_map[matches[0]]
             if len(matches) > 1:
@@ -165,10 +161,7 @@ class Reranker:
             if r is not None and str(r.id) not in seen:
                 reordered.append(r)
                 seen.add(str(r.id))
-        if (
-            self.rerank_mode == RERANK_MODE_FULL_REORDER
-            and len(reordered) < len(head) * 0.8
-        ):
+        if self.rerank_mode == RERANK_MODE_FULL_REORDER and len(reordered) < len(head) * 0.8:
             logger.warning(
                 "rerank parsed %d of %d candidate ids",
                 len(reordered),

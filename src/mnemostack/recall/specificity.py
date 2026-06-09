@@ -4,6 +4,7 @@ This module is intentionally conservative: it only triggers on short generic
 phrases that commonly hurt factual QA scoring, then asks the LLM to rewrite the
 already-generated answer using exact names present in the retrieved memories.
 """
+
 from __future__ import annotations
 
 import re
@@ -181,8 +182,7 @@ def _build_specificity_prompt(
 ) -> str:
     memories = _format_memories(candidate_memories)
     placeholder_lines = "\n".join(
-        f"- {placeholder}: {candidate_query}"
-        for placeholder, candidate_query in placeholders
+        f"- {placeholder}: {candidate_query}" for placeholder, candidate_query in placeholders
     )
     return f"""REWRITE the answer below to replace generic placeholders with exact specific names found in the memories.
 

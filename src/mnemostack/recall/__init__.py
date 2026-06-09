@@ -76,7 +76,6 @@ __all__ = [
     "HyDERetriever",
     "MemgraphRetriever",
     "TemporalRetriever",
-
     "extract_temporal",
     "Answer",
     "AnswerGenerator",

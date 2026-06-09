@@ -4,6 +4,7 @@ Extensible design: users register phases (callables) and the runtime
 executes them in order, tracking success/failure/duration for each.
 Inspired by Kairos (internal prototype) but generalized for any memory stack.
 """
+
 from __future__ import annotations
 
 import time

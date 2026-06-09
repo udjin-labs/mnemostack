@@ -14,6 +14,7 @@ handles, ``_build_filter`` converts it to a valid
 ``RecallResult`` objects with ``sources=['temporal']`` when hits
 are returned by the store.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -264,15 +265,15 @@ def test_store_exception_returns_empty_and_logs(caplog):
     mnemostack_logger.propagate = True
     try:
         r = TemporalRetriever(
-            embedding=_FakeEmbedding(), vector_store=_RaisingVectorStore(),
+            embedding=_FakeEmbedding(),
+            vector_store=_RaisingVectorStore(),
         )
         with caplog.at_level("WARNING", logger="mnemostack.recall.retrievers"):
             results = r.search("april 2026 logs?", limit=5)
 
         assert results == []
         assert any(
-            "TemporalRetriever" in rec.getMessage()
-            and "simulated qdrant 500" in rec.getMessage()
+            "TemporalRetriever" in rec.getMessage() and "simulated qdrant 500" in rec.getMessage()
             for rec in caplog.records
         ), "expected a WARNING log entry describing the store failure"
     finally:

@@ -88,10 +88,13 @@ class TestStoreMemoryValidation:
             validate_tool_input(StoreMemoryInput, {"content": "  "})
 
     def test_valid_with_metadata(self):
-        m = validate_tool_input(StoreMemoryInput, {
-            "content": "important fact",
-            "metadata": {"source": "test"},
-        })
+        m = validate_tool_input(
+            StoreMemoryInput,
+            {
+                "content": "important fact",
+                "metadata": {"source": "test"},
+            },
+        )
         assert m.metadata == {"source": "test"}
 
 

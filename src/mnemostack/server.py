@@ -16,6 +16,7 @@ Or programmatically:
 
 The server is opt-in: install with `pip install 'mnemostack[server]'`.
 """
+
 from __future__ import annotations
 
 import logging
@@ -43,11 +44,11 @@ from mnemostack.observability.recorder import (
     set_recorder,
 )
 from mnemostack.recall import (
+    RERANK_MODES,
     AnswerGenerator,
     BM25Retriever,
     MemgraphRetriever,
     Recaller,
-    RERANK_MODES,
     Reranker,
     TemporalRetriever,
     VectorRetriever,
@@ -67,6 +68,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 
 # ----- Request / response models -----
+
 
 class RecallRequest(BaseModel):
     query: str = Field(..., min_length=1, description="Natural language query.")
@@ -150,6 +152,7 @@ class HealthResponse(BaseModel):
 
 # ----- Server construction -----
 
+
 @dataclass
 class ServerConfig:
     provider_name: str = "gemini"
@@ -211,11 +214,13 @@ def _build_bm25_docs(paths: list[str] | None):
             for i in range(0, len(text), 800):
                 chunk = text[i : i + 800]
                 if chunk.strip():
-                    docs.append(BM25Doc(
-                        id=f"{f}:{i}",
-                        text=chunk,
-                        payload={"source": str(f), "offset": i},
-                    ))
+                    docs.append(
+                        BM25Doc(
+                            id=f"{f}:{i}",
+                            text=chunk,
+                            payload={"source": str(f), "offset": i},
+                        )
+                    )
     return docs
 
 
@@ -228,10 +233,7 @@ def _memory_of(result) -> Memory:
     payload = getattr(result, "payload", None)
     if not payload:
         payload = getattr(result, "metadata", None) or {}
-    payload = {
-        key: value for key, value in payload.items()
-        if key != "_vector_floor_candidates"
-    }
+    payload = {key: value for key, value in payload.items() if key != "_vector_floor_candidates"}
     # Common source fields populated by our indexers. Order matters: explicit
     # 'source' wins, then the workspace conventions, finally nothing.
     source = (
@@ -324,7 +326,9 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     set_recorder(InMemoryRecorder())
 
     provider = get_provider(cfg.provider_name, **model_kwargs(cfg.embedding_model))
-    store = VectorStore(collection=cfg.collection, dimension=provider.dimension, host=cfg.qdrant_url)
+    store = VectorStore(
+        collection=cfg.collection, dimension=provider.dimension, host=cfg.qdrant_url
+    )
 
     def _graph_ok() -> bool:
         if not cfg.graph_uri:

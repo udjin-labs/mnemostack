@@ -1,4 +1,5 @@
 """Abstract base class for LLM providers (used for answer generation, reranking)."""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod

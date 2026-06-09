@@ -1,4 +1,5 @@
 """High-level Recaller — orchestrates embedding + vector + BM25 + RRF fusion."""
+
 from __future__ import annotations
 
 import logging
@@ -87,19 +88,32 @@ class Recaller:
     # almost nothing. Markers are matched as whole words to avoid false-positives
     # like "pipeline" → "ip" or "important" → "port".
     _EXACT_TOKEN_RE = re.compile(
-        r"\b\d{1,3}(?:\.\d{1,3}){3}\b|"       # IPv4
-        r"\b\d{4,5}\b|"                        # port / numeric code
-        r"\b\d{4}\.\d+\.\d+\b|"                 # version
+        r"\b\d{1,3}(?:\.\d{1,3}){3}\b|"  # IPv4
+        r"\b\d{4,5}\b|"  # port / numeric code
+        r"\b\d{4}\.\d+\.\d+\b|"  # version
         r"\b[A-Za-z]+[-_]\d+[A-Za-z0-9-]*\b"  # id/code
     )
     _EXACT_MARKERS = {"ip", "порт", "port", "версия", "version", "uuid", "api"}
     _PERSON_MARKERS = {
-        "кто", "who", "telegram", "handle", "username",
-        "contact", "контакт",
+        "кто",
+        "who",
+        "telegram",
+        "handle",
+        "username",
+        "contact",
+        "контакт",
     }
     _TEMPORAL_MARKERS = {
-        "когда", "when", "дата", "date", "вчера", "yesterday",
-        "сегодня", "today", "завтра", "tomorrow",
+        "когда",
+        "when",
+        "дата",
+        "date",
+        "вчера",
+        "yesterday",
+        "сегодня",
+        "today",
+        "завтра",
+        "tomorrow",
     }
 
     def __init__(
@@ -171,10 +185,7 @@ class Recaller:
         if cls._EXACT_TOKEN_RE.search(q_lower) or tokens & cls._EXACT_MARKERS:
             return "exact_token"
         # Telegram-style @handle is a person signal too
-        if (
-            (tokens & cls._PERSON_MARKERS)
-            or re.search(r"@\w+", q_lower)
-        ):
+        if (tokens & cls._PERSON_MARKERS) or re.search(r"@\w+", q_lower):
             return "person"
         if tokens & cls._TEMPORAL_MARKERS:
             return "temporal"
@@ -265,12 +276,8 @@ class Recaller:
                 query_vec = self.embedding.embed(query)
             if query_vec:
                 with histogram("mnemostack.recall.vector_latency_ms"):
-                    vector_hits = self.vector.search(
-                        query_vec, limit=vector_limit, filters=filters
-                    )
-                counter(
-                    "mnemostack.recall.vector_hits", len(vector_hits)
-                )
+                    vector_hits = self.vector.search(query_vec, limit=vector_limit, filters=filters)
+                counter("mnemostack.recall.vector_hits", len(vector_hits))
             raw_vector_candidates = self._vector_floor_candidates_from_hits(vector_hits)
             if vector_floor_candidates is not None:
                 vector_floor_candidates.extend(raw_vector_candidates)
@@ -346,13 +353,10 @@ class Recaller:
                     query, results, limit=limit, vector_limit=vector_limit, filters=filters
                 )
             if apply_vector_floor:
-                results = self._apply_vector_floor(
-                    results, raw_vector_candidates
-                )
+                results = self._apply_vector_floor(results, raw_vector_candidates)
             self._attach_vector_floor_candidates(results, raw_vector_candidates)
             counter("mnemostack.recall.results", len(results))
             return results
-
 
     def search_many(self, vectors: list[list[float]], limit: int) -> list[RecallResult]:
         """Search Qdrant for multiple vectors and RRF-merge the ranked hits."""
@@ -586,17 +590,11 @@ class Recaller:
             if apply_vector_floor:
                 results = self._apply_vector_floor(
                     results,
-                    [
-                        result for result in id_to_result.values()
-                        if "vector" in result.sources
-                    ],
+                    [result for result in id_to_result.values() if "vector" in result.sources],
                 )
             self._attach_vector_floor_candidates(
                 results,
-                [
-                    result for result in id_to_result.values()
-                    if "vector" in result.sources
-                ],
+                [result for result in id_to_result.values() if "vector" in result.sources],
             )
             counter("mnemostack.recall.results", len(results))
             return results
@@ -723,7 +721,8 @@ class Recaller:
                 )
             return candidates
         return [
-            result for result in results
+            result
+            for result in results
             if "vector" in result.sources and "raw_vector_score" in result.payload
         ]
 
@@ -804,9 +803,7 @@ class Recaller:
             result.id: index for index, result in enumerate(pipeline_results)
         }
         pipeline_scores = [result.score for result in pipeline_results]
-        fallback_only_penalty_ceiling = (
-            min(pipeline_scores) - 0.01 if pipeline_scores else None
-        )
+        fallback_only_penalty_ceiling = min(pipeline_scores) - 0.01 if pipeline_scores else None
         fallback_only: list[RecallResult] = []
 
         for fallback in fallback_hits:

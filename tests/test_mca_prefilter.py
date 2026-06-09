@@ -59,10 +59,12 @@ def test_extract_exact_tokens_skips_dates_fractions_and_common_slash_words():
 
 
 def test_mca_prefilter_returns_bm25_matches_as_recall_results():
-    bm25 = BM25([
-        BM25Doc("rare", "Deployment mentions snake_case_id and /var/log/app.log"),
-        BM25Doc("other", "ordinary semantic text"),
-    ])
+    bm25 = BM25(
+        [
+            BM25Doc("rare", "Deployment mentions snake_case_id and /var/log/app.log"),
+            BM25Doc("other", "ordinary semantic text"),
+        ]
+    )
 
     results = mca_prefilter("where is snake_case_id?", bm25, limit=10)
 
@@ -83,11 +85,15 @@ def test_mca_results_join_rrf_pool_in_retriever_mode():
         BM25Doc("mca", "Relevant branch feat-123-fix is here"),
         BM25Doc("noise", "unrelated"),
     ]
-    bm25_retriever = type("BM25Like", (), {
-        "name": "bm25",
-        "bm25": BM25(bm25_docs),
-        "search": lambda self, query, limit=20, filters=None: [],
-    })()
+    bm25_retriever = type(
+        "BM25Like",
+        (),
+        {
+            "name": "bm25",
+            "bm25": BM25(bm25_docs),
+            "search": lambda self, query, limit=20, filters=None: [],
+        },
+    )()
     recaller = Recaller(
         retrievers=[FixedRetriever(), bm25_retriever],
         mca_prefilter=True,
