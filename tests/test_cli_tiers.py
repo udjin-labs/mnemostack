@@ -175,6 +175,7 @@ def test_mcp_serve_passes_vector_floor_to_build_server():
         bm25_path=[],
         state_path="/tmp/state.json",
         vector_floor=3,
+        rerank_mode="full_reorder",
     )
     fake_mcp = MagicMock()
 
@@ -184,6 +185,7 @@ def test_mcp_serve_passes_vector_floor_to_build_server():
     assert rc == 0
     build_server.assert_called_once()
     assert build_server.call_args.kwargs["vector_floor"] == 3
+    assert build_server.call_args.kwargs["rerank_mode"] == "full_reorder"
     fake_mcp.run.assert_called_once()
 
 

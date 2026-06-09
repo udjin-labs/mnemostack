@@ -237,6 +237,45 @@ def test_build_app_passes_configured_provider_models(monkeypatch):
     assert calls["llm"] == ("fake-llm", {"model": "llm-custom"})
 
 
+def test_build_app_passes_configured_rerank_mode(monkeypatch):
+    import mnemostack.server as srv
+
+    reranker_kwargs = {}
+
+    class _FakeProvider:
+        dimension = 3
+
+        def embed(self, text):
+            return [0.0, 0.0, 0.0]
+
+    def _fake_reranker(**kwargs):
+        reranker_kwargs.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(srv, "get_provider", lambda _name, **_kwargs: _FakeProvider())
+    monkeypatch.setattr(srv, "get_llm", lambda _name, **_kwargs: object())
+    monkeypatch.setattr(srv, "VectorStore", lambda **_: object())
+    monkeypatch.setattr(srv, "Recaller", lambda **_: _FakeRecaller())
+    monkeypatch.setattr(srv, "VectorRetriever", lambda **_: object())
+    monkeypatch.setattr(srv, "BM25Retriever", lambda **_: object())
+    monkeypatch.setattr(srv, "MemgraphRetriever", lambda **_: object())
+    monkeypatch.setattr(srv, "TemporalRetriever", lambda **_: object())
+    monkeypatch.setattr(srv, "build_full_pipeline", lambda **_: _FakePipeline())
+    monkeypatch.setattr(srv, "FileStateStore", lambda path: object())
+    monkeypatch.setattr(srv, "AnswerGenerator", lambda **_: object())
+    monkeypatch.setattr(srv, "Reranker", _fake_reranker)
+
+    build_app(
+        ServerConfig(
+            provider_name="fake",
+            llm_name="fake-llm",
+            rerank_mode="full_reorder",
+        )
+    )
+
+    assert reranker_kwargs["rerank_mode"] == "full_reorder"
+
+
 def test_recall_endpoint(monkeypatch):
     app, recaller = _patched_app(monkeypatch)
     client = TestClient(app)

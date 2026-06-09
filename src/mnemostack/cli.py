@@ -24,6 +24,7 @@ from .recall import (
     BM25Retriever,
     MemgraphRetriever,
     Recaller,
+    RERANK_MODES,
     TemporalRetriever,
     VectorRetriever,
     build_bm25_docs,
@@ -769,6 +770,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=cfg.recall.vector_floor,
         help="Append missing top-N raw-vector candidates after fusion/rerank",
     )
+    p_mcp.add_argument(
+        "--rerank-mode",
+        choices=sorted(RERANK_MODES),
+        default=cfg.recall.rerank_mode,
+        help="LLM reranker contract: relevant_only returns a subset, full_reorder ranks all",
+    )
     p_mcp.set_defaults(func=cmd_mcp_serve)
 
     p_init = sub.add_parser(
@@ -835,6 +842,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Append missing top-N raw-vector candidates after fusion/rerank",
     )
     p_serve.add_argument(
+        "--rerank-mode",
+        choices=sorted(RERANK_MODES),
+        default=cfg.recall.rerank_mode,
+        help="LLM reranker contract: relevant_only returns a subset, full_reorder ranks all",
+    )
+    p_serve.add_argument(
         "--reload", action="store_true", help="Enable uvicorn auto-reload (dev only)"
     )
     p_serve.set_defaults(func=cmd_serve)
@@ -889,6 +902,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         graph_timeout=args.graph_timeout,
         bm25_paths=list(args.bm25_path) if args.bm25_path else None,
         vector_floor=max(0, int(args.vector_floor)),
+        rerank_mode=args.rerank_mode,
         state_path=args.state_path,
         auto_record_ior=args.auto_record_ior,
     )
@@ -977,6 +991,7 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
         bm25_paths=list(args.bm25_path) if args.bm25_path else None,
         state_path=args.state_path,
         vector_floor=max(0, int(args.vector_floor)),
+        rerank_mode=args.rerank_mode,
     )
     mcp.run()
     return 0
