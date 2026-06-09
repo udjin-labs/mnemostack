@@ -161,6 +161,7 @@ class ServerConfig:
     graph_health_timeout: float = 1.0
     graph_timeout: float = 5.0
     bm25_paths: list[str] | None = None  # optional markdown dirs for BM25 corpus
+    vector_floor: int = 0
     state_path: str = "/tmp/mnemostack-server-state.json"
     auto_record_ior: bool = False
 
@@ -178,6 +179,7 @@ class ServerConfig:
             graph_health_timeout=cfg.graph.health_timeout,
             graph_timeout=cfg.graph.timeout,
             bm25_paths=list(cfg.recall.bm25_paths) or None,
+            vector_floor=max(0, int(cfg.recall.vector_floor)),
             auto_record_ior=_env_bool("MNEMOSTACK_AUTO_RECORD_IOR"),
         )
 
@@ -218,6 +220,10 @@ def _memory_of(result) -> Memory:
     payload = getattr(result, "payload", None)
     if not payload:
         payload = getattr(result, "metadata", None) or {}
+    payload = {
+        key: value for key, value in payload.items()
+        if key != "_vector_floor_candidates"
+    }
     # Common source fields populated by our indexers. Order matters: explicit
     # 'source' wins, then the workspace conventions, finally nothing.
     source = (
@@ -338,7 +344,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         TemporalRetriever(embedding=provider, vector_store=store),
     ]
     retrievers = [r for r in retrievers if r is not None]
-    recaller = Recaller(retrievers=retrievers)
+    recaller = Recaller(retrievers=retrievers, vector_floor=cfg.vector_floor)
 
     from pathlib import Path
 
@@ -369,7 +375,8 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
 
     def _run_recall_sync(query: str, limit: int, full_pipeline: bool):
         raw_limit = max(limit * 3, 30) if full_pipeline else limit
-        results = recaller.recall(query, limit=raw_limit)
+        recalled_results = recaller.recall(query, limit=raw_limit)
+        results = recalled_results
         if full_pipeline:
             results = pipeline.apply(query, results)
             if reranker is not None:
@@ -378,6 +385,10 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 except Exception as exc:  # pragma: no cover
                     log.warning("reranker failed (%s) — returning pre-rerank order", exc)
         results = results[:limit]
+        results = recaller.apply_vector_floor_after_rerank(
+            results,
+            recalled_results,
+        )
         if cfg.auto_record_ior:
             record_recall_events(pipeline, results)
         return results

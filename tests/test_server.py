@@ -78,6 +78,9 @@ class _FakeRecaller:
         self.calls.append((query, limit))
         return [FakeResult(id=str(i), text=f"m{i}") for i in range(min(limit, 3))]
 
+    def apply_vector_floor_after_rerank(self, results, recalled_results):
+        return results
+
 
 class _FakePipeline:
     def __init__(self, stages=None):
@@ -245,6 +248,62 @@ def test_recall_endpoint(monkeypatch):
     assert data["results"][0]["id"] == "0"
     # Validates the recaller was invoked
     assert recaller.calls
+
+
+def test_recall_endpoint_applies_vector_floor_after_rerank_and_slice(monkeypatch):
+    import mnemostack.server as srv
+
+    class _FloorRecaller:
+        def recall(self, query, limit=10, **_):
+            return [
+                FakeResult(id="lexical-1", text="lexical winner"),
+                FakeResult(id="lexical-2", text="lexical runner up"),
+                FakeResult(id="vector-strong", text="vector-only match"),
+            ]
+
+        def apply_vector_floor_after_rerank(self, results, recalled_results):
+            ids = {result.id for result in results}
+            output = list(results)
+            for result in recalled_results:
+                if result.id == "vector-strong" and result.id not in ids:
+                    output.append(result)
+            return output
+
+    class _DroppingReranker:
+        def __init__(self, **_):
+            pass
+
+        def rerank(self, q, rs):
+            return [result for result in rs if result.id != "vector-strong"]
+
+    monkeypatch.setattr(srv, "VectorStore", lambda **_: type("VS", (), {"count": lambda self: 0, "dimension": 3})())
+
+    class _FakeProvider:
+        dimension = 3
+
+        def embed(self, text):
+            return [0.0, 0.0, 0.0]
+
+    monkeypatch.setattr(srv, "get_provider", lambda _name, **_kwargs: _FakeProvider())
+    monkeypatch.setattr(srv, "Recaller", lambda **_: _FloorRecaller())
+    monkeypatch.setattr(srv, "VectorRetriever", lambda **_: object())
+    monkeypatch.setattr(srv, "BM25Retriever", lambda **_: object())
+    monkeypatch.setattr(srv, "MemgraphRetriever", lambda **_: object())
+    monkeypatch.setattr(srv, "TemporalRetriever", lambda **_: object())
+    monkeypatch.setattr(srv, "build_full_pipeline", lambda **_: _FakePipeline())
+    monkeypatch.setattr(srv, "FileStateStore", lambda path: object())
+    monkeypatch.setattr(srv, "AnswerGenerator", lambda **_: object())
+    monkeypatch.setattr(srv, "Reranker", _DroppingReranker)
+    monkeypatch.setattr(srv, "get_llm", lambda _n, **_kwargs: object())
+
+    app = srv.build_app(ServerConfig(provider_name="fake", llm_name="fake"))
+    client = TestClient(app)
+
+    r = client.post("/recall", json={"query": "hello", "limit": 2, "full_pipeline": True})
+
+    assert r.status_code == 200
+    ids = [result["id"] for result in r.json()["results"]]
+    assert ids == ["lexical-1", "lexical-2", "vector-strong"]
 
 
 def test_recall_endpoint_can_auto_record_ior(monkeypatch):
