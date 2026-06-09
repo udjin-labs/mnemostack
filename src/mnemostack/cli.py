@@ -344,6 +344,7 @@ def _build_recaller(
         retrievers=[r for r in retrievers if r is not None],
         query_expansion=query_expansion,
         expansion_llm=expansion_llm,
+        vector_floor=max(0, int(getattr(args, "vector_floor", 0))),
     )
 
 
@@ -551,6 +552,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--query-expansion",
         action="store_true",
         help="Expand query with an LLM and fuse recall over original + variants",
+    )
+    p_search.add_argument(
+        "--vector-floor",
+        type=int,
+        default=cfg.recall.vector_floor,
+        help="Append missing top-N raw-vector candidates after fusion/rerank",
     )
     p_search.set_defaults(func=cmd_search)
 
@@ -801,6 +808,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Record returned recall ids for inhibition-of-return state",
     )
     p_serve.add_argument(
+        "--vector-floor",
+        type=int,
+        default=cfg.recall.vector_floor,
+        help="Append missing top-N raw-vector candidates after fusion/rerank",
+    )
+    p_serve.add_argument(
         "--reload", action="store_true", help="Enable uvicorn auto-reload (dev only)"
     )
     p_serve.set_defaults(func=cmd_serve)
@@ -854,6 +867,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         graph_uri=args.memgraph_uri,
         graph_timeout=args.graph_timeout,
         bm25_paths=list(args.bm25_path) if args.bm25_path else None,
+        vector_floor=max(0, int(args.vector_floor)),
         state_path=args.state_path,
         auto_record_ior=args.auto_record_ior,
     )
