@@ -24,12 +24,13 @@ MEMORIES:
 {memories}
 
 RULES:
-1. Output ONLY a space-separated list of memory IDs, most relevant first.
-2. Include only memories that are actually relevant (skip irrelevant ones).
-3. If none are relevant, output: NONE
-4. No explanation, no prose, just the IDs.
+1. Output ONLY a space-separated list of ALL memory IDs, most relevant first.
+2. Include every memory ID exactly once, even if some memories seem irrelevant.
+3. Do not drop, skip, filter, or omit any IDs; downstream stages handle filtering.
+4. If the memory list is empty, output: NONE
+5. No explanation, no prose, just the IDs.
 
-RELEVANT_IDS:"""
+RANKED_IDS:"""
 
 
 @dataclass
@@ -89,7 +90,7 @@ class Reranker:
 
         prompt_ids = self._ordinal_ids(head)
         prompt = self._build_prompt(query, head, prompt_ids)
-        effective_max_tokens = max(self.max_tokens, len(head) * 8)
+        effective_max_tokens = max(self.max_tokens, len(head) * 10)
         resp = self.llm.generate(
             prompt, max_tokens=effective_max_tokens, temperature=0.0
         )
@@ -137,7 +138,7 @@ class Reranker:
             if r is not None and str(r.id) not in seen:
                 reordered.append(r)
                 seen.add(str(r.id))
-        if len(reordered) < len(head):
+        if len(reordered) < len(head) * 0.8:
             logger.warning(
                 "rerank parsed %d of %d candidate ids",
                 len(reordered),
@@ -206,4 +207,5 @@ class Reranker:
         first_line = text.split("\n", 1)[0]
         # Split on whitespace / commas; keep composite tokens intact
         tokens = [t.strip().rstrip(".") for t in re.split(r"[\s,]+", first_line) if t.strip()]
-        return [t for t in tokens if t.upper() not in {"RELEVANT_IDS", "NONE", ""}]
+        labels = {"RELEVANT_IDS", "RANKED_IDS", "NONE", ""}
+        return [t for t in tokens if t.upper().rstrip(":") not in labels]
