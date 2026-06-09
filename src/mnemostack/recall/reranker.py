@@ -101,7 +101,7 @@ class Reranker:
             logger.warning("rerank produced no usable ids, keeping original order")
             return results
 
-        ordinal_map = {str(i): r for i, r in enumerate(head)}
+        ordinal_map = {f"R{i}": r for i, r in enumerate(head)}
         # Build id → result map. Keep this as a fallback so LLMs that drop
         # trailing segments (e.g. `MEMORY.md` instead of `MEMORY.md:45`) still
         # resolve to the right result.
@@ -162,7 +162,7 @@ class Reranker:
         lines = []
         for i, r in enumerate(results):
             text = r.text.strip().replace("\n", " ")[:300]
-            lines.append(f"ID={i}: {text}")
+            lines.append(f"ID=R{i}: {text}")
         memories_str = "\n".join(lines)
         return _RERANK_PROMPT.format(query=query, memories=memories_str)
 
