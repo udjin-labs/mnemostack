@@ -600,9 +600,13 @@ class Recaller:
                 return result.score
 
         strongest = sorted(vector_candidates, key=_raw_score, reverse=True)
+        floor_score = min((result.score for result in output), default=None)
         for candidate in strongest[: self.vector_floor]:
             if candidate.id in seen_ids:
                 continue
+            if floor_score is not None:
+                candidate.score = floor_score * 0.999
+                floor_score = candidate.score
             output.append(candidate)
             seen_ids.add(candidate.id)
         return output

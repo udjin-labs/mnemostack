@@ -80,6 +80,22 @@ def test_vector_floor_deduplicates_existing_results():
     assert len(ids) == len(set(ids))
 
 
+def test_vector_floor_appended_scores_stay_below_fused_results():
+    recaller = Recaller(
+        embedding_provider=FakeEmbedding(),
+        vector_store=FakeVectorStore(_vector_hits()),
+        bm25_docs=_bm25_docs(),
+        vector_floor=2,
+    )
+
+    results = recaller.recall("lexical", limit=2, vector_limit=3)
+    by_id = {result.id: result for result in results}
+
+    assert by_id["v-buried"].payload["raw_vector_score"] == 0.721
+    assert by_id["v-buried"].score < min(result.score for result in results[:2])
+    assert sorted(results, key=lambda result: result.score, reverse=True)[:2] == results[:2]
+
+
 def test_vector_floor_with_no_vector_hits_does_not_add_results():
     recaller = Recaller(
         embedding_provider=FakeEmbedding(),
