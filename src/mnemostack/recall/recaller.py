@@ -115,6 +115,7 @@ class Recaller:
         expansion_llm: LLMProvider | None = None,
         fallback_threshold: float = 0.35,
         mca_prefilter: bool = False,
+        vector_floor: int = 0,
     ):
         """Two modes:
 
@@ -150,6 +151,7 @@ class Recaller:
         self.expansion_llm = expansion_llm
         self.fallback_threshold = fallback_threshold
         self.mca_prefilter_enabled = mca_prefilter
+        self.vector_floor = max(0, int(vector_floor))
         self._query_expansion_cache: dict[str, list[str]] = {}
 
     # --- adaptive weight helpers ---
@@ -323,6 +325,9 @@ class Recaller:
                 results = self._maybe_apply_fallback(
                     query, results, limit=limit, vector_limit=vector_limit, filters=filters
                 )
+            results = self._apply_vector_floor(
+                results, self._vector_floor_candidates_from_hits(vector_hits)
+            )
             counter("mnemostack.recall.results", len(results))
             return results
 
@@ -421,6 +426,13 @@ class Recaller:
                 continue
             result.score = rrf_score
             merged.append(result)
+        merged = self._apply_vector_floor(
+            merged,
+            [
+                result for result in id_to_result.values()
+                if "vector" in result.sources
+            ],
+        )
         counter("mnemostack.recall.results", len(merged))
         return merged
 
@@ -541,8 +553,59 @@ class Recaller:
                 results = self._maybe_apply_fallback(
                     query, results, limit=limit, vector_limit=per_source_limit, filters=filters
                 )
+            results = self._apply_vector_floor(
+                results,
+                [
+                    result for result in id_to_result.values()
+                    if "vector" in result.sources
+                ],
+            )
             counter("mnemostack.recall.results", len(results))
             return results
+
+    def _vector_floor_candidates_from_hits(
+        self,
+        vector_hits: list[Hit],
+    ) -> list[RecallResult]:
+        candidates: list[RecallResult] = []
+        for hit in vector_hits:
+            payload = dict(hit.payload or {})
+            payload["raw_vector_score"] = hit.score
+            candidates.append(
+                RecallResult(
+                    id=hit.id,
+                    text=payload.get("text", ""),
+                    score=hit.score,
+                    payload=payload,
+                    sources=["vector"],
+                )
+            )
+        return candidates
+
+    def _apply_vector_floor(
+        self,
+        results: list[RecallResult],
+        vector_candidates: list[RecallResult],
+    ) -> list[RecallResult]:
+        if self.vector_floor <= 0 or not vector_candidates:
+            return results
+
+        output = list(results)
+        seen_ids = {result.id for result in output}
+
+        def _raw_score(result: RecallResult) -> float:
+            try:
+                return float(result.payload.get("raw_vector_score", result.score))
+            except (TypeError, ValueError):
+                return result.score
+
+        strongest = sorted(vector_candidates, key=_raw_score, reverse=True)
+        for candidate in strongest[: self.vector_floor]:
+            if candidate.id in seen_ids:
+                continue
+            output.append(candidate)
+            seen_ids.add(candidate.id)
+        return output
 
     def _mca_hits(self, query: str, limit: int) -> list[RecallResult]:
         bm25 = self.bm25
