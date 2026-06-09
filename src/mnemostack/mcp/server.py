@@ -39,6 +39,15 @@ from ..recall.pipeline import FileStateStore
 from ..vector import VectorStore
 
 
+def _public_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
+    if not payload:
+        return {}
+    return {
+        key: value for key, value in payload.items()
+        if key != "_vector_floor_candidates"
+    }
+
+
 def build_server(
     collection: str = "mnemostack",
     embedding_provider: str = "gemini",
@@ -228,7 +237,7 @@ def build_server(
                         "text": r.text,
                         "score": round(r.score, 4),
                         "sources": r.sources,
-                        "payload": r.payload,
+                        "payload": _public_payload(r.payload),
                     }
                     for r in results
                 ],
