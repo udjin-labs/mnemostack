@@ -237,10 +237,18 @@ class Recaller:
         vector_limit: int,
         bm25_limit: int,
         filters: dict[str, Any] | None,
+        *,
+        apply_vector_floor: bool = True,
     ) -> list[RecallResult]:
         # Retrievers mode: fuse N arbitrary ranked lists
         if self.retrievers:
-            return self._recall_via_retrievers(query, limit, vector_limit, filters)
+            return self._recall_via_retrievers(
+                query,
+                limit,
+                vector_limit,
+                filters,
+                apply_vector_floor=apply_vector_floor,
+            )
         with histogram("mnemostack.recall.latency_ms"):
             # Vector search
             vector_hits: list[Hit] = []
@@ -325,9 +333,10 @@ class Recaller:
                 results = self._maybe_apply_fallback(
                     query, results, limit=limit, vector_limit=vector_limit, filters=filters
                 )
-            results = self._apply_vector_floor(
-                results, self._vector_floor_candidates_from_hits(vector_hits)
-            )
+            if apply_vector_floor:
+                results = self._apply_vector_floor(
+                    results, self._vector_floor_candidates_from_hits(vector_hits)
+                )
             counter("mnemostack.recall.results", len(results))
             return results
 
@@ -405,6 +414,7 @@ class Recaller:
                 vector_limit=vector_limit,
                 bm25_limit=bm25_limit,
                 filters=filters,
+                apply_vector_floor=False,
             )
             ranked: list[tuple[Any, float]] = []
             for result in results:
@@ -463,6 +473,8 @@ class Recaller:
         limit: int,
         per_source_limit: int,
         filters: dict[str, Any] | None,
+        *,
+        apply_vector_floor: bool = True,
     ) -> list[RecallResult]:
         """Fuse N retrievers' ranked lists via RRF. Preserves source tags.
 
@@ -553,13 +565,14 @@ class Recaller:
                 results = self._maybe_apply_fallback(
                     query, results, limit=limit, vector_limit=per_source_limit, filters=filters
                 )
-            results = self._apply_vector_floor(
-                results,
-                [
-                    result for result in id_to_result.values()
-                    if "vector" in result.sources
-                ],
-            )
+            if apply_vector_floor:
+                results = self._apply_vector_floor(
+                    results,
+                    [
+                        result for result in id_to_result.values()
+                        if "vector" in result.sources
+                    ],
+                )
             counter("mnemostack.recall.results", len(results))
             return results
 

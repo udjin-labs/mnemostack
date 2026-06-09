@@ -1,3 +1,4 @@
+from mnemostack.llm.base import LLMResponse
 from mnemostack.recall import BM25Doc, Recaller, RecallResult
 from mnemostack.vector.qdrant import Hit
 
@@ -13,6 +14,11 @@ class FakeVectorStore:
 
     def search(self, vector, limit=10, filters=None):
         return self.hits[:limit]
+
+
+class FakeExpansionLLM:
+    def generate(self, prompt, max_tokens=120, temperature=0.0):
+        return LLMResponse(text="lexical variant\nsemantic variant")
 
 
 def _bm25_docs():
@@ -107,6 +113,29 @@ def test_vector_floor_with_no_vector_hits_does_not_add_results():
     results = recaller.recall("lexical", limit=2, vector_limit=3)
 
     assert [result.id for result in results] == ["b1", "b2"]
+
+
+def test_vector_floor_applies_once_after_query_expansion_fusion():
+    recaller = Recaller(
+        embedding_provider=FakeEmbedding(),
+        vector_store=FakeVectorStore(_vector_hits()),
+        bm25_docs=_bm25_docs(),
+        query_expansion=True,
+        expansion_llm=FakeExpansionLLM(),
+        vector_floor=2,
+    )
+    calls = []
+    original_apply_vector_floor = recaller._apply_vector_floor
+
+    def spy_apply_vector_floor(results, vector_candidates):
+        calls.append([result.id for result in results])
+        return original_apply_vector_floor(results, vector_candidates)
+
+    recaller._apply_vector_floor = spy_apply_vector_floor
+
+    recaller.recall("lexical", limit=2, vector_limit=3)
+
+    assert len(calls) == 1
 
 
 class FixedRetriever:
