@@ -127,7 +127,10 @@ def cmd_search(args: argparse.Namespace) -> int:
             if snippet_chars is None:
                 # backward-compatible: full text + payload
                 entry["text"] = r.text
-                entry["payload"] = r.payload
+                entry["payload"] = {
+                    key: value for key, value in r.payload.items()
+                    if key != "_vector_floor_candidates"
+                }
             elif snippet_chars > 0:
                 entry["text"] = r.text[:snippet_chars]
             # tier 1 (snippet_chars == 0) emits no text at all
@@ -748,6 +751,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="/tmp/mnemostack-server-state.json",
         help="Pipeline state file path for feedback",
     )
+    p_mcp.add_argument(
+        "--vector-floor",
+        type=int,
+        default=cfg.recall.vector_floor,
+        help="Append missing top-N raw-vector candidates after fusion/rerank",
+    )
     p_mcp.set_defaults(func=cmd_mcp_serve)
 
     p_init = sub.add_parser(
@@ -955,6 +964,7 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
         graph_timeout=args.graph_timeout,
         bm25_paths=list(args.bm25_path) if args.bm25_path else None,
         state_path=args.state_path,
+        vector_floor=max(0, int(args.vector_floor)),
     )
     mcp.run()
     return 0
