@@ -1,7 +1,7 @@
 # mnemostack benchmarks
 
 Reproducible LoCoMo benchmark harness for mnemostack. Used to produce the
-**82.5%** strict / **92.2%** combined headline numbers on the main README,
+**82.9%** strict / **92.7%** combined headline numbers on the main README,
 plus the earlier `gemini-2.5-flash`-judged 67.8% / 80.4% historical run.
 
 ## What gets measured
