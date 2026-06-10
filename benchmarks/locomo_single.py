@@ -150,6 +150,16 @@ def main():
     )
     ap.add_argument("--only-sample", default=None, help="Run only the specified sample_id (e.g. conv-43)")
     ap.add_argument(
+        "--only-questions",
+        default=None,
+        help=(
+            "Path to a JSON list of {sample, question} rows (e.g. a wrong-questions dump). "
+            "Only those QA are evaluated, with the exact same pipeline as a full run. "
+            "Cheap directional probe — NOT a baseline: it cannot detect regressions on "
+            "questions that previously passed."
+        ),
+    )
+    ap.add_argument(
         "--window-size",
         type=int,
         default=3,
@@ -175,6 +185,12 @@ def main():
         if args.skip:
             dataset = dataset[args.skip :]
 
+    only_questions: set[tuple[str, str]] | None = None
+    if args.only_questions:
+        with open(args.only_questions) as f:
+            rows = json.load(f)
+        only_questions = {(r["sample"], r["question"]) for r in rows}
+
     client = QdrantClient(host="localhost", port=6333)
     provider = get_provider("gemini")
     llm = get_llm("gemini")
@@ -195,6 +211,9 @@ def main():
     for si, sample in enumerate(dataset):
         sid = sample["sample_id"]
         collection = f"locomo_single_{sid}"
+        if only_questions is not None and not any(s == sid for s, _ in only_questions):
+            log(f"\n=== Sample {si+1}/{len(dataset)}: {sid} — skipped (no selected QA) ===")
+            continue
         log(f"\n=== Sample {si+1}/{len(dataset)}: {sid} ===")
         store, bm25 = ingest_sample(sample, provider, client, collection, log, args.window_size)
         # Three modes:
@@ -244,6 +263,9 @@ def main():
         )
 
         qa_list = sample["qa"] if args.qa is None else sample["qa"][: args.qa]
+        if only_questions is not None:
+            qa_list = [qa for qa in qa_list if (sid, qa["question"]) in only_questions]
+            log(f"  --only-questions: {len(qa_list)} QA selected for {sid}")
         for qi, qa in enumerate(qa_list):
             q = qa["question"]
             truth = str(qa.get("answer", ""))
