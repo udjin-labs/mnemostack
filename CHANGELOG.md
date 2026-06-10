@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Timestamps are first-class in ingest**: `IngestItem` gains an explicit `timestamp` field (ISO-8601) that lands in `payload["timestamp"]`; passing it via `metadata` still works. Every payload now records `indexed_at` (UTC). Sliding-window chunks carry the temporal range of the window (`window_start_ts` / `window_end_ts`) alongside the middle item's timestamp.
+- **Recall trace and degraded flags**: new `mnemostack.recall.trace` module (`RecallTrace`, `apply_rerank_safe`). `Recaller.recall()` accepts an optional per-call `trace` that captures per-retriever ranked lists (with errors and latency), the fused order, the post-rerank order, and stable degradation tags (`retriever:<name>:failed`, `reranker:fallback`, `reranker:unavailable`, `temporal:no_parse`). HTTP `/recall` and `/answer` always return `degraded` and accept `include_trace`; MCP `mnemostack_search` / `mnemostack_answer` return `degraded`, search accepts `include_trace`. Fail-open behavior is unchanged — degradations are now visible instead of silent.
+- **Temporal parsing**: part-of-month expressions in English and Russian (`early/mid/late April`, `в начале/середине/конце апреля` → day 1–10 / 11–20 / 21–EOM windows) and `around <date>` qualifiers (`around/about/circa/примерно/около/где-то` widen the window to ±3 days while keeping the exact target date).
+- **CI**: mypy typecheck job (src fully clean, config in `pyproject.toml`) and coverage reporting in the test matrix.
+- `mnemostack index --recreate` now asks for confirmation (shows point count); `--yes/-y` skips the prompt, non-interactive runs without `--yes` exit with code 2.
+
+### Changed
+
+- Answer context no longer truncates timestamps to the date: time of day is kept when meaningful (`[2023-05-08 13:41]`), midnight/date-only values render as date. **This changes the answer prompt, so LoCoMo numbers are not directly comparable to the 82.5/92.2 baseline — re-baseline before comparing runs.**
+- `ensure_collection()` (sync and async) raises `DimensionMismatchError` when an existing collection stores vectors of a different size than the embedding provider produces. Previously the mismatch surfaced as garbage search results; deployments that were silently mis-dimensioned will now fail loudly at startup.
+- `TemporalRetriever` emits a `mnemostack.recall.temporal_no_parse` counter and exposes `explain_empty()` so an unparsed date is distinguishable from an empty corpus.
+
 ## [0.4.1] - 2026-05-03
 
 - Documentation restructuring and improvements.

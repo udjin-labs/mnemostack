@@ -61,3 +61,4 @@ benchmark-results/
 data/
 backups/
 /.codex
+locomo-tests/
