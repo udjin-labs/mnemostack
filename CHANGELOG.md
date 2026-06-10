@@ -6,23 +6,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Benchmarks
-
-- New LoCoMo headline, measured with the documented default config (`window_size=3`, query expansion, top-K 25) on the same judge (`gemini-3-flash-preview`): **82.9%** strict / **92.7%** combined (signal-only: 78.0% / 90.6%). Two methodology changes vs the previous 82.5/92.2 measurement, both about data fidelity: photo captions (`blip_caption`) are now ingested into the benchmark corpus (697/1540 signal QA cite image turns as evidence; previously dropped silently), and answer prompts show the time of day of each memory.
-- Benchmark harness gained per-QA `degraded` reporting and an `--only-questions` probe mode for cheap fix-validation iterations.
+## [0.4.5] - 2026-06-10
 
 ### Added
 
 - **Timestamps are first-class in ingest**: `IngestItem` gains an explicit `timestamp` field (ISO-8601) that lands in `payload["timestamp"]`; passing it via `metadata` still works. Every payload now records `indexed_at` (UTC). Sliding-window chunks carry the temporal range of the window (`window_start_ts` / `window_end_ts`) alongside the middle item's timestamp.
-- **Recall trace and degraded flags**: new `mnemostack.recall.trace` module (`RecallTrace`, `apply_rerank_safe`). `Recaller.recall()` accepts an optional per-call `trace` that captures per-retriever ranked lists (with errors and latency), the fused order, the post-rerank order, and stable degradation tags (`retriever:<name>:failed`, `reranker:fallback`, `reranker:unavailable`, `temporal:no_parse`). HTTP `/recall` and `/answer` always return `degraded` and accept `include_trace`; MCP `mnemostack_search` / `mnemostack_answer` return `degraded`, search accepts `include_trace`. Fail-open behavior is unchanged — degradations are now visible instead of silent.
-- **Temporal parsing**: part-of-month expressions in English and Russian (`early/mid/late April`, `в начале/середине/конце апреля` → day 1–10 / 11–20 / 21–EOM windows) and `around <date>` qualifiers (`around/about/circa/примерно/около/где-то` widen the window to ±3 days while keeping the exact target date).
+- **Recall trace and degraded flags**: new `mnemostack.recall.trace` module (`RecallTrace`, `apply_rerank_safe`). `Recaller.recall()` accepts an optional per-call `trace` that captures per-retriever ranked lists (with errors and latency), the fused order, the post-rerank order, and stable degradation tags (`retriever:<name>:failed`, `reranker:fallback`, `reranker:unavailable`, `temporal:no_parse`). HTTP `/recall` and `/answer` always return `degraded` and accept `include_trace`; MCP `mnemostack_search` / `mnemostack_answer` return `degraded`, search accepts `include_trace`. Fail-open behavior is unchanged: degradations are now visible instead of silent.
+- **Temporal parsing**: part-of-month expressions in English and Russian (`early/mid/late April`, `в начале/середине/конце апреля` -> day 1-10 / 11-20 / 21-EOM windows) and `around <date>` qualifiers (`around/about/circa/примерно/около/где-то`) widen the window to +/-3 days while keeping the exact target date.
+- **LoCoMo benchmark coverage**: photo captions (`blip_caption`) are now ingested into the benchmark corpus, covering image evidence that was previously dropped silently.
+- **LoCoMo harness**: per-QA `degraded` recording and an `--only-questions` probe mode for cheap fix-validation iterations.
 - **CI**: mypy typecheck job (src fully clean, config in `pyproject.toml`) and coverage reporting in the test matrix.
 - `mnemostack index --recreate` now asks for confirmation (shows point count); `--yes/-y` skips the prompt, non-interactive runs without `--yes` exit with code 2.
 
 ### Changed
 
-- Answer context no longer truncates timestamps to the date: time of day is kept when meaningful (`[2023-05-08 13:41]`), midnight/date-only values render as date. **This changes the answer prompt, so LoCoMo numbers are not directly comparable to the 82.5/92.2 baseline — re-baseline before comparing runs.**
+- New LoCoMo headline, measured with the documented default config (`window_size=3`, query expansion, top-K 25) on the same judge (`gemini-3-flash-preview`): **82.9%** strict / **92.7%** combined (signal-only: 78.0% / 90.6%). Two methodology changes vs the previous 82.5/92.2 measurement, both about data fidelity: photo captions are now ingested into the benchmark corpus (697/1540 signal QA cite image turns as evidence), and answer prompts show the time of day of each memory.
+- Answer context no longer truncates timestamps to the date: time of day is kept when meaningful (`[2023-05-08 13:41]`), midnight/date-only values render as date. **This changes the answer prompt, so LoCoMo numbers are not directly comparable to the 82.5/92.2 baseline.**
 - `ensure_collection()` (sync and async) raises `DimensionMismatchError` when an existing collection stores vectors of a different size than the embedding provider produces. Previously the mismatch surfaced as garbage search results; deployments that were silently mis-dimensioned will now fail loudly at startup.
+- The LoCoMo docs now clarify that the LLM reranker and graph retrieval are runtime-only options, not part of the benchmark methodology.
+
+### Fixed
+
 - `TemporalRetriever` emits a `mnemostack.recall.temporal_no_parse` counter and exposes `explain_empty()` so an unparsed date is distinguishable from an empty corpus.
 
 ## [0.4.4] - 2026-06-10
