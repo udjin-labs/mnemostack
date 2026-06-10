@@ -22,7 +22,7 @@ from qdrant_client.models import (
     VectorParams,
 )
 
-from .qdrant import Hit
+from .qdrant import DimensionMismatchError, Hit
 
 
 class AsyncVectorStore:
@@ -77,7 +77,19 @@ class AsyncVectorStore:
                 vectors_config=VectorParams(size=self.dimension, distance=self.distance),
             )
             return True
+        await self._validate_dimension()
         return False
+
+    async def _validate_dimension(self) -> None:
+        info = await self.client.get_collection(self.collection)
+        vectors = info.config.params.vectors
+        size = getattr(vectors, "size", None)  # named-vectors dict has no .size — skip
+        if size is not None and int(size) != int(self.dimension):
+            raise DimensionMismatchError(
+                f"Collection '{self.collection}' stores {size}-dim vectors but the "
+                f"embedding provider produces {self.dimension}-dim vectors. "
+                f"Re-index with --recreate or switch the embedding model."
+            )
 
     async def count(self) -> int:
         info = await self.client.get_collection(self.collection)

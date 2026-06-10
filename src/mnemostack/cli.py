@@ -366,6 +366,19 @@ def cmd_index(args: argparse.Namespace) -> int:
         dimension=provider.dimension,
         host=args.qdrant,
     )
+    if args.recreate and not args.yes:
+        if not sys.stdin.isatty():
+            print(
+                "error: --recreate drops the collection; pass --yes to confirm "
+                "in non-interactive mode",
+                file=sys.stderr,
+            )
+            return 2
+        points = store.count() if store.collection_exists() else 0
+        reply = input(f"Drop collection '{args.collection}' ({points} points) and recreate? [y/N] ")
+        if reply.strip().lower() not in {"y", "yes"}:
+            print("aborted")
+            return 1
     store.ensure_collection(recreate=args.recreate)
 
     files = (
@@ -696,6 +709,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Adjacent chunks to concatenate into overlapping context chunks (1 disables)",
     )
     p_index.add_argument("--recreate", action="store_true", help="Drop existing collection")
+    p_index.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Skip the confirmation prompt for --recreate",
+    )
     p_index.set_defaults(func=cmd_index)
 
     p_feedback = sub.add_parser(
