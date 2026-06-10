@@ -180,7 +180,7 @@ def test_apply_rerank_safe_none_reranker_noop():
     results = _results("vector", ["a"])
     trace = RecallTrace()
     assert apply_rerank_safe(None, "q", results, trace) == results
-    assert trace.degraded == []
+    assert trace.degraded == ["reranker:unavailable"]
 
 
 def test_apply_rerank_safe_without_trace():
