@@ -20,6 +20,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `ensure_collection()` (sync and async) raises `DimensionMismatchError` when an existing collection stores vectors of a different size than the embedding provider produces. Previously the mismatch surfaced as garbage search results; deployments that were silently mis-dimensioned will now fail loudly at startup.
 - `TemporalRetriever` emits a `mnemostack.recall.temporal_no_parse` counter and exposes `explain_empty()` so an unparsed date is distinguishable from an empty corpus.
 
+## [0.4.4] - 2026-06-10
+
+### Fixed
+
+- Restored the default rerank behavior to `relevant_only`, matching the pre-0.4.3 baseline while keeping `full_reorder` available through `rerank_mode` / `MNEMOSTACK_RERANK_MODE`.
+- Preserved vector-floor candidates in the MCP search and answer path after reranking.
+- Aligned search and answer reranking so both paths apply the same rerank mode semantics.
+
 ## [0.4.1] - 2026-05-03
 
 - Documentation restructuring and improvements.
