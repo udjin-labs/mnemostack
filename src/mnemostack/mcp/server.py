@@ -151,6 +151,15 @@ def build_server(
         except Exception:  # noqa: BLE001
             return results
 
+    def _run_recall(query: str, limit: int) -> list[Any]:
+        recaller = _get_recaller()
+        recalled_results = recaller.recall(query, limit=limit)
+        results = _apply_rerank(query, recalled_results)[:limit]
+        apply_vector_floor = getattr(recaller, "apply_vector_floor_after_rerank", None)
+        if apply_vector_floor is not None:
+            return apply_vector_floor(results, recalled_results)
+        return results
+
     def _get_feedback_pipeline():
         if "feedback_pipeline" not in _components:
             _components["feedback_pipeline"] = build_full_pipeline(
@@ -243,9 +252,7 @@ def build_server(
         payload.
         """
         try:
-            recaller = _get_recaller()
-            results = recaller.recall(query, limit=limit)
-            results = _apply_rerank(query, results)[:limit]
+            results = _run_recall(query, limit)
             return {
                 "ok": True,
                 "query": query,
@@ -284,9 +291,7 @@ def build_server(
         fallback_recommended, and error.
         """
         try:
-            recaller = _get_recaller()
-            memories = recaller.recall(query, limit=limit)
-            memories = _apply_rerank(query, memories)[:limit]
+            memories = _run_recall(query, limit)
             gen = _get_answer_gen()
             answer = gen.generate(query, memories)
             return {

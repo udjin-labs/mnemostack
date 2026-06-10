@@ -92,6 +92,59 @@ def test_mcp_search_strips_internal_vector_floor_payload(monkeypatch):
     assert payload["results"][0]["payload"] == {"public": "ok"}
 
 
+def test_mcp_search_preserves_vector_floor_after_rerank_slice(monkeypatch):
+    import mnemostack.mcp.server as srv
+
+    class _FakeEmbedding:
+        dimension = 3
+
+    class _FakeVectorStore:
+        def __init__(self, **_):
+            pass
+
+    class _FakeRecaller:
+        def __init__(self, **_):
+            pass
+
+        def recall(self, query, limit=10):
+            return [
+                SimpleNamespace(id="a", text="winner", score=0.9, sources=[], payload={}),
+                SimpleNamespace(
+                    id="v",
+                    text="protected",
+                    score=0.7,
+                    sources=["vector"],
+                    payload={"raw_vector_score": 0.95},
+                ),
+            ]
+
+        def apply_vector_floor_after_rerank(self, results, recalled_results):
+            return results + [r for r in recalled_results if r.id == "v"]
+
+    class _FakeReranker:
+        def __init__(self, **_):
+            pass
+
+        def rerank(self, query, results):
+            return results
+
+    monkeypatch.setattr(srv, "get_provider", lambda *_args, **_kwargs: _FakeEmbedding())
+    monkeypatch.setattr(srv, "get_llm", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(srv, "VectorStore", _FakeVectorStore)
+    monkeypatch.setattr(srv, "VectorRetriever", lambda **_: MagicMock())
+    monkeypatch.setattr(srv, "TemporalRetriever", lambda **_: MagicMock())
+    monkeypatch.setattr(srv, "build_bm25_docs", lambda _paths: [])
+    monkeypatch.setattr(srv, "Recaller", _FakeRecaller)
+    monkeypatch.setattr(srv, "Reranker", _FakeReranker)
+
+    mcp = build_server(collection="test", embedding_provider="ollama", vector_floor=1)
+
+    result = asyncio.run(mcp.call_tool("mnemostack_search", {"query": "q", "limit": 1}))
+
+    payload = result.structured_content
+    assert [item["id"] for item in payload["results"]] == ["a", "v"]
+
+
 def test_mcp_search_passes_configured_rerank_mode(monkeypatch):
     import mnemostack.mcp.server as srv
 
