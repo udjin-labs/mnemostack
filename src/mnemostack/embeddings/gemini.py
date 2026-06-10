@@ -64,7 +64,7 @@ class GeminiProvider(EmbeddingProvider):
                     data=json.dumps(payload).encode(),
                     headers={
                         "Content-Type": "application/json",
-                        "x-goog-api-key": self.api_key,
+                        "x-goog-api-key": self.api_key or "",
                     },
                 )
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
@@ -126,7 +126,7 @@ class GeminiProvider(EmbeddingProvider):
                     data=json.dumps(payload).encode(),
                     headers={
                         "Content-Type": "application/json",
-                        "x-goog-api-key": self.api_key,
+                        "x-goog-api-key": self.api_key or "",
                     },
                 )
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:

@@ -12,6 +12,6 @@ Usage:
 """
 
 from .async_qdrant import AsyncVectorStore
-from .qdrant import Hit, VectorStore
+from .qdrant import DimensionMismatchError, Hit, VectorStore
 
-__all__ = ["VectorStore", "AsyncVectorStore", "Hit"]
+__all__ = ["VectorStore", "AsyncVectorStore", "Hit", "DimensionMismatchError"]

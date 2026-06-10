@@ -8,6 +8,7 @@ where blocking I/O would hurt concurrency.
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
@@ -22,7 +23,7 @@ from qdrant_client.models import (
     VectorParams,
 )
 
-from .qdrant import Hit
+from .qdrant import DimensionMismatchError, Hit
 
 
 class AsyncVectorStore:
@@ -77,7 +78,19 @@ class AsyncVectorStore:
                 vectors_config=VectorParams(size=self.dimension, distance=self.distance),
             )
             return True
+        await self._validate_dimension()
         return False
+
+    async def _validate_dimension(self) -> None:
+        info = await self.client.get_collection(self.collection)
+        vectors = info.config.params.vectors
+        size = getattr(vectors, "size", None)  # named-vectors dict has no .size — skip
+        if size is not None and int(size) != int(self.dimension):
+            raise DimensionMismatchError(
+                f"Collection '{self.collection}' stores {size}-dim vectors but the "
+                f"embedding provider produces {self.dimension}-dim vectors. "
+                f"Re-index with --recreate or switch the embedding model."
+            )
 
     async def count(self) -> int:
         info = await self.client.get_collection(self.collection)
@@ -126,12 +139,13 @@ class AsyncVectorStore:
         for pt in result.points:
             if pt.score < min_score:
                 continue
-            hits.append(Hit(id=pt.id, score=pt.score, payload=pt.payload or {}))
+            pid = str(pt.id) if isinstance(pt.id, UUID) else pt.id
+            hits.append(Hit(id=pid, score=pt.score, payload=pt.payload or {}))
         return hits
 
     @staticmethod
     def _build_filter(filters: dict[str, Any]) -> Filter:
-        must = []
+        must: list[Any] = []
         for key, value in filters.items():
             if isinstance(value, dict) and ("gte" in value or "lte" in value):
                 gte = value.get("gte")

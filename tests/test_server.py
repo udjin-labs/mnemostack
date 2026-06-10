@@ -510,3 +510,65 @@ def test_metrics_endpoint_emits_prometheus_format(monkeypatch):
     assert "mnemostack_test_latency_ms_sum " in body
     assert "mnemostack_test_latency_ms_count 1" in body
     assert 'quantile="0.5"' in body
+
+
+def test_recall_response_degraded_default_empty(monkeypatch):
+    app, _ = _patched_app(monkeypatch)
+    client = TestClient(app)
+    resp = client.post("/recall", json={"query": "hello"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["degraded"] == []
+    assert data["trace"] is None
+
+
+def test_recall_trace_opt_in(monkeypatch):
+    app, _ = _patched_app(monkeypatch)
+    client = TestClient(app)
+    resp = client.post("/recall", json={"query": "hello", "include_trace": True})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["trace"] is not None
+    assert "retrievers" in data["trace"]
+    assert "fused" in data["trace"]
+
+
+def test_recall_degraded_on_reranker_failure(monkeypatch):
+    import mnemostack.server as srv
+
+    app, _ = _patched_app(monkeypatch)
+
+    # The app closed over an instance of the fake reranker class that
+    # _patched_app installed as srv.Reranker — break its rerank method.
+    def _boom(self, q, rs):
+        raise RuntimeError("llm down")
+
+    monkeypatch.setattr(srv.Reranker, "rerank", _boom)
+    client = TestClient(app)
+    resp = client.post("/recall", json={"query": "hello"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "reranker:fallback" in data["degraded"]
+    assert data["results"]  # fail-open: results still served
+
+
+def test_recall_degraded_when_reranker_unavailable(monkeypatch):
+    app, _ = _patched_app(monkeypatch, with_answer=False)
+    client = TestClient(app)
+
+    resp = client.post("/recall", json={"query": "hello"})
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "reranker:unavailable" in data["degraded"]
+    assert data["results"]  # fail-open: results still served
+
+
+def test_answer_response_carries_degraded(monkeypatch):
+    app, _ = _patched_app(monkeypatch)
+    client = TestClient(app)
+    resp = client.post("/answer", json={"query": "hello"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["degraded"] == []
+    assert "trace" in data and data["trace"] is None

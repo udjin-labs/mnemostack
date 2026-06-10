@@ -18,20 +18,22 @@ from __future__ import annotations
 import logging
 import re
 from abc import ABC, abstractmethod
+from calendar import monthrange
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Any
+from typing import Any, cast
 
 from ..embeddings.base import EmbeddingProvider
 from ..llm.base import LLMProvider
+from ..observability import counter
 from ..vector import VectorStore
 
 try:
     from qdrant_client.models import DatetimeRange, FieldCondition, Filter
 except ImportError:  # pragma: no cover - qdrant-client is a runtime dependency
-    DatetimeRange = FieldCondition = Filter = None  # type: ignore[assignment]
+    DatetimeRange = FieldCondition = Filter = None  # type: ignore[assignment,misc]
 from .bm25 import BM25, BM25Doc
 from .recaller import RecallResult
 
@@ -104,7 +106,12 @@ def _with_timestamp_range_filter(
 
     timestamp_condition = FieldCondition(
         key="timestamp",
-        range=DatetimeRange(gte=newer_than, lte=older_than),
+        # ISO strings are accepted by Qdrant at runtime; the stubs only admit
+        # datetime/date, hence the casts.
+        range=DatetimeRange(
+            gte=cast("datetime | None", newer_than),
+            lte=cast("datetime | None", older_than),
+        ),
     )
     if scroll_filter is None:
         return Filter(must=[timestamp_condition])
@@ -626,6 +633,14 @@ _GENERIC_DATE_QUERY_WORDS = {
     "the",
     "a",
     "an",
+    # "around <date>" qualifiers must not make a date query look specific
+    "around",
+    "about",
+    "approximately",
+    "circa",
+    "примерно",
+    "около",
+    "где-то",
     "за",
     "на",
     "в",
@@ -663,10 +678,22 @@ def _safe_date(year: int, month: int, day: int) -> date | None:
         return None
 
 
-def _day_window(day: date) -> tuple[str, str]:
-    start = datetime.combine(day - timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
-    end = datetime.combine(day + timedelta(days=1), datetime.max.time(), tzinfo=timezone.utc)
+def _day_window(day: date, slack: int = 1) -> tuple[str, str]:
+    start = datetime.combine(day - timedelta(days=slack), datetime.min.time(), tzinfo=timezone.utc)
+    end = datetime.combine(day + timedelta(days=slack), datetime.max.time(), tzinfo=timezone.utc)
     return start.isoformat(), end.isoformat()
+
+
+_AROUND_QUALIFIER_RE = re.compile(
+    r"\b(?:around|about|approximately|circa|примерно|около|где-то)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _around_slack(q: str, match_start: int) -> int:
+    """±3 day window when the date is qualified ('around April 30'), else ±1."""
+    prefix = q[max(0, match_start - 16) : match_start]
+    return 3 if _AROUND_QUALIFIER_RE.search(prefix) else 1
 
 
 def _strict_day_window(day: date) -> tuple[str, str]:
@@ -726,7 +753,7 @@ def extract_temporal_query(query: str, now: datetime | None = None) -> TemporalQ
     if m:
         target = _safe_date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
         if target is not None:
-            start, end = _day_window(target)
+            start, end = _day_window(target, slack=_around_slack(q, m.start()))
             return TemporalQuery(
                 start, end, target, _date_focused(query, [m.span()], has_target_date=True)
             )
@@ -755,7 +782,7 @@ def extract_temporal_query(query: str, now: datetime | None = None) -> TemporalQ
             continue
         delta_days = int(m.group(1)) * abs(days) if days < 0 else days
         target = today - timedelta(days=delta_days)
-        start, end = _day_window(target)
+        start, end = _day_window(target, slack=_around_slack(q, m.start()))
         return TemporalQuery(
             start, end, target, _date_focused(query, [m.span()], has_target_date=True)
         )
@@ -769,7 +796,7 @@ def extract_temporal_query(query: str, now: datetime | None = None) -> TemporalQ
             year = int(day_month.group(3)) if day_month.group(3) else today.year
             target = _safe_date(year, month, day)
             if target is not None:
-                start, end = _day_window(target)
+                start, end = _day_window(target, slack=_around_slack(q, day_month.start()))
                 return TemporalQuery(
                     start,
                     end,
@@ -787,13 +814,39 @@ def extract_temporal_query(query: str, now: datetime | None = None) -> TemporalQ
             year = int(month_day.group(3)) if month_day.group(3) else today.year
             target = _safe_date(year, month, day)
             if target is not None:
-                start, end = _day_window(target)
+                start, end = _day_window(target, slack=_around_slack(q, month_day.start()))
                 return TemporalQuery(
                     start,
                     end,
                     target,
                     _date_focused(query, [month_day.span()], has_target_date=True),
                 )
+
+    # Part-of-month expressions: "early April", "mid-April", "late April 2026",
+    # "в начале апреля", "в конце апреля". Must run before the month-only
+    # fallback, which would otherwise match the same text with a wider window.
+    part_m = re.search(
+        rf"\b(?P<qual>early|beginnings?\s+of|start\s+of|middle\s+of|mid|late|end\s+of|"
+        rf"начал[еоа]|середин[аеуы]|кон(?:це|ца|ец))(?:\s+|-)(?:of\s+)?"
+        rf"(?P<month>{_MONTH_NAME_PATTERN})\w*\s*(?P<year>20\d{{2}})?\b",
+        q,
+    )
+    if part_m:
+        month = _month_from_text(part_m.group("month"))
+        if month is not None:
+            year = int(part_m.group("year")) if part_m.group("year") else today.year
+            qual = part_m.group("qual")
+            if qual.startswith(("early", "beginning", "start", "начал")):
+                lo, hi = 1, 10
+            elif qual.startswith(("mid", "middle", "середин")):
+                lo, hi = 11, 20
+            else:  # late / end of / конце
+                lo, hi = 21, monthrange(year, month)[1]
+            part_start = datetime(year, month, lo, tzinfo=timezone.utc)
+            part_end = datetime.combine(
+                date(year, month, hi), datetime.max.time(), tzinfo=timezone.utc
+            )
+            return TemporalQuery(part_start.isoformat(), part_end.isoformat(), None, False)
 
     # Month-only expressions keep the legacy month-wide semantic path.
     # Match whole month words/stems, not arbitrary substrings. The English
@@ -847,9 +900,19 @@ class TemporalRetriever(Retriever):
         self.vector_store = vector_store
         self.extractor = extractor
 
+    def explain_empty(self, query: str) -> str | None:
+        """Why an empty result is a degradation, not an absence of data.
+
+        Recognized by the recaller's trace collection (duck-typed): when the
+        retriever returned nothing without raising, this names the reason.
+        """
+        return "temporal:no_parse" if not self.extractor(query) else None
+
     def search(self, query, limit=10, filters=None):
         parsed_or_window = self.extractor(query)
         if not parsed_or_window:
+            # Visible even without tracing — temporal boost silently lost.
+            counter("mnemostack.recall.temporal_no_parse", 1)
             return []
         if isinstance(parsed_or_window, TemporalQuery):
             start, end = parsed_or_window.window

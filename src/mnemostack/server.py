@@ -49,9 +49,12 @@ from mnemostack.recall import (
     BM25Retriever,
     MemgraphRetriever,
     Recaller,
+    RecallTrace,
     Reranker,
+    Retriever,
     TemporalRetriever,
     VectorRetriever,
+    apply_rerank_safe,
     build_full_pipeline,
 )
 from mnemostack.recall.pipeline import FileStateStore
@@ -77,12 +80,17 @@ class RecallRequest(BaseModel):
         True,
         description="Apply the 8-stage recall pipeline. Set to False for raw RRF output.",
     )
+    include_trace: bool = Field(
+        False,
+        description="Return the per-retriever recall trace (debug; verbose).",
+    )
 
 
 class AnswerRequest(BaseModel):
     query: str = Field(..., min_length=1)
     limit: int = Field(10, ge=1, le=100)
     full_pipeline: bool = Field(True)
+    include_trace: bool = Field(False)
 
 
 class FeedbackRequest(BaseModel):
@@ -121,6 +129,22 @@ class Memory(BaseModel):
 class RecallResponse(BaseModel):
     query: str
     results: list[Memory]
+    degraded: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Degradations that occurred while serving this call "
+            "(e.g. retriever:bm25:failed, reranker:fallback). Empty when healthy."
+        ),
+    )
+    trace: dict[str, Any] | None = Field(
+        None,
+        description=(
+            "Recall trace (per-retriever ranked lists, fused and post-rerank "
+            "order). Present only when include_trace=true. The results list is "
+            "the final order; it may differ from post_rerank when vector-floor "
+            "re-appends items."
+        ),
+    )
 
 
 class AnswerResponse(BaseModel):
@@ -129,6 +153,8 @@ class AnswerResponse(BaseModel):
     confidence: float
     sources: list[str]
     memories: list[Memory]
+    degraded: list[str] = Field(default_factory=list)
+    trace: dict[str, Any] | None = None
 
 
 class FeedbackResponse(BaseModel):
@@ -349,13 +375,13 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             return False
 
     bm25_docs = _build_bm25_docs(cfg.bm25_paths)
-    retrievers = [
+    maybe_retrievers = [
         VectorRetriever(embedding=provider, vector_store=store),
         BM25Retriever(docs=bm25_docs) if bm25_docs else None,
-        MemgraphRetriever(uri=cfg.graph_uri, timeout=cfg.graph_timeout),
+        MemgraphRetriever(uri=cfg.graph_uri, timeout=cfg.graph_timeout) if cfg.graph_uri else None,
         TemporalRetriever(embedding=provider, vector_store=store),
     ]
-    retrievers = [r for r in retrievers if r is not None]
+    retrievers: list[Retriever] = [r for r in maybe_retrievers if r is not None]
     recaller = Recaller(retrievers=retrievers, vector_floor=cfg.vector_floor)
 
     from pathlib import Path
@@ -390,16 +416,13 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     import asyncio
 
     def _run_recall_sync(query: str, limit: int, full_pipeline: bool):
+        trace = RecallTrace()
         raw_limit = max(limit * 3, 30) if full_pipeline else limit
-        recalled_results = recaller.recall(query, limit=raw_limit)
+        recalled_results = recaller.recall(query, limit=raw_limit, trace=trace)
         results = recalled_results
         if full_pipeline:
             results = pipeline.apply(query, results)
-            if reranker is not None:
-                try:
-                    results = reranker.rerank(query, results)
-                except Exception as exc:  # pragma: no cover
-                    log.warning("reranker failed (%s) — returning pre-rerank order", exc)
+            results = apply_rerank_safe(reranker, query, results, trace)
         results = results[:limit]
         results = recaller.apply_vector_floor_after_rerank(
             results,
@@ -407,7 +430,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         )
         if cfg.auto_record_ior:
             record_recall_events(pipeline, results)
-        return results
+        return results, trace
 
     async def _run_recall(query: str, limit: int, full_pipeline: bool):
         """Offload the blocking recall stack to a worker thread.
@@ -460,11 +483,16 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     @app.post("/recall", response_model=RecallResponse)
     async def recall_endpoint(req: RecallRequest):
         try:
-            results = await _run_recall(req.query, req.limit, req.full_pipeline)
+            results, trace = await _run_recall(req.query, req.limit, req.full_pipeline)
         except Exception as exc:
             log.exception("recall endpoint failed")
             raise HTTPException(status_code=500, detail="recall failed") from exc
-        return RecallResponse(query=req.query, results=[_memory_of(r) for r in results])
+        return RecallResponse(
+            query=req.query,
+            results=[_memory_of(r) for r in results],
+            degraded=trace.degraded,
+            trace=trace.to_dict() if req.include_trace else None,
+        )
 
     @app.post("/answer", response_model=AnswerResponse)
     async def answer_endpoint(req: AnswerRequest):
@@ -474,7 +502,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 detail="answer generator unavailable (LLM not configured)",
             )
         try:
-            results = await _run_recall(req.query, req.limit, req.full_pipeline)
+            results, trace = await _run_recall(req.query, req.limit, req.full_pipeline)
             ans = await asyncio.to_thread(answer_gen.generate, req.query, results)
         except Exception as exc:
             log.exception("answer endpoint failed")
@@ -485,6 +513,8 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             confidence=float(getattr(ans, "confidence", 0.0)),
             sources=list(getattr(ans, "sources", []) or []),
             memories=[_memory_of(r) for r in results],
+            degraded=trace.degraded,
+            trace=trace.to_dict() if req.include_trace else None,
         )
 
     @app.post("/feedback", response_model=FeedbackResponse)

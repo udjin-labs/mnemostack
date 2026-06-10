@@ -208,7 +208,12 @@ def test_ingest_window_size_1_matches_current_behavior():
 
     assert baseline.ingest(items).upserted == 3
     assert windowed.ingest(items).upserted == 3
-    assert baseline_store.upserts == window_store.upserts
+
+    def _normalized(upserts):
+        # indexed_at is wall-clock — equal up to microseconds, strip it
+        return [(pid, vec, {k: v for k, v in p.items() if k != "indexed_at"}) for pid, vec, p in upserts]
+
+    assert _normalized(baseline_store.upserts) == _normalized(window_store.upserts)
 
 
 def test_ingest_sliding_window_adds_context_chunks_with_middle_metadata():
@@ -231,3 +236,77 @@ def test_ingest_sliding_window_adds_context_chunks_with_middle_metadata():
     assert [p["text"] for p in window_payloads] == ["A\nB\nC", "B\nC\nD", "C\nD\nE"]
     assert [p["speaker"] for p in window_payloads] == ["s1", "s2", "s3"]
     assert [p["offset"] for p in window_payloads] == [1, 2, 3]
+
+
+# ---------- timestamp handling ----------
+
+
+def _flush_payloads(items, **ingestor_kwargs):
+    store = _FakeStore()
+    ing = Ingestor(_FakeEmbedding(), store, **ingestor_kwargs)
+    ing.ingest(items)
+    return [payload for _id, _vec, payload in store.upserts]
+
+
+def test_timestamp_field_lands_in_payload():
+    payloads = _flush_payloads([IngestItem(text="hi", timestamp="2026-06-01T13:41:00")])
+    assert payloads[0]["timestamp"] == "2026-06-01T13:41:00"
+
+
+def test_metadata_timestamp_back_compat():
+    payloads = _flush_payloads(
+        [IngestItem(text="hi", metadata={"timestamp": "2026-06-01T13:41:00"})]
+    )
+    assert payloads[0]["timestamp"] == "2026-06-01T13:41:00"
+
+
+def test_timestamp_field_wins_over_metadata():
+    payloads = _flush_payloads(
+        [
+            IngestItem(
+                text="hi",
+                timestamp="2026-06-02T00:00:00",
+                metadata={"timestamp": "2020-01-01T00:00:00"},
+            )
+        ]
+    )
+    assert payloads[0]["timestamp"] == "2026-06-02T00:00:00"
+
+
+def test_indexed_at_auto_utc_and_not_overwritten():
+    from datetime import datetime
+
+    payloads = _flush_payloads(
+        [
+            IngestItem(text="a", source="s", offset=0),
+            IngestItem(text="b", source="s", offset=1, metadata={"indexed_at": "pinned"}),
+        ]
+    )
+    auto = payloads[0]["indexed_at"]
+    parsed = datetime.fromisoformat(auto)
+    assert parsed.utcoffset() is not None and parsed.utcoffset().total_seconds() == 0
+    assert payloads[1]["indexed_at"] == "pinned"
+
+
+def test_window_chunks_carry_ts_range():
+    items = [
+        IngestItem(text=f"m{i}", source="conv", offset=i, timestamp=f"2026-06-0{i + 1}T10:00:00")
+        for i in range(3)
+    ]
+    payloads = _flush_payloads(items, window_size=3)
+    windows = [p for p in payloads if p.get("chunk_kind") == "sliding_window"]
+    assert len(windows) == 1
+    w = windows[0]
+    assert w["window_start_ts"] == "2026-06-01T10:00:00"
+    assert w["window_end_ts"] == "2026-06-03T10:00:00"
+    assert w["timestamp"] == "2026-06-02T10:00:00"  # middle item
+
+
+def test_window_chunks_without_ts_omit_range_keys():
+    items = [IngestItem(text=f"m{i}", source="conv", offset=i) for i in range(3)]
+    payloads = _flush_payloads(items, window_size=3)
+    windows = [p for p in payloads if p.get("chunk_kind") == "sliding_window"]
+    assert len(windows) == 1
+    assert "window_start_ts" not in windows[0]
+    assert "window_end_ts" not in windows[0]
+    assert "timestamp" not in windows[0]
