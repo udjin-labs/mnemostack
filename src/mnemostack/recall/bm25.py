@@ -58,11 +58,11 @@ class BM25:
         self.k1 = k1
         self.b = b
         self.doc_count = len(documents)
-        self.avgdl = sum(len(d.tokens) for d in documents) / max(self.doc_count, 1)
+        self.avgdl = sum(len(d.tokens or []) for d in documents) / max(self.doc_count, 1)
         # Document frequency per term
         self.df: dict[str, int] = defaultdict(int)
         for d in documents:
-            for term in set(d.tokens):
+            for term in set(d.tokens or []):
                 self.df[term] += 1
         # IDF per term
         self.idf: dict[str, float] = {}
@@ -72,7 +72,7 @@ class BM25:
     def _score(self, query_tokens: list[str], doc: BM25Doc) -> float:
         score = 0.0
         tf = Counter(doc.tokens)
-        doc_len = len(doc.tokens)
+        doc_len = len(doc.tokens or [])
         for term in query_tokens:
             if term not in self.idf:
                 continue

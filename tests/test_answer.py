@@ -215,3 +215,40 @@ def test_prompt_allows_hypothetical_inference(sample_memories):
     # Must instruct to attempt inference for hypothetical questions
     assert "might be" in p and "would be" in p
     assert "reasonable inference" in p
+
+
+def test_display_ts_keeps_meaningful_time():
+    from mnemostack.recall.answer import _display_ts
+
+    assert _display_ts("2023-05-08T13:41:00") == "2023-05-08 13:41"
+    assert _display_ts("2023-05-08T13:41:00Z") == "2023-05-08 13:41"
+
+
+def test_display_ts_date_only_at_midnight():
+    from mnemostack.recall.answer import _display_ts
+
+    assert _display_ts("2026-06-01T00:00:00") == "2026-06-01"
+    assert _display_ts("2026-06-01") == "2026-06-01"
+
+
+def test_display_ts_garbage_falls_back_without_raising():
+    from mnemostack.recall.answer import _display_ts
+
+    assert _display_ts("May 2023, around noon") == "May 2023, "
+
+
+def test_format_context_renders_time_of_day():
+    from mnemostack.recall.answer import AnswerGenerator
+    from mnemostack.recall.recaller import RecallResult
+
+    ctx = AnswerGenerator._format_context(
+        [
+            RecallResult(
+                id=1,
+                text="met Jean at the cafe",
+                score=1.0,
+                payload={"timestamp": "2023-05-08T13:41:00", "source": "conv-1"},
+            )
+        ]
+    )
+    assert "[2023-05-08 13:41]" in ctx

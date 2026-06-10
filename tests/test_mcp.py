@@ -63,7 +63,7 @@ def test_mcp_search_strips_internal_vector_floor_payload(monkeypatch):
         def __init__(self, **_):
             pass
 
-        def recall(self, query, limit=10):
+        def recall(self, query, limit=10, **kwargs):
             return [
                 SimpleNamespace(
                     id="a",
@@ -106,7 +106,7 @@ def test_mcp_search_preserves_vector_floor_after_rerank_slice(monkeypatch):
         def __init__(self, **_):
             pass
 
-        def recall(self, query, limit=10):
+        def recall(self, query, limit=10, **kwargs):
             return [
                 SimpleNamespace(id="a", text="winner", score=0.9, sources=[], payload={}),
                 SimpleNamespace(
@@ -161,7 +161,7 @@ def test_mcp_search_passes_configured_rerank_mode(monkeypatch):
         def __init__(self, **_):
             pass
 
-        def recall(self, query, limit=10):
+        def recall(self, query, limit=10, **kwargs):
             return [
                 SimpleNamespace(id="a", text="first", score=0.9, sources=[], payload={}),
                 SimpleNamespace(id="b", text="second", score=0.8, sources=[], payload={}),
@@ -213,7 +213,7 @@ def test_mcp_answer_passes_configured_rerank_mode(monkeypatch):
         def __init__(self, **_):
             pass
 
-        def recall(self, query, limit=10):
+        def recall(self, query, limit=10, **kwargs):
             return [
                 SimpleNamespace(id="a", text="first", score=0.9, sources=[], payload={}),
                 SimpleNamespace(id="b", text="second", score=0.8, sources=[], payload={}),
@@ -264,3 +264,113 @@ def test_mcp_answer_passes_configured_rerank_mode(monkeypatch):
     assert result.structured_content["ok"] is True
     assert reranker_kwargs["rerank_mode"] == "full_reorder"
     assert [item.id for item in answer_memories] == ["b", "a"]
+
+
+def _patch_minimal(monkeypatch, srv, recaller_cls, reranker_cls=None):
+    class _FakeEmbedding:
+        dimension = 3
+
+    class _FakeVectorStore:
+        def __init__(self, **_):
+            pass
+
+    class _PassReranker:
+        def __init__(self, **_):
+            pass
+
+        def rerank(self, query, results):
+            return results
+
+    monkeypatch.setattr(srv, "get_provider", lambda *_args, **_kwargs: _FakeEmbedding())
+    monkeypatch.setattr(srv, "get_llm", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(srv, "VectorStore", _FakeVectorStore)
+    monkeypatch.setattr(srv, "VectorRetriever", lambda **_: MagicMock())
+    monkeypatch.setattr(srv, "TemporalRetriever", lambda **_: MagicMock())
+    monkeypatch.setattr(srv, "build_bm25_docs", lambda _paths: [])
+    monkeypatch.setattr(srv, "Recaller", recaller_cls)
+    monkeypatch.setattr(srv, "Reranker", reranker_cls or _PassReranker)
+
+
+class _OneHitRecaller:
+    def __init__(self, **_):
+        pass
+
+    def recall(self, query, limit=10, **kwargs):
+        return [SimpleNamespace(id="a", text="text", score=0.9, sources=["vector"], payload={})]
+
+
+def test_mcp_search_returns_degraded_empty_when_healthy(monkeypatch):
+    import mnemostack.mcp.server as srv
+
+    _patch_minimal(monkeypatch, srv, _OneHitRecaller)
+    mcp = build_server(collection="test", embedding_provider="ollama")
+
+    result = asyncio.run(mcp.call_tool("mnemostack_search", {"query": "q"}))
+    payload = result.structured_content
+
+    assert payload["ok"] is True
+    assert payload["degraded"] == []
+    assert "trace" not in payload
+
+
+def test_mcp_search_trace_opt_in(monkeypatch):
+    import mnemostack.mcp.server as srv
+
+    _patch_minimal(monkeypatch, srv, _OneHitRecaller)
+    mcp = build_server(collection="test", embedding_provider="ollama")
+
+    result = asyncio.run(
+        mcp.call_tool("mnemostack_search", {"query": "q", "include_trace": True})
+    )
+    payload = result.structured_content
+
+    assert payload["ok"] is True
+    assert "trace" in payload
+    assert "fused" in payload["trace"]
+
+
+def test_mcp_search_degraded_on_reranker_failure(monkeypatch):
+    import mnemostack.mcp.server as srv
+
+    class _BoomReranker:
+        def __init__(self, **_):
+            pass
+
+        def rerank(self, query, results):
+            raise RuntimeError("llm down")
+
+    _patch_minimal(monkeypatch, srv, _OneHitRecaller, _BoomReranker)
+    mcp = build_server(collection="test", embedding_provider="ollama")
+
+    result = asyncio.run(mcp.call_tool("mnemostack_search", {"query": "q"}))
+    payload = result.structured_content
+
+    assert payload["ok"] is True  # fail-open
+    assert payload["degraded"] == ["reranker:fallback"]
+    assert payload["results"]
+
+
+def test_mcp_answer_carries_degraded(monkeypatch):
+    import mnemostack.mcp.server as srv
+
+    class _FakeAnswerGen:
+        def __init__(self, **_):
+            pass
+
+        def generate(self, query, memories):
+            return SimpleNamespace(
+                ok=True, text="42", confidence=0.9, sources=["s"], error=None
+            )
+
+        def should_fallback(self, answer):
+            return False
+
+    _patch_minimal(monkeypatch, srv, _OneHitRecaller)
+    monkeypatch.setattr(srv, "AnswerGenerator", _FakeAnswerGen)
+    mcp = build_server(collection="test", embedding_provider="ollama")
+
+    result = asyncio.run(mcp.call_tool("mnemostack_answer", {"query": "q"}))
+    payload = result.structured_content
+
+    assert payload["ok"] is True
+    assert payload["degraded"] == []

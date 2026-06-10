@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from uuid import UUID
 
 from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
@@ -18,6 +19,10 @@ from qdrant_client.models import (
     Range,
     VectorParams,
 )
+
+
+class DimensionMismatchError(ValueError):
+    """Existing collection stores vectors of a different size than the provider produces."""
 
 
 @dataclass
@@ -65,7 +70,12 @@ class VectorStore:
             raise
 
     def ensure_collection(self, recreate: bool = False) -> bool:
-        """Create collection if missing. If recreate=True, drop and recreate."""
+        """Create collection if missing. If recreate=True, drop and recreate.
+
+        Raises DimensionMismatchError when the collection already exists but
+        stores vectors of a different size than this store's `dimension` —
+        searching such a collection silently returns garbage otherwise.
+        """
         exists = self.collection_exists()
         if exists and recreate:
             self.client.delete_collection(self.collection)
@@ -76,7 +86,19 @@ class VectorStore:
                 vectors_config=VectorParams(size=self.dimension, distance=self.distance),
             )
             return True
+        self._validate_dimension()
         return False
+
+    def _validate_dimension(self) -> None:
+        info = self.client.get_collection(self.collection)
+        vectors = info.config.params.vectors
+        size = getattr(vectors, "size", None)  # named-vectors dict has no .size — skip
+        if size is not None and int(size) != int(self.dimension):
+            raise DimensionMismatchError(
+                f"Collection '{self.collection}' stores {size}-dim vectors but the "
+                f"embedding provider produces {self.dimension}-dim vectors. "
+                f"Re-index with --recreate or switch the embedding model."
+            )
 
     def index_payload_field(self, field: str, schema: PayloadSchemaType) -> None:
         """Create a payload index for filtering (e.g. timestamp as DATETIME)."""
@@ -125,7 +147,8 @@ class VectorStore:
             if not points:
                 break
             for pt in points:
-                yield Hit(id=pt.id, score=1.0, payload=pt.payload or {})
+                pid = str(pt.id) if isinstance(pt.id, UUID) else pt.id
+                yield Hit(id=pid, score=1.0, payload=pt.payload or {})
             if next_offset is None:
                 break
 
@@ -206,11 +229,12 @@ class VectorStore:
         for pt in result.points:
             if pt.score < min_score:
                 continue
-            hits.append(Hit(id=pt.id, score=pt.score, payload=pt.payload or {}))
+            pid = str(pt.id) if isinstance(pt.id, UUID) else pt.id
+            hits.append(Hit(id=pid, score=pt.score, payload=pt.payload or {}))
         return hits
 
     def _build_filter(self, filters: dict[str, Any]) -> Filter:
-        must = []
+        must: list[Any] = []
         for key, value in filters.items():
             if isinstance(value, dict) and ("gte" in value or "lte" in value):
                 gte = value.get("gte")

@@ -51,8 +51,10 @@ server = [
 dev = [
     "pytest>=7.4",
     "pytest-asyncio>=0.21",
+    "pytest-cov>=4",
     "ruff>=0.1",
     "mypy>=1.7",
+    "types-PyYAML",
     "fastapi>=0.110,<1",
     "httpx>=0.24,<1",
 ]
@@ -77,6 +79,21 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]
 ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+no_implicit_optional = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+# mcp/server.py guards its fastmcp import with try/except ImportError and a
+# `FastMCP = None  # type: ignore` fallback. Whether that ignore is "used"
+# depends on whether fastmcp is installed, so unused-ignore checking would
+# make the mypy verdict vary by environment. Exempt just this module.
+[[tool.mypy.overrides]]
+module = "mnemostack.mcp.server"
+warn_unused_ignores = false
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

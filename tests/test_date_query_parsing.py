@@ -296,3 +296,104 @@ def test_non_date_focused_temporal_query_keeps_semantic_search_path():
     assert embedding.called is True
     assert store.search_called is True
     assert store.filters_seen == []
+
+
+# ---------- part-of-month: early/mid/late MONTH ----------
+
+
+def _window(query: str) -> tuple[str, str]:
+    parsed = extract_temporal_query(query, now=NOW)
+    assert parsed is not None, f"no temporal parse for {query!r}"
+    return parsed.window
+
+
+def test_early_april_window():
+    start, end = _window("what did we plan in early April?")
+    assert start.startswith("2026-04-01")
+    assert end.startswith("2026-04-10")
+
+
+def test_mid_april_window():
+    start, end = _window("the discussion mid-April")
+    assert start.startswith("2026-04-11")
+    assert end.startswith("2026-04-20")
+
+
+def test_late_april_window():
+    start, end = _window("what happened late April 2025?")
+    assert start.startswith("2025-04-21")
+    assert end.startswith("2025-04-30")
+
+
+def test_end_of_february_respects_month_length():
+    start, end = _window("deadlines at the end of February 2024")
+    assert start.startswith("2024-02-21")
+    assert end.startswith("2024-02-29")  # leap year
+
+
+def test_russian_nachale_aprelya():
+    start, end = _window("что мы обсуждали в начале апреля?")
+    assert start.startswith("2026-04-01")
+    assert end.startswith("2026-04-10")
+
+
+def test_russian_kontse_aprelya():
+    start, end = _window("встречи в конце апреля")
+    assert start.startswith("2026-04-21")
+    assert end.startswith("2026-04-30")
+
+
+def test_russian_seredine_iyunya():
+    start, end = _window("что было в середине июня?")
+    assert start.startswith("2026-06-11")
+    assert end.startswith("2026-06-20")
+
+
+def test_part_of_month_wins_over_month_only():
+    # Regression guard: "early April" must not fall through to full April.
+    start, end = _window("early April notes")
+    assert end.startswith("2026-04-10")
+
+
+def test_plain_month_window_unchanged():
+    start, end = _window("what did we do in April?")
+    assert start.startswith("2026-04-01")
+    assert end.startswith("2026-05-01")  # exclusive month-wide window
+
+
+# ---------- "around <date>" slack widening ----------
+
+
+def test_around_iso_date_widens_to_3_days():
+    parsed = extract_temporal_query("what happened around 2026-04-30?", now=NOW)
+    assert parsed is not None
+    assert parsed.start_iso.startswith("2026-04-27")
+    assert parsed.end_iso.startswith("2026-05-03")
+    assert parsed.target_date == date(2026, 4, 30)  # exact-day preference kept
+
+
+def test_around_month_day_widens_to_3_days():
+    parsed = extract_temporal_query("the trip around April 30", now=NOW)
+    assert parsed is not None
+    assert parsed.start_iso.startswith("2026-04-27")
+    assert parsed.end_iso.startswith("2026-05-03")
+
+
+def test_russian_primerno_widens_to_3_days():
+    parsed = extract_temporal_query("встреча примерно 30 апреля", now=NOW)
+    assert parsed is not None
+    assert parsed.start_iso.startswith("2026-04-27")
+    assert parsed.end_iso.startswith("2026-05-03")
+
+
+def test_unqualified_date_keeps_1_day_slack():
+    parsed = extract_temporal_query("what happened on 2026-04-30?", now=NOW)
+    assert parsed is not None
+    assert parsed.start_iso.startswith("2026-04-29")
+    assert parsed.end_iso.startswith("2026-05-01")
+
+
+def test_around_does_not_defeat_date_focus():
+    vague = extract_temporal_query("что делали примерно 30 апреля", now=NOW)
+    assert vague is not None
+    assert vague.date_focused is True

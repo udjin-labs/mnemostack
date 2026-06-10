@@ -26,6 +26,7 @@ from .recall import (
     BM25Retriever,
     MemgraphRetriever,
     Recaller,
+    Retriever,
     TemporalRetriever,
     VectorRetriever,
     build_bm25_docs,
@@ -318,7 +319,7 @@ def _build_recaller(
     source_filter: set[str] | None = None,
 ) -> Recaller:
     """Build the same retriever-mode Recaller used by the service surfaces."""
-    retrievers = []
+    retrievers: list[Retriever] = []
     if (
         provider is not None
         and store is not None
@@ -329,8 +330,9 @@ def _build_recaller(
         bm25_docs = build_bm25_docs(list(getattr(args, "bm25_path", []) or []))
         if bm25_docs:
             retrievers.append(BM25Retriever(docs=bm25_docs))
-    if _source_enabled_for_cli("memgraph", source_filter) and getattr(args, "memgraph_uri", None):
-        retrievers.append(MemgraphRetriever(uri=getattr(args, "memgraph_uri", None)))
+    memgraph_uri = getattr(args, "memgraph_uri", None)
+    if _source_enabled_for_cli("memgraph", source_filter) and memgraph_uri:
+        retrievers.append(MemgraphRetriever(uri=memgraph_uri))
     if (
         provider is not None
         and store is not None
@@ -366,6 +368,19 @@ def cmd_index(args: argparse.Namespace) -> int:
         dimension=provider.dimension,
         host=args.qdrant,
     )
+    if args.recreate and not args.yes:
+        if not sys.stdin.isatty():
+            print(
+                "error: --recreate drops the collection; pass --yes to confirm "
+                "in non-interactive mode",
+                file=sys.stderr,
+            )
+            return 2
+        points = store.count() if store.collection_exists() else 0
+        reply = input(f"Drop collection '{args.collection}' ({points} points) and recreate? [y/N] ")
+        if reply.strip().lower() not in {"y", "yes"}:
+            print("aborted")
+            return 1
     store.ensure_collection(recreate=args.recreate)
 
     files = (
@@ -696,6 +711,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Adjacent chunks to concatenate into overlapping context chunks (1 disables)",
     )
     p_index.add_argument("--recreate", action="store_true", help="Drop existing collection")
+    p_index.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Skip the confirmation prompt for --recreate",
+    )
     p_index.set_defaults(func=cmd_index)
 
     p_feedback = sub.add_parser(
