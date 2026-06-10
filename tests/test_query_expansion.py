@@ -1,4 +1,5 @@
 """Tests for query expansion helpers and Recaller integration."""
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock
@@ -48,6 +49,7 @@ def test_query_expansion_skips_non_list_queries():
 
 def test_query_expansion_merges_with_rrf():
     llm = FakeLLM("what X has Y done?\nwhich things did Y like?")
+
     # Build recaller that returns different results per query
     def _recall(query, **kwargs):
         if "original" in query.lower():
@@ -72,9 +74,12 @@ def test_query_expansion_merges_with_rrf():
 def test_query_expansion_falls_back_when_llm_fails():
     class FailingLLM(LLMProvider):
         @property
-        def name(self): return "fail"
+        def name(self):
+            return "fail"
+
         def generate(self, prompt, max_tokens=200, temperature=0.0):
             return LLMResponse(text="", error="boom")
+
     recaller = MagicMock()
     recaller.recall.return_value = [_rr(1, "x", 0.5)]
     qe = QueryExpander(recaller=recaller, llm=FailingLLM())
@@ -114,7 +119,9 @@ class QueryAwareRetriever:
 
 
 def test_expand_query_returns_valid_variants():
-    llm = FakeLLM("Where was Caroline previously based?\nWhat country did Caroline come from?\nCaroline Sweden origin")
+    llm = FakeLLM(
+        "Where was Caroline previously based?\nWhat country did Caroline come from?\nCaroline Sweden origin"
+    )
 
     variants = expand_query("Where did Caroline move from?", llm, n_variants=3)
 
@@ -128,7 +135,9 @@ def test_expand_query_returns_valid_variants():
 
 def test_recaller_with_expansion_produces_superset_and_uses_cache():
     retriever = QueryAwareRetriever()
-    llm = FakeLLM("Caroline Sweden origin\nWhere was Caroline previously based?\nWhat country did Caroline come from?")
+    llm = FakeLLM(
+        "Caroline Sweden origin\nWhere was Caroline previously based?\nWhat country did Caroline come from?"
+    )
     expanded = Recaller(retrievers=[retriever], query_expansion=True, expansion_llm=llm)
     baseline = Recaller(retrievers=[QueryAwareRetriever()])
 

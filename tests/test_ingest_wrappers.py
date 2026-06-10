@@ -1,4 +1,5 @@
 """Tests for markdown wrapper generation during ingest."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -47,13 +48,15 @@ def test_wrapper_generation_creates_markdown_file(tmp_path):
     wrapper_dir = tmp_path / "memory" / "files"
     ing = _ingestor(wrapper_dir)
 
-    stats = ing.ingest([
-        IngestItem(
-            text="A research note about memory wrappers.",
-            source="docs/report.pdf",
-            tags=["research", "pdf"],
-        )
-    ])
+    stats = ing.ingest(
+        [
+            IngestItem(
+                text="A research note about memory wrappers.",
+                source="docs/report.pdf",
+                tags=["research", "pdf"],
+            )
+        ]
+    )
 
     wrappers = list(wrapper_dir.glob("report-*.md"))
     assert len(wrappers) == 1
@@ -84,10 +87,12 @@ def test_wrapper_update_is_idempotent_when_file_exists(tmp_path):
 def test_wrapper_filenames_are_collision_safe(tmp_path):
     ing = _ingestor(tmp_path)
 
-    stats = ing.ingest([
-        IngestItem(text="alpha", source="alpha/report.pdf"),
-        IngestItem(text="beta", source="beta/report.pdf"),
-    ])
+    stats = ing.ingest(
+        [
+            IngestItem(text="alpha", source="alpha/report.pdf"),
+            IngestItem(text="beta", source="beta/report.pdf"),
+        ]
+    )
 
     wrappers = sorted(path.name for path in tmp_path.glob("report-*.md"))
     assert stats.wrappers_created == 2

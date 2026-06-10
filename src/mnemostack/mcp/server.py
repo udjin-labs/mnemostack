@@ -6,6 +6,7 @@ Design notes:
 - All tools accept JSON-serializable args and return JSON-serializable output
 - Errors are returned as structured error objects, not exceptions
 """
+
 from __future__ import annotations
 
 import os
@@ -26,10 +27,12 @@ from ..embeddings import get_provider
 from ..feedback import apply_feedback
 from ..llm import get_llm
 from ..recall import (
+    RERANK_MODES,
     AnswerGenerator,
     BM25Retriever,
     MemgraphRetriever,
     Recaller,
+    Reranker,
     TemporalRetriever,
     VectorRetriever,
     build_bm25_docs,
@@ -42,10 +45,7 @@ from ..vector import VectorStore
 def _public_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
     if not payload:
         return {}
-    return {
-        key: value for key, value in payload.items()
-        if key != "_vector_floor_candidates"
-    }
+    return {key: value for key, value in payload.items() if key != "_vector_floor_candidates"}
 
 
 def build_server(
@@ -60,6 +60,7 @@ def build_server(
     bm25_paths: list[str] | None = None,
     state_path: str = "/tmp/mnemostack-server-state.json",
     vector_floor: int = 0,
+    rerank_mode: str = "relevant_only",
 ) -> Any:
     """Build and return a configured FastMCP server.
 
@@ -73,6 +74,7 @@ def build_server(
         memgraph_uri: if provided, register graph tools (e.g. bolt://localhost:7687)
         state_path: JSON state file for feedback / stateful recall stages
         vector_floor: protect top-N raw-vector candidates from later ranking stages
+        rerank_mode: LLM reranker mode for service parity
 
     Returns:
         FastMCP instance ready to .run()
@@ -81,9 +83,10 @@ def build_server(
         ImportError: if fastmcp not installed (install with mnemostack[mcp])
     """
     if not _FASTMCP_AVAILABLE:
-        raise ImportError(
-            "fastmcp not installed. Install with: pip install 'mnemostack[mcp]'"
-        )
+        raise ImportError("fastmcp not installed. Install with: pip install 'mnemostack[mcp]'")
+    if rerank_mode not in RERANK_MODES:
+        allowed = ", ".join(sorted(RERANK_MODES))
+        raise ValueError(f"rerank_mode must be one of: {allowed}")
 
     mcp = FastMCP("mnemostack")
 
@@ -132,6 +135,30 @@ def build_server(
                 recaller=_get_recaller(),
             )
         return _components["answer"]
+
+    def _get_reranker():
+        if "reranker" not in _components:
+            _components["reranker"] = Reranker(
+                llm=get_llm(llm_provider, **model_kwargs(llm_model)),
+                max_items=20,
+                rerank_mode=rerank_mode,
+            )
+        return _components["reranker"]
+
+    def _apply_rerank(query: str, results: list[Any]) -> list[Any]:
+        try:
+            return _get_reranker().rerank(query, results)
+        except Exception:  # noqa: BLE001
+            return results
+
+    def _run_recall(query: str, limit: int) -> list[Any]:
+        recaller = _get_recaller()
+        recalled_results = recaller.recall(query, limit=limit)
+        results = _apply_rerank(query, recalled_results)[:limit]
+        apply_vector_floor = getattr(recaller, "apply_vector_floor_after_rerank", None)
+        if apply_vector_floor is not None:
+            return apply_vector_floor(results, recalled_results)
+        return results
 
     def _get_feedback_pipeline():
         if "feedback_pipeline" not in _components:
@@ -225,8 +252,7 @@ def build_server(
         payload.
         """
         try:
-            recaller = _get_recaller()
-            results = recaller.recall(query, limit=limit)
+            results = _run_recall(query, limit)
             return {
                 "ok": True,
                 "query": query,
@@ -265,8 +291,7 @@ def build_server(
         fallback_recommended, and error.
         """
         try:
-            recaller = _get_recaller()
-            memories = recaller.recall(query, limit=limit)
+            memories = _run_recall(query, limit)
             gen = _get_answer_gen()
             answer = gen.generate(query, memories)
             return {
@@ -325,6 +350,7 @@ def build_server(
     # ---------- graph tools (optional) ----------
 
     if memgraph_uri:
+
         @mcp.tool()
         def mnemostack_graph_query(
             subject: str | None = None,
@@ -346,8 +372,11 @@ def build_server(
 
                 gs = GraphStore(uri=memgraph_uri, timeout=graph_timeout)
                 triples = gs.query_triples(
-                    subject=subject, predicate=predicate, obj=obj,
-                    as_of=as_of, limit=limit,
+                    subject=subject,
+                    predicate=predicate,
+                    obj=obj,
+                    as_of=as_of,
+                    limit=limit,
                 )
                 gs.close()
                 return {
@@ -385,8 +414,11 @@ def build_server(
 
                 gs = GraphStore(uri=memgraph_uri, timeout=graph_timeout)
                 gs.add_triple(
-                    subject=subject, predicate=predicate, obj=obj,
-                    valid_from=valid_from, valid_until=valid_until,
+                    subject=subject,
+                    predicate=predicate,
+                    obj=obj,
+                    valid_from=valid_from,
+                    valid_until=valid_until,
                 )
                 gs.close()
                 return {"ok": True, "subject": subject, "predicate": predicate, "obj": obj}
@@ -410,6 +442,7 @@ def main() -> None:
         MNEMOSTACK_GRAPH_TIMEOUT    (default: 5.0)
         MNEMOSTACK_BM25_PATHS       (default: none, os.pathsep-separated paths)
         MNEMOSTACK_STATE_PATH       (default: /tmp/mnemostack-server-state.json)
+        MNEMOSTACK_RERANK_MODE      (default: relevant_only)
     """
     cfg = Config.load()
     mcp = build_server(
@@ -423,6 +456,8 @@ def main() -> None:
         graph_timeout=cfg.graph.timeout,
         bm25_paths=list(cfg.recall.bm25_paths) or None,
         state_path=os.environ.get("MNEMOSTACK_STATE_PATH", "/tmp/mnemostack-server-state.json"),
+        vector_floor=max(0, int(cfg.recall.vector_floor)),
+        rerank_mode=cfg.recall.rerank_mode,
     )
     mcp.run()
 

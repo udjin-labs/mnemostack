@@ -16,6 +16,7 @@ Or programmatically:
 
 The server is opt-in: install with `pip install 'mnemostack[server]'`.
 """
+
 from __future__ import annotations
 
 import logging
@@ -43,6 +44,7 @@ from mnemostack.observability.recorder import (
     set_recorder,
 )
 from mnemostack.recall import (
+    RERANK_MODES,
     AnswerGenerator,
     BM25Retriever,
     MemgraphRetriever,
@@ -66,6 +68,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 
 # ----- Request / response models -----
+
 
 class RecallRequest(BaseModel):
     query: str = Field(..., min_length=1, description="Natural language query.")
@@ -149,6 +152,7 @@ class HealthResponse(BaseModel):
 
 # ----- Server construction -----
 
+
 @dataclass
 class ServerConfig:
     provider_name: str = "gemini"
@@ -162,8 +166,14 @@ class ServerConfig:
     graph_timeout: float = 5.0
     bm25_paths: list[str] | None = None  # optional markdown dirs for BM25 corpus
     vector_floor: int = 0
+    rerank_mode: str = "relevant_only"
     state_path: str = "/tmp/mnemostack-server-state.json"
     auto_record_ior: bool = False
+
+    def __post_init__(self) -> None:
+        if self.rerank_mode not in RERANK_MODES:
+            allowed = ", ".join(sorted(RERANK_MODES))
+            raise ValueError(f"rerank_mode must be one of: {allowed}")
 
     @classmethod
     def from_env(cls) -> ServerConfig:
@@ -180,6 +190,7 @@ class ServerConfig:
             graph_timeout=cfg.graph.timeout,
             bm25_paths=list(cfg.recall.bm25_paths) or None,
             vector_floor=max(0, int(cfg.recall.vector_floor)),
+            rerank_mode=cfg.recall.rerank_mode,
             auto_record_ior=_env_bool("MNEMOSTACK_AUTO_RECORD_IOR"),
         )
 
@@ -203,11 +214,13 @@ def _build_bm25_docs(paths: list[str] | None):
             for i in range(0, len(text), 800):
                 chunk = text[i : i + 800]
                 if chunk.strip():
-                    docs.append(BM25Doc(
-                        id=f"{f}:{i}",
-                        text=chunk,
-                        payload={"source": str(f), "offset": i},
-                    ))
+                    docs.append(
+                        BM25Doc(
+                            id=f"{f}:{i}",
+                            text=chunk,
+                            payload={"source": str(f), "offset": i},
+                        )
+                    )
     return docs
 
 
@@ -220,10 +233,7 @@ def _memory_of(result) -> Memory:
     payload = getattr(result, "payload", None)
     if not payload:
         payload = getattr(result, "metadata", None) or {}
-    payload = {
-        key: value for key, value in payload.items()
-        if key != "_vector_floor_candidates"
-    }
+    payload = {key: value for key, value in payload.items() if key != "_vector_floor_candidates"}
     # Common source fields populated by our indexers. Order matters: explicit
     # 'source' wins, then the workspace conventions, finally nothing.
     source = (
@@ -316,7 +326,9 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     set_recorder(InMemoryRecorder())
 
     provider = get_provider(cfg.provider_name, **model_kwargs(cfg.embedding_model))
-    store = VectorStore(collection=cfg.collection, dimension=provider.dimension, host=cfg.qdrant_url)
+    store = VectorStore(
+        collection=cfg.collection, dimension=provider.dimension, host=cfg.qdrant_url
+    )
 
     def _graph_ok() -> bool:
         if not cfg.graph_uri:
@@ -359,7 +371,11 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     try:
         llm = get_llm(cfg.llm_name, **model_kwargs(cfg.llm_model))
         answer_gen: AnswerGenerator | None = AnswerGenerator(llm=llm, recaller=recaller)
-        reranker: Reranker | None = Reranker(llm=llm, max_items=20)
+        reranker: Reranker | None = Reranker(
+            llm=llm,
+            max_items=20,
+            rerank_mode=cfg.rerank_mode,
+        )
     except Exception as exc:  # pragma: no cover - missing provider key
         log.warning("LLM init failed (%s); /answer and reranker disabled.", exc)
         answer_gen = None

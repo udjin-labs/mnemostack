@@ -2,6 +2,7 @@
 
 Requires: pip install mnemostack[huggingface]
 """
+
 from __future__ import annotations
 
 from .base import EmbeddingProvider
@@ -31,9 +32,7 @@ class HuggingFaceProvider(EmbeddingProvider):
         pooling: str = "mean",
     ):
         if not _AVAILABLE:
-            raise ImportError(
-                "HuggingFaceProvider requires `pip install mnemostack[huggingface]`"
-            )
+            raise ImportError("HuggingFaceProvider requires `pip install mnemostack[huggingface]`")
         self.model_name = model
         self.pooling = pooling
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")

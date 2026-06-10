@@ -1,4 +1,5 @@
 """LLM provider registry."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -21,9 +22,7 @@ def get_llm(name: str, **kwargs: Any) -> LLMProvider:
     if key not in _REGISTRY:
         _lazy_register_builtins()
     if key not in _REGISTRY:
-        raise ValueError(
-            f"Unknown LLM provider: {name!r}. Registered: {list_llms()}"
-        )
+        raise ValueError(f"Unknown LLM provider: {name!r}. Registered: {list_llms()}")
     return _REGISTRY[key](**kwargs)
 
 

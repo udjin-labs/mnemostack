@@ -3,6 +3,7 @@
 Stages are ported from the reference implementation in enhanced-recall.py.
 Each stage is a small, independently-testable transformation.
 """
+
 from __future__ import annotations
 
 import math
@@ -18,15 +19,73 @@ from .state import StateStore
 # ---------- defaults / stopwords ----------
 
 STOPWORDS_RU = {
-    "что", "как", "где", "когда", "кто", "зачем", "почему", "это",
-    "мой", "мне", "на", "в", "с", "и", "или", "для", "по", "за",
-    "от", "до", "не", "но", "а", "то", "ещё", "уже", "было", "был",
-    "есть", "будет", "все", "так", "его", "её", "их", "мы", "они",
+    "что",
+    "как",
+    "где",
+    "когда",
+    "кто",
+    "зачем",
+    "почему",
+    "это",
+    "мой",
+    "мне",
+    "на",
+    "в",
+    "с",
+    "и",
+    "или",
+    "для",
+    "по",
+    "за",
+    "от",
+    "до",
+    "не",
+    "но",
+    "а",
+    "то",
+    "ещё",
+    "уже",
+    "было",
+    "был",
+    "есть",
+    "будет",
+    "все",
+    "так",
+    "его",
+    "её",
+    "их",
+    "мы",
+    "они",
 }
 STOPWORDS_EN = {
-    "what", "is", "my", "the", "a", "an", "do", "i", "know", "about",
-    "have", "did", "on", "in", "for", "to", "of", "and", "or", "how",
-    "why", "where", "when", "who", "should", "today", "done", "been",
+    "what",
+    "is",
+    "my",
+    "the",
+    "a",
+    "an",
+    "do",
+    "i",
+    "know",
+    "about",
+    "have",
+    "did",
+    "on",
+    "in",
+    "for",
+    "to",
+    "of",
+    "and",
+    "or",
+    "how",
+    "why",
+    "where",
+    "when",
+    "who",
+    "should",
+    "today",
+    "done",
+    "been",
 }
 STOPWORDS = STOPWORDS_RU | STOPWORDS_EN
 
@@ -72,10 +131,10 @@ class ClassifyQuery(Stage):
 # ---------- exact-token detection / source-of-truth rescue ----------
 
 _EXACT_PATTERNS = [
-    re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b"),          # IP address
-    re.compile(r"\b\d{4,5}\b"),                            # port / numeric code
-    re.compile(r"\b\d{4}\.\d+\.\d+\b"),                    # version like 2026.4.12
-    re.compile(r"\b[a-z]+[-_]?\d+[a-z0-9-]*\b"),            # IDs/codes
+    re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b"),  # IP address
+    re.compile(r"\b\d{4,5}\b"),  # port / numeric code
+    re.compile(r"\b\d{4}\.\d+\.\d+\b"),  # version like 2026.4.12
+    re.compile(r"\b[a-z]+[-_]?\d+[a-z0-9-]*\b"),  # IDs/codes
 ]
 _EXACT_MARKERS = {"ip", "порт", "port", "версия", "version", "id", "uuid", "токен", "api"}
 
@@ -164,9 +223,7 @@ class GravityDampen(Stage):
         self.min_score = min_score
 
     def apply(self, context, results):
-        key_terms = set(context.query_tokens) or (
-            set(context.query.lower().split()) - STOPWORDS
-        )
+        key_terms = set(context.query_tokens) or (set(context.query.lower().split()) - STOPWORDS)
         if not key_terms:
             return results
         for r in results:
@@ -405,7 +462,7 @@ class InhibitionOfReturn(Stage):
             n = counts.get(str(r.id), 0)
             if n > 0:
                 penalty = min(self.max_penalty, self.penalty_per_recall * n)
-                r.score *= (1 - penalty)
+                r.score *= 1 - penalty
                 r.payload["ior_penalty"] = round(penalty, 3)
         results.sort(key=lambda x: -x.score)
         return results
@@ -413,10 +470,12 @@ class InhibitionOfReturn(Stage):
     def record_recall(self, memory_id: Any) -> None:
         """Append a recall event for memory_id (call after emitting results)."""
         ts = datetime.now(timezone.utc).isoformat()
+
         def _update(current):
             log = list(current or [])
             log.append({"id": memory_id, "timestamp": ts})
             return log[-self.keep_last :]
+
         self.store.update(self.STATE_KEY, _update)
 
 
@@ -515,9 +574,7 @@ class QLearningReranker(Stage):
         self.blend_weight = blend_weight
         self.use_blend = use_blend
 
-    def _q_value_with_ucb(
-        self, q_table: dict, source: str, query_type: str
-    ) -> float:
+    def _q_value_with_ucb(self, q_table: dict, source: str, query_type: str) -> float:
         """Get Q-value with UCB1 exploration bonus for under-sampled sources.
 
         Mirrors legacy enhanced-recall.py:get_q_value so cold-start behaviour
@@ -533,9 +590,7 @@ class QLearningReranker(Stage):
                 qt_entry = src_entry.get(query_type, {})
                 total_n += qt_entry.get("n", 0)
             if total_n > 0 and n > 0:
-                q += self.exploration_bonus * math.sqrt(
-                    math.log(total_n) / n
-                )
+                q += self.exploration_bonus * math.sqrt(math.log(total_n) / n)
             else:
                 q += self.exploration_bonus
         return q
@@ -545,10 +600,8 @@ class QLearningReranker(Stage):
         for r in results:
             # Q can mix multiple sources (Vector + BM25 etc.) for one item.
             source_qs = []
-            for source in (r.sources or ["vector"]):
-                source_qs.append(
-                    self._q_value_with_ucb(q_table, source, context.query_type)
-                )
+            for source in r.sources or ["vector"]:
+                source_qs.append(self._q_value_with_ucb(q_table, source, context.query_type))
             avg_q = sum(source_qs) / len(source_qs) if source_qs else self.default_q
             if self.use_blend:
                 # Multiplicative blend: mirrors legacy behaviour — raw scores
@@ -568,6 +621,7 @@ class QLearningReranker(Stage):
         reward: float,
     ) -> None:
         """Update Q-table based on observed reward (1.0 = user used this result)."""
+
         def _update(current):
             table = dict(current or {})
             src_table = dict(table.get(source, {}))
@@ -581,4 +635,5 @@ class QLearningReranker(Stage):
             src_table[query_type] = entry
             table[source] = src_table
             return table
+
         self.store.update(self.STATE_KEY, _update)

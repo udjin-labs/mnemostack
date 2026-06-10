@@ -3,6 +3,7 @@
 Provides compact and full text renderings — useful for 3-layer search UX
 (first get a cheap index, then fetch full details for selected ids only).
 """
+
 from __future__ import annotations
 
 from collections.abc import Iterable
@@ -54,7 +55,9 @@ def compact_format(
         return "(no results)"
     if include_hint:
         lines.append("")
-        lines.append("  hint: results carry stable ids; resolve full text via your storage's fetch-by-id helper")
+        lines.append(
+            "  hint: results carry stable ids; resolve full text via your storage's fetch-by-id helper"
+        )
     return "\n".join(lines)
 
 

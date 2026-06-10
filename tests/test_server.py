@@ -5,6 +5,7 @@ tests stay pure and fast. The goal is to catch wiring and contract bugs:
 request/response shapes, HTTP codes, and graceful degradation when an
 LLM / graph backend is missing.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -102,7 +103,9 @@ def _patched_app(
     """Build the FastAPI app with the heavy retrieval layers mocked out."""
     import mnemostack.server as srv
 
-    monkeypatch.setattr(srv, "VectorStore", lambda **_: type("VS", (), {"count": lambda self: 0, "dimension": 3})())
+    monkeypatch.setattr(
+        srv, "VectorStore", lambda **_: type("VS", (), {"count": lambda self: 0, "dimension": 3})()
+    )
 
     class _FakeProvider:
         dimension = 3
@@ -123,6 +126,7 @@ def _patched_app(
     monkeypatch.setattr(srv, "FileStateStore", lambda path: object())
 
     if with_answer:
+
         class _FakeAns:
             text = "42"
             confidence = 0.9
@@ -140,6 +144,7 @@ def _patched_app(
         class _FakeLLM:
             def generate(self, *a, **kw):
                 from mnemostack.llm.base import LLMResponse
+
                 return LLMResponse(text="ok")
 
         monkeypatch.setattr(srv, "AnswerGenerator", _FakeAnswerGen)
@@ -147,21 +152,27 @@ def _patched_app(
         class _FakeReranker:
             def __init__(self, **_):
                 pass
+
             def rerank(self, q, rs):
                 return rs
 
         monkeypatch.setattr(srv, "Reranker", _FakeReranker)
         monkeypatch.setattr(srv, "get_llm", lambda _n, **_kwargs: _FakeLLM())
     else:
+
         def _raise(*_a, **_kw):
             raise RuntimeError("no llm")
+
         monkeypatch.setattr(srv, "get_llm", _raise)
 
-    app = build_app(config or ServerConfig(
-        provider_name="fake",
-        llm_name="fake",
-        graph_uri=None,
-    ))
+    app = build_app(
+        config
+        or ServerConfig(
+            provider_name="fake",
+            llm_name="fake",
+            graph_uri=None,
+        )
+    )
     return app, fake_recaller
 
 
@@ -237,6 +248,45 @@ def test_build_app_passes_configured_provider_models(monkeypatch):
     assert calls["llm"] == ("fake-llm", {"model": "llm-custom"})
 
 
+def test_build_app_passes_configured_rerank_mode(monkeypatch):
+    import mnemostack.server as srv
+
+    reranker_kwargs = {}
+
+    class _FakeProvider:
+        dimension = 3
+
+        def embed(self, text):
+            return [0.0, 0.0, 0.0]
+
+    def _fake_reranker(**kwargs):
+        reranker_kwargs.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(srv, "get_provider", lambda _name, **_kwargs: _FakeProvider())
+    monkeypatch.setattr(srv, "get_llm", lambda _name, **_kwargs: object())
+    monkeypatch.setattr(srv, "VectorStore", lambda **_: object())
+    monkeypatch.setattr(srv, "Recaller", lambda **_: _FakeRecaller())
+    monkeypatch.setattr(srv, "VectorRetriever", lambda **_: object())
+    monkeypatch.setattr(srv, "BM25Retriever", lambda **_: object())
+    monkeypatch.setattr(srv, "MemgraphRetriever", lambda **_: object())
+    monkeypatch.setattr(srv, "TemporalRetriever", lambda **_: object())
+    monkeypatch.setattr(srv, "build_full_pipeline", lambda **_: _FakePipeline())
+    monkeypatch.setattr(srv, "FileStateStore", lambda path: object())
+    monkeypatch.setattr(srv, "AnswerGenerator", lambda **_: object())
+    monkeypatch.setattr(srv, "Reranker", _fake_reranker)
+
+    build_app(
+        ServerConfig(
+            provider_name="fake",
+            llm_name="fake-llm",
+            rerank_mode="full_reorder",
+        )
+    )
+
+    assert reranker_kwargs["rerank_mode"] == "full_reorder"
+
+
 def test_recall_endpoint(monkeypatch):
     app, recaller = _patched_app(monkeypatch)
     client = TestClient(app)
@@ -276,7 +326,9 @@ def test_recall_endpoint_applies_vector_floor_after_rerank_and_slice(monkeypatch
         def rerank(self, q, rs):
             return [result for result in rs if result.id != "vector-strong"]
 
-    monkeypatch.setattr(srv, "VectorStore", lambda **_: type("VS", (), {"count": lambda self: 0, "dimension": 3})())
+    monkeypatch.setattr(
+        srv, "VectorStore", lambda **_: type("VS", (), {"count": lambda self: 0, "dimension": 3})()
+    )
 
     class _FakeProvider:
         dimension = 3

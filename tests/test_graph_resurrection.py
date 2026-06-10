@@ -2,6 +2,7 @@
 
 Uses a fake neo4j driver injected via `driver=` so no live Memgraph needed.
 """
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock
@@ -54,7 +55,13 @@ def test_resurrection_dedupes_against_existing():
     rows = {"mnemostack": [{"name": "LoCoMo", "type": "B", "mc": "w", "rel": "x"}]}
     stage = GraphResurrection(driver=_make_driver(rows))
     existing = [
-        RecallResult(id=1, text="LoCoMo is a benchmark", score=0.9, payload={"text": "LoCoMo is a benchmark"}, sources=["vector"]),
+        RecallResult(
+            id=1,
+            text="LoCoMo is a benchmark",
+            score=0.9,
+            payload={"text": "LoCoMo is a benchmark"},
+            sources=["vector"],
+        ),
     ]
     out = stage.apply(_ctx("mnemostack results"), existing)
     # No graph result added because LoCoMo already present in text
@@ -99,10 +106,7 @@ def test_resurrection_cypher_failure_is_noop():
 
 def test_resurrection_respects_limit():
     rows = {
-        "project": [
-            {"name": f"n{i}", "type": "T", "mc": "w", "rel": "r"}
-            for i in range(10)
-        ],
+        "project": [{"name": f"n{i}", "type": "T", "mc": "w", "rel": "r"} for i in range(10)],
     }
     stage = GraphResurrection(driver=_make_driver(rows), limit=2, max_per_seed=10)
     out = stage.apply(_ctx("project search"), [])

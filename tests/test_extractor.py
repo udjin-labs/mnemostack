@@ -22,7 +22,9 @@ class FakeLLM(LLMProvider):
 
 
 def test_extract_basic():
-    llm = FakeLLM(response='[{"subject": "alice", "predicate": "works_on", "object": "project-x", "valid_from": "2024-01-01"}]')
+    llm = FakeLLM(
+        response='[{"subject": "alice", "predicate": "works_on", "object": "project-x", "valid_from": "2024-01-01"}]'
+    )
     ext = TripleExtractor(llm=llm)
     triples = ext.extract("Alice started project-x on Jan 1, 2024")
     assert len(triples) == 1
@@ -34,10 +36,10 @@ def test_extract_basic():
 
 
 def test_extract_multiple():
-    response = '''[
+    response = """[
         {"subject": "alice", "predicate": "works_on", "object": "project-x", "valid_from": null},
         {"subject": "bob", "predicate": "manages", "object": "team-a", "valid_from": "2023-06-01"}
-    ]'''
+    ]"""
     llm = FakeLLM(response=response)
     ext = TripleExtractor(llm=llm)
     triples = ext.extract("Alice works on project-x. Bob manages team-a since June 2023.")
@@ -47,7 +49,9 @@ def test_extract_multiple():
 
 
 def test_extract_strips_markdown_fences():
-    response = '```json\n[{"subject": "s", "predicate": "p", "object": "o", "valid_from": null}]\n```'
+    response = (
+        '```json\n[{"subject": "s", "predicate": "p", "object": "o", "valid_from": null}]\n```'
+    )
     llm = FakeLLM(response=response)
     ext = TripleExtractor(llm=llm)
     triples = ext.extract("s p o")
@@ -55,7 +59,9 @@ def test_extract_strips_markdown_fences():
 
 
 def test_extract_handles_leading_prose():
-    response = 'Sure, here are the triples:\n[{"subject": "s", "predicate": "p", "object": "o"}]\nDone!'
+    response = (
+        'Sure, here are the triples:\n[{"subject": "s", "predicate": "p", "object": "o"}]\nDone!'
+    )
     llm = FakeLLM(response=response)
     ext = TripleExtractor(llm=llm)
     triples = ext.extract("x")
@@ -89,11 +95,11 @@ def test_extract_empty_text_skips_llm():
 
 
 def test_extract_filters_incomplete_triples():
-    response = '''[
+    response = """[
         {"subject": "", "predicate": "p", "object": "o"},
         {"subject": "s", "predicate": "p", "object": ""},
         {"subject": "s", "predicate": "p", "object": "o"}
-    ]'''
+    ]"""
     llm = FakeLLM(response=response)
     ext = TripleExtractor(llm=llm)
     triples = ext.extract("x")
@@ -101,10 +107,7 @@ def test_extract_filters_incomplete_triples():
 
 
 def test_extract_respects_max_triples():
-    items = ",".join(
-        f'{{"subject":"s{i}","predicate":"p","object":"o{i}"}}'
-        for i in range(20)
-    )
+    items = ",".join(f'{{"subject":"s{i}","predicate":"p","object":"o{i}"}}' for i in range(20))
     llm = FakeLLM(response=f"[{items}]")
     ext = TripleExtractor(llm=llm, max_triples=5)
     triples = ext.extract("x")

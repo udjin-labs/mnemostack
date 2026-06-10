@@ -11,7 +11,9 @@ def test_strip_metadata_blocks_removes_openclaw_webchat():
 <system-reminder>Do not mention hidden tool details.</system-reminder>
 """
 
-    assert strip_metadata_blocks(raw) == "[Sun 2026-04-26 10:42 UTC] Please index only this message."
+    assert (
+        strip_metadata_blocks(raw) == "[Sun 2026-04-26 10:42 UTC] Please index only this message."
+    )
 
 
 def test_strip_metadata_blocks_removes_telegram_envelope():
@@ -60,7 +62,10 @@ def test_strip_metadata_blocks_extra_patterns_applied():
 Keep me.
 """
 
-    assert strip_metadata_blocks(raw, profiles=(), extra_patterns=[r"^CUSTOM META:[^\n]*\n?"]) == "Keep me."
+    assert (
+        strip_metadata_blocks(raw, profiles=(), extra_patterns=[r"^CUSTOM META:[^\n]*\n?"])
+        == "Keep me."
+    )
 
 
 def test_is_heartbeat_poll_detects_pure_poll():

@@ -8,6 +8,7 @@ Commands:
 Most commands need a running Qdrant (default: http://localhost:6333) and a
 configured embedding provider (GEMINI_API_KEY for gemini, or a running Ollama).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -20,6 +21,7 @@ from .config import DEFAULT_CONFIG_PATHS, Config, generate_example_config, model
 from .embeddings import get_provider, list_providers
 from .llm import get_llm, list_llms
 from .recall import (
+    RERANK_MODES,
     AnswerGenerator,
     BM25Retriever,
     MemgraphRetriever,
@@ -105,8 +107,7 @@ def cmd_search(args: argparse.Namespace) -> int:
     )
     if not store.collection_exists():
         print(
-            f"error: collection '{args.collection}' does not exist. "
-            f"Run `mnemostack index` first.",
+            f"error: collection '{args.collection}' does not exist. Run `mnemostack index` first.",
             file=sys.stderr,
         )
         return 2
@@ -128,7 +129,8 @@ def cmd_search(args: argparse.Namespace) -> int:
                 # backward-compatible: full text + payload
                 entry["text"] = r.text
                 entry["payload"] = {
-                    key: value for key, value in r.payload.items()
+                    key: value
+                    for key, value in r.payload.items()
                     if key != "_vector_floor_candidates"
                 }
             elif snippet_chars > 0:
@@ -211,8 +213,7 @@ def cmd_answer(args: argparse.Namespace) -> int:
     )
     if not store.collection_exists():
         print(
-            f"error: collection '{args.collection}' does not exist. "
-            f"Run `mnemostack index` first.",
+            f"error: collection '{args.collection}' does not exist. Run `mnemostack index` first.",
             file=sys.stderr,
         )
         return 2
@@ -279,7 +280,7 @@ def cmd_answer(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         print(
-            f"  mnemostack search \"{args.query}\" --provider {args.provider}",
+            f'  mnemostack search "{args.query}" --provider {args.provider}',
             file=sys.stderr,
         )
     return 0
@@ -318,20 +319,22 @@ def _build_recaller(
 ) -> Recaller:
     """Build the same retriever-mode Recaller used by the service surfaces."""
     retrievers = []
-    if provider is not None and store is not None and _source_enabled_for_cli(
-        "vector", source_filter
+    if (
+        provider is not None
+        and store is not None
+        and _source_enabled_for_cli("vector", source_filter)
     ):
         retrievers.append(VectorRetriever(embedding=provider, vector_store=store))
     if _source_enabled_for_cli("bm25", source_filter):
         bm25_docs = build_bm25_docs(list(getattr(args, "bm25_path", []) or []))
         if bm25_docs:
             retrievers.append(BM25Retriever(docs=bm25_docs))
-    if _source_enabled_for_cli("memgraph", source_filter) and getattr(
-        args, "memgraph_uri", None
-    ):
+    if _source_enabled_for_cli("memgraph", source_filter) and getattr(args, "memgraph_uri", None):
         retrievers.append(MemgraphRetriever(uri=getattr(args, "memgraph_uri", None)))
-    if provider is not None and store is not None and _source_enabled_for_cli(
-        "temporal", source_filter
+    if (
+        provider is not None
+        and store is not None
+        and _source_enabled_for_cli("temporal", source_filter)
     ):
         retrievers.append(TemporalRetriever(embedding=provider, vector_store=store))
     query_expansion = bool(getattr(args, "query_expansion", False))
@@ -366,7 +369,8 @@ def cmd_index(args: argparse.Namespace) -> int:
     store.ensure_collection(recreate=args.recreate)
 
     files = (
-        [target] if target.is_file()
+        [target]
+        if target.is_file()
         else sorted(target.rglob("*.md")) + sorted(target.rglob("*.txt"))
     )
     if not files:
@@ -511,9 +515,7 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument(
         "--collection", default=cfg.vector.collection, help="Qdrant collection name"
     )
-    common.add_argument(
-        "--qdrant", default=cfg.vector.host, help="Qdrant URL"
-    )
+    common.add_argument("--qdrant", default=cfg.vector.host, help="Qdrant URL")
 
     p_health = sub.add_parser("health", parents=[common], help="Check stack health")
     p_health.set_defaults(func=cmd_health)
@@ -544,7 +546,10 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_search.add_argument(
-        "--llm", default=cfg.llm.provider, choices=list_llms(), help="LLM provider for query expansion"
+        "--llm",
+        default=cfg.llm.provider,
+        choices=list_llms(),
+        help="LLM provider for query expansion",
     )
     p_search.add_argument(
         "--llm-model",
@@ -624,7 +629,9 @@ def build_parser() -> argparse.ArgumentParser:
         "answer", parents=[common], help="Synthesize concise answer from memories"
     )
     p_answer.add_argument("query", help="Question to answer")
-    p_answer.add_argument("--limit", type=int, default=cfg.recall.top_k, help="Max memories to consider")
+    p_answer.add_argument(
+        "--limit", type=int, default=cfg.recall.top_k, help="Max memories to consider"
+    )
     p_answer.add_argument(
         "--bm25-path",
         action="append",
@@ -647,7 +654,10 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_answer.add_argument(
-        "--llm", default=cfg.llm.provider, choices=list_llms(), help="LLM provider for answer generation"
+        "--llm",
+        default=cfg.llm.provider,
+        choices=list_llms(),
+        help="LLM provider for answer generation",
     )
     p_answer.add_argument(
         "--llm-model",
@@ -676,7 +686,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_index = sub.add_parser("index", parents=[common], help="Index files into vector store")
     p_index.add_argument("path", help="File or directory to index")
-    p_index.add_argument("--chunk-size", type=int, default=cfg.vector.chunk_size, help="Chunk size in chars")
+    p_index.add_argument(
+        "--chunk-size", type=int, default=cfg.vector.chunk_size, help="Chunk size in chars"
+    )
     p_index.add_argument(
         "--window-size",
         type=int,
@@ -733,9 +745,7 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[common],
         help="Run MCP server (stdio). Requires: pip install 'mnemostack[mcp]'",
     )
-    p_mcp.add_argument(
-        "--llm", default=cfg.llm.provider, help="LLM provider for answer generation"
-    )
+    p_mcp.add_argument("--llm", default=cfg.llm.provider, help="LLM provider for answer generation")
     p_mcp.add_argument(
         "--llm-model",
         default=cfg.llm.model,
@@ -768,6 +778,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=cfg.recall.vector_floor,
         help="Append missing top-N raw-vector candidates after fusion/rerank",
+    )
+    p_mcp.add_argument(
+        "--rerank-mode",
+        choices=sorted(RERANK_MODES),
+        default=cfg.recall.rerank_mode,
+        help="LLM reranker contract: relevant_only returns a subset, full_reorder ranks all",
     )
     p_mcp.set_defaults(func=cmd_mcp_serve)
 
@@ -835,6 +851,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Append missing top-N raw-vector candidates after fusion/rerank",
     )
     p_serve.add_argument(
+        "--rerank-mode",
+        choices=sorted(RERANK_MODES),
+        default=cfg.recall.rerank_mode,
+        help="LLM reranker contract: relevant_only returns a subset, full_reorder ranks all",
+    )
+    p_serve.add_argument(
         "--reload", action="store_true", help="Enable uvicorn auto-reload (dev only)"
     )
     p_serve.set_defaults(func=cmd_serve)
@@ -889,6 +911,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         graph_timeout=args.graph_timeout,
         bm25_paths=list(args.bm25_path) if args.bm25_path else None,
         vector_floor=max(0, int(args.vector_floor)),
+        rerank_mode=args.rerank_mode,
         state_path=args.state_path,
         auto_record_ior=args.auto_record_ior,
     )
@@ -927,10 +950,7 @@ def cmd_graph_migrate_current(args: argparse.Namespace) -> int:
         store.close()
 
     action = "Would update" if args.dry_run else "Updated"
-    print(
-        f"{action} {counts['nodes']} node(s) and "
-        f"{counts['relationships']} relationship(s)."
-    )
+    print(f"{action} {counts['nodes']} node(s) and {counts['relationships']} relationship(s).")
     return 0
 
 
@@ -938,7 +958,9 @@ def cmd_init(args: argparse.Namespace) -> int:
     """Create an example config file at the standard location."""
     target = Path(args.path).expanduser() if args.path else DEFAULT_CONFIG_PATHS[0]
     if target.exists() and not args.force:
-        print(f"error: config already exists at {target} (use --force to overwrite)", file=sys.stderr)
+        print(
+            f"error: config already exists at {target} (use --force to overwrite)", file=sys.stderr
+        )
         return 2
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(generate_example_config())
@@ -950,6 +972,7 @@ def cmd_init(args: argparse.Namespace) -> int:
 def cmd_config_show(args: argparse.Namespace) -> int:
     """Print the currently resolved config (file + env overrides)."""
     import yaml
+
     cfg = Config.load(args.config)
     print(yaml.safe_dump(cfg.to_dict(), default_flow_style=False, sort_keys=False))
     return 0
@@ -977,6 +1000,7 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
         bm25_paths=list(args.bm25_path) if args.bm25_path else None,
         state_path=args.state_path,
         vector_floor=max(0, int(args.vector_floor)),
+        rerank_mode=args.rerank_mode,
     )
     mcp.run()
     return 0

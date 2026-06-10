@@ -1,4 +1,5 @@
 """Tests for AnswerGenerator — uses FakeLLM for deterministic behavior."""
+
 import json
 
 import pytest
@@ -173,9 +174,7 @@ def test_gemini_llm_uses_api_key_header_not_query_string(monkeypatch):
             return False
 
         def read(self):
-            return json.dumps(
-                {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
-            ).encode()
+            return json.dumps({"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}).encode()
 
     def fake_urlopen(req, timeout):
         seen["url"] = req.full_url

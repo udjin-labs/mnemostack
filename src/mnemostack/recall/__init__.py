@@ -42,7 +42,7 @@ from .pipeline import (
 from .query_expansion import expand_query
 from .recaller import Recaller, RecallResult
 from .render import compact_format, full_format
-from .reranker import Reranker
+from .reranker import RERANK_MODES, Reranker
 from .retrievers import (
     BM25Retriever,
     HyDERetriever,
@@ -76,7 +76,6 @@ __all__ = [
     "HyDERetriever",
     "MemgraphRetriever",
     "TemporalRetriever",
-
     "extract_temporal",
     "Answer",
     "AnswerGenerator",
@@ -84,6 +83,7 @@ __all__ = [
     "detect_placeholders",
     "resolve_specificity",
     "Reranker",
+    "RERANK_MODES",
     "Pipeline",
     "PipelineContext",
     "Stage",

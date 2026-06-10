@@ -1,4 +1,5 @@
 """State storage for stateful stages (Q-learning, IOR, mood, curiosity)."""
+
 from __future__ import annotations
 
 import json
@@ -16,12 +17,10 @@ class StateStore(ABC):
     """
 
     @abstractmethod
-    def get(self, key: str, default: Any = None) -> Any:
-        ...
+    def get(self, key: str, default: Any = None) -> Any: ...
 
     @abstractmethod
-    def set(self, key: str, value: Any) -> None:
-        ...
+    def set(self, key: str, value: Any) -> None: ...
 
     @abstractmethod
     def update(self, key: str, updater) -> Any:

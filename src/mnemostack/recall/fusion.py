@@ -1,4 +1,5 @@
 """Reciprocal Rank Fusion (RRF) — merges ranked lists from multiple retrievers."""
+
 from __future__ import annotations
 
 from collections.abc import Iterable

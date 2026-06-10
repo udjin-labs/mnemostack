@@ -1,4 +1,5 @@
 """Chunker interface and Chunk dataclass."""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -11,7 +12,7 @@ class Chunk:
     """A piece of text with positional and semantic metadata."""
 
     text: str
-    offset: int = 0                     # character offset in source document
+    offset: int = 0  # character offset in source document
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __len__(self) -> int:

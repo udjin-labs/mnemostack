@@ -28,6 +28,7 @@ Example config file:
       rrf_k: 60
       confidence_threshold: 0.5
 """
+
 from __future__ import annotations
 
 import os
@@ -89,6 +90,7 @@ class RecallConfig:
     confidence_threshold: float = 0.5
     bm25_paths: list[str] = field(default_factory=list)
     vector_floor: int = 0
+    rerank_mode: str = "relevant_only"
 
 
 @dataclass
@@ -182,6 +184,7 @@ def _apply_env_overrides(cfg: Config) -> Config:
         MNEMOSTACK_GRAPH_HEALTH_TIMEOUT
         MNEMOSTACK_BM25_PATHS       (os.pathsep-separated)
         MNEMOSTACK_VECTOR_FLOOR
+        MNEMOSTACK_RERANK_MODE      (relevant_only | full_reorder)
         MNEMOSTACK_QDRANT_HOST  (alias for VECTOR_HOST)
         MNEMOSTACK_COLLECTION   (alias for VECTOR_COLLECTION)
         MNEMOSTACK_MEMGRAPH_URI (alias for GRAPH_URI)
@@ -232,6 +235,8 @@ def _apply_env_overrides(cfg: Config) -> Config:
         cfg.recall.bm25_paths = [p for p in v.split(os.pathsep) if p]
     if v := env.get("MNEMOSTACK_VECTOR_FLOOR"):
         cfg.recall.vector_floor = max(0, int(v))
+    if v := env.get("MNEMOSTACK_RERANK_MODE"):
+        cfg.recall.rerank_mode = v
 
     return cfg
 
@@ -272,4 +277,5 @@ recall:
   confidence_threshold: 0.5
   bm25_paths: []
   vector_floor: 0
+  rerank_mode: relevant_only  # relevant_only | full_reorder
 """

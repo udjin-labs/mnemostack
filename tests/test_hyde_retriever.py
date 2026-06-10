@@ -4,6 +4,7 @@ We fake the LLM, embedding, and vector store so the test is pure and fast.
 Real-prod verification against Qdrant + Gemini is done separately (see the
 accompanying smoke script) — remember the mocks-can-lie lesson.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -21,12 +22,14 @@ class _FakeLLM:
     def generate(self, prompt, max_tokens=120, temperature=0.0):
         self.calls += 1
         from mnemostack.llm.base import LLMResponse
+
         return LLMResponse(text=self._text, tokens_used=len(self._text.split()))
 
 
 class _EmptyLLM:
     def generate(self, *a, **kw):
         from mnemostack.llm.base import LLMResponse
+
         return LLMResponse(text="", tokens_used=0)
 
 
@@ -70,8 +73,7 @@ class _FakeVectorStore:
 
 def _hits(n: int):
     return [
-        _Hit(id=f"mem-{i}", score=1.0 - 0.1 * i, payload={"text": f"memory {i}"})
-        for i in range(n)
+        _Hit(id=f"mem-{i}", score=1.0 - 0.1 * i, payload={"text": f"memory {i}"}) for i in range(n)
     ]
 
 
@@ -93,9 +95,7 @@ def test_hyde_calls_llm_then_embedding_then_vector_search():
 
 
 def test_hyde_empty_on_empty_llm_output():
-    r = HyDERetriever(
-        llm=_EmptyLLM(), embedding=_FakeEmbedding(), vector_store=_FakeVectorStore()
-    )
+    r = HyDERetriever(llm=_EmptyLLM(), embedding=_FakeEmbedding(), vector_store=_FakeVectorStore())
     assert r.search("anything") == []
 
 

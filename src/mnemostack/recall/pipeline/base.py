@@ -1,4 +1,5 @@
 """Pipeline and Stage base classes."""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -17,7 +18,7 @@ class PipelineContext:
     """
 
     query: str
-    query_type: str = "general"   # filled by ClassifyQueryStage
+    query_type: str = "general"  # filled by ClassifyQueryStage
     query_tokens: list[str] = field(default_factory=list)
     extras: dict[str, Any] = field(default_factory=dict)
 

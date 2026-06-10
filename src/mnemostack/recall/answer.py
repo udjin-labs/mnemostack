@@ -4,6 +4,7 @@ Synthesizes concise factual answers from retrieved memories, with explicit
 confidence scoring and source citations. Designed to be honest about
 uncertainty: low confidence → caller should fall back to raw evidence.
 """
+
 from __future__ import annotations
 
 import json
@@ -273,13 +274,17 @@ def classify_question(query: str) -> str:
     ) or re.match(rf"^in ({_MONTH_PATTERN}|20(?:20|21|22|23|24))\b", q):
         return "temporal"
 
-    if re.search(
-        r"\b(would|likely|probably|what if|do you think|"
-        r"what kind of person)\b",
-        q,
-    ) or re.search(r"\bmight\b(?!['’]ve)", q) or re.search(
-        r"\bwhat(?:'s| is) their (?:likely |probable )?(?:political )?leaning\b",
-        q,
+    if (
+        re.search(
+            r"\b(would|likely|probably|what if|do you think|"
+            r"what kind of person)\b",
+            q,
+        )
+        or re.search(r"\bmight\b(?!['’]ve)", q)
+        or re.search(
+            r"\bwhat(?:'s| is) their (?:likely |probable )?(?:political )?leaning\b",
+            q,
+        )
     ):
         return "inference"
 

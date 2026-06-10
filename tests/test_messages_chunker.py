@@ -1,4 +1,5 @@
 """Tests for MessagePairChunker — dialogue/transcript sliding window."""
+
 import pytest
 
 from mnemostack.chunking import MessagePairChunker

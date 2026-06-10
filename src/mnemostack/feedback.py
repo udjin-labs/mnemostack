@@ -1,4 +1,5 @@
 """Shared feedback recording helpers for stateful recall stages."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

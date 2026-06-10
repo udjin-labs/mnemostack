@@ -8,6 +8,7 @@ look semantically similar to each other.
 
 Use strip_metadata_blocks() before chunking to keep only the actual body.
 """
+
 from __future__ import annotations
 
 import re
@@ -89,7 +90,11 @@ def strip_metadata_blocks(
             text = rx.sub("", text)
     if extra_patterns:
         for pattern in extra_patterns:
-            rx = re.compile(pattern, re.DOTALL | re.MULTILINE) if isinstance(pattern, str) else pattern
+            rx = (
+                re.compile(pattern, re.DOTALL | re.MULTILINE)
+                if isinstance(pattern, str)
+                else pattern
+            )
             text = rx.sub("", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()

@@ -4,6 +4,7 @@ The public ``synthesize`` entry point gathers evidence about one entity from
 whatever recall backends are available, deduplicates near-identical chunks, and
 returns a structured result that can be rendered as Markdown or JSON.
 """
+
 from __future__ import annotations
 
 import json
@@ -27,10 +28,42 @@ from .recall.retrievers import (
 
 _TIMESTAMP_KEYS = ("timestamp", "created_at", "date", "time")
 _STOPWORDS = {
-    "about", "after", "also", "and", "are", "because", "been", "but", "for",
-    "from", "has", "have", "into", "its", "that", "the", "their", "them",
-    "then", "there", "this", "was", "were", "with", "you", "your", "это",
-    "как", "для", "или", "что", "она", "они", "его", "про", "на",
+    "about",
+    "after",
+    "also",
+    "and",
+    "are",
+    "because",
+    "been",
+    "but",
+    "for",
+    "from",
+    "has",
+    "have",
+    "into",
+    "its",
+    "that",
+    "the",
+    "their",
+    "them",
+    "then",
+    "there",
+    "this",
+    "was",
+    "were",
+    "with",
+    "you",
+    "your",
+    "это",
+    "как",
+    "для",
+    "или",
+    "что",
+    "она",
+    "они",
+    "его",
+    "про",
+    "на",
 }
 
 
@@ -140,11 +173,15 @@ def synthesize(
         raise ValueError("max_results must be >= 1")
 
     source_filter = _normalize_sources(sources)
-    recaller = _filter_recaller(kwargs.get("recaller"), source_filter) or _build_recaller_from_kwargs(
-        source_filter, kwargs
-    )
+    recaller = _filter_recaller(
+        kwargs.get("recaller"), source_filter
+    ) or _build_recaller_from_kwargs(source_filter, kwargs)
     raw_results = _query_recaller(recaller, entity, max_results, kwargs.get("filters"))
-    raw_results.extend(_query_retrievers(kwargs.get("retrievers"), entity, max_results, source_filter, kwargs.get("filters")))
+    raw_results.extend(
+        _query_retrievers(
+            kwargs.get("retrievers"), entity, max_results, source_filter, kwargs.get("filters")
+        )
+    )
     raw_results = [r for r in raw_results if _result_source_enabled(r, source_filter)]
 
     facts = _dedupe_facts(_facts_from_results(raw_results), max_results=max_results)
@@ -170,11 +207,17 @@ def _normalize_sources(sources: list[str] | None) -> set[str] | None:
     return {aliases.get(s.lower(), s.lower()) for s in sources}
 
 
-def _build_recaller_from_kwargs(source_filter: set[str] | None, kwargs: dict[str, Any]) -> Recaller | None:
+def _build_recaller_from_kwargs(
+    source_filter: set[str] | None, kwargs: dict[str, Any]
+) -> Recaller | None:
     retrievers: list[Retriever] = []
     embedding = kwargs.get("embedding_provider") or kwargs.get("embedding")
     vector_store = kwargs.get("vector_store")
-    if _source_enabled("vector", source_filter) and embedding is not None and vector_store is not None:
+    if (
+        _source_enabled("vector", source_filter)
+        and embedding is not None
+        and vector_store is not None
+    ):
         retrievers.append(VectorRetriever(embedding=embedding, vector_store=vector_store))
     if _source_enabled("bm25", source_filter) and kwargs.get("bm25_docs"):
         retrievers.append(BM25Retriever(docs=list(kwargs["bm25_docs"])))
@@ -189,7 +232,11 @@ def _build_recaller_from_kwargs(source_filter: set[str] | None, kwargs: dict[str
                 timeout=float(kwargs.get("graph_timeout", 5.0)),
             )
         )
-    if _source_enabled("temporal", source_filter) and embedding is not None and vector_store is not None:
+    if (
+        _source_enabled("temporal", source_filter)
+        and embedding is not None
+        and vector_store is not None
+    ):
         retrievers.append(TemporalRetriever(embedding=embedding, vector_store=vector_store))
     if not retrievers:
         return None
@@ -383,7 +430,9 @@ def _timestamp_sort_key(timestamp: str | None) -> tuple[int, str]:
         return (0, raw)
 
 
-def _related_entities(entity: str, results: list[RecallResult], kwargs: dict[str, Any]) -> list[str]:
+def _related_entities(
+    entity: str, results: list[RecallResult], kwargs: dict[str, Any]
+) -> list[str]:
     provider = kwargs.get("related_entity_provider")
     if provider is not None:
         try:

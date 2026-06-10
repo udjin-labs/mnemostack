@@ -1,4 +1,5 @@
 """Weighted RRF: retrievers should be able to express confidence per list."""
+
 from mnemostack.recall.fusion import reciprocal_rank_fusion
 
 

@@ -4,6 +4,7 @@ Uses a ranking prompt instead of embedding similarity. Works well for
 queries where semantic similarity alone is too broad (e.g. 'when did X happen'
 can match any mention of X, but only specific dates are actually relevant).
 """
+
 from __future__ import annotations
 
 import logging
@@ -16,7 +17,26 @@ from .recaller import RecallResult
 
 logger = logging.getLogger(__name__)
 
-_RERANK_PROMPT = """Rank these memories by how well they answer a query.
+RERANK_MODE_RELEVANT_ONLY = "relevant_only"
+RERANK_MODE_FULL_REORDER = "full_reorder"
+RERANK_MODES = frozenset({RERANK_MODE_RELEVANT_ONLY, RERANK_MODE_FULL_REORDER})
+
+_RELEVANT_ONLY_PROMPT = """Rank these memories by how well they answer a query.
+
+QUERY: {query}
+
+MEMORIES:
+{memories}
+
+RULES:
+1. Output ONLY a space-separated list of memory IDs, most relevant first.
+2. Include only memories that are actually relevant (skip irrelevant ones).
+3. If none are relevant, output: NONE
+4. No explanation, no prose, just the IDs.
+
+RELEVANT_IDS:"""
+
+_FULL_REORDER_PROMPT = """Rank these memories by how well they answer a query.
 
 QUERY: {query}
 
@@ -49,6 +69,10 @@ class Reranker:
         llm: LLM provider (Gemini Flash works well with thinkingBudget=0)
         max_items: how many top-K to rerank (reranking all is expensive)
         max_tokens: minimum LLM output budget for rerank responses
+        rerank_mode: prompt contract to use. Allowed values are
+            "relevant_only" (default; model may return only relevant IDs) and
+            "full_reorder" (model should return every candidate ID once).
+            Final filtering is still performed by callers via their limit.
     """
 
     def __init__(
@@ -57,10 +81,15 @@ class Reranker:
         max_items: int = 20,
         max_tokens: int = 200,
         cache_ttl: float = 300.0,
+        rerank_mode: str = RERANK_MODE_RELEVANT_ONLY,
     ):
         self.llm = llm
         self.max_items = max_items
         self.max_tokens = max_tokens
+        if rerank_mode not in RERANK_MODES:
+            allowed = ", ".join(sorted(RERANK_MODES))
+            raise ValueError(f"rerank_mode must be one of: {allowed}")
+        self.rerank_mode = rerank_mode
         self.cache = RerankerCache(ttl_seconds=cache_ttl)
 
     def rerank(
@@ -90,10 +119,8 @@ class Reranker:
 
         prompt_ids = self._ordinal_ids(head)
         prompt = self._build_prompt(query, head, prompt_ids)
-        effective_max_tokens = max(self.max_tokens, len(head) * 10)
-        resp = self.llm.generate(
-            prompt, max_tokens=effective_max_tokens, temperature=0.0
-        )
+        effective_max_tokens = max(self.max_tokens, self._token_floor(len(head)))
+        resp = self.llm.generate(prompt, max_tokens=effective_max_tokens, temperature=0.0)
         if not resp.ok:
             logger.warning("rerank failed, keeping original order: %s", resp.error)
             return results  # graceful fallback
@@ -119,10 +146,7 @@ class Reranker:
             # Fuzzy fallback: longest full-id that starts with the candidate,
             # or that the candidate starts with. This catches composite ids
             # (paths / namespaced keys) when the LLM emits a shorter form.
-            matches = [
-                full for full in id_map
-                if full.startswith(rid) or rid.startswith(full)
-            ]
+            matches = [full for full in id_map if full.startswith(rid) or rid.startswith(full)]
             if len(matches) == 1:
                 return id_map[matches[0]]
             if len(matches) > 1:
@@ -138,7 +162,7 @@ class Reranker:
             if r is not None and str(r.id) not in seen:
                 reordered.append(r)
                 seen.add(str(r.id))
-        if len(reordered) < len(head) * 0.8:
+        if self.rerank_mode == RERANK_MODE_FULL_REORDER and len(reordered) < len(head) * 0.8:
             logger.warning(
                 "rerank parsed %d of %d candidate ids",
                 len(reordered),
@@ -161,6 +185,11 @@ class Reranker:
         )
 
         return reordered
+
+    def _token_floor(self, candidate_count: int) -> int:
+        if self.rerank_mode == RERANK_MODE_FULL_REORDER:
+            return candidate_count * 10
+        return candidate_count * 8
 
     @staticmethod
     def _ordinal_ids(results: list[RecallResult]) -> list[str]:
@@ -188,7 +217,12 @@ class Reranker:
             text = r.text.strip().replace("\n", " ")[:300]
             lines.append(f"ID={prompt_id}: {text}")
         memories_str = "\n".join(lines)
-        return _RERANK_PROMPT.format(query=query, memories=memories_str)
+        prompt_template = (
+            _FULL_REORDER_PROMPT
+            if self.rerank_mode == RERANK_MODE_FULL_REORDER
+            else _RELEVANT_ONLY_PROMPT
+        )
+        return prompt_template.format(query=query, memories=memories_str)
 
     @staticmethod
     def _parse_ids(raw: str) -> list[str]:

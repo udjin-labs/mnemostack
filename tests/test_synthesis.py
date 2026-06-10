@@ -186,16 +186,18 @@ def test_cli_synthesize_graph_only_skips_vector_setup(monkeypatch, capsys):
     monkeypatch.setattr(cli, "MemgraphRetriever", FakeMemgraphRetriever)
 
     parser = build_parser()
-    args = parser.parse_args([
-        "synthesize",
-        "Alice",
-        "--source",
-        "graph",
-        "--memgraph-uri",
-        "bolt://example:7687",
-        "--format",
-        "json",
-    ])
+    args = parser.parse_args(
+        [
+            "synthesize",
+            "Alice",
+            "--source",
+            "graph",
+            "--memgraph-uri",
+            "bolt://example:7687",
+            "--format",
+            "json",
+        ]
+    )
 
     assert cli.cmd_synthesize(args) == 0
     payload = json.loads(capsys.readouterr().out)

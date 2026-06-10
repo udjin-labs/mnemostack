@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class CacheStats:
     """Cache hit/miss statistics."""
+
     hits: int = 0
     misses: int = 0
     evictions: int = 0
@@ -37,6 +38,7 @@ class CacheStats:
 @dataclass
 class _CacheEntry:
     """Internal cache entry with expiry."""
+
     value: Any
     expires_at: float
 

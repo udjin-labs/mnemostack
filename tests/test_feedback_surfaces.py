@@ -1,4 +1,5 @@
 """Tests for CLI/MCP feedback surfaces."""
+
 from __future__ import annotations
 
 import argparse
