@@ -20,6 +20,10 @@ from qdrant_client.models import (
 )
 
 
+class DimensionMismatchError(ValueError):
+    """Existing collection stores vectors of a different size than the provider produces."""
+
+
 @dataclass
 class Hit:
     """Single search result."""
@@ -65,7 +69,12 @@ class VectorStore:
             raise
 
     def ensure_collection(self, recreate: bool = False) -> bool:
-        """Create collection if missing. If recreate=True, drop and recreate."""
+        """Create collection if missing. If recreate=True, drop and recreate.
+
+        Raises DimensionMismatchError when the collection already exists but
+        stores vectors of a different size than this store's `dimension` —
+        searching such a collection silently returns garbage otherwise.
+        """
         exists = self.collection_exists()
         if exists and recreate:
             self.client.delete_collection(self.collection)
@@ -76,7 +85,19 @@ class VectorStore:
                 vectors_config=VectorParams(size=self.dimension, distance=self.distance),
             )
             return True
+        self._validate_dimension()
         return False
+
+    def _validate_dimension(self) -> None:
+        info = self.client.get_collection(self.collection)
+        vectors = info.config.params.vectors
+        size = getattr(vectors, "size", None)  # named-vectors dict has no .size — skip
+        if size is not None and int(size) != int(self.dimension):
+            raise DimensionMismatchError(
+                f"Collection '{self.collection}' stores {size}-dim vectors but the "
+                f"embedding provider produces {self.dimension}-dim vectors. "
+                f"Re-index with --recreate or switch the embedding model."
+            )
 
     def index_payload_field(self, field: str, schema: PayloadSchemaType) -> None:
         """Create a payload index for filtering (e.g. timestamp as DATETIME)."""

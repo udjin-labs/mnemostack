@@ -132,3 +132,45 @@ def test_scroll_empty_collection(store):
     store.ensure_collection()
     assert list(store.scroll()) == []
     assert list(store.iter_ids()) == []
+
+
+# ---------- dimension validation ----------
+
+
+def _store_with_client(client, dimension):
+    from qdrant_client.models import Distance
+
+    from mnemostack.vector import VectorStore as VS
+
+    s = VS.__new__(VS)
+    s.collection = "test_collection"
+    s.dimension = dimension
+    s.distance = Distance.COSINE
+    s.client = client
+    return s
+
+
+def test_ensure_collection_dimension_mismatch_raises(store):
+    from mnemostack.vector import DimensionMismatchError
+
+    store.ensure_collection()  # creates with dimension 4
+    other = _store_with_client(store.client, dimension=8)
+    with pytest.raises(DimensionMismatchError, match="4-dim.*8-dim"):
+        other.ensure_collection()
+
+
+def test_ensure_collection_matching_dimension_ok(store):
+    store.ensure_collection()
+    other = _store_with_client(store.client, dimension=4)
+    assert other.ensure_collection() is False  # exists, validated, kept
+
+
+def test_ensure_collection_recreate_skips_validation(store):
+    store.ensure_collection()
+    other = _store_with_client(store.client, dimension=8)
+    assert other.ensure_collection(recreate=True) is True
+    # collection is now 8-dim; original store would mismatch
+    from mnemostack.vector import DimensionMismatchError
+
+    with pytest.raises(DimensionMismatchError):
+        store.ensure_collection()
