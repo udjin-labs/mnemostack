@@ -54,6 +54,7 @@ from .retrievers import (
     extract_temporal,
 )
 from .specificity import detect_placeholders, resolve_specificity
+from .trace import RecallTrace, RetrieverTrace, apply_rerank_safe
 
 __all__ = [
     "BM25",
@@ -61,6 +62,9 @@ __all__ = [
     "build_bm25_docs",
     "tokenize",
     "reciprocal_rank_fusion",
+    "RecallTrace",
+    "RetrieverTrace",
+    "apply_rerank_safe",
     "extract_exact_tokens",
     "mca_prefilter",
     "Recaller",
