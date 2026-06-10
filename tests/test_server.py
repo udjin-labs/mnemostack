@@ -552,6 +552,18 @@ def test_recall_degraded_on_reranker_failure(monkeypatch):
     assert data["results"]  # fail-open: results still served
 
 
+def test_recall_degraded_when_reranker_unavailable(monkeypatch):
+    app, _ = _patched_app(monkeypatch, with_answer=False)
+    client = TestClient(app)
+
+    resp = client.post("/recall", json={"query": "hello"})
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "reranker:unavailable" in data["degraded"]
+    assert data["results"]  # fail-open: results still served
+
+
 def test_answer_response_carries_degraded(monkeypatch):
     app, _ = _patched_app(monkeypatch)
     client = TestClient(app)

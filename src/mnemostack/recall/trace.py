@@ -90,6 +90,8 @@ def apply_rerank_safe(
 ) -> list[RecallResult]:
     """Rerank with the fail-open contract, but leave a trace of the fallback."""
     if reranker is None:
+        if trace is not None:
+            trace.mark("reranker:unavailable")
         return results
     try:
         out = reranker.rerank(query, results)
