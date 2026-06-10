@@ -67,6 +67,12 @@ def ingest_sample(sample, provider, client, collection, log, window_size=1):
         sess_date = parse_date(conv.get(f"{skey}_date_time", ""))
         for msg in conv[skey]:
             text = f"[{sess_date.strftime('%Y-%m-%d')}] {msg['speaker']}: {msg['text']}"
+            # LoCoMo turns that share a photo carry the visual content in
+            # blip_caption; without it the corpus silently loses what the
+            # image showed (697/1540 signal QA cite image turns as evidence).
+            caption = (msg.get("blip_caption") or "").strip()
+            if caption:
+                text += f" [shared a photo: {caption}]"
             texts.append(text)
             records.append({
                 "source": f"{sample['sample_id']}/{skey}",
