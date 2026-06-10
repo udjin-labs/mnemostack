@@ -26,6 +26,7 @@ from mnemostack.recall import (
     BM25Retriever,
     HyDERetriever,
     Recaller,
+    RecallTrace,
     VectorRetriever,
     build_full_pipeline,
 )
@@ -248,11 +249,12 @@ def main():
             truth = str(qa.get("answer", ""))
             cat = qa.get("category", 0)
 
+            trace = RecallTrace()
             if not truth.strip():
                 ans_text = ""
                 r = {"correct": True, "partial": False, "reason": "empty_ground_truth"}
             else:
-                raw = recaller.recall(q, limit=50)
+                raw = recaller.recall(q, limit=50, trace=trace)
                 mems = pipeline.apply(q, raw)[: args.limit]
                 ans = answer_gen.generate(q, mems)
                 ans_text = ans.text
@@ -277,6 +279,7 @@ def main():
             all_per_qa.append({
                 "sample": sid, "question": q, "ground_truth": truth,
                 "predicted": ans_text, "category": cat, **r,
+                "degraded": trace.degraded,
             })
 
         try:
