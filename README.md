@@ -487,7 +487,7 @@ print(answer.text, answer.confidence, answer.sources)
 
 #### Full stack: 4-source retrieval + 8-stage pipeline + reranker
 
-This is the baseline configuration used for the LoCoMo numbers above; the retrieval-improvements run adds `window_size=3`, query expansion, and top-K 25.
+This is the full runtime configuration. The LoCoMo numbers above are produced by a subset of it: the benchmark loop runs Vector + BM25 retrieval, the 8-stage pipeline, `window_size=3`, query expansion, and top-K 25 — the LLM reranker and the graph retriever are runtime-only features and are not part of the benchmark methodology (see `benchmarks/run_locomo.sh` for the exact reproduction path).
 
 ```python
 from mnemostack.embeddings import get_provider
