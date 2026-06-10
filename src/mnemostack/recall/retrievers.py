@@ -26,6 +26,7 @@ from typing import Any
 
 from ..embeddings.base import EmbeddingProvider
 from ..llm.base import LLMProvider
+from ..observability import counter
 from ..vector import VectorStore
 
 try:
@@ -847,9 +848,19 @@ class TemporalRetriever(Retriever):
         self.vector_store = vector_store
         self.extractor = extractor
 
+    def explain_empty(self, query: str) -> str | None:
+        """Why an empty result is a degradation, not an absence of data.
+
+        Recognized by the recaller's trace collection (duck-typed): when the
+        retriever returned nothing without raising, this names the reason.
+        """
+        return "temporal:no_parse" if not self.extractor(query) else None
+
     def search(self, query, limit=10, filters=None):
         parsed_or_window = self.extractor(query)
         if not parsed_or_window:
+            # Visible even without tracing — temporal boost silently lost.
+            counter("mnemostack.recall.temporal_no_parse", 1)
             return []
         if isinstance(parsed_or_window, TemporalQuery):
             start, end = parsed_or_window.window

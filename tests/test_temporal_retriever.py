@@ -279,3 +279,12 @@ def test_store_exception_returns_empty_and_logs(caplog):
     finally:
         retriever_logger.propagate = original_retr
         mnemostack_logger.propagate = original_mnem
+
+
+def test_explain_empty_reports_no_parse_only_when_unparsed():
+    retriever = TemporalRetriever(
+        embedding=_FakeEmbedding(),
+        vector_store=_FakeVectorStore([]),
+    )
+    assert retriever.explain_empty("what is the meaning of life") == "temporal:no_parse"
+    assert retriever.explain_empty("what happened on 2026-04-30") is None

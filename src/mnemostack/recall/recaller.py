@@ -15,6 +15,7 @@ from .bm25 import BM25, BM25Doc
 from .fusion import reciprocal_rank_fusion
 from .mca_prefilter import mca_prefilter as run_mca_prefilter
 from .query_expansion import expand_query
+from .trace import RecallTrace, RetrieverTrace
 
 logger = logging.getLogger(__name__)
 
@@ -208,6 +209,8 @@ class Recaller:
         vector_limit: int = 20,
         bm25_limit: int = 20,
         filters: dict[str, Any] | None = None,
+        *,
+        trace: RecallTrace | None = None,
     ) -> list[RecallResult]:
         """Async wrapper around `recall`.
 
@@ -226,6 +229,7 @@ class Recaller:
             vector_limit,
             bm25_limit,
             filters,
+            trace=trace,
         )
 
     def recall(
@@ -235,8 +239,15 @@ class Recaller:
         vector_limit: int = 20,
         bm25_limit: int = 20,
         filters: dict[str, Any] | None = None,
+        *,
+        trace: RecallTrace | None = None,
     ) -> list[RecallResult]:
-        """Run hybrid recall and return fused top-K results."""
+        """Run hybrid recall and return fused top-K results.
+
+        Pass a fresh `RecallTrace` to capture per-retriever ranked lists, the
+        fused order, and degradation tags for this call. Results are identical
+        with or without a trace.
+        """
         counter("mnemostack.recall.calls", 1)
         if self.query_expansion:
             return self._recall_with_query_expansion(
@@ -245,8 +256,9 @@ class Recaller:
                 vector_limit=vector_limit,
                 bm25_limit=bm25_limit,
                 filters=filters,
+                trace=trace,
             )
-        return self._recall_once(query, limit, vector_limit, bm25_limit, filters)
+        return self._recall_once(query, limit, vector_limit, bm25_limit, filters, trace=trace)
 
     def _recall_once(
         self,
@@ -258,6 +270,7 @@ class Recaller:
         *,
         apply_vector_floor: bool = True,
         vector_floor_candidates: list[RecallResult] | None = None,
+        trace: RecallTrace | None = None,
     ) -> list[RecallResult]:
         # Retrievers mode: fuse N arbitrary ranked lists
         if self.retrievers:
@@ -268,6 +281,7 @@ class Recaller:
                 filters,
                 apply_vector_floor=apply_vector_floor,
                 vector_floor_candidates=vector_floor_candidates,
+                trace=trace,
             )
         with histogram("mnemostack.recall.latency_ms"):
             # Vector search
@@ -292,6 +306,20 @@ class Recaller:
             # Build id→source map and per-list tuples for RRF
             vector_list = [(hit, hit.score) for hit in vector_hits]
             bm25_list = [(doc, score) for doc, score in bm25_hits]
+            if trace is not None:
+                trace.retrievers.append(
+                    RetrieverTrace(
+                        name="vector",
+                        ranked=[(str(h.id), h.score) for h in vector_hits],
+                    )
+                )
+                if self.bm25:
+                    trace.retrievers.append(
+                        RetrieverTrace(
+                            name="bm25",
+                            ranked=[(str(d.id), s) for d, s in bm25_hits],
+                        )
+                    )
             mca_hits = self._mca_hits(query, bm25_limit) if self.mca_prefilter_enabled else []
             mca_by_id = {hit.id: hit for hit in mca_hits}
             ranked_lists = [vector_list, bm25_list]
@@ -355,6 +383,8 @@ class Recaller:
             if apply_vector_floor:
                 results = self._apply_vector_floor(results, raw_vector_candidates)
             self._attach_vector_floor_candidates(results, raw_vector_candidates)
+            if trace is not None:
+                trace.fused = [(str(r.id), r.score) for r in results]
             counter("mnemostack.recall.results", len(results))
             return results
 
@@ -421,11 +451,14 @@ class Recaller:
         vector_limit: int,
         bm25_limit: int,
         filters: dict[str, Any] | None,
+        *,
+        trace: RecallTrace | None = None,
     ) -> list[RecallResult]:
         ranked_lists: list[list[tuple[Any, float]]] = []
         id_to_result: dict[Any, RecallResult] = {}
         vector_floor_candidates: list[RecallResult] = []
         for expanded_query in self._expanded_queries(query):
+            trace_mark = len(trace.retrievers) if trace is not None else 0
             results = self._recall_once(
                 expanded_query,
                 limit=max(limit, vector_limit, bm25_limit),
@@ -434,7 +467,12 @@ class Recaller:
                 filters=filters,
                 apply_vector_floor=False,
                 vector_floor_candidates=vector_floor_candidates,
+                trace=trace,
             )
+            if trace is not None:
+                # Disambiguate which expanded query produced these entries.
+                for rt in trace.retrievers[trace_mark:]:
+                    rt.query = expanded_query
             ranked: list[tuple[Any, float]] = []
             for result in results:
                 if result.id in id_to_result:
@@ -460,6 +498,10 @@ class Recaller:
             vector_floor_candidates,
         )
         self._attach_vector_floor_candidates(merged, vector_floor_candidates)
+        if trace is not None:
+            # Per-pass fused orders are intermediate; the merged list is the
+            # one recall actually returns.
+            trace.fused = [(str(r.id), r.score) for r in merged]
         counter("mnemostack.recall.results", len(merged))
         return merged
 
@@ -493,6 +535,7 @@ class Recaller:
         *,
         apply_vector_floor: bool = True,
         vector_floor_candidates: list[RecallResult] | None = None,
+        trace: RecallTrace | None = None,
     ) -> list[RecallResult]:
         """Fuse N retrievers' ranked lists via RRF. Preserves source tags.
 
@@ -507,10 +550,12 @@ class Recaller:
 
         def _run(retr):
             start = time.monotonic()
+            err: str | None = None
             try:
                 hits = retr.search(query, limit=per_source_limit, filters=filters)
-            except Exception:
+            except Exception as exc:  # noqa: BLE001 — fail-open: one broken retriever must not kill recall
                 hits = []
+                err = f"{type(exc).__name__}: {exc}"
             elapsed_ms = (time.monotonic() - start) * 1000.0
             # Per-retriever latency — exposed in /metrics as
             # mnemostack_recall_<name>_latency_ms{...}.
@@ -520,7 +565,7 @@ class Recaller:
                 )
             except Exception:
                 pass
-            return retr, hits
+            return retr, hits, err, elapsed_ms
 
         with histogram("mnemostack.recall.latency_ms"):
             all_lists: list[list[tuple[Any, float]]] = []
@@ -538,8 +583,26 @@ class Recaller:
                 max_workers=max(len(self.retrievers), 1)
             ) as ex:
                 retriever_hits = list(ex.map(_run, self.retrievers))
-            for retr, hits in retriever_hits:
+            for retr, hits, err, elapsed_ms in retriever_hits:
                 counter(f"mnemostack.recall.{retr.name}_hits", len(hits))
+                if trace is not None:
+                    trace.retrievers.append(
+                        RetrieverTrace(
+                            name=retr.name,
+                            ranked=[(str(r.id), r.score) for r in hits],
+                            error=err,
+                            latency_ms=elapsed_ms,
+                        )
+                    )
+                    if err:
+                        trace.mark(f"retriever:{retr.name}:failed")
+                    elif not hits:
+                        # Empty without an error may still be a meaningful
+                        # degradation (e.g. temporal couldn't parse a date).
+                        explain = getattr(retr, "explain_empty", None)
+                        reason = explain(query) if callable(explain) else None
+                        if reason:
+                            trace.mark(reason)
                 if retr.name == "vector" and hits:
                     has_vector_results = True
                 ranked: list[tuple[Any, float]] = []
@@ -596,6 +659,8 @@ class Recaller:
                 results,
                 [result for result in id_to_result.values() if "vector" in result.sources],
             )
+            if trace is not None:
+                trace.fused = [(str(r.id), r.score) for r in results]
             counter("mnemostack.recall.results", len(results))
             return results
 

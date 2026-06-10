@@ -32,9 +32,11 @@ from ..recall import (
     BM25Retriever,
     MemgraphRetriever,
     Recaller,
+    RecallTrace,
     Reranker,
     TemporalRetriever,
     VectorRetriever,
+    apply_rerank_safe,
     build_bm25_docs,
     build_full_pipeline,
 )
@@ -145,20 +147,20 @@ def build_server(
             )
         return _components["reranker"]
 
-    def _apply_rerank(query: str, results: list[Any]) -> list[Any]:
-        try:
-            return _get_reranker().rerank(query, results)
-        except Exception:  # noqa: BLE001
-            return results
-
-    def _run_recall(query: str, limit: int) -> list[Any]:
+    def _run_recall(query: str, limit: int) -> tuple[list[Any], RecallTrace]:
+        trace = RecallTrace()
         recaller = _get_recaller()
-        recalled_results = recaller.recall(query, limit=limit)
-        results = _apply_rerank(query, recalled_results)[:limit]
+        recalled_results = recaller.recall(query, limit=limit, trace=trace)
+        try:
+            reranker = _get_reranker()
+        except Exception:  # noqa: BLE001 — LLM not configured; recall still works
+            reranker = None
+            trace.mark("reranker:unavailable")
+        results = apply_rerank_safe(reranker, query, recalled_results, trace)[:limit]
         apply_vector_floor = getattr(recaller, "apply_vector_floor_after_rerank", None)
         if apply_vector_floor is not None:
-            return apply_vector_floor(results, recalled_results)
-        return results
+            results = apply_vector_floor(results, recalled_results)
+        return results, trace
 
     def _get_feedback_pipeline():
         if "feedback_pipeline" not in _components:
@@ -241,22 +243,28 @@ def build_server(
             int,
             Field(description="Maximum number of results to return (default 10)"),
         ] = 10,
+        include_trace: Annotated[
+            bool,
+            Field(description="Include the per-retriever recall trace (debug; verbose)"),
+        ] = False,
     ) -> dict:
         """Search indexed memories with hybrid recall.
 
         Read-only, no side effects, no authentication required. Use this when
         you need raw memory matches rather than a synthesized answer. Returns a
-        JSON object with ok, query, count, and results. Results are ranked by
-        reciprocal rank fusion of BM25, semantic, graph, and temporal retrievers
-        when configured; each result includes id, text, score, sources, and
-        payload.
+        JSON object with ok, query, count, results, and degraded (which
+        components fell back while serving the call; empty when healthy).
+        Results are ranked by reciprocal rank fusion of BM25, semantic, graph,
+        and temporal retrievers when configured; each result includes id, text,
+        score, sources, and payload.
         """
         try:
-            results = _run_recall(query, limit)
-            return {
+            results, trace = _run_recall(query, limit)
+            response = {
                 "ok": True,
                 "query": query,
                 "count": len(results),
+                "degraded": trace.degraded,
                 "results": [
                     {
                         "id": r.id,
@@ -268,6 +276,9 @@ def build_server(
                     for r in results
                 ],
             }
+            if include_trace:
+                response["trace"] = trace.to_dict()
+            return response
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": str(e), "query": query}
 
@@ -288,10 +299,11 @@ def build_server(
         you want a concise factual answer synthesized from memory search results
         instead of the raw matches returned by mnemostack_search. Returns a JSON
         object with ok, query, answer text, confidence (0.0-1.0), sources,
+        degraded (components that fell back while serving the call),
         fallback_recommended, and error.
         """
         try:
-            memories = _run_recall(query, limit)
+            memories, trace = _run_recall(query, limit)
             gen = _get_answer_gen()
             answer = gen.generate(query, memories)
             return {
@@ -300,6 +312,7 @@ def build_server(
                 "answer": answer.text,
                 "confidence": round(answer.confidence, 3),
                 "sources": answer.sources,
+                "degraded": trace.degraded,
                 "fallback_recommended": gen.should_fallback(answer),
                 "error": answer.error,
             }
