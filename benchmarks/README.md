@@ -39,8 +39,11 @@ export GEMINI_API_KEY=...
 bash benchmarks/run_locomo.sh            # runs all 10 samples, writes results
 ```
 
-Results land in `benchmarks/results/<timestamp>.json` and the full per-QA
-log in `benchmarks/results/<timestamp>.log`.
+The script's defaults reproduce the published headline configuration:
+`window_size=3`, top-K `LIMIT=25`, query expansion on. Override via env
+(`LIMIT=15 QUERY_EXPANSION=0 bash benchmarks/run_locomo.sh` for the
+conservative config). Results land in `benchmarks/results/<timestamp>.json`
+and the full per-QA log in `benchmarks/results/<timestamp>.log`.
 
 ## Runners
 

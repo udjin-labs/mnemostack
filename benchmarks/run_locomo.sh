@@ -4,9 +4,12 @@
 #
 # Usage:
 #   export GEMINI_API_KEY=...                   # required
-#   bash benchmarks/run_locomo.sh               # full 10 samples
+#   bash benchmarks/run_locomo.sh               # full 10 samples, headline config
 #   SAMPLES=3 bash benchmarks/run_locomo.sh     # quick run, 3 samples
+#   LIMIT=15 QUERY_EXPANSION=0 bash benchmarks/run_locomo.sh   # conservative config
 #
+# Defaults reproduce the published headline configuration:
+# window_size=3 (harness default), top-K LIMIT=25, query expansion ON.
 # Output lands in benchmarks/results/<UTC timestamp>.{json,log}.
 
 set -euo pipefail
@@ -16,7 +19,8 @@ RESULTS_DIR="$HERE/results"
 mkdir -p "$RESULTS_DIR"
 
 SAMPLES="${SAMPLES:-10}"
-LIMIT="${LIMIT:-15}"
+LIMIT="${LIMIT:-25}"
+QUERY_EXPANSION="${QUERY_EXPANSION:-1}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 JSON_OUT="$RESULTS_DIR/$STAMP.json"
 LOG_OUT="$RESULTS_DIR/$STAMP.log"
@@ -33,7 +37,12 @@ if [[ -z "${LOCOMO_DATASET:-}" ]] && [[ ! -f "$DATASET_DEFAULT" ]]; then
 fi
 export LOCOMO_DATASET="${LOCOMO_DATASET:-$DATASET_DEFAULT}"
 
-echo "Running LoCoMo: samples=$SAMPLES limit=$LIMIT"
+EXTRA_FLAGS=()
+if [[ "$QUERY_EXPANSION" == "1" ]]; then
+    EXTRA_FLAGS+=(--query-expansion)
+fi
+
+echo "Running LoCoMo: samples=$SAMPLES limit=$LIMIT query_expansion=$QUERY_EXPANSION"
 echo "  dataset: $LOCOMO_DATASET"
 echo "  json:    $JSON_OUT"
 echo "  log:     $LOG_OUT"
@@ -42,6 +51,7 @@ echo
 python3 "$HERE/locomo_single.py" \
     --samples "$SAMPLES" \
     --limit "$LIMIT" \
+    "${EXTRA_FLAGS[@]}" \
     --output "$JSON_OUT" \
     --log "$LOG_OUT"
 
