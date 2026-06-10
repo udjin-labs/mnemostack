@@ -59,6 +59,12 @@ class IngestItem:
     `source` and `offset` together produce the deterministic chunk id. Supply
     them when ingesting chunks of a longer document; omit `offset` if each
     item is standalone.
+
+    `timestamp` is the event time of the content (ISO-8601) — when the message
+    was said or the note was written. It lands in `payload["timestamp"]` and
+    drives temporal recall; without it, temporal questions cannot be answered
+    for this chunk. Passing it via `metadata={"timestamp": ...}` still works;
+    the explicit field wins when both are set.
     """
 
     text: str
@@ -67,6 +73,7 @@ class IngestItem:
     metadata: dict[str, Any] = field(default_factory=dict)
     tags: list[str] = field(default_factory=list)
     wrapper_dir: str | Path | None = None
+    timestamp: str | None = None
 
 
 @dataclass
@@ -212,29 +219,14 @@ def _window_items(
         if len(group) >= window_size:
             for start in range(0, len(group) - window_size + 1):
                 window = group[start : start + window_size]
-                middle = window[window_size // 2]
-                metadata = dict(middle.metadata)
-                metadata.update(
-                    {
-                        "chunk_window": window_size,
-                        "chunk_kind": "sliding_window",
-                        "chunk_start_offset": window[0].offset,
-                        "chunk_end_offset": window[-1].offset,
-                    }
-                )
-                expanded.append(
-                    IngestItem(
-                        text=separator.join(item.text for item in window),
-                        source=middle.source,
-                        offset=middle.offset,
-                        metadata=metadata,
-                        tags=list(middle.tags),
-                        wrapper_dir=middle.wrapper_dir,
-                    )
-                )
+                expanded.append(_make_window_item(window, window_size, separator))
         group_start = group_end
 
     return expanded
+
+
+def _effective_ts(item: IngestItem) -> str | None:
+    return item.timestamp or item.metadata.get("timestamp")
 
 
 def _make_window_item(
@@ -252,6 +244,14 @@ def _make_window_item(
             "chunk_end_offset": window[-1].offset,
         }
     )
+    # A window can span sessions; keep the full temporal range alongside the
+    # middle item's timestamp so range-aware retrieval stays possible.
+    start_ts = _effective_ts(window[0])
+    end_ts = _effective_ts(window[-1])
+    if start_ts:
+        metadata["window_start_ts"] = start_ts
+    if end_ts:
+        metadata["window_end_ts"] = end_ts
     return IngestItem(
         text=separator.join(item.text for item in window),
         source=middle.source,
@@ -259,6 +259,7 @@ def _make_window_item(
         metadata=metadata,
         tags=list(middle.tags),
         wrapper_dir=middle.wrapper_dir,
+        timestamp=middle.timestamp,
     )
 
 
@@ -441,6 +442,9 @@ class Ingestor:
                 "offset": item.offset,
                 **item.metadata,
             }
+            if item.timestamp:
+                payload["timestamp"] = item.timestamp
+            payload.setdefault("indexed_at", datetime.now(timezone.utc).isoformat())
             tags = _item_tags(item)
             if tags:
                 payload["tags"] = tags

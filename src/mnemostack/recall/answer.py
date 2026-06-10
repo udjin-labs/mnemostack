@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from ..llm.base import LLMProvider
@@ -17,6 +18,22 @@ from ..observability import counter, histogram
 from .inference_retry import decompose_query, merge_results, should_retry
 from .recaller import RecallResult
 from .specificity import detect_placeholders, resolve_specificity
+
+
+def _display_ts(ts: str) -> str:
+    """Render a payload timestamp for the answer prompt.
+
+    Keeps the time of day when it carries information; a bare date or an
+    exact-midnight timestamp renders as date-only. Non-ISO strings fall back
+    to the first 10 characters (the historical behavior).
+    """
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return ts[:10]
+    if (dt.hour, dt.minute, dt.second) == (0, 0, 0):
+        return dt.strftime("%Y-%m-%d")
+    return dt.strftime("%Y-%m-%d %H:%M")
 
 if TYPE_CHECKING:
     from .recaller import Recaller
@@ -649,7 +666,7 @@ class AnswerGenerator:
             ts = m.payload.get("timestamp", "")
             prefix = f"[{i}]"
             if ts:
-                prefix = f"{prefix} [{ts[:10]}]"
+                prefix = f"{prefix} [{_display_ts(ts)}]"
             if source:
                 prefix = f"{prefix} ({source})"
             lines.append(f"{prefix} {text}")
