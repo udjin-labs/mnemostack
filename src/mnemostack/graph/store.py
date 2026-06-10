@@ -1,4 +1,5 @@
 """Memgraph/Neo4j wrapper with temporal validity."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -57,9 +58,7 @@ class GraphStore:
         timeout: float = 5.0,
     ):
         if not _AVAILABLE:
-            raise ImportError(
-                "GraphStore requires neo4j driver (already in core deps)"
-            )
+            raise ImportError("GraphStore requires neo4j driver (already in core deps)")
         self.uri = uri
         self.database = database
         self.timeout = timeout
@@ -136,9 +135,7 @@ class GraphStore:
             f"RETURN count(r) AS n"
         )
         with self.driver.session(database=self.database) as session:
-            rec = session.run(
-                query, subject=subject, obj=obj, ended=_to_iso(ended)
-            ).single()
+            rec = session.run(query, subject=subject, obj=obj, ended=_to_iso(ended)).single()
             return rec["n"] if rec else 0
 
     # ---------- read ----------

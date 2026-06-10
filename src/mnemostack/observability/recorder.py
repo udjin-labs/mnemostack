@@ -4,6 +4,7 @@ All counters/histograms flow through a single recorder instance. Default is
 NullRecorder (zero overhead). Users swap it via set_recorder() to integrate
 with Prometheus, OpenTelemetry, StatsD, etc.
 """
+
 from __future__ import annotations
 
 import logging
@@ -22,9 +23,7 @@ class MetricsRecorder(Protocol):
     affect business logic.
     """
 
-    def record_counter(
-        self, name: str, value: float, labels: dict[str, str] | None = None
-    ) -> None:
+    def record_counter(self, name: str, value: float, labels: dict[str, str] | None = None) -> None:
         """Increment a counter by `value`."""
 
     def record_histogram(
@@ -83,9 +82,7 @@ class InMemoryRecorder:
     def counter_value(self, name: str, labels: dict[str, str] | None = None) -> float:
         return self.counters.get(self._key(name, labels), 0.0)
 
-    def histogram_values(
-        self, name: str, labels: dict[str, str] | None = None
-    ) -> list[float]:
+    def histogram_values(self, name: str, labels: dict[str, str] | None = None) -> list[float]:
         return list(self.histograms.get(self._key(name, labels), []))
 
     def reset(self) -> None:
@@ -107,9 +104,7 @@ def get_recorder() -> MetricsRecorder:
     return _recorder
 
 
-def counter(
-    name: str, value: float = 1.0, labels: dict[str, str] | None = None
-) -> None:
+def counter(name: str, value: float = 1.0, labels: dict[str, str] | None = None) -> None:
     """Increment a counter metric."""
     try:
         _recorder.record_counter(name, value, labels)
@@ -118,9 +113,7 @@ def counter(
 
 
 @contextmanager
-def histogram(
-    name: str, labels: dict[str, str] | None = None
-):
+def histogram(name: str, labels: dict[str, str] | None = None):
     """Context manager that records elapsed milliseconds as a histogram observation.
 
     Usage:
@@ -140,6 +133,7 @@ def histogram(
 
 def timed(name: str, labels: dict[str, str] | None = None):
     """Decorator variant of histogram() for timing a full function."""
+
     def decorator(func):
         from functools import wraps
 

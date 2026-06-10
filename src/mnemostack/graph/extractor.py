@@ -4,6 +4,7 @@ Given free-form text, extracts (subject, predicate, object) triples suitable
 for GraphStore.add_triple(). Uses a small, deterministic prompt that asks
 the LLM to respond in a strict JSON format.
 """
+
 from __future__ import annotations
 
 import json

@@ -94,7 +94,9 @@ def test_specific_query_with_date_stays_semantic_filtered():
 
 
 def test_modal_may_is_not_parsed_as_month():
-    parsed = extract_temporal_query("What personality traits may Melanie say Caroline has?", now=NOW)
+    parsed = extract_temporal_query(
+        "What personality traits may Melanie say Caroline has?", now=NOW
+    )
 
     assert parsed is None
 
@@ -205,16 +207,24 @@ def test_date_focused_query_prefers_same_day_over_previous_day():
 
 def test_date_focused_query_prefers_same_day_diary_over_transcripts():
     hits = [
-        _Hit("transcript", 1.0, {
-            "text": "call transcript",
-            "timestamp": "2026-04-13T09:00:00+00:00",
-            "source_file": "transcripts/meeting.md",
-        }),
-        _Hit("diary", 1.0, {
-            "text": "diary",
-            "timestamp": "2026-04-13T22:00:00+00:00",
-            "source_file": "memory/2026-04-13.md",
-        }),
+        _Hit(
+            "transcript",
+            1.0,
+            {
+                "text": "call transcript",
+                "timestamp": "2026-04-13T09:00:00+00:00",
+                "source_file": "transcripts/meeting.md",
+            },
+        ),
+        _Hit(
+            "diary",
+            1.0,
+            {
+                "text": "diary",
+                "timestamp": "2026-04-13T22:00:00+00:00",
+                "source_file": "memory/2026-04-13.md",
+            },
+        ),
     ]
     store = _ScrollableStore(hits)
     retriever = TemporalRetriever(

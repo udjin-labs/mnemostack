@@ -1,4 +1,5 @@
 """Tests for BM25 and RRF fusion."""
+
 import pytest
 
 from mnemostack.recall import BM25, reciprocal_rank_fusion, tokenize
@@ -59,7 +60,7 @@ def test_bm25_payload_preserved(sample_corpus):
         BM25Doc(id=1, text="foo bar baz", payload={"source": "a.md", "line": 5}),
     ]
     bm25 = BM25(docs)
-    (doc, score), = bm25.search("foo", limit=1)
+    ((doc, score),) = bm25.search("foo", limit=1)
     assert doc.payload == {"source": "a.md", "line": 5}
 
 

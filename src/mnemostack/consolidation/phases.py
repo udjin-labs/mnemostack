@@ -3,6 +3,7 @@
 These are generic phases that work out of the box. Users can subclass Phase
 to add custom logic (e.g. extract facts from documents, sync graph from text).
 """
+
 from __future__ import annotations
 
 from ..embeddings.base import EmbeddingProvider

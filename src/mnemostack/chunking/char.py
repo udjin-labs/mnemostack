@@ -1,4 +1,5 @@
 """Fixed-size character chunker — baseline, language-agnostic."""
+
 from __future__ import annotations
 
 from .base import Chunk, Chunker

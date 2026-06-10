@@ -1,4 +1,5 @@
 """Tests for chunking strategies."""
+
 import pytest
 
 from mnemostack.chunking import (
@@ -9,6 +10,7 @@ from mnemostack.chunking import (
 )
 
 # ---------- CharChunker ----------
+
 
 def test_char_chunker_basic():
     chunker = CharChunker(chunk_size=10, overlap=2)
@@ -37,6 +39,7 @@ def test_char_chunker_preserves_offsets():
 
 
 # ---------- ParagraphChunker ----------
+
 
 def test_paragraph_chunker_basic():
     text = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph."
@@ -71,6 +74,7 @@ def test_paragraph_chunker_empty():
 
 
 # ---------- MarkdownChunker ----------
+
 
 def test_markdown_chunker_splits_on_headers():
     text = """# Title

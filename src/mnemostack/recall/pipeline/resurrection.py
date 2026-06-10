@@ -10,6 +10,7 @@ Adds resurrected results as new RecallResult entries with capped score
 Fails soft: if the graph driver is unavailable or the connection fails,
 the stage is a no-op. This matches legacy behaviour.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -20,6 +21,7 @@ from .stages import STOPWORDS
 
 try:
     from neo4j import GraphDatabase
+
     _AVAILABLE = True
 except ImportError:
     _AVAILABLE = False
@@ -105,8 +107,7 @@ class GraphResurrection(Stage):
             return results
 
         existing = " ".join(
-            (r.text or "") + " " + (r.payload.get("text", "") if r.payload else "")
-            for r in results
+            (r.text or "") + " " + (r.payload.get("text", "") if r.payload else "") for r in results
         ).lower()
 
         seed_match: dict[str, dict[str, Any]] = {}
@@ -124,7 +125,8 @@ class GraphResurrection(Stage):
                                m.memory_class AS mc, type(r1) AS rel
                         LIMIT $lim
                         """,
-                        seed=seed, lim=self.max_per_seed,
+                        seed=seed,
+                        lim=self.max_per_seed,
                     ).data()
                     for nb in rows:
                         name = nb.get("name") or ""
@@ -149,7 +151,7 @@ class GraphResurrection(Stage):
             overlap = len(info["seeds"]) / max(len(seeds), 1)
             score = min(0.10 + 0.15 * overlap, 0.30)
             rels = ", ".join(sorted(r for r in info["rels"] if r))
-            text = f"[Graph] {nb.get('type','')}: {name} (rel: {rels})"
+            text = f"[Graph] {nb.get('type', '')}: {name} (rel: {rels})"
             rr = RecallResult(
                 id=f"graph:{name}",
                 text=text,

@@ -1,4 +1,5 @@
 """Tests for embedding provider registry + batch embedding."""
+
 import json
 
 import pytest
