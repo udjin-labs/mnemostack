@@ -10,7 +10,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - New LoCoMo headline, measured with the documented default config (`window_size=3`, query expansion, top-K 25) on the same judge (`gemini-3-flash-preview`): **82.9%** strict / **92.7%** combined (signal-only: 78.0% / 90.6%). Two methodology changes vs the previous 82.5/92.2 measurement, both about data fidelity: photo captions (`blip_caption`) are now ingested into the benchmark corpus (697/1540 signal QA cite image turns as evidence; previously dropped silently), and answer prompts show the time of day of each memory.
 - Benchmark harness gained per-QA `degraded` reporting and an `--only-questions` probe mode for cheap fix-validation iterations.
-- Corrected attribution: the 0.4.3 investigation run (79.9%) was NOT affected by the `full_reorder` rerank mode — the benchmark loop never invokes the LLM reranker. The drop traced to config drift (query expansion off, top-K 15) plus run-to-run variance (±1.3pp across three runs of near-identical benchmark code).
 
 ### Added
 
