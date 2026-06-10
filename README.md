@@ -165,11 +165,11 @@ Some LoCoMo `cat_5` questions have empty ground-truth answers. Under the current
 | --- | --- | --- | --- | --- |
 | Baseline v0.3.0 (Vector + BM25 + 8-stage pipeline) | 76.7% (1524 / 1986) | 88.1% (1750 / 1986) | 70.0% (1078 / 1540) | 84.7% (1304 / 1540) |
 | Retrieval improvements (`window_size=3`, query expansion, top-K 25) | 82.5% (1639 / 1986) | 92.2% (1832 / 1986) | 77.5% (1193 / 1540) | 90.0% (1386 / 1540) |
-| **v0.4.4 + photo captions** (same config as above) | **82.9%** (1647 / 1986) | **92.7%** (1842 / 1986) | **78.0%** (1201 / 1540) | **90.6%** (1396 / 1540) |
+| **v0.4.5 + photo captions** (same config as above) | **82.9%** (1647 / 1986) | **92.7%** (1842 / 1986) | **78.0%** (1201 / 1540) | **90.6%** (1396 / 1540) |
 
 > **Honest numbers disclaimer.** `(full)` is the headline aggregate across **all 1986 questions**, the format vendors typically report — some publish only their strongest sub-category, we publish the full aggregate because it's what actually predicts behavior on mixed workloads. `(signal-only)` strips the `cat_5` auto-pass artifact described above, so what you read there is the real recall quality on questions that have a ground-truth answer.
 
-**Per-category breakdown** (v0.4.4 + photo captions run):
+**Per-category breakdown** (v0.4.5 + photo captions run):
 
 | Category | Strict | Combined |
 | --- | --- | --- |
@@ -184,7 +184,7 @@ Notes:
 - Judge model matters: `gemini-3-flash-preview` is more accurate than the previous Gemini Flash judge on synonyms, partial matches, and empty ground truth.
 - `cat_5` questions have empty ground truth in this new run and are auto-scored as correct by the benchmark harness. That makes the new `cat_5` strict score (446 / 446, 100.0%) useful for aggregate harness accounting, but not directly comparable to the historical `cat_5` strict score (89.7%) from the older adversarial-question evaluation.
 - Pipeline: Vector retrieval with Gemini embeddings + BM25 + RRF + 8-stage reranking pipeline. The LLM reranker is not part of the benchmark loop (it is a runtime/server feature), so `rerank_mode` does not affect these numbers.
-- The v0.4.4 run additionally ingests the photo captions (`blip_caption`) that LoCoMo attaches to image-sharing turns — 697 of the 1540 signal questions cite image turns as evidence, and earlier runs silently dropped that content. Answer prompts also show the time of day of each memory since v0.4.4.
+- The v0.4.5 run additionally ingests the photo captions (`blip_caption`) that LoCoMo attaches to image-sharing turns — 697 of the 1540 signal questions cite image turns as evidence, and earlier runs silently dropped that content. Answer prompts also show the time of day of each memory since v0.4.5.
 
 ### Historical LoCoMo results (`gemini-2.5-flash` judge)
 
