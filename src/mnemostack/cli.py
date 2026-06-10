@@ -26,6 +26,7 @@ from .recall import (
     BM25Retriever,
     MemgraphRetriever,
     Recaller,
+    Retriever,
     TemporalRetriever,
     VectorRetriever,
     build_bm25_docs,
@@ -318,7 +319,7 @@ def _build_recaller(
     source_filter: set[str] | None = None,
 ) -> Recaller:
     """Build the same retriever-mode Recaller used by the service surfaces."""
-    retrievers = []
+    retrievers: list[Retriever] = []
     if (
         provider is not None
         and store is not None
@@ -329,8 +330,9 @@ def _build_recaller(
         bm25_docs = build_bm25_docs(list(getattr(args, "bm25_path", []) or []))
         if bm25_docs:
             retrievers.append(BM25Retriever(docs=bm25_docs))
-    if _source_enabled_for_cli("memgraph", source_filter) and getattr(args, "memgraph_uri", None):
-        retrievers.append(MemgraphRetriever(uri=getattr(args, "memgraph_uri", None)))
+    memgraph_uri = getattr(args, "memgraph_uri", None)
+    if _source_enabled_for_cli("memgraph", source_filter) and memgraph_uri:
+        retrievers.append(MemgraphRetriever(uri=memgraph_uri))
     if (
         provider is not None
         and store is not None

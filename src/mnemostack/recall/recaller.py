@@ -283,6 +283,11 @@ class Recaller:
                 vector_floor_candidates=vector_floor_candidates,
                 trace=trace,
             )
+        if self.embedding is None or self.vector is None:
+            raise ValueError(
+                "legacy recall path requires embedding_provider and vector_store "
+                "(or pass retrievers=[...])"
+            )
         with histogram("mnemostack.recall.latency_ms"):
             # Vector search
             vector_hits: list[Hit] = []
@@ -322,7 +327,7 @@ class Recaller:
                     )
             mca_hits = self._mca_hits(query, bm25_limit) if self.mca_prefilter_enabled else []
             mca_by_id = {hit.id: hit for hit in mca_hits}
-            ranked_lists = [vector_list, bm25_list]
+            ranked_lists: list[list[tuple[Any, float]]] = [vector_list, bm25_list]
             if mca_hits:
                 ranked_lists.insert(0, [(hit, hit.score) for hit in mca_hits])
 
@@ -411,9 +416,10 @@ class Recaller:
         fused = reciprocal_rank_fusion(ranked_lists, k=self.rrf_k, limit=limit)
         results: list[RecallResult] = []
         for key, rrf_score in fused:
-            hit = id_to_hit.get(key)
-            if hit is None:
+            fused_hit = id_to_hit.get(key)
+            if fused_hit is None:
                 continue
+            hit = fused_hit
             payload = dict(hit.payload or {})
             payload["raw_vector_score"] = hit.score
             results.append(
@@ -488,11 +494,11 @@ class Recaller:
         fused = reciprocal_rank_fusion(ranked_lists, k=self.rrf_k, limit=limit)
         merged: list[RecallResult] = []
         for key, rrf_score in fused:
-            result = id_to_result.get(key)
-            if result is None:
+            merged_hit = id_to_result.get(key)
+            if merged_hit is None:
                 continue
-            result.score = rrf_score
-            merged.append(result)
+            merged_hit.score = rrf_score
+            merged.append(merged_hit)
         merged = self._apply_vector_floor(
             merged,
             vector_floor_candidates,
