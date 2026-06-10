@@ -72,6 +72,7 @@ class Reranker:
         rerank_mode: prompt contract to use. Allowed values are
             "relevant_only" (default; model may return only relevant IDs) and
             "full_reorder" (model should return every candidate ID once).
+            Final filtering is still performed by callers via their limit.
     """
 
     def __init__(
