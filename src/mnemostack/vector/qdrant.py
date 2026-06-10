@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from uuid import UUID
 
 from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
@@ -146,7 +147,8 @@ class VectorStore:
             if not points:
                 break
             for pt in points:
-                yield Hit(id=pt.id, score=1.0, payload=pt.payload or {})
+                pid = str(pt.id) if isinstance(pt.id, UUID) else pt.id
+                yield Hit(id=pid, score=1.0, payload=pt.payload or {})
             if next_offset is None:
                 break
 
@@ -227,11 +229,12 @@ class VectorStore:
         for pt in result.points:
             if pt.score < min_score:
                 continue
-            hits.append(Hit(id=pt.id, score=pt.score, payload=pt.payload or {}))
+            pid = str(pt.id) if isinstance(pt.id, UUID) else pt.id
+            hits.append(Hit(id=pid, score=pt.score, payload=pt.payload or {}))
         return hits
 
     def _build_filter(self, filters: dict[str, Any]) -> Filter:
-        must = []
+        must: list[Any] = []
         for key, value in filters.items():
             if isinstance(value, dict) and ("gte" in value or "lte" in value):
                 gte = value.get("gte")

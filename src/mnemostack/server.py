@@ -51,6 +51,7 @@ from mnemostack.recall import (
     Recaller,
     RecallTrace,
     Reranker,
+    Retriever,
     TemporalRetriever,
     VectorRetriever,
     apply_rerank_safe,
@@ -374,13 +375,13 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             return False
 
     bm25_docs = _build_bm25_docs(cfg.bm25_paths)
-    retrievers = [
+    maybe_retrievers = [
         VectorRetriever(embedding=provider, vector_store=store),
         BM25Retriever(docs=bm25_docs) if bm25_docs else None,
-        MemgraphRetriever(uri=cfg.graph_uri, timeout=cfg.graph_timeout),
+        MemgraphRetriever(uri=cfg.graph_uri, timeout=cfg.graph_timeout) if cfg.graph_uri else None,
         TemporalRetriever(embedding=provider, vector_store=store),
     ]
-    retrievers = [r for r in retrievers if r is not None]
+    retrievers: list[Retriever] = [r for r in maybe_retrievers if r is not None]
     recaller = Recaller(retrievers=retrievers, vector_floor=cfg.vector_floor)
 
     from pathlib import Path

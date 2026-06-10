@@ -23,7 +23,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Any
+from typing import Any, cast
 
 from ..embeddings.base import EmbeddingProvider
 from ..llm.base import LLMProvider
@@ -33,7 +33,7 @@ from ..vector import VectorStore
 try:
     from qdrant_client.models import DatetimeRange, FieldCondition, Filter
 except ImportError:  # pragma: no cover - qdrant-client is a runtime dependency
-    DatetimeRange = FieldCondition = Filter = None  # type: ignore[assignment]
+    DatetimeRange = FieldCondition = Filter = None  # type: ignore[assignment,misc]
 from .bm25 import BM25, BM25Doc
 from .recaller import RecallResult
 
@@ -106,7 +106,12 @@ def _with_timestamp_range_filter(
 
     timestamp_condition = FieldCondition(
         key="timestamp",
-        range=DatetimeRange(gte=newer_than, lte=older_than),
+        # ISO strings are accepted by Qdrant at runtime; the stubs only admit
+        # datetime/date, hence the casts.
+        range=DatetimeRange(
+            gte=cast("datetime | None", newer_than),
+            lte=cast("datetime | None", older_than),
+        ),
     )
     if scroll_filter is None:
         return Filter(must=[timestamp_condition])
@@ -837,11 +842,11 @@ def extract_temporal_query(query: str, now: datetime | None = None) -> TemporalQ
                 lo, hi = 11, 20
             else:  # late / end of / конце
                 lo, hi = 21, monthrange(year, month)[1]
-            start = datetime(year, month, lo, tzinfo=timezone.utc)
-            end = datetime.combine(
+            part_start = datetime(year, month, lo, tzinfo=timezone.utc)
+            part_end = datetime.combine(
                 date(year, month, hi), datetime.max.time(), tzinfo=timezone.utc
             )
-            return TemporalQuery(start.isoformat(), end.isoformat(), None, False)
+            return TemporalQuery(part_start.isoformat(), part_end.isoformat(), None, False)
 
     # Month-only expressions keep the legacy month-wide semantic path.
     # Match whole month words/stems, not arbitrary substrings. The English

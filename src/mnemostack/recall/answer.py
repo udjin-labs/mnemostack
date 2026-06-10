@@ -502,6 +502,8 @@ class AnswerGenerator:
         recall_filters: dict[str, object] | None,
     ) -> tuple[Answer, list[RecallResult]]:
         """Retry low-confidence inference answers with decomposed evidence queries."""
+        if self.recaller is None:
+            return draft, memories
         sub_queries = decompose_query(query, self.llm)
         if not sub_queries:
             return draft, memories

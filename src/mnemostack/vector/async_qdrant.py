@@ -8,6 +8,7 @@ where blocking I/O would hurt concurrency.
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
@@ -138,12 +139,13 @@ class AsyncVectorStore:
         for pt in result.points:
             if pt.score < min_score:
                 continue
-            hits.append(Hit(id=pt.id, score=pt.score, payload=pt.payload or {}))
+            pid = str(pt.id) if isinstance(pt.id, UUID) else pt.id
+            hits.append(Hit(id=pid, score=pt.score, payload=pt.payload or {}))
         return hits
 
     @staticmethod
     def _build_filter(filters: dict[str, Any]) -> Filter:
-        must = []
+        must: list[Any] = []
         for key, value in filters.items():
             if isinstance(value, dict) and ("gte" in value or "lte" in value):
                 gte = value.get("gte")

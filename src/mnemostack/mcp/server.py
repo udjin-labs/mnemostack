@@ -19,7 +19,7 @@ try:
     _FASTMCP_AVAILABLE = True
 except ImportError:  # pragma: no cover
     FastMCP = None  # type: ignore[assignment, misc]
-    Field = None  # type: ignore[assignment, misc]
+    Field = None  # type: ignore[assignment]
     _FASTMCP_AVAILABLE = False
 
 from ..config import Config, model_kwargs
