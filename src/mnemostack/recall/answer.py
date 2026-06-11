@@ -679,6 +679,8 @@ class AnswerGenerator:
             return self._fallback_list_answer(query, memories)
         items, contributing = extracted
 
+        sources = self._sources_for_items(items, contributing)
+
         if self.list_finalize == "verbatim":
             # Deterministic assembly straight from the extracted items: no
             # second LLM pass to paraphrase or distort them (a real failure
@@ -687,7 +689,7 @@ class AnswerGenerator:
             return Answer(
                 text=text,
                 confidence=0.8,
-                sources=self._extract_sources(contributing),
+                sources=sources,
                 raw="",
             )
 
@@ -708,16 +710,42 @@ class AnswerGenerator:
             return Answer(
                 text=text,
                 confidence=0.6,
-                sources=self._extract_sources(contributing),
+                sources=sources,
                 raw=final_resp.text,
             )
 
         return Answer(
             text=final_resp.text.strip(),
             confidence=0.8,
-            sources=self._extract_sources(contributing),
+            sources=sources,
             raw=final_resp.text,
         )
+
+    def _sources_for_items(
+        self, items: list[str], contributing: list[RecallResult]
+    ) -> list[str]:
+        """Source attribution for extracted items.
+
+        The extract output carries no item→memory mapping, so provenance is
+        recovered by substring match: memories that literally contain an
+        extracted item are cited first. Without this, `_extract_sources`'
+        truncation could cite unrelated early memories of a contributing
+        batch while dropping the one that actually holds the answer. Items
+        the LLM paraphrased (no literal match) fall back to batch order.
+        """
+        matched: list[RecallResult] = []
+        matched_ids: set[int] = set()
+        lowered = [(m, (m.text or "").lower()) for m in contributing]
+        for item in items:
+            needle = item.lower().strip()
+            if not needle:
+                continue
+            for memory, text in lowered:
+                if needle in text and id(memory) not in matched_ids:
+                    matched_ids.add(id(memory))
+                    matched.append(memory)
+        remainder = [m for m in contributing if id(m) not in matched_ids]
+        return self._extract_sources(matched + remainder)
 
     def _extract_items_over_pool(
         self, query: str, memories: list[RecallResult]
