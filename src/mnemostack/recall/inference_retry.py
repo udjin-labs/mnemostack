@@ -67,11 +67,18 @@ def should_retry(
     draft_answer_text: str,
     draft_confidence: float,
     low_confidence_threshold: float = 0.4,
+    abstention_text: str = "Not in memory.",
 ) -> bool:
-    """Decide if cat_3 inference question needs a retry."""
+    """Decide if cat_3 inference question needs a retry.
+
+    *abstention_text* is the marker the prompts instruct the LLM to reply
+    with (localizable via `AnswerGenerator(abstention_text=...)`); the
+    English literal is always checked too.
+    """
     if not draft_answer_text:
         return True
-    if "not in memory" in draft_answer_text.lower():
+    text = draft_answer_text.lower()
+    if "not in memory" in text or abstention_text.lower() in text:
         return True
     return draft_confidence < low_confidence_threshold
 

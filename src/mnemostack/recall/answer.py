@@ -369,8 +369,18 @@ class AnswerGenerator:
         self.max_memories = max_memories
         self.max_tokens = max_tokens
         self.confidence_threshold = confidence_threshold
+        self.abstention_text = abstention_text
         self._custom_prompt_template = prompt_template is not None
-        self.prompt_template = prompt_template or _DEFAULT_PROMPT
+        self.prompt_template = prompt_template or self._localize_abstention(_DEFAULT_PROMPT)
+        # Built-in prompts instruct the LLM to reply with the literal English
+        # marker; keep them in sync with the configured abstention text so a
+        # localized deployment never gets "Not in memory." back from the
+        # low-evidence path. User-supplied templates and prompt_overrides are
+        # left verbatim — their authors write their own abstention line.
+        self._builtin_prompts = {
+            name: self._localize_abstention(template)
+            for name, template in _PROMPT_BY_CATEGORY.items()
+        }
         self.category_aware_prompts = category_aware_prompts
         self.list_extract_mode = list_extract_mode
         self.specificity_resolver = specificity_resolver
@@ -378,7 +388,6 @@ class AnswerGenerator:
         self.recaller = recaller
         self.retry_with_expansion = retry_with_expansion
         self.expansion_llm = expansion_llm
-        self.abstention_text = abstention_text
         self.question_classifier = question_classifier or classify_question
         self.prompt_overrides = dict(prompt_overrides or {})
         for name, template in self.prompt_overrides.items():
@@ -393,6 +402,14 @@ class AnswerGenerator:
                 raise ValueError(
                     f"prompt override {name!r} must contain {missing} placeholders"
                 )
+
+    def _localize_abstention(self, template: str) -> str:
+        """Swap the literal English abstention marker for the configured one."""
+        if self.abstention_text == "Not in memory.":
+            return template
+        return template.replace("Not in memory.", self.abstention_text).replace(
+            "Not in memory", self.abstention_text
+        )
 
     def generate(
         self,
@@ -434,7 +451,7 @@ class AnswerGenerator:
             )
             if not self._custom_prompt_template:
                 prompt_template = self.prompt_overrides.get(
-                    category, _PROMPT_BY_CATEGORY[category]
+                    category, self._builtin_prompts[category]
                 )
 
         if not memories:
@@ -458,7 +475,12 @@ class AnswerGenerator:
         if (
             self.retry_with_expansion
             and self.recaller is not None
-            and should_retry(answer.text, answer.confidence, low_confidence_threshold=0.5)
+            and should_retry(
+                answer.text,
+                answer.confidence,
+                low_confidence_threshold=0.5,
+                abstention_text=self.abstention_text,
+            )
         ):
             answer, specificity_memories = self._retry_with_expansion_answer(
                 query=query,
@@ -471,7 +493,7 @@ class AnswerGenerator:
             and self.inference_retry
             and category == "inference"
             and self.recaller is not None
-            and should_retry(answer.text, answer.confidence)
+            and should_retry(answer.text, answer.confidence, abstention_text=self.abstention_text)
         ):
             answer, specificity_memories = self._retry_inference_answer(
                 query=query,
@@ -590,6 +612,7 @@ class AnswerGenerator:
         if (
             retry_answer.ok
             and "not in memory" not in retry_answer.text.lower()
+            and self.abstention_text.lower() not in retry_answer.text.lower()
             and retry_answer.confidence >= 0.5
         ):
             return retry_answer, merged_memories
@@ -628,7 +651,9 @@ class AnswerGenerator:
     ) -> Answer:
         extract_memories = memories[:40]
         context = self._format_context(extract_memories)
-        prompt = self.prompt_overrides.get("list_extract", _LIST_EXTRACT_PROMPT).format(
+        prompt = self.prompt_overrides.get(
+            "list_extract", self._localize_abstention(_LIST_EXTRACT_PROMPT)
+        ).format(
             n_memories=len(extract_memories),
             context=context,
             query=query,
@@ -647,7 +672,9 @@ class AnswerGenerator:
         if not items:
             return self._fallback_list_answer(query, memories)
 
-        finalize_template = self.prompt_overrides.get("list_finalize", _LIST_FINALIZE_PROMPT)
+        finalize_template = self.prompt_overrides.get(
+            "list_finalize", self._localize_abstention(_LIST_FINALIZE_PROMPT)
+        )
         finalize_prompt = finalize_template.format(query=query, items=json.dumps(items))
         with histogram("mnemostack.answer.llm_latency_ms"):
             final_resp = self.llm.generate(finalize_prompt, max_tokens=self.max_tokens)
@@ -681,7 +708,7 @@ class AnswerGenerator:
         answer = self._generate_single_prompt(
             query=query,
             memories=memories[: self.max_memories],
-            prompt_template=self.prompt_overrides.get("list", _LIST_PROMPT),
+            prompt_template=self.prompt_overrides.get("list", self._builtin_prompts["list"]),
         )
         if answer.ok:
             answer.confidence = 0.3
