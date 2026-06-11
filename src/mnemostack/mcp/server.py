@@ -10,6 +10,7 @@ Design notes:
 from __future__ import annotations
 
 import os
+import threading
 from typing import Annotated, Any
 
 try:
@@ -36,11 +37,11 @@ from ..recall import (
     Reranker,
     TemporalRetriever,
     VectorRetriever,
-    apply_rerank_safe,
     build_bm25_docs,
     build_full_pipeline,
+    recall_flow,
 )
-from ..recall.pipeline import FileStateStore
+from ..recall.pipeline import FileStateStore, default_state_path
 from ..vector import VectorStore
 
 
@@ -60,7 +61,7 @@ def build_server(
     memgraph_uri: str | None = None,
     graph_timeout: float = 5.0,
     bm25_paths: list[str] | None = None,
-    state_path: str = "/tmp/mnemostack-server-state.json",
+    state_path: str | None = None,
     vector_floor: int = 0,
     rerank_mode: str = "relevant_only",
 ) -> Any:
@@ -92,80 +93,107 @@ def build_server(
 
     mcp = FastMCP("mnemostack")
 
-    # Lazy-initialize components so server boots even if e.g. GEMINI_API_KEY missing
+    resolved_state_path = state_path or default_state_path()
+
+    # Lazy-initialize components so server boots even if e.g. GEMINI_API_KEY missing.
+    # Tool calls can run concurrently; the lock makes each component initialize
+    # exactly once instead of racing into duplicate providers/clients.
     _components: dict[str, Any] = {}
+    _components_lock = threading.RLock()
+
+    def _component(name: str, factory):
+        with _components_lock:
+            if name not in _components:
+                _components[name] = factory()
+            return _components[name]
 
     def _get_embedding():
-        if "embedding" not in _components:
-            _components["embedding"] = get_provider(
-                embedding_provider,
-                **model_kwargs(embedding_model),
-            )
-        return _components["embedding"]
+        return _component(
+            "embedding",
+            lambda: get_provider(embedding_provider, **model_kwargs(embedding_model)),
+        )
 
     def _get_vector():
-        if "vector" not in _components:
-            emb = _get_embedding()
-            _components["vector"] = VectorStore(
-                collection=collection, dimension=emb.dimension, host=qdrant_host
-            )
-        return _components["vector"]
+        return _component(
+            "vector",
+            lambda: VectorStore(
+                collection=collection,
+                dimension=_get_embedding().dimension,
+                host=qdrant_host,
+            ),
+        )
+
+    def _build_recaller():
+        emb = _get_embedding()
+        vec = _get_vector()
+        bm25_docs = build_bm25_docs(bm25_paths)
+        retrievers = [
+            VectorRetriever(embedding=emb, vector_store=vec),
+            BM25Retriever(docs=bm25_docs) if bm25_docs else None,
+            MemgraphRetriever(uri=memgraph_uri, timeout=graph_timeout)
+            if memgraph_uri
+            else None,
+            TemporalRetriever(embedding=emb, vector_store=vec),
+        ]
+        return Recaller(
+            retrievers=[r for r in retrievers if r is not None],
+            vector_floor=max(0, int(vector_floor)),
+        )
 
     def _get_recaller():
-        if "recaller" not in _components:
-            emb = _get_embedding()
-            vec = _get_vector()
-            bm25_docs = build_bm25_docs(bm25_paths)
-            retrievers = [
-                VectorRetriever(embedding=emb, vector_store=vec),
-                BM25Retriever(docs=bm25_docs) if bm25_docs else None,
-                MemgraphRetriever(uri=memgraph_uri, timeout=graph_timeout)
-                if memgraph_uri
-                else None,
-                TemporalRetriever(embedding=emb, vector_store=vec),
-            ]
-            _components["recaller"] = Recaller(
-                retrievers=[r for r in retrievers if r is not None],
-                vector_floor=max(0, int(vector_floor)),
-            )
-        return _components["recaller"]
+        return _component("recaller", _build_recaller)
 
     def _get_answer_gen():
-        if "answer" not in _components:
-            _components["answer"] = AnswerGenerator(
+        return _component(
+            "answer",
+            lambda: AnswerGenerator(
                 llm=get_llm(llm_provider, **model_kwargs(llm_model)),
                 recaller=_get_recaller(),
-            )
-        return _components["answer"]
+            ),
+        )
+
+    def _get_pipeline():
+        return _component(
+            "pipeline",
+            lambda: build_full_pipeline(
+                state_store=FileStateStore(resolved_state_path),
+                graph_uri=memgraph_uri,
+                graph_timeout=graph_timeout,
+            ),
+        )
 
     def _get_reranker():
-        if "reranker" not in _components:
-            _components["reranker"] = Reranker(
+        return _component(
+            "reranker",
+            lambda: Reranker(
                 llm=get_llm(llm_provider, **model_kwargs(llm_model)),
                 max_items=20,
                 rerank_mode=rerank_mode,
-            )
-        return _components["reranker"]
+            ),
+        )
 
     def _run_recall(query: str, limit: int) -> tuple[list[Any], RecallTrace]:
         trace = RecallTrace()
         recaller = _get_recaller()
-        recalled_results = recaller.recall(query, limit=limit, trace=trace)
         try:
             reranker = _get_reranker()
         except Exception:  # noqa: BLE001 — LLM not configured; recall still works
             reranker = None
             trace.mark("reranker:unavailable")
-        results = apply_rerank_safe(reranker, query, recalled_results, trace)[:limit]
-        apply_vector_floor = getattr(recaller, "apply_vector_floor_after_rerank", None)
-        if apply_vector_floor is not None:
-            results = apply_vector_floor(results, recalled_results)
+        results = recall_flow(
+            recaller,
+            query,
+            limit,
+            pipeline=_get_pipeline(),
+            reranker=reranker,
+            trace=trace,
+        )
         return results, trace
 
     def _get_feedback_pipeline():
         if "feedback_pipeline" not in _components:
             _components["feedback_pipeline"] = build_full_pipeline(
-                state_store=FileStateStore(state_path),
+                state_store=FileStateStore(resolved_state_path),
                 graph_uri=None,
             )
         return _components["feedback_pipeline"]
@@ -454,7 +482,8 @@ def main() -> None:
         MNEMOSTACK_MEMGRAPH_URI     (default: none — graph tools disabled)
         MNEMOSTACK_GRAPH_TIMEOUT    (default: 5.0)
         MNEMOSTACK_BM25_PATHS       (default: none, os.pathsep-separated paths)
-        MNEMOSTACK_STATE_PATH       (default: /tmp/mnemostack-server-state.json)
+        MNEMOSTACK_STATE_PATH       (default: $XDG_STATE_HOME/mnemostack/server-state.json,
+                                     falling back to ~/.local/state/mnemostack/server-state.json)
         MNEMOSTACK_RERANK_MODE      (default: relevant_only)
     """
     cfg = Config.load()
@@ -468,7 +497,7 @@ def main() -> None:
         memgraph_uri=cfg.graph.uri,
         graph_timeout=cfg.graph.timeout,
         bm25_paths=list(cfg.recall.bm25_paths) or None,
-        state_path=os.environ.get("MNEMOSTACK_STATE_PATH", "/tmp/mnemostack-server-state.json"),
+        state_path=os.environ.get("MNEMOSTACK_STATE_PATH"),
         vector_floor=max(0, int(cfg.recall.vector_floor)),
         rerank_mode=cfg.recall.rerank_mode,
     )

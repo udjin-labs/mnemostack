@@ -6,6 +6,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Stale-chunk pruning**: `mnemostack index --prune` deletes chunks that a re-indexed file no longer produces (edits shifted offsets, the document shrank, chunking parameters changed). Only the sources indexed in the current run are touched, and the delete is scoped to the indexing root (recorded as a new additive `index_root` payload field): a same-named file indexed from another root, or chunks indexed by earlier versions that did not record a root, are never pruned — rebuild those with `--recreate` if needed. Sources with failed embeddings are skipped (the old chunk stays until a replacement lands). The same logic is available to library users as `mnemostack.ingest.prune_stale_chunks(store, fresh_ids_by_source, index_root=...)`, backed by the new `VectorStore.delete_points(ids)`. Chunk ids themselves are unchanged — the `stable_chunk_id` scheme is API and will only change in a major release.
+- **Localizable abstention text**: `AnswerGenerator(abstention_text=...)` replaces the hardcoded English "Not in memory." for non-English deployments — in the empty-memory answer, in the built-in prompts that instruct the LLM which marker to reply with on low evidence, and in the retry logic that detects abstentions (`should_retry` gained an `abstention_text=` parameter; the English literal is always recognized too). User-supplied `prompt_template`/`prompt_overrides` are left verbatim.
+- **Pluggable question classifier**: `AnswerGenerator(question_classifier=...)` overrides the built-in English-regex category classifier; an unknown returned category falls back to `general` (fail-open).
+- `--raw` flag on `mnemostack search` / `mnemostack answer` restores plain fused recall without the post-processing pipeline.
+
+### Changed
+
+- **All entry points now rank identically**: CLI, HTTP server and MCP server share one canonical post-recall chain (`recall_flow`: 3x candidate pool -> pipeline -> rerank fail-open -> limit -> vector floor). MCP search/answer and CLI search/answer now run the full 8-stage recall pipeline that was previously HTTP-only; pass `--raw` (CLI) to get the old plain-recall behavior.
+- **Learning state moved out of /tmp**: the pipeline state file now defaults to `$XDG_STATE_HOME/mnemostack/server-state.json` (or `~/.local/state/...`), with a one-time automatic migration from the old `/tmp` path. `FileStateStore` takes a cross-process `flock` around reads and writes, so multiple servers sharing one state file no longer corrupt it.
+- **Gemini retry storms tamed**: retry backoff is jittered in both the embedding and LLM clients, and batch-embedding fallback probes a single item first — if the provider is down, the remaining items fail fast instead of issuing two retries each.
+
+### Fixed
+
+- A finalize-stage LLM failure in list-extract mode no longer discards already-extracted items: the answer is built deterministically from them (count questions get the number, list questions get the joined items).
+- LLM echoes of the `REWRITTEN_ANSWER:` prompt label are stripped from specificity-resolver output instead of leaking into answers.
+- MCP lazy component initialization is serialized with a lock — concurrent first requests no longer build duplicate recallers/embedders.
+
 ## [0.4.8] - 2026-06-11
 
 ### Added

@@ -117,6 +117,49 @@ def _item_tags(item: IngestItem) -> list[str]:
     return [str(tag) for tag in raw_tags if str(tag)]
 
 
+def prune_stale_chunks(
+    vector_store: VectorStore,
+    fresh_ids_by_source: dict[str, set[str]],
+    *,
+    index_root: str | None = None,
+) -> int:
+    """Delete stale chunks of re-indexed sources. Returns count removed.
+
+    For each source in *fresh_ids_by_source*, deletes points whose payload
+    ``source`` matches but whose id is not in the fresh set — i.e. chunks
+    that the source no longer produces (content edits shifted offsets, the
+    document shrank, chunking parameters changed).
+
+    Only the listed sources are touched; points ingested under other sources
+    are never affected. The fresh set MUST contain every id the source
+    currently produces (compute it via `stable_chunk_id` over all chunks,
+    including ones skipped as already indexed) — an incomplete set would
+    delete live data. Likewise, do NOT include a source whose chunks failed
+    to embed or upsert in the current run: its fresh ids never landed, so
+    pruning would delete the previous data without a replacement.
+
+    Pass *index_root* when source names are relative and may collide across
+    indexing roots (the CLI stores the resolved root as ``index_root`` in the
+    payload): the delete is then scoped to points carrying the same root, so
+    ``note.md`` from another root — or from a version that didn't record a
+    root — is never touched.
+    """
+    removed = 0
+    for source, fresh_ids in fresh_ids_by_source.items():
+        filters: dict[str, Any] = {"source": source}
+        if index_root is not None:
+            filters["index_root"] = index_root
+        stale = [
+            pid
+            for pid in (str(p) for p in vector_store.iter_ids(filters=filters))
+            if pid not in fresh_ids
+        ]
+        if stale:
+            removed += vector_store.delete_points(list(stale))
+    counter("mnemostack.ingest.pruned", removed)
+    return removed
+
+
 def _wrapper_filename(source: str) -> str:
     source_key = source or "item"
     basename = Path(source_key).stem or Path(source_key).name or "item"
@@ -497,4 +540,4 @@ class Ingestor:
                     log.warning("failed to sync wrapper graph for %s: %s", item.source, exc)
 
 
-__all__ = ["Ingestor", "IngestItem", "IngestStats", "stable_chunk_id"]
+__all__ = ["Ingestor", "IngestItem", "IngestStats", "prune_stale_chunks", "stable_chunk_id"]

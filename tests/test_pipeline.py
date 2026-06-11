@@ -331,3 +331,68 @@ def test_preset_full_pipeline_stateful_master_toggle():
     assert not any(isinstance(stage, QLearningReranker) for stage in pipe)
     assert not any(isinstance(stage, CuriosityBoost) for stage in pipe)
     assert not any(isinstance(stage, InhibitionOfReturn) for stage in pipe)
+
+
+def test_default_state_path_respects_xdg(monkeypatch, tmp_path):
+    from mnemostack.recall.pipeline import default_state_path
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
+    p = default_state_path()
+    assert p == str(tmp_path / "xdg-state" / "mnemostack" / "server-state.json")
+
+
+def test_default_state_path_migrates_legacy_tmp_file(monkeypatch, tmp_path):
+    import mnemostack.recall.pipeline.state as state_mod
+
+    legacy = tmp_path / "legacy-state.json"
+    legacy.write_text('{"q": 1}')
+    monkeypatch.setattr(state_mod, "_LEGACY_STATE_PATH", legacy)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
+
+    p = state_mod.default_state_path()
+
+    assert (tmp_path / "xdg" / "mnemostack" / "server-state.json").read_text() == '{"q": 1}'
+    assert p.endswith("server-state.json")
+
+
+def test_file_state_store_cross_process_lockfile(tmp_path):
+    from mnemostack.recall.pipeline import FileStateStore
+
+    store = FileStateStore(tmp_path / "state.json")
+    store.set("k", {"v": 1})
+
+    assert store.get("k") == {"v": 1}
+    assert (tmp_path / "state.json.lock").exists()
+
+
+def test_legacy_migration_does_not_clobber_existing_state(monkeypatch, tmp_path):
+    """A process that lost the startup race re-checks under the lock and must
+    not overwrite state another process already wrote."""
+    import mnemostack.recall.pipeline.state as state_mod
+
+    legacy = tmp_path / "legacy-state.json"
+    legacy.write_text('{"q": "stale"}')
+    monkeypatch.setattr(state_mod, "_LEGACY_STATE_PATH", legacy)
+    target = tmp_path / "xdg" / "mnemostack" / "server-state.json"
+    target.parent.mkdir(parents=True)
+    target.write_text('{"q": "newer"}')
+
+    state_mod._migrate_legacy_state(target)
+
+    assert target.read_text() == '{"q": "newer"}'
+
+
+def test_legacy_migration_is_atomic_and_leaves_no_temp(monkeypatch, tmp_path):
+    import mnemostack.recall.pipeline.state as state_mod
+
+    legacy = tmp_path / "legacy-state.json"
+    legacy.write_text('{"q": 1}')
+    monkeypatch.setattr(state_mod, "_LEGACY_STATE_PATH", legacy)
+    target = tmp_path / "xdg" / "mnemostack" / "server-state.json"
+
+    state_mod._migrate_legacy_state(target)
+
+    assert target.read_text() == '{"q": 1}'
+    assert not list(target.parent.glob("*.migrate-tmp"))
+    # the migration shares FileStateStore's lock file for this path
+    assert (target.parent / "server-state.json.lock").exists()
