@@ -334,7 +334,9 @@ class Recaller:
                             ranked=[(str(d.id), s) for d, s in bm25_hits],
                         )
                     )
-            mca_hits = self._mca_hits(query, bm25_limit) if self.mca_prefilter_enabled else []
+            mca_hits = (
+                self._mca_hits(query, bm25_limit, filters) if self.mca_prefilter_enabled else []
+            )
             mca_by_id = {hit.id: hit for hit in mca_hits}
             ranked_lists: list[list[tuple[Any, float]]] = [vector_list, bm25_list]
             if mca_hits:
@@ -593,7 +595,7 @@ class Recaller:
             id_to_result: dict[Any, RecallResult] = {}
             has_vector_results = False
             if self.mca_prefilter_enabled:
-                mca_hits = self._mca_hits(query, per_source_limit)
+                mca_hits = self._mca_hits(query, per_source_limit, filters)
                 if mca_hits:
                     all_lists.append([(hit, hit.score) for hit in mca_hits])
                     per_list_weights.append(self._weight_for("mca", query))
@@ -811,7 +813,12 @@ class Recaller:
             if "vector" in result.sources and "raw_vector_score" in result.payload
         ]
 
-    def _mca_hits(self, query: str, limit: int) -> list[RecallResult]:
+    def _mca_hits(
+        self,
+        query: str,
+        limit: int,
+        filters: dict[str, Any] | None = None,
+    ) -> list[RecallResult]:
         bm25 = self.bm25
         if bm25 is None:
             for retriever in self.retrievers:
@@ -820,7 +827,7 @@ class Recaller:
                     break
         if bm25 is None:
             return []
-        return run_mca_prefilter(query, bm25, limit=limit)
+        return run_mca_prefilter(query, bm25, limit=limit, filters=filters)
 
     def _vector_fallback_hits(
         self,

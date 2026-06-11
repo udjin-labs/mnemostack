@@ -318,3 +318,41 @@ def test_temporal_disjoint_scope_returns_nothing():
     )
 
     assert results == []
+
+
+def test_mca_prefilter_stays_inside_filtered_scope():
+    """The exact-token (MCA) arm queries the BM25 corpus directly — with
+    filters it must not inject out-of-scope docs into the RRF pool."""
+    docs = [
+        BM25Doc(
+            id="a1",
+            text="tenant a mentions ticket_4711 once",
+            payload={"tenant": "a"},
+        ),
+        BM25Doc(
+            id="b1",
+            text="ticket_4711 ticket_4711 ticket_4711 in tenant b",
+            payload={"tenant": "b"},
+        ),
+    ]
+    embedder = FakeEmbedder()
+    store = VectorStore.__new__(VectorStore)
+    store.collection = "test"
+    store.dimension = embedder.dimension
+    store.distance = Distance.COSINE
+    store.client = QdrantClient(":memory:")
+    store.ensure_collection()
+
+    recaller = Recaller(
+        embedding_provider=embedder,
+        vector_store=store,
+        bm25_docs=docs,
+        mca_prefilter=True,
+    )
+
+    results = recaller.recall("what about ticket_4711", limit=10, filters={"tenant": "a"})
+
+    assert results
+    assert all(r.payload.get("tenant") == "a" for r in results)
+    mca_sourced = [r for r in results if "mca" in (r.sources or [])]
+    assert all(r.payload.get("tenant") == "a" for r in mca_sourced)
