@@ -39,6 +39,18 @@ def _display_ts(ts: str) -> str:
 if TYPE_CHECKING:
     from .recaller import Recaller
 
+# Scripts written without word separators: word-boundary regexes never match
+# inside running text there (adjacent characters are all \w). Hiragana,
+# Katakana, CJK ideographs (ext. A + unified + compatibility), Hangul, Thai.
+_NONSPACED_SCRIPT_RE = re.compile(
+    "[\u3040-\u30ff"  # Hiragana, Katakana
+    "\u3400-\u4dbf"  # CJK ideographs extension A
+    "\u4e00-\u9fff"  # CJK unified ideographs
+    "\uf900-\ufaff"  # CJK compatibility ideographs
+    "\uac00-\ud7af"  # Hangul syllables
+    "\u0e00-\u0e7f]"  # Thai
+)
+
 _CONFIDENCE_RULES = """After your answer, on a NEW line, output ONLY:
 CONFIDENCE: <float 0.0-1.0>
 
@@ -746,10 +758,22 @@ class AnswerGenerator:
             if not needle:
                 continue
             pattern = re.compile(rf"(?<!\w){re.escape(needle)}(?!\w)")
+            item_matched = False
             for memory, text in lowered:
                 if id(memory) not in matched_ids and pattern.search(text):
                     matched_ids.add(id(memory))
                     matched.append(memory)
+                    item_matched = True
+            if not item_matched and _NONSPACED_SCRIPT_RE.search(needle):
+                # Non-spaced scripts (CJK, Thai): adjacent characters count
+                # as \w, so a correct phrase never matches with boundaries.
+                # Plain containment for these items only — spaced-script
+                # items keep the boundary requirement ("Ann" must not claim
+                # "annual").
+                for memory, text in lowered:
+                    if id(memory) not in matched_ids and needle in text:
+                        matched_ids.add(id(memory))
+                        matched.append(memory)
         remainder = [m for m in contributing if id(m) not in matched_ids]
         return self._extract_sources(matched + remainder)
 

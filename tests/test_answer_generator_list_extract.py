@@ -512,3 +512,36 @@ def test_new_options_are_keyword_only():
     sig = inspect.signature(AnswerGenerator.__init__)
     for name in ("list_extract_batch_size", "list_finalize"):
         assert sig.parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_item_provenance_matches_nonspaced_scripts():
+    """Boundary anchors never match inside CJK running text (adjacent
+    ideographs are all \\w) — such items fall back to containment so the
+    supporting memory is still cited first."""
+    from mnemostack.recall import RecallResult
+
+    def _mem(i, text):
+        return RecallResult(
+            id=str(i),
+            text=text,
+            score=1.0 - i * 0.01,
+            payload={"source": f"chat-{i}"},
+            sources=["vector"],
+        )
+
+    pool = [
+        _mem(1, "participant A talked about the weather"),
+        _mem(2, "参加者は猫を飼っていると言いました"),
+    ]
+    llm = SequenceLLM(['{"items": ["猫"]}'])
+    gen = AnswerGenerator(
+        llm=llm,
+        category_aware_prompts=True,
+        list_extract_mode=True,
+        list_finalize="verbatim",
+    )
+
+    answer = gen.generate("List the pets mentioned by participants", pool)
+
+    assert answer.text == "猫"
+    assert answer.sources[0] == "chat-2"
