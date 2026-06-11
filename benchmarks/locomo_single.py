@@ -171,6 +171,18 @@ def main():
         default=3,
         help="Adjacent messages to concatenate into overlapping chunks (1 disables)",
     )
+    ap.add_argument(
+        "--list-extract",
+        action="store_true",
+        help="EXPERIMENT: enable AnswerGenerator(list_extract_mode=True) — batched "
+        "extract-and-aggregate for count/list questions over the full candidate pool",
+    )
+    ap.add_argument(
+        "--pool",
+        type=int,
+        default=None,
+        help="EXPERIMENT: candidate pool size for recall (limit and per-source limits)",
+    )
     args = ap.parse_args()
     run_started_at = datetime.now(timezone.utc).isoformat()
 
@@ -258,6 +270,7 @@ def main():
 
         answer_gen = AnswerGenerator(
             llm=llm,
+            list_extract_mode=args.list_extract,
             confidence_threshold=0.5,
             max_memories=args.limit,
             category_aware_prompts=True,
@@ -282,8 +295,20 @@ def main():
                 ans_text = ""
                 r = {"correct": True, "partial": False, "reason": "empty_ground_truth"}
             else:
-                raw = recaller.recall(q, limit=50, trace=trace)
-                mems = pipeline.apply(q, raw)[: args.limit]
+                if args.pool:
+                    raw = recaller.recall(
+                        q, limit=args.pool, vector_limit=max(20, args.pool // 2),
+                        bm25_limit=max(20, args.pool // 2), trace=trace,
+                    )
+                else:
+                    # default invocation unchanged: Recaller's documented
+                    # per-source defaults (20/20), historical runs comparable
+                    raw = recaller.recall(q, limit=50, trace=trace)
+                mems = pipeline.apply(q, raw)
+                if not args.list_extract:
+                    mems = mems[: args.limit]
+                # list-extract mode: generator walks the full pool in batches
+                # for count/list questions and self-limits other categories.
                 ans = answer_gen.generate(q, mems)
                 ans_text = ans.text
                 r = evaluate(q, ans_text, truth, llm)
@@ -332,6 +357,8 @@ def main():
         "limit": args.limit,
         "query_expansion": bool(args.query_expansion),
         "window_size": args.window_size,
+        "list_extract": bool(args.list_extract),
+        "pool": args.pool,
         "samples": args.samples,
         "timestamp": run_started_at,
         "dataset": DATASET,
