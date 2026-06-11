@@ -361,6 +361,8 @@ Tear down with `docker compose -f examples/docker-compose.yml down -v` (the `-v`
 
 Prefer Ollama (no cloud key needed)? Run Ollama on the host, set `OLLAMA_HOST=http://host.docker.internal:11434`, and pass `--provider ollama` everywhere instead of `gemini`.
 
+**Reasoning models** (qwen3, deepseek-r1 and similar): mnemostack disables thinking by default (`think=False` in `OllamaLLM`) — with thinking on, these models spend the whole token budget on thoughts and return empty text, silently degrading reranking, expansion and extraction. Pass `get_llm("ollama", think=None)` to keep the model's own default, or `think=True` to force it on models that support thinking. Extra generation options go through `options={...}` (e.g. `{"num_ctx": 8192}`).
+
 ### Installation
 
 ```bash

@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Ollama think control and options passthrough**: `OllamaLLM(think=..., options=...)`. `options` is merged into the request's generation options (e.g. `num_ctx`, `top_p`; explicit keys override the per-call temperature/num_predict). `think` controls reasoning on models that support it and defaults to **False**: reasoning models (qwen3, deepseek-r1 and similar) otherwise spend the whole `num_predict` budget on thoughts and return empty text, which silently degrades reranking, query expansion and extraction into their fallbacks. `think=False` is accepted by every model and ignored by servers that predate the field — only `think=True` errors on models without thinking support. Pass `think=None` to omit the field and keep the model's own default. **Behavior change** for Ollama deployments with reasoning models: internal generations now produce text instead of silently empty responses.
+
 ## [0.5.0] - 2026-06-11
 
 ### Added
