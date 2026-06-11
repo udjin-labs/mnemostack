@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from .filters import payload_matches
 from .trace import RecallTrace, apply_rerank_safe
 
 if TYPE_CHECKING:
@@ -44,6 +45,13 @@ def recall_flow(
     results = recalled
     if pipeline is not None:
         results = pipeline.apply(query, results)
+        if filters:
+            # Pipeline stages may append candidates that never passed the
+            # filtered retrievers (e.g. graph resurrection injects records
+            # with no tenant/timestamp payload). Enforce the caller's scope
+            # on the pipeline output too: anything that cannot be attributed
+            # to the scope is dropped, not leaked.
+            results = [r for r in results if payload_matches(r.payload, filters)]
     if reranker is not None:
         results = apply_rerank_safe(reranker, query, results, trace)
     results = results[:limit]
