@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- **Tenant-isolation leak in filtered recall (affects 0.5.0 and earlier)**: in all prior releases, several recall paths ignored `filters=`, so a filtered fused recall could return data from outside the filtered scope — in multi-tenant deployments, **one tenant's query could return another tenant's chunks**. `Recaller.recall(filters=)` and `AnswerGenerator.generate(recall_filters=)` were library-level APIs in those releases (HTTP/MCP/CLI did not expose filters yet), so deployments that relied on them for isolation — rather than post-filtering results themselves — are affected and **should upgrade**. The leaking paths, all fixed and covered by adversarial isolation tests: `BM25Retriever` (silently ignored filters; now applies the same semantics in-process via the new exported `payload_matches`, restricting candidates *before* the top-K cut), the MCA exact-token arm, the legacy `Recaller(bm25_docs=...)` constructor path, `TemporalRetriever` (replaced a caller timestamp constraint with the parsed query window instead of intersecting), the answer generator's expansion-retry sub-recalls, and pipeline-appended results (graph resurrection). Sources that cannot attribute results to the filtered scope (the knowledge-graph retriever — graph nodes carry no chunk payload) now contribute nothing rather than leak.
+
 ### Added
 
 - **Recall filters on every surface**: `filters` is now accepted by HTTP `/recall` and `/answer`, MCP `mnemostack_search` / `mnemostack_answer`, the CLI (`--filters '{"tenant": "a"}'` on search/answer) and `recall_flow()`. Exact-match and `gte`/`lte` range conditions, same semantics as the native Qdrant filter. On `/answer` paths the filter also scopes the generator's retry sub-recalls.
@@ -20,10 +24,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **List/count extraction is order-insensitive**: in `list_extract_mode` the extract pass now walks the whole candidate pool in batches (`list_extract_batch_size`, default 40) and merges items across batches, instead of reading only the top 40. Pool position no longer decides whether a memory is seen — the pool order itself is non-deterministic (RRF over expanded queries), which made extraction results vary run-to-run. Cost is one LLM call per batch instead of one total; a failed batch is skipped without discarding the other batches' items.
 - **Empty extracts are retried once**: a non-empty pool with a zero-item extract gets one more extraction pass before falling back/abstaining (counter: `mnemostack.answer.list_extract_empty_retry`). Extraction is the lossy, non-deterministic step — retrieval doesn't change between passes, the LLM's reading does.
-
-### Fixed
-
-- **Tenant-isolation leak in filtered recall**: `BM25Retriever` accepted `filters` and silently ignored them, so a fused recall with filters mixed unfiltered BM25 candidates into the output — in multi-tenant deployments that leaked foreign data. BM25 now applies the same filter semantics in-process (new `payload_matches` helper, exported), restricting the candidate set *before* the top-K cut so filtered recall keeps full depth. The knowledge-graph retriever contributes nothing under filters: graph nodes carry no chunk payload, so its results cannot be attributed to the filtered scope.
 
 ## [0.5.0] - 2026-06-11
 
