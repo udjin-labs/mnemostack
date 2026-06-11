@@ -30,7 +30,7 @@ class _FakeStore:
         self.ensure_calls.append(recreate)
         return recreate
 
-    def iter_ids(self):
+    def iter_ids(self, filters=None):
         return iter(())
 
     def upsert(self, cid, vec, payload) -> None:
@@ -47,6 +47,7 @@ def _args(tmp_path, **overrides) -> argparse.Namespace:
         qdrant="http://localhost:6333",
         recreate=True,
         yes=False,
+        prune=False,
         chunk_size=800,
         window_size=1,
     )

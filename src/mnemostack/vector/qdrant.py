@@ -15,6 +15,7 @@ from qdrant_client.models import (
     Filter,
     MatchValue,
     PayloadSchemaType,
+    PointIdsList,
     PointStruct,
     Range,
     VectorParams,
@@ -201,6 +202,18 @@ class VectorStore:
             structs = [PointStruct(id=pid, vector=vec, payload=pl or {}) for pid, vec, pl in chunk]
             self.client.upsert(collection_name=self.collection, points=structs)
             total += len(structs)
+        return total
+
+    def delete_points(self, ids: list[str | int], batch_size: int = 1000) -> int:
+        """Delete specific points by id. Returns count requested for deletion."""
+        total = 0
+        for i in range(0, len(ids), batch_size):
+            chunk = ids[i : i + batch_size]
+            self.client.delete(
+                collection_name=self.collection,
+                points_selector=PointIdsList(points=list(chunk)),
+            )
+            total += len(chunk)
         return total
 
     # ---------- search ----------
