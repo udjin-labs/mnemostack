@@ -117,6 +117,8 @@ def _index_args(tmp_path, **overrides) -> argparse.Namespace:
         recreate=False,
         yes=False,
         prune=True,
+        enrich=None,
+        refresh_payloads=False,
         chunk_size=800,
         window_size=1,
     )
