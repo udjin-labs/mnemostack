@@ -668,15 +668,16 @@ class AnswerGenerator:
     def _generate_list_extract(
         self, query: str, memories: list[RecallResult], category: str = "list"
     ) -> Answer:
-        items = self._extract_items_over_pool(query, memories)
-        if items is not None and not items:
+        extracted = self._extract_items_over_pool(query, memories)
+        if extracted is not None and not extracted[0]:
             # The pool is non-empty but extraction found nothing. Extraction
             # is the lossy, non-deterministic step (not retrieval) — give it
             # one more pass before abstaining.
             counter("mnemostack.answer.list_extract_empty_retry", 1)
-            items = self._extract_items_over_pool(query, memories)
-        if not items:  # None (every batch failed) or still empty
+            extracted = self._extract_items_over_pool(query, memories)
+        if extracted is None or not extracted[0]:  # every batch failed / still empty
             return self._fallback_list_answer(query, memories)
+        items, contributing = extracted
 
         if self.list_finalize == "verbatim":
             # Deterministic assembly straight from the extracted items: no
@@ -686,7 +687,7 @@ class AnswerGenerator:
             return Answer(
                 text=text,
                 confidence=0.8,
-                sources=self._extract_sources(memories),
+                sources=self._extract_sources(contributing),
                 raw="",
             )
 
@@ -707,20 +708,20 @@ class AnswerGenerator:
             return Answer(
                 text=text,
                 confidence=0.6,
-                sources=self._extract_sources(memories),
+                sources=self._extract_sources(contributing),
                 raw=final_resp.text,
             )
 
         return Answer(
             text=final_resp.text.strip(),
             confidence=0.8,
-            sources=self._extract_sources(memories),
+            sources=self._extract_sources(contributing),
             raw=final_resp.text,
         )
 
     def _extract_items_over_pool(
         self, query: str, memories: list[RecallResult]
-    ) -> list[str] | None:
+    ) -> tuple[list[str], list[RecallResult]] | None:
         """Run the extract prompt over the WHOLE pool in batches.
 
         A single fixed window made extraction order-sensitive: a relevant
@@ -730,14 +731,19 @@ class AnswerGenerator:
         pool no longer decides whether a memory is seen.
 
         Returns None when every batch failed (LLM error or unparseable
-        output); an empty list means the LLM saw the whole pool and found
-        nothing. Items are merged across batches preserving first-seen order.
+        output); otherwise (items, contributing_memories) where items are
+        merged across batches preserving first-seen order and the memories
+        come from the batches that actually produced items — source
+        attribution must point at the supporting batches, not the pool
+        prefix (`_extract_sources` truncates, so an answer found deep in
+        the pool would otherwise cite unrelated earlier memories).
         """
         template = self.prompt_overrides.get(
             "list_extract", self._localize_abstention(_LIST_EXTRACT_PROMPT)
         )
         merged: list[str] = []
         seen: set[str] = set()
+        contributing: list[RecallResult] = []
         any_batch_ok = False
         for start in range(0, len(memories), self.list_extract_batch_size):
             batch = memories[start : start + self.list_extract_batch_size]
@@ -755,13 +761,15 @@ class AnswerGenerator:
             except (TypeError, ValueError, json.JSONDecodeError):
                 continue
             any_batch_ok = True
+            if items:
+                contributing.extend(batch)
             for item in items:
                 if item not in seen:
                     seen.add(item)
                     merged.append(item)
         if not any_batch_ok:
             return None
-        return merged
+        return merged, contributing
 
     def _fallback_list_answer(
         self,
