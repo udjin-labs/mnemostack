@@ -12,6 +12,7 @@ from ..observability import counter, histogram
 from ..observability.recorder import get_recorder
 from ..vector.qdrant import Hit, VectorStore
 from .bm25 import BM25, BM25Doc
+from .filters import payload_matches
 from .fusion import reciprocal_rank_fusion
 from .mca_prefilter import mca_prefilter as run_mca_prefilter
 from .query_expansion import expand_query
@@ -301,11 +302,19 @@ class Recaller:
             if vector_floor_candidates is not None:
                 vector_floor_candidates.extend(raw_vector_candidates)
 
-            # BM25 search
+            # BM25 search — same filter semantics as the vector store, applied
+            # in-process before the top-K cut (isolation: foreign docs must
+            # not be fused into a filtered result set on this path either).
             bm25_hits: list[tuple[BM25Doc, float]] = []
             if self.bm25:
+                predicate = None
+                if filters:
+
+                    def predicate(d: BM25Doc) -> bool:
+                        return payload_matches(d.payload, filters)
+
                 with histogram("mnemostack.recall.bm25_latency_ms"):
-                    bm25_hits = self.bm25.search(query, limit=bm25_limit)
+                    bm25_hits = self.bm25.search(query, limit=bm25_limit, predicate=predicate)
                 counter("mnemostack.recall.bm25_hits", len(bm25_hits))
 
             # Build id→source map and per-list tuples for RRF

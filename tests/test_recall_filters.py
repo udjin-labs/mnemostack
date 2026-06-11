@@ -233,3 +233,88 @@ def test_expansion_retry_stays_inside_filtered_scope():
     gen.generate("a question", [memory], recall_filters={"tenant": "a"})
 
     assert recaller.search_many.call_args.kwargs["filters"] == {"tenant": "a"}
+
+
+def test_legacy_recaller_path_filters_bm25():
+    """Recaller(embedding_provider=..., vector_store=..., bm25_docs=...) uses
+    the legacy fusion path — its BM25 arm must honor filters too."""
+    embedder = FakeEmbedder()
+    store = VectorStore.__new__(VectorStore)
+    store.collection = "test"
+    store.dimension = embedder.dimension
+    store.distance = Distance.COSINE
+    store.client = QdrantClient(":memory:")
+    store.ensure_collection()
+
+    corpus = [
+        ("11111111-0000-0000-0000-00000000000a", "tenant a quarterly report", "a"),
+        ("22222222-0000-0000-0000-00000000000b", "tenant b quarterly report", "b"),
+    ]
+    bm25_docs = []
+    for pid, text, tenant in corpus:
+        payload = {"text": text, "tenant": tenant}
+        store.upsert(pid, embedder.embed(text), payload)
+        bm25_docs.append(BM25Doc(id=pid, text=text, payload=payload))
+
+    recaller = Recaller(
+        embedding_provider=embedder, vector_store=store, bm25_docs=bm25_docs
+    )
+
+    results = recaller.recall("quarterly report", limit=10, filters={"tenant": "a"})
+
+    assert results
+    assert all(r.payload.get("tenant") == "a" for r in results)
+
+
+# ---------- temporal window vs caller timestamp scope ----------
+
+
+def _temporal_setup(window):
+    from mnemostack.recall.retrievers import TemporalRetriever
+
+    embedder = FakeEmbedder()
+    store = VectorStore.__new__(VectorStore)
+    store.collection = "test"
+    store.dimension = embedder.dimension
+    store.distance = Distance.COSINE
+    store.client = QdrantClient(":memory:")
+    store.ensure_collection()
+
+    points = [
+        ("33333333-0000-0000-0000-000000000001", "may meeting notes", "2026-05-10T12:00:00+00:00"),
+        ("33333333-0000-0000-0000-000000000002", "june meeting notes", "2026-06-10T12:00:00+00:00"),
+        ("33333333-0000-0000-0000-000000000003", "july meeting notes", "2026-07-10T12:00:00+00:00"),
+    ]
+    for pid, text, ts in points:
+        store.upsert(pid, embedder.embed(text), {"text": text, "timestamp": ts})
+
+    return TemporalRetriever(embedder, store, extractor=lambda _q: window)
+
+
+def test_temporal_intersects_caller_timestamp_scope():
+    """A caller timestamp filter must narrow the parsed query window, not be
+    replaced by it — hits outside the caller's scope must not appear."""
+    retr = _temporal_setup(("2026-05-01T00:00:00+00:00", "2026-07-31T23:59:59+00:00"))
+
+    results = retr.search(
+        "meeting notes",
+        limit=10,
+        filters={"timestamp": {"gte": "2026-06-01T00:00:00+00:00"}},
+    )
+
+    assert results
+    timestamps = {r.payload["timestamp"] for r in results}
+    assert "2026-05-10T12:00:00+00:00" not in timestamps  # outside caller scope
+    assert "2026-06-10T12:00:00+00:00" in timestamps
+
+
+def test_temporal_disjoint_scope_returns_nothing():
+    retr = _temporal_setup(("2025-05-01T00:00:00+00:00", "2025-05-31T23:59:59+00:00"))
+
+    results = retr.search(
+        "meeting notes",
+        limit=10,
+        filters={"timestamp": {"gte": "2026-01-01T00:00:00+00:00"}},
+    )
+
+    assert results == []
