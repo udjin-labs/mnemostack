@@ -566,3 +566,34 @@ def test_cross_batch_dedup_normalizes_casing(memories):
     answer = gen.generate("How many distinct medications were mentioned?", memories)
 
     assert answer.text == "3"  # Ibuprofen, Aspirin, aspirin forte — not 4
+
+
+def test_popular_item_does_not_crowd_out_other_items_sources():
+    """An item mentioned in many memories must not push the sole source of
+    another item past the 5-source truncation — round-robin: every item's
+    first supporting memory outranks anyone's second mention."""
+    from mnemostack.recall import RecallResult
+
+    def _mem(i, text):
+        return RecallResult(
+            id=str(i),
+            text=text,
+            score=1.0 - i * 0.01,
+            payload={"source": f"chat-{i}"},
+            sources=["vector"],
+        )
+
+    pool = [_mem(i, f"Luna was mentioned again in update {i}") for i in range(1, 7)]
+    pool.append(_mem(7, "Oliver appeared exactly once"))
+    llm = SequenceLLM(['{"items": ["Luna", "Oliver"]}'])
+    gen = AnswerGenerator(
+        llm=llm,
+        category_aware_prompts=True,
+        list_extract_mode=True,
+        list_finalize="verbatim",
+    )
+
+    answer = gen.generate("List the pets mentioned", pool)
+
+    assert answer.text == "Luna, Oliver"
+    assert "chat-7" in answer.sources  # Oliver's sole source survives
