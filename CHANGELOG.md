@@ -25,6 +25,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - LLM echoes of the `REWRITTEN_ANSWER:` prompt label are stripped from specificity-resolver output instead of leaking into answers.
 - MCP lazy component initialization is serialized with a lock — concurrent first requests no longer build duplicate recallers/embedders.
 
+## [0.4.8] - 2026-06-11
+
+### Added
+
+- **Count/list aggregation recipe**: `AnswerGenerator` now supports the wide-recall-pool plus `list_extract_mode` recipe for count and "list all X" questions. In this mode, count/list questions use a two-pass extract-and-aggregate flow with one extra LLM call; other question categories are unaffected. The recipe is documented in the README and exposed in the LoCoMo harness with `--list-extract` and `--pool`.
+- **Per-prompt overrides and explicit category routing**: `AnswerGenerator` now supports per-prompt override text and explicit question-category routing, so callers can localize or specialize prompts while keeping category-aware answer behavior predictable.
+
 ## [0.4.7] - 2026-06-11
 
 ### Added
