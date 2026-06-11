@@ -417,6 +417,11 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
 
     def _run_recall_sync(query: str, limit: int, full_pipeline: bool):
         trace = RecallTrace()
+        # Reranking is part of the full pipeline; if it was requested but the
+        # LLM never initialized, that is a degradation worth surfacing. With
+        # full_pipeline=False the reranker is off by request, not degraded.
+        if full_pipeline and reranker is None:
+            trace.mark("reranker:unavailable")
         results = recall_flow(
             recaller,
             query,

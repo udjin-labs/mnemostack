@@ -188,6 +188,21 @@ def test_apply_rerank_safe_without_trace():
     assert [r.id for r in apply_rerank_safe(_FakeReranker(fail=True), "q", results)] == ["a", "b"]
 
 
+def test_recall_flow_without_reranker_leaves_trace_clean():
+    """reranker=None means 'not requested', not a degradation — the raw and
+    no-pipeline paths must not report reranker:unavailable."""
+    from mnemostack.recall import recall_flow
+
+    recaller = Recaller(
+        retrievers=[_ListRetriever("vector", _results("vector", ["a", "b"]))],
+    )
+    trace = RecallTrace()
+    results = recall_flow(recaller, "q", limit=5, reranker=None, trace=trace)
+
+    assert results
+    assert trace.degraded == []
+
+
 # ---------- query expansion path ----------
 
 

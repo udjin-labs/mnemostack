@@ -33,13 +33,18 @@ def recall_flow(
     with; the reranker is applied fail-open via `apply_rerank_safe`; the
     result is cut to `limit` and vector-floor guarantees are re-applied
     after the cut. Without a pipeline this degrades to plain recall.
+
+    `reranker=None` means "no reranking requested" and leaves the trace
+    untouched. A caller that *wanted* a reranker but could not build one
+    should mark `reranker:unavailable` on the trace itself.
     """
     raw_limit = max(limit * 3, 30) if pipeline is not None else limit
     recalled = recaller.recall(query, limit=raw_limit, trace=trace)
     results = recalled
     if pipeline is not None:
         results = pipeline.apply(query, results)
-    results = apply_rerank_safe(reranker, query, results, trace)
+    if reranker is not None:
+        results = apply_rerank_safe(reranker, query, results, trace)
     results = results[:limit]
     apply_floor = getattr(recaller, "apply_vector_floor_after_rerank", None)
     if apply_floor is not None:
