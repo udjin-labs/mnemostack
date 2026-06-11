@@ -120,6 +120,8 @@ def _item_tags(item: IngestItem) -> list[str]:
 def prune_stale_chunks(
     vector_store: VectorStore,
     fresh_ids_by_source: dict[str, set[str]],
+    *,
+    index_root: str | None = None,
 ) -> int:
     """Delete stale chunks of re-indexed sources. Returns count removed.
 
@@ -135,12 +137,21 @@ def prune_stale_chunks(
     delete live data. Likewise, do NOT include a source whose chunks failed
     to embed or upsert in the current run: its fresh ids never landed, so
     pruning would delete the previous data without a replacement.
+
+    Pass *index_root* when source names are relative and may collide across
+    indexing roots (the CLI stores the resolved root as ``index_root`` in the
+    payload): the delete is then scoped to points carrying the same root, so
+    ``note.md`` from another root — or from a version that didn't record a
+    root — is never touched.
     """
     removed = 0
     for source, fresh_ids in fresh_ids_by_source.items():
+        filters: dict[str, Any] = {"source": source}
+        if index_root is not None:
+            filters["index_root"] = index_root
         stale = [
             pid
-            for pid in (str(p) for p in vector_store.iter_ids(filters={"source": source}))
+            for pid in (str(p) for p in vector_store.iter_ids(filters=filters))
             if pid not in fresh_ids
         ]
         if stale:

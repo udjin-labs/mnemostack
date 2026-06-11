@@ -425,6 +425,10 @@ def cmd_index(args: argparse.Namespace) -> int:
         return 2
 
     chunks: list[tuple[str, str, dict]] = []  # (id, text, payload) triples
+    # Sources are stored relative to the indexed root, so different roots can
+    # produce the same source name. Record the root in the payload (additive,
+    # not part of the chunk id) so --prune can tell those documents apart.
+    index_root = str((target if target.is_dir() else target.parent).resolve())
     for f in files:
         text = f.read_text(encoding="utf-8", errors="ignore")
         source = str(f.relative_to(target if target.is_dir() else target.parent))
@@ -443,6 +447,7 @@ def cmd_index(args: argparse.Namespace) -> int:
                         "text": chunk,
                         "source": source,
                         "offset": i,
+                        "index_root": index_root,
                     },
                 )
             )
@@ -460,6 +465,7 @@ def cmd_index(args: argparse.Namespace) -> int:
                             "text": chunk,
                             "source": source,
                             "offset": middle_offset,
+                            "index_root": index_root,
                             "chunk_window": args.window_size,
                             "chunk_kind": "sliding_window",
                             "chunk_start_offset": window[0][0],
@@ -512,7 +518,7 @@ def cmd_index(args: argparse.Namespace) -> int:
                 "with failed embeddings; re-run after the provider recovers",
                 file=sys.stderr,
             )
-        pruned = prune_stale_chunks(store, fresh_by_source)
+        pruned = prune_stale_chunks(store, fresh_by_source, index_root=index_root)
 
     print(
         f"Done: inserted/updated {inserted}, skipped {skipped},"
@@ -790,7 +796,9 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "After indexing, delete stale chunks of the indexed files — points whose "
             "ids the files no longer produce (edits shifted offsets, documents shrank). "
-            "Other sources in the collection are not touched."
+            "Scoped to this indexing root: other sources, same-named files indexed "
+            "from other roots, and chunks indexed by versions that did not record a "
+            "root are not touched."
         ),
     )
     p_index.add_argument(

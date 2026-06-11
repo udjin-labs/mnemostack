@@ -30,9 +30,12 @@ def store():
     return s
 
 
-def _put(store, source: str, offset: int, text: str) -> str:
+def _put(store, source: str, offset: int, text: str, index_root: str | None = None) -> str:
     pid = stable_chunk_id(source, offset, text)
-    store.upsert(pid, VEC, {"text": text, "source": source, "offset": offset})
+    payload = {"text": text, "source": source, "offset": offset}
+    if index_root is not None:
+        payload["index_root"] = index_root
+    store.upsert(pid, VEC, payload)
     return pid
 
 
@@ -132,10 +135,11 @@ def _patch_stack(monkeypatch, store) -> None:
 def test_cli_index_prune_deletes_stale_chunks(monkeypatch, tmp_path, store, capsys):
     doc = tmp_path / "note.md"
     doc.write_text("hello world", encoding="utf-8")
+    root = str(tmp_path.resolve())
     # A chunk this file used to produce (different offset/text) — now stale.
-    stale = _put(store, "note.md", 800, "removed second page")
+    stale = _put(store, "note.md", 800, "removed second page", index_root=root)
     # A chunk from another source — must survive.
-    other = _put(store, "other.md", 0, "foreign chunk")
+    other = _put(store, "other.md", 0, "foreign chunk", index_root=root)
     _patch_stack(monkeypatch, store)
 
     rc = cli.cmd_index(_index_args(tmp_path))
@@ -153,7 +157,7 @@ def test_cli_index_prune_spares_sources_with_failed_embeddings(monkeypatch, tmp_
     that source's data — pruning must leave it alone."""
     doc = tmp_path / "note.md"
     doc.write_text("hello world", encoding="utf-8")
-    old = _put(store, "note.md", 800, "previous revision chunk")
+    old = _put(store, "note.md", 800, "previous revision chunk", index_root=str(tmp_path.resolve()))
 
     class _FailingProvider:
         dimension = 4
@@ -194,3 +198,44 @@ def test_index_parser_accepts_prune_flag():
     assert args.prune is True
     args = parser.parse_args(["index", "some/path"])
     assert args.prune is False
+
+
+def test_prune_scoped_to_index_root(store):
+    """Two roots can produce the same relative source name — pruning one root
+    must not delete the other root's document."""
+    ours = _put(store, "note.md", 0, "our content", index_root="/data/a")
+    foreign = _put(store, "note.md", 0, "their content", index_root="/data/b")
+
+    removed = prune_stale_chunks(store, {"note.md": {ours}}, index_root="/data/a")
+
+    assert removed == 0
+    remaining = {str(pid) for pid in store.iter_ids()}
+    assert foreign in remaining
+
+
+def test_prune_with_root_skips_unattributed_points(store):
+    """Points indexed by versions that did not record index_root cannot be
+    attributed to a root — a scoped prune must leave them alone."""
+    legacy = _put(store, "note.md", 0, "indexed before root tracking")
+    fresh = stable_chunk_id("note.md", 0, "current content")
+
+    removed = prune_stale_chunks(store, {"note.md": {fresh}}, index_root="/data/a")
+
+    assert removed == 0
+    assert legacy in {str(pid) for pid in store.iter_ids()}
+
+
+def test_cli_index_prune_ignores_other_roots(monkeypatch, tmp_path, store):
+    doc = tmp_path / "note.md"
+    doc.write_text("hello world", encoding="utf-8")
+    root = str(tmp_path.resolve())
+    stale_ours = _put(store, "note.md", 800, "our stale chunk", index_root=root)
+    same_name_other_root = _put(store, "note.md", 0, "other project's note", index_root="/elsewhere")
+    _patch_stack(monkeypatch, store)
+
+    rc = cli.cmd_index(_index_args(tmp_path))
+
+    assert rc == 0
+    remaining = {str(pid) for pid in store.iter_ids()}
+    assert stale_ours not in remaining
+    assert same_name_other_root in remaining
