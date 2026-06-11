@@ -482,7 +482,8 @@ def main() -> None:
         MNEMOSTACK_MEMGRAPH_URI     (default: none — graph tools disabled)
         MNEMOSTACK_GRAPH_TIMEOUT    (default: 5.0)
         MNEMOSTACK_BM25_PATHS       (default: none, os.pathsep-separated paths)
-        MNEMOSTACK_STATE_PATH       (default: /tmp/mnemostack-server-state.json)
+        MNEMOSTACK_STATE_PATH       (default: $XDG_STATE_HOME/mnemostack/server-state.json,
+                                     falling back to ~/.local/state/mnemostack/server-state.json)
         MNEMOSTACK_RERANK_MODE      (default: relevant_only)
     """
     cfg = Config.load()
@@ -496,7 +497,7 @@ def main() -> None:
         memgraph_uri=cfg.graph.uri,
         graph_timeout=cfg.graph.timeout,
         bm25_paths=list(cfg.recall.bm25_paths) or None,
-        state_path=os.environ.get("MNEMOSTACK_STATE_PATH", "/tmp/mnemostack-server-state.json"),
+        state_path=os.environ.get("MNEMOSTACK_STATE_PATH"),
         vector_floor=max(0, int(cfg.recall.vector_floor)),
         rerank_mode=cfg.recall.rerank_mode,
     )

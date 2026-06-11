@@ -378,3 +378,39 @@ def test_mcp_answer_carries_degraded(monkeypatch):
 
     assert payload["ok"] is True
     assert payload["degraded"] == []
+
+
+def test_main_state_path_defaults_to_none(monkeypatch):
+    """`mnemostack-mcp` must not pin the legacy /tmp path: with the env var
+    unset, build_server receives None and resolves default_state_path()."""
+    import mnemostack.mcp.server as srv
+
+    captured: dict = {}
+
+    def _fake_build_server(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(run=lambda: None)
+
+    monkeypatch.setattr(srv, "build_server", _fake_build_server)
+    monkeypatch.delenv("MNEMOSTACK_STATE_PATH", raising=False)
+
+    srv.main()
+
+    assert captured["state_path"] is None
+
+
+def test_main_state_path_respects_env(monkeypatch):
+    import mnemostack.mcp.server as srv
+
+    captured: dict = {}
+
+    def _fake_build_server(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(run=lambda: None)
+
+    monkeypatch.setattr(srv, "build_server", _fake_build_server)
+    monkeypatch.setenv("MNEMOSTACK_STATE_PATH", "/custom/state.json")
+
+    srv.main()
+
+    assert captured["state_path"] == "/custom/state.json"
