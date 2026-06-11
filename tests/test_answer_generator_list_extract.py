@@ -597,3 +597,32 @@ def test_popular_item_does_not_crowd_out_other_items_sources():
 
     assert answer.text == "Luna, Oliver"
     assert "chat-7" in answer.sources  # Oliver's sole source survives
+
+
+def test_provenance_matches_projected_context_fields():
+    """With context_fields the extractor can pull an item from a projected
+    payload field — attribution must search the same content the LLM saw,
+    not just the memory text."""
+    from mnemostack.recall import RecallResult
+
+    def _mem(i, text, author=None):
+        payload = {"source": f"chat-{i}"}
+        if author:
+            payload["author"] = author
+        return RecallResult(id=str(i), text=text, score=1.0 - i * 0.01, payload=payload, sources=["vector"])
+
+    pool = [_mem(i, f"routine status update number {i}") for i in range(1, 7)]
+    pool.append(_mem(7, "the deployment was approved", author="Teilnehmer B"))
+    llm = SequenceLLM(['{"items": ["Teilnehmer B"]}'])
+    gen = AnswerGenerator(
+        llm=llm,
+        category_aware_prompts=True,
+        list_extract_mode=True,
+        list_finalize="verbatim",
+        context_fields=["author"],
+    )
+
+    answer = gen.generate("List everyone who approved deployments", pool)
+
+    assert answer.text == "Teilnehmer B"
+    assert answer.sources[0] == "chat-7"  # found via the projected field
