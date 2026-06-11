@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-06-11
+
+### Added
+
+- **Multimodal ingest support**: `GeminiLLM.describe_image()` adds opt-in VLM image captioning for PR #58, allowing image descriptions to be appended to ingested text while text-only pipelines remain unaffected. Gemini text generation and image captioning now share the `_generate_content` transport, with 4 new vision tests covering the behavior.
+
 ## [0.4.5] - 2026-06-10
 
 ### Added
