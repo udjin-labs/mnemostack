@@ -115,3 +115,18 @@ def test_custom_prompt_template_validated():
     )
     assert out == "ok"
     assert "H:Q: Wer hat das Deployment freigegeben?" in llm.last_prompt
+
+
+def test_max_history_zero_sends_nothing_and_skips_llm():
+    """-0 == 0 would make the [-max_history:] slice send the WHOLE history —
+    this parameter gates privacy/token budget, so zero must mean none."""
+    llm = FakeLLM("should not be used")
+
+    out = rewrite_followup("und wer?", HISTORY, llm, max_history=0)
+
+    assert out == "und wer?"
+    assert llm.calls == 0
+
+    out = rewrite_followup("und wer?", HISTORY, llm, max_history=-3)
+    assert out == "und wer?"
+    assert llm.calls == 0
