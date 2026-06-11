@@ -35,6 +35,7 @@ try:
 except ImportError:  # pragma: no cover - qdrant-client is a runtime dependency
     DatetimeRange = FieldCondition = Filter = None  # type: ignore[assignment,misc]
 from .bm25 import BM25, BM25Doc
+from .filters import payload_matches
 from .recaller import RecallResult
 
 logger = logging.getLogger(__name__)
@@ -280,7 +281,17 @@ class BM25Retriever(Retriever):
         return cls(docs=docs)
 
     def search(self, query, limit=20, filters=None):
-        hits = self.bm25.search(query, limit=limit)
+        # Same filter semantics the vector store applies natively. Without
+        # this, a fused recall with filters= mixed unfiltered BM25 candidates
+        # into the output — in multi-tenant deployments that is an isolation
+        # leak. The candidate set is restricted before the top-K cut.
+        predicate = None
+        if filters:
+
+            def predicate(d: BM25Doc) -> bool:
+                return payload_matches(d.payload, filters)
+
+        hits = self.bm25.search(query, limit=limit, predicate=predicate)
         return [
             RecallResult(
                 id=d.id,
@@ -442,6 +453,12 @@ class MemgraphRetriever(Retriever):
             self._driver = None
 
     def search(self, query, limit=20, filters=None):
+        if filters:
+            # Graph nodes carry no chunk payload, so a result here cannot be
+            # proven to belong to the filtered scope (tenant, source, time
+            # range). Under the isolation contract anything unattributable
+            # is excluded rather than leaked.
+            return []
         driver = self._get_driver()
         if driver is None:
             return []

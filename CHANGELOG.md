@@ -8,7 +8,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Recall filters on every surface**: `filters` is now accepted by HTTP `/recall` and `/answer`, MCP `mnemostack_search` / `mnemostack_answer`, the CLI (`--filters '{"tenant": "a"}'` on search/answer) and `recall_flow()`. Exact-match and `gte`/`lte` range conditions, same semantics as the native Qdrant filter. On `/answer` paths the filter also scopes the generator's retry sub-recalls.
 - **Ollama think control and options passthrough**: `OllamaLLM(think=..., options=...)`. `options` is merged into the request's generation options (e.g. `num_ctx`, `top_p`; explicit keys override the per-call temperature/num_predict). `think` controls reasoning on models that support it and defaults to **False**: reasoning models (qwen3, deepseek-r1 and similar) otherwise spend the whole `num_predict` budget on thoughts and return empty text, which silently degrades reranking, query expansion and extraction into their fallbacks. `think=False` is accepted by every model and ignored by servers that predate the field — only `think=True` errors on models without thinking support. Pass `think=None` to omit the field and keep the model's own default. **Behavior change** for Ollama deployments with reasoning models: internal generations now produce text instead of silently empty responses.
+
+### Fixed
+
+- **Tenant-isolation leak in filtered recall**: `BM25Retriever` accepted `filters` and silently ignored them, so a fused recall with filters mixed unfiltered BM25 candidates into the output — in multi-tenant deployments that leaked foreign data. BM25 now applies the same filter semantics in-process (new `payload_matches` helper, exported), restricting the candidate set *before* the top-K cut so filtered recall keeps full depth. The knowledge-graph retriever contributes nothing under filters: graph nodes carry no chunk payload, so its results cannot be attributed to the filtered scope.
 
 ## [0.5.0] - 2026-06-11
 

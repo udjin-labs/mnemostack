@@ -13,6 +13,8 @@ import json
 from io import StringIO
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from mnemostack.cli import (
     TIER_PROFILES,
     _apply_tier,
@@ -295,7 +297,7 @@ def test_answer_passes_llm_model_to_provider():
             self.llm = llm
             self.confidence_threshold = confidence_threshold
 
-        def generate(self, query, results):
+        def generate(self, query, results, **kwargs):
             return _FakeAnswer()
 
         def should_fallback(self, answer):
@@ -417,3 +419,71 @@ def test_search_and_answer_parsers_accept_rerank_mode():
     # default comes from config (relevant_only unless overridden)
     args = parser.parse_args(["search", "q"])
     assert args.rerank_mode
+
+
+def test_search_filters_flag_threads_to_recall():
+    args = argparse.Namespace(
+        provider="fake",
+        collection="test",
+        qdrant="http://localhost:6333",
+        query="anything",
+        limit=2,
+        json=True,
+        tier=None,
+        raw=True,
+        llm="fake-llm",
+        llm_model=None,
+        memgraph_uri=None,
+        bm25_path=[],
+        rerank_mode="relevant_only",
+        filters='{"tenant": "a"}',
+    )
+    mock_provider = MagicMock(dimension=3072)
+    mock_store = MagicMock()
+    mock_store.collection_exists.return_value = True
+    mock_recaller = MagicMock()
+    mock_recaller.recall.return_value = FAKE_RESULTS[:2]
+
+    with (
+        patch("mnemostack.cli.get_provider", return_value=mock_provider),
+        patch("mnemostack.cli.VectorStore", return_value=mock_store),
+        patch("mnemostack.cli.Recaller", return_value=mock_recaller),
+        patch("sys.stdout", StringIO()),
+    ):
+        rc = cmd_search(args)
+
+    assert rc == 0
+    assert mock_recaller.recall.call_args.kwargs["filters"] == {"tenant": "a"}
+
+
+def test_search_filters_invalid_json_exits_2(capsys):
+    args = argparse.Namespace(
+        provider="fake",
+        collection="test",
+        qdrant="http://localhost:6333",
+        query="anything",
+        limit=2,
+        json=True,
+        tier=None,
+        raw=True,
+        llm="fake-llm",
+        llm_model=None,
+        memgraph_uri=None,
+        bm25_path=[],
+        rerank_mode="relevant_only",
+        filters="{not json",
+    )
+    mock_provider = MagicMock(dimension=3072)
+    mock_store = MagicMock()
+    mock_store.collection_exists.return_value = True
+
+    with (
+        patch("mnemostack.cli.get_provider", return_value=mock_provider),
+        patch("mnemostack.cli.VectorStore", return_value=mock_store),
+        patch("mnemostack.cli.Recaller", return_value=MagicMock()),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        cmd_search(args)
+
+    assert exc_info.value.code == 2
+    assert "--filters" in capsys.readouterr().err
