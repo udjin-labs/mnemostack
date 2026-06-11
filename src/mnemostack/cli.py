@@ -26,12 +26,14 @@ from .recall import (
     BM25Retriever,
     MemgraphRetriever,
     Recaller,
+    Reranker,
     Retriever,
     TemporalRetriever,
     VectorRetriever,
     build_bm25_docs,
+    recall_flow,
 )
-from .recall.pipeline import default_state_path
+from .recall.pipeline import FileStateStore, build_full_pipeline, default_state_path
 from .synthesis import synthesize
 from .vector import VectorStore
 
@@ -99,6 +101,31 @@ def cmd_health(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def _recall_for_cli(args: argparse.Namespace, recaller, query: str, limit: int):
+    """Run the same recall flow as the HTTP and MCP servers.
+
+    Applies the 8-stage pipeline and the fail-open LLM reranker so the CLI
+    ranks results identically to the serving surfaces. `--raw` skips both
+    and returns plain fused recall (the historical CLI behavior).
+    """
+    if getattr(args, "raw", False):
+        return recaller.recall(query, limit=limit)
+    pipeline = build_full_pipeline(
+        state_store=FileStateStore(default_state_path()),
+        graph_uri=getattr(args, "memgraph_uri", None) or None,
+    )
+    reranker = None
+    try:
+        reranker = Reranker(
+            llm=get_llm(getattr(args, "llm", "gemini"), **model_kwargs(_llm_model(args))),
+            max_items=20,
+            rerank_mode=getattr(args, "rerank_mode", None) or "relevant_only",
+        )
+    except Exception:  # noqa: BLE001 — no LLM key: search still works, unranked by LLM
+        pass
+    return recall_flow(recaller, query, limit, pipeline=pipeline, reranker=reranker)
+
+
 def cmd_search(args: argparse.Namespace) -> int:
     profile = _apply_tier(args)
     provider = get_provider(args.provider, **model_kwargs(_embedding_model(args)))
@@ -115,7 +142,7 @@ def cmd_search(args: argparse.Namespace) -> int:
         return 2
 
     recaller = _build_recaller(args, provider, store)
-    results = recaller.recall(args.query, limit=args.limit)
+    results = _recall_for_cli(args, recaller, args.query, args.limit)
 
     if args.json:
         snippet_chars = profile["snippet_chars"] if profile else None
@@ -221,7 +248,7 @@ def cmd_answer(args: argparse.Namespace) -> int:
         return 2
 
     recaller = _build_recaller(args, provider, store)
-    results = recaller.recall(args.query, limit=args.limit)
+    results = _recall_for_cli(args, recaller, args.query, args.limit)
 
     llm = get_llm(args.llm, **model_kwargs(_llm_model(args)))
     answer_generator_kwargs = {
@@ -552,6 +579,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Memgraph URI to enable graph recall (e.g. bolt://localhost:7687)",
     )
     p_search.add_argument(
+        "--raw",
+        action="store_true",
+        help="Skip the ranking pipeline and LLM reranker (plain fused recall)",
+    )
+    p_search.add_argument(
         "--tier",
         type=int,
         choices=[1, 2, 3],
@@ -658,6 +690,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--memgraph-uri",
         default=cfg.graph.uri,
         help="Memgraph URI to enable graph recall (e.g. bolt://localhost:7687)",
+    )
+    p_answer.add_argument(
+        "--raw",
+        action="store_true",
+        help="Skip the ranking pipeline and LLM reranker (plain fused recall)",
     )
     p_answer.add_argument(
         "--tier",
