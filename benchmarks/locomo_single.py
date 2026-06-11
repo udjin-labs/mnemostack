@@ -360,6 +360,12 @@ def main():
         "list_extract": bool(args.list_extract),
         "pool": args.pool,
         "samples": args.samples,
+        # A subset run is not comparable to a full run — record what was
+        # actually evaluated so later artifact comparison can tell them apart.
+        # The count is the evaluated total (after sample/qa selectors), not
+        # the filter-file size: the file may list QA outside the selection.
+        "only_questions": args.only_questions,
+        "only_questions_count": stats["total"] if only_questions is not None else None,
         "timestamp": run_started_at,
         "dataset": DATASET,
     }
