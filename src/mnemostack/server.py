@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 try:
@@ -57,7 +57,7 @@ from mnemostack.recall import (
     apply_rerank_safe,
     build_full_pipeline,
 )
-from mnemostack.recall.pipeline import FileStateStore
+from mnemostack.recall.pipeline import FileStateStore, default_state_path
 from mnemostack.vector import VectorStore
 
 log = logging.getLogger(__name__)
@@ -193,7 +193,7 @@ class ServerConfig:
     bm25_paths: list[str] | None = None  # optional markdown dirs for BM25 corpus
     vector_floor: int = 0
     rerank_mode: str = "relevant_only"
-    state_path: str = "/tmp/mnemostack-server-state.json"
+    state_path: str = field(default_factory=default_state_path)
     auto_record_ior: bool = False
 
     def __post_init__(self) -> None:

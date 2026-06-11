@@ -41,7 +41,7 @@ from ..recall import (
     build_bm25_docs,
     build_full_pipeline,
 )
-from ..recall.pipeline import FileStateStore
+from ..recall.pipeline import FileStateStore, default_state_path
 from ..vector import VectorStore
 
 
@@ -61,7 +61,7 @@ def build_server(
     memgraph_uri: str | None = None,
     graph_timeout: float = 5.0,
     bm25_paths: list[str] | None = None,
-    state_path: str = "/tmp/mnemostack-server-state.json",
+    state_path: str | None = None,
     vector_floor: int = 0,
     rerank_mode: str = "relevant_only",
 ) -> Any:
@@ -175,10 +175,12 @@ def build_server(
             results = apply_vector_floor(results, recalled_results)
         return results, trace
 
+    resolved_state_path = state_path or default_state_path()
+
     def _get_feedback_pipeline():
         if "feedback_pipeline" not in _components:
             _components["feedback_pipeline"] = build_full_pipeline(
-                state_store=FileStateStore(state_path),
+                state_store=FileStateStore(resolved_state_path),
                 graph_uri=None,
             )
         return _components["feedback_pipeline"]

@@ -31,6 +31,7 @@ from .recall import (
     VectorRetriever,
     build_bm25_docs,
 )
+from .recall.pipeline import default_state_path
 from .synthesis import synthesize
 from .vector import VectorStore
 
@@ -755,7 +756,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_feedback.add_argument(
         "--state-path",
-        default="/tmp/mnemostack-server-state.json",
+        default=default_state_path(),
         help="Pipeline state file path",
     )
     p_feedback.add_argument("--json", action="store_true", help="JSON output")
@@ -791,7 +792,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_mcp.add_argument(
         "--state-path",
-        default="/tmp/mnemostack-server-state.json",
+        default=default_state_path(),
         help="Pipeline state file path for feedback",
     )
     p_mcp.add_argument(
@@ -857,7 +858,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_serve.add_argument(
         "--state-path",
-        default="/tmp/mnemostack-server-state.json",
+        default=default_state_path(),
         help="Pipeline state file path",
     )
     p_serve.add_argument(
