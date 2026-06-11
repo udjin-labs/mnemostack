@@ -12,6 +12,7 @@ from ..observability import counter, histogram
 from ..observability.recorder import get_recorder
 from ..vector.qdrant import Hit, VectorStore
 from .bm25 import BM25, BM25Doc
+from .filters import payload_matches
 from .fusion import reciprocal_rank_fusion
 from .mca_prefilter import mca_prefilter as run_mca_prefilter
 from .query_expansion import expand_query
@@ -301,11 +302,19 @@ class Recaller:
             if vector_floor_candidates is not None:
                 vector_floor_candidates.extend(raw_vector_candidates)
 
-            # BM25 search
+            # BM25 search — same filter semantics as the vector store, applied
+            # in-process before the top-K cut (isolation: foreign docs must
+            # not be fused into a filtered result set on this path either).
             bm25_hits: list[tuple[BM25Doc, float]] = []
             if self.bm25:
+                predicate = None
+                if filters:
+
+                    def predicate(d: BM25Doc) -> bool:
+                        return payload_matches(d.payload, filters)
+
                 with histogram("mnemostack.recall.bm25_latency_ms"):
-                    bm25_hits = self.bm25.search(query, limit=bm25_limit)
+                    bm25_hits = self.bm25.search(query, limit=bm25_limit, predicate=predicate)
                 counter("mnemostack.recall.bm25_hits", len(bm25_hits))
 
             # Build id→source map and per-list tuples for RRF
@@ -325,7 +334,9 @@ class Recaller:
                             ranked=[(str(d.id), s) for d, s in bm25_hits],
                         )
                     )
-            mca_hits = self._mca_hits(query, bm25_limit) if self.mca_prefilter_enabled else []
+            mca_hits = (
+                self._mca_hits(query, bm25_limit, filters) if self.mca_prefilter_enabled else []
+            )
             mca_by_id = {hit.id: hit for hit in mca_hits}
             ranked_lists: list[list[tuple[Any, float]]] = [vector_list, bm25_list]
             if mca_hits:
@@ -393,7 +404,12 @@ class Recaller:
             counter("mnemostack.recall.results", len(results))
             return results
 
-    def search_many(self, vectors: list[list[float]], limit: int) -> list[RecallResult]:
+    def search_many(
+        self,
+        vectors: list[list[float]],
+        limit: int,
+        filters: dict[str, Any] | None = None,
+    ) -> list[RecallResult]:
         """Search Qdrant for multiple vectors and RRF-merge the ranked hits."""
         if not self.vector:
             return []
@@ -404,7 +420,7 @@ class Recaller:
             if not vector:
                 continue
             try:
-                hits = self.vector.search(vector, limit=limit)
+                hits = self.vector.search(vector, limit=limit, filters=filters)
             except Exception:
                 hits = []
             ranked: list[tuple[Any, float]] = []
@@ -579,7 +595,7 @@ class Recaller:
             id_to_result: dict[Any, RecallResult] = {}
             has_vector_results = False
             if self.mca_prefilter_enabled:
-                mca_hits = self._mca_hits(query, per_source_limit)
+                mca_hits = self._mca_hits(query, per_source_limit, filters)
                 if mca_hits:
                     all_lists.append([(hit, hit.score) for hit in mca_hits])
                     per_list_weights.append(self._weight_for("mca", query))
@@ -797,7 +813,12 @@ class Recaller:
             if "vector" in result.sources and "raw_vector_score" in result.payload
         ]
 
-    def _mca_hits(self, query: str, limit: int) -> list[RecallResult]:
+    def _mca_hits(
+        self,
+        query: str,
+        limit: int,
+        filters: dict[str, Any] | None = None,
+    ) -> list[RecallResult]:
         bm25 = self.bm25
         if bm25 is None:
             for retriever in self.retrievers:
@@ -806,7 +827,7 @@ class Recaller:
                     break
         if bm25 is None:
             return []
-        return run_mca_prefilter(query, bm25, limit=limit)
+        return run_mca_prefilter(query, bm25, limit=limit, filters=filters)
 
     def _vector_fallback_hits(
         self,

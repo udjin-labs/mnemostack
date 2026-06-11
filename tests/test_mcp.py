@@ -234,7 +234,7 @@ def test_mcp_answer_passes_configured_rerank_mode(monkeypatch):
         def __init__(self, **_):
             pass
 
-        def generate(self, query, memories):
+        def generate(self, query, memories, **kwargs):
             answer_memories.extend(memories)
             return SimpleNamespace(
                 ok=True,
@@ -361,7 +361,7 @@ def test_mcp_answer_carries_degraded(monkeypatch):
         def __init__(self, **_):
             pass
 
-        def generate(self, query, memories):
+        def generate(self, query, memories, **kwargs):
             return SimpleNamespace(
                 ok=True, text="42", confidence=0.9, sources=["s"], error=None
             )
@@ -414,3 +414,29 @@ def test_main_state_path_respects_env(monkeypatch):
     srv.main()
 
     assert captured["state_path"] == "/custom/state.json"
+
+
+def test_mcp_search_threads_filters_to_recaller(monkeypatch):
+    import mnemostack.mcp.server as srv
+
+    captured = {}
+
+    class _FilterCapturingRecaller:
+        def __init__(self, **_):
+            pass
+
+        def recall(self, query, limit=10, filters=None, **kwargs):
+            captured["filters"] = filters
+            return [
+                SimpleNamespace(id="a", text="text", score=0.9, sources=["vector"], payload={})
+            ]
+
+    _patch_minimal(monkeypatch, srv, _FilterCapturingRecaller)
+    mcp = build_server(collection="test", embedding_provider="ollama")
+
+    result = asyncio.run(
+        mcp.call_tool("mnemostack_search", {"query": "q", "filters": {"tenant": "a"}})
+    )
+
+    assert result.structured_content["ok"] is True
+    assert captured["filters"] == {"tenant": "a"}

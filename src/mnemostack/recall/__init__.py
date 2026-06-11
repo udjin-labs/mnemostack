@@ -18,6 +18,7 @@ from .answer import Answer, AnswerGenerator, classify_question
 from .bm25 import BM25, BM25Doc, tokenize
 from .corpus import build_bm25_docs
 from .expansion import QueryExpander
+from .filters import payload_matches
 from .flow import recall_flow
 from .fusion import reciprocal_rank_fusion
 from .mca_prefilter import extract_exact_tokens, mca_prefilter
@@ -66,6 +67,7 @@ __all__ = [
     "RecallTrace",
     "RetrieverTrace",
     "apply_rerank_safe",
+    "payload_matches",
     "recall_flow",
     "extract_exact_tokens",
     "mca_prefilter",

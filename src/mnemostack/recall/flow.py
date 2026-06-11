@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from .filters import payload_matches
 from .trace import RecallTrace, apply_rerank_safe
 
 if TYPE_CHECKING:
@@ -24,6 +25,7 @@ def recall_flow(
     *,
     pipeline: Pipeline | None = None,
     reranker: Reranker | None = None,
+    filters: dict[str, object] | None = None,
     trace: RecallTrace | None = None,
 ) -> list[RecallResult]:
     """Run hybrid recall plus the canonical post-processing chain.
@@ -39,10 +41,17 @@ def recall_flow(
     should mark `reranker:unavailable` on the trace itself.
     """
     raw_limit = max(limit * 3, 30) if pipeline is not None else limit
-    recalled = recaller.recall(query, limit=raw_limit, trace=trace)
+    recalled = recaller.recall(query, limit=raw_limit, filters=filters, trace=trace)
     results = recalled
     if pipeline is not None:
         results = pipeline.apply(query, results)
+        if filters:
+            # Pipeline stages may append candidates that never passed the
+            # filtered retrievers (e.g. graph resurrection injects records
+            # with no tenant/timestamp payload). Enforce the caller's scope
+            # on the pipeline output too: anything that cannot be attributed
+            # to the scope is dropped, not leaked.
+            results = [r for r in results if payload_matches(r.payload, filters)]
     if reranker is not None:
         results = apply_rerank_safe(reranker, query, results, trace)
     results = results[:limit]

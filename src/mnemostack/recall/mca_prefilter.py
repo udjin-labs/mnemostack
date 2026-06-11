@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from .bm25 import BM25
+from .bm25 import BM25, BM25Doc
+from .filters import payload_matches
 
 if TYPE_CHECKING:
     from .recaller import RecallResult
@@ -76,15 +77,30 @@ def extract_exact_tokens(query: str) -> list[str]:
     return tokens
 
 
-def mca_prefilter(query: str, bm25: BM25, limit: int = 10) -> list[RecallResult]:
-    """Run BM25 over extracted technical tokens and return RecallResult hits."""
+def mca_prefilter(
+    query: str,
+    bm25: BM25,
+    limit: int = 10,
+    filters: dict[str, Any] | None = None,
+) -> list[RecallResult]:
+    """Run BM25 over extracted technical tokens and return RecallResult hits.
+
+    *filters* applies the same payload scope as the rest of the recall — the
+    exact-token arm must not leak out-of-scope docs into the RRF pool.
+    """
     tokens = extract_exact_tokens(query)
     if not tokens:
         return []
 
     from .recaller import RecallResult
 
-    hits = bm25.search(" ".join(tokens), limit=limit)
+    predicate = None
+    if filters:
+
+        def predicate(d: BM25Doc) -> bool:
+            return payload_matches(d.payload, filters)
+
+    hits = bm25.search(" ".join(tokens), limit=limit, predicate=predicate)
     return [
         RecallResult(
             id=doc.id,

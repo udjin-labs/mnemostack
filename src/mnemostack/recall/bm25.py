@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -84,12 +85,23 @@ class BM25:
             score += self.idf[term] * num / denom
         return score
 
-    def search(self, query: str, limit: int = 10) -> list[tuple[BM25Doc, float]]:
-        """Return top-K (doc, score) pairs sorted by score desc."""
+    def search(
+        self,
+        query: str,
+        limit: int = 10,
+        predicate: Callable[[BM25Doc], bool] | None = None,
+    ) -> list[tuple[BM25Doc, float]]:
+        """Return top-K (doc, score) pairs sorted by score desc.
+
+        *predicate* restricts the candidate set BEFORE the top-K cut: a
+        post-cut filter would return fewer than K matching results whenever
+        foreign docs out-scored them, losing recall.
+        """
         q_tokens = tokenize(query)
         if not q_tokens:
             return []
-        scored = [(d, self._score(q_tokens, d)) for d in self.docs]
+        candidates = self.docs if predicate is None else [d for d in self.docs if predicate(d)]
+        scored = [(d, self._score(q_tokens, d)) for d in candidates]
         scored = [x for x in scored if x[1] > 0]
         scored.sort(key=lambda x: -x[1])
         return scored[:limit]
