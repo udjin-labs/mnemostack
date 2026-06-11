@@ -65,7 +65,7 @@ Memgraph (Cypher-compatible) with temporal validity:
 
 ### Recall pipeline (hybrid)
 
-Every stage of the pipeline is fail-open: a broken retriever contributes nothing, a failing LLM reranker leaves the pre-rerank order. Since v0.4.5 those degradations are observable instead of silent: pass a per-call `RecallTrace` to `Recaller.recall(trace=...)` to capture per-retriever ranked lists (with errors and latency), the fused order, the post-rerank order, and stable `degraded` tags (`retriever:<name>:failed`, `reranker:fallback`, `temporal:no_parse`). The HTTP and MCP surfaces always expose `degraded` in responses and offer the full trace opt-in via `include_trace`; the shared `apply_rerank_safe` helper implements the reranker's fail-open contract for all entry points.
+Retrieval and reranking are fail-open: a broken retriever contributes nothing, a failing LLM reranker leaves the pre-rerank order. Query expansion is the exception — it runs before retrieval, and a misconfigured expansion step (`query_expansion=True` without an `expansion_llm`, or a provider error inside `expand_query`) surfaces as an error rather than degrading. Since v0.4.5 those degradations are observable instead of silent: pass a per-call `RecallTrace` to `Recaller.recall(trace=...)` to capture per-retriever ranked lists (with errors and latency), the fused order, the post-rerank order, and stable `degraded` tags (`retriever:<name>:failed`, `reranker:fallback`, `temporal:no_parse`). The HTTP and MCP surfaces always expose `degraded` in responses and offer the full trace opt-in via `include_trace`; the shared `apply_rerank_safe` helper implements the reranker's fail-open contract for all entry points.
 
 Query goes through a staged pipeline:
 
