@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -362,6 +363,7 @@ class AnswerGenerator:
         expansion_llm: LLMProvider | None = None,
         prompt_overrides: dict[str, str] | None = None,
         abstention_text: str = "Not in memory.",
+        question_classifier: Callable[[str], str] | None = None,
     ):
         self.llm = llm
         self.max_memories = max_memories
@@ -377,6 +379,7 @@ class AnswerGenerator:
         self.retry_with_expansion = retry_with_expansion
         self.expansion_llm = expansion_llm
         self.abstention_text = abstention_text
+        self.question_classifier = question_classifier or classify_question
         self.prompt_overrides = dict(prompt_overrides or {})
         for name, template in self.prompt_overrides.items():
             placeholders = _OVERRIDE_PLACEHOLDERS.get(name)
@@ -400,9 +403,10 @@ class AnswerGenerator:
     ) -> Answer:
         """Synthesize answer from retrieved memories.
 
-        `category` overrides the built-in question classifier — pass it when
-        the caller routes question classes itself (the classifier's patterns
-        are English; non-English pipelines should classify on their side).
+        `category` overrides the classifier for this call — pass it when
+        the caller routes question classes itself. For a persistent custom
+        router, pass `question_classifier=` to the constructor instead (the
+        built-in classifier's patterns are English).
         Valid values: the keys of the category prompt map ("list", "count",
         "temporal", "multihop", "inference", "adversarial", "general").
         """
@@ -418,7 +422,11 @@ class AnswerGenerator:
         category = explicit_category or "general"
         if self.category_aware_prompts:
             if explicit_category is None:
-                category = classify_question(query)
+                category = self.question_classifier(query)
+                if category not in _PROMPT_BY_CATEGORY:
+                    # fail-open: a misbehaving custom classifier must not
+                    # break answer generation
+                    category = "general"
             counter(
                 "mnemostack.answer.question_category",
                 1,

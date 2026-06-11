@@ -116,3 +116,36 @@ def test_explicit_category_routes_list_extract_for_non_english():
 
     assert answer.text == "2"
     assert "extract ALL items" in llm.prompts[0]
+
+
+def test_custom_question_classifier_routes_categories():
+    llm = SequenceLLM(['{"items": ["x", "y"]}', "x, y"])
+
+    def my_classifier(query: str) -> str:
+        return "list" if query.startswith("Liste") else "general"
+
+    gen = AnswerGenerator(
+        llm=llm,
+        category_aware_prompts=True,
+        list_extract_mode=True,
+        question_classifier=my_classifier,
+    )
+
+    answer = gen.generate("Liste alle Einträge auf", _memories())
+
+    assert answer.text == "x, y"
+    assert "extract ALL items" in llm.prompts[0]
+
+
+def test_misbehaving_classifier_falls_back_to_general():
+    llm = SequenceLLM(["ok\nCONFIDENCE: 0.9"])
+    gen = AnswerGenerator(
+        llm=llm,
+        category_aware_prompts=True,
+        question_classifier=lambda q: "garbage-category",
+    )
+
+    answer = gen.generate("anything", _memories())
+
+    assert answer.text == "ok"
+    assert "Answer a question based on retrieved memories" in llm.prompts[0]
