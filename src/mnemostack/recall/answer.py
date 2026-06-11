@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -381,6 +381,7 @@ class AnswerGenerator:
         # the options above positionally — new options must not shift them.
         list_extract_batch_size: int = 40,
         list_finalize: str = "llm",
+        context_fields: Sequence[str] | None = None,
     ):
         self.llm = llm
         self.max_memories = max_memories
@@ -406,6 +407,11 @@ class AnswerGenerator:
             raise ValueError('list_finalize must be "llm" or "verbatim"')
         self.list_extract_batch_size = list_extract_batch_size
         self.list_finalize = list_finalize
+        # Payload fields projected into the answer context, e.g. ["author",
+        # "amount"]. Projection affects only what the answer prompt SHOWS —
+        # retrieval ranks by text, so content that must be findable (image
+        # captions and the like) belongs in the text itself.
+        self.context_fields: tuple[str, ...] = tuple(context_fields or ())
         self.specificity_resolver = specificity_resolver
         self.inference_retry = inference_retry
         self.recaller = recaller
@@ -815,7 +821,7 @@ class AnswerGenerator:
             batch = memories[start : start + self.list_extract_batch_size]
             prompt = template.format(
                 n_memories=len(batch),
-                context=self._format_context(batch),
+                context=self._format_context(batch, self.context_fields),
                 query=query,
             )
             with histogram("mnemostack.answer.llm_latency_ms"):
@@ -862,7 +868,7 @@ class AnswerGenerator:
         memories: list[RecallResult],
         prompt_template: str,
     ) -> Answer:
-        context = self._format_context(memories)
+        context = self._format_context(memories, self.context_fields)
         prompt = prompt_template.format(
             context=context,
             query=query,
@@ -898,7 +904,10 @@ class AnswerGenerator:
         return answer.confidence < self.confidence_threshold
 
     @staticmethod
-    def _format_context(memories: list[RecallResult]) -> str:
+    def _format_context(
+        memories: list[RecallResult],
+        context_fields: Sequence[str] = (),
+    ) -> str:
         lines = []
         for i, m in enumerate(memories, 1):
             text = m.text.strip().replace("\n", " ")[:400]
@@ -909,6 +918,16 @@ class AnswerGenerator:
                 prefix = f"{prefix} [{_display_ts(ts)}]"
             if source:
                 prefix = f"{prefix} ({source})"
+            for key in context_fields:
+                value = m.payload.get(key)
+                if value is None or value == "":
+                    continue  # a memory without the field renders without it
+                if isinstance(value, (list, tuple)):
+                    value = ", ".join(str(v) for v in value)
+                rendered = str(value).replace("\n", " ")
+                if len(rendered) > 100:
+                    rendered = rendered[:100] + "…"
+                prefix = f"{prefix} {key}={rendered}"
             lines.append(f"{prefix} {text}")
         return "\n".join(lines)
 
