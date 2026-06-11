@@ -58,6 +58,17 @@ class GeminiProvider(EmbeddingProvider):
         return f"gemini:{self.model}"
 
     def embed(self, text: str) -> list[float]:
+        vec, _provider_down = self._embed_one(text)
+        return vec
+
+    def _embed_one(self, text: str) -> tuple[list[float], bool]:
+        """Embed one text; returns (vector, provider_down).
+
+        `provider_down` is True only when the failure looks provider-wide
+        (429/5xx with retries exhausted, or transport errors) — a
+        content-specific rejection (other 4xx, e.g. an oversized chunk)
+        returns ([], False) so callers can keep going with other texts.
+        """
         url = f"{self.BASE_URL}/{self.model}:embedContent"
         payload = {
             "model": f"models/{self.model}",
@@ -75,7 +86,7 @@ class GeminiProvider(EmbeddingProvider):
                 )
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                     data = json.loads(resp.read())
-                return data.get("embedding", {}).get("values", [])
+                return data.get("embedding", {}).get("values", []), False
             except HTTPError as e:
                 if e.code in (429, 500, 502, 503, 504) and attempt < self.max_retries - 1:
                     logger.warning(
@@ -87,35 +98,40 @@ class GeminiProvider(EmbeddingProvider):
                     time.sleep(_backoff(attempt))
                     continue
                 logger.error("gemini embed failed: HTTP %d %s", e.code, e.reason)
-                return []
+                return [], e.code in (429, 500, 502, 503, 504)
             except Exception as e:  # noqa: BLE001
                 if attempt < self.max_retries - 1:
                     logger.warning("gemini embed retry: %s", e)
                     time.sleep(_backoff(0))
                     continue
                 logger.error("gemini embed exhausted retries: %s", e)
-                return []
-        return []
-
+                return [], True
+        return [], True
 
     def _sequential_fallback(self, texts: list[str]) -> list[list[float]]:
         """Per-item fallback with a storm guard.
 
         When the batch endpoint dies while the API itself is down, falling
         back to N sequential calls multiplies the retry traffic by N against
-        an already-failing service. Probe with the first item: if even that
-        fails, report failure for the whole batch instead of hammering.
+        an already-failing service. As soon as any item fails in a way that
+        looks provider-wide (429/5xx exhausted, transport error), the rest
+        of the batch is reported failed instead of hammering. A
+        content-specific rejection (e.g. one oversized chunk) only fails
+        that item — the remaining texts are still tried.
         """
-        if not texts:
-            return []
-        first = self.embed(texts[0])
-        if not first:
-            logger.error(
-                "gemini sequential fallback probe failed — skipping %d remaining items",
-                len(texts) - 1,
-            )
-            return [first] + [[] for _ in texts[1:]]
-        return [first] + [self.embed(t) for t in texts[1:]]
+        out: list[list[float]] = []
+        for i, text in enumerate(texts):
+            vec, provider_down = self._embed_one(text)
+            out.append(vec)
+            if not vec and provider_down:
+                logger.error(
+                    "gemini sequential fallback hit a provider-wide failure — "
+                    "skipping %d remaining items",
+                    len(texts) - i - 1,
+                )
+                out.extend([] for _ in texts[i + 1 :])
+                break
+        return out
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         """Batch embedding via :batchEmbedContents endpoint.
