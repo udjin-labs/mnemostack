@@ -6,7 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.4.5] - 2026-06-10
+### Added
+
+- `GeminiLLM.describe_image()` — opt-in multimodal ingest support: produces a dense, index-oriented description of an image (objects, verbatim text/signs, setting, actions) to append to ingested item text. Nothing calls it automatically; text-only pipelines are unaffected. Validated on the LoCoMo residual with a built-in control group: 23.4% of previously failing image-evidence questions flipped to correct vs 7.7% control.
+
+## [0.4.5] - 2026-06-11
 
 ### Added
 

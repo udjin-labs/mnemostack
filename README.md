@@ -72,6 +72,8 @@ Index a folder of notes, docs, transcripts, or project context:
 mnemostack index ./my-notes/ --provider gemini --collection my-memory --recreate
 ```
 
+`--recreate` drops the existing collection, so it asks for confirmation first; pass `--yes` to skip the prompt (required in scripts/CI — non-interactive runs without it exit with code 2).
+
 For a running app or assistant, use the streaming `Ingestor` API shown below to store messages as they arrive.
 
 ### 4. Recall memory
@@ -322,6 +324,12 @@ Built-in profiles cover OpenClaw webchat and Telegram envelopes; pass `profiles=
 | `MNEMOSTACK_LLM` / `MNEMOSTACK_LLM_PROVIDER` | LLM provider | Answer generation / reranking |
 | `MNEMOSTACK_BM25_PATHS` | BM25 corpus paths separated by `os.pathsep` (`:` on Unix) | CLI / HTTP / MCP BM25 retriever |
 | `MNEMOSTACK_AUTO_RECORD_IOR` | `true`/`false` toggle for HTTP recall exposure logging | HTTP stateful pipeline |
+| `MNEMOSTACK_EMBEDDING_MODEL` / `MNEMOSTACK_LLM_MODEL` | Override the embedding / LLM model name | CLI / HTTP / MCP |
+| `MNEMOSTACK_VECTOR_HOST` / `MNEMOSTACK_VECTOR_COLLECTION` | Aliases for the Qdrant URL / collection | CLI / HTTP / MCP |
+| `MNEMOSTACK_VECTOR_FLOOR` | Keep top-N raw vector hits in results even when fusion/rerank would drop them (0 = off) | Recall tuning |
+| `MNEMOSTACK_RERANK_MODE` | LLM reranker mode: `relevant_only` (default) or `full_reorder` | HTTP / MCP runtime reranker |
+| `MNEMOSTACK_GRAPH_TIMEOUT` / `MNEMOSTACK_GRAPH_HEALTH_TIMEOUT` | Memgraph query / health-check timeouts in seconds | Graph retriever |
+| `MNEMOSTACK_CONFIG` | Path to the YAML config file | All entry points |
 
 Only the providers you actually use need their keys. HuggingFace local-GPU embeddings need no keys at all. `mnemostack init` writes the same settings as YAML; explicit CLI flags override config/env defaults.
 
@@ -438,7 +446,8 @@ store.ensure_collection()
 ing = Ingestor(embedding=emb, vector_store=store, batch_size=64)
 
 stats = ing.ingest([
-    IngestItem(text="alice joined acme on 2024-03-01", source="notes/alice.md"),
+    IngestItem(text="alice joined acme on 2024-03-01", source="notes/alice.md",
+               timestamp="2024-03-01T09:00:00Z"),  # event time — drives temporal recall
     IngestItem(text="alice left acme on 2025-06-15", source="notes/alice.md", offset=100),
 ])
 print(stats)  # IngestStats(seen=2, embedded=2, upserted=2, skipped=0, failed=0)
@@ -448,6 +457,21 @@ Guarantees:
 
 - **Idempotent.** Each item gets a deterministic UUID-shaped content id computed from `(source, offset, text)`. Re-running with the same input is a no-op: Qdrant upsert replaces the point onto itself, and an in-process LRU cache skips even the embedding call for items already seen in this session.
 - **Batched.** Items are embedded in batches of `batch_size`, so provider HTTP overhead amortises across many items.
+- **Dated.** Every payload records `indexed_at` (UTC). Pass `timestamp=` (or `metadata={"timestamp": ...}`) to set the event time the temporal retriever filters on. With `window_size > 1`, sliding-window chunks also carry the window's temporal range as `window_start_ts` / `window_end_ts` payload keys.
+
+#### Images in the input (optional)
+
+A memory stack that indexes only text answers "Not in memory" to questions whose answer lived in a photo. If your data contains images, describe them at ingest time and index the description:
+
+```python
+from mnemostack.llm import get_llm
+
+llm = get_llm("gemini")
+desc = llm.describe_image(photo_bytes, mime_type="image/jpeg")  # one vision call per image
+item = IngestItem(text=f"{message_text} [shared a photo: {desc.text}]", source=..., timestamp=...)
+```
+
+`describe_image` is fully opt-in — nothing in the ingest or recall paths calls it, and text-only pipelines are unaffected. The default prompt produces a dense, index-oriented description (objects, any text/signs verbatim, setting, actions); pass `prompt=` to customize.
 - **Streaming-friendly.** `ing.stream(item_iter)` yields per-batch stats so long feeds can be monitored without waiting for the whole stream to drain.
 - **Graceful.** If a single item fails to embed, it is counted as `failed` but the rest of the batch still lands.
 
@@ -602,11 +626,14 @@ Response shape (abridged):
   "query": "what did we decide about auth",
   "results": [
     { "id": "...", "text": "...", "score": 0.72, "source": "notes/...md", "metadata": {} }
-  ]
+  ],
+  "degraded": []   // components that fell back while serving the call, e.g. "retriever:bm25:failed", "reranker:fallback"; empty when healthy
 }
 ```
 
-The `/answer` endpoint adds `{ answer, confidence, sources }` alongside the memories. If the LLM isn't configured, `/answer` returns `503` and `/recall` still works — graceful degradation applies at the HTTP layer too.
+Pass `"include_trace": true` in the request body to additionally get a `trace` object with per-retriever ranked lists, the fused order, and the post-rerank order — useful when debugging why a memory did or didn't surface.
+
+The `/answer` endpoint adds `{ answer, confidence, sources }` alongside the memories and carries the same `degraded` / opt-in `trace` fields. If the LLM isn't configured, `/answer` returns `503` and `/recall` still works — graceful degradation applies at the HTTP layer too.
 
 Stateful learning is explicit. Start the server with `--auto-record-ior` if you want `/recall` and `/answer` responses to update inhibition-of-return state. Send user actions to `/feedback` to update Q-learning:
 
