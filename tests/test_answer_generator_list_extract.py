@@ -447,3 +447,26 @@ def test_sources_come_from_the_batch_that_produced_items(memories):
     # sources from the second batch (chat-41..45), not the pool prefix
     assert answer.sources
     assert all(src in {f"chat-{i}" for i in range(41, 46)} for src in answer.sources)
+
+
+def test_sources_prefer_memories_containing_the_items(memories):
+    """Within a 40-memory batch the 5-source truncation could drop the memory
+    that actually holds the answer — memories literally containing an
+    extracted item are cited first."""
+    llm = SequenceLLM(
+        [
+            '{"items": ["Melanie detail 30"]}',  # matches memory 30, deep in batch 1
+            '{"items": []}',
+        ]
+    )
+    gen = AnswerGenerator(
+        llm=llm,
+        category_aware_prompts=True,
+        list_extract_mode=True,
+        list_finalize="verbatim",
+    )
+
+    answer = gen.generate("What are Melanie's pets?", memories)
+
+    assert answer.sources
+    assert answer.sources[0] == "chat-30"  # the supporting memory leads
