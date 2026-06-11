@@ -204,6 +204,29 @@ class VectorStore:
             total += len(structs)
         return total
 
+    def set_payload(self, id: str | int, payload: dict[str, Any]) -> None:
+        """Merge payload keys into an existing point without re-embedding.
+
+        The vector is untouched — this is the cheap path for applying new
+        payload fields (enrichment output, index_root) to already-indexed
+        points. Merge semantics: keys not present in *payload* are kept.
+        """
+        self.client.set_payload(
+            collection_name=self.collection,
+            payload=payload,
+            points=[id],
+        )
+
+    def delete_payload_keys(self, id: str | int, keys: list[str]) -> None:
+        """Remove specific payload keys from a point (vector untouched)."""
+        if not keys:
+            return
+        self.client.delete_payload(
+            collection_name=self.collection,
+            keys=keys,
+            points=[id],
+        )
+
     def delete_points(self, ids: list[str | int], batch_size: int = 1000) -> int:
         """Delete specific points by id. Returns count requested for deletion."""
         total = 0

@@ -526,6 +526,18 @@ answer = gen.generate("how many trips did user A take", pool)
 
 `list_finalize="verbatim"` skips the finalize LLM pass and assembles the answer deterministically from the extracted items (the count for count questions, the comma-joined items otherwise). Recommended for non-English corpora: an LLM finalize pass can paraphrase or distort items instead of repeating them verbatim. The default `"llm"` keeps the formatting pass.
 
+**Enriching payloads at ingest.** `Ingestor(enrich=callable)` calls your function for every final item (including assembled window chunks) and merges the returned dict into the chunk payload — the mechanism is core, the extractor is yours (content extraction is corpus- and language-specific, so mnemostack ships none). Fail-open: a raising hook logs a warning and the item is indexed without enrichment; `text`/`source`/`offset` and an explicit item timestamp can't be overridden. From the CLI: `mnemostack index docs/ --enrich mypkg.extractors:invoice_fields`. Enriched fields combine with the rest of the stack: scope recall with `filters={"amount": {"gte": 100}}` and show them to the answer LLM with `context_fields=["amount"]`.
+
+```python
+def invoice_fields(item):          # yours — any language, any domain
+    amounts = AMOUNT_RE.findall(item.text)
+    return {"amounts": amounts} if amounts else {}
+
+ing = Ingestor(embedding=emb, vector_store=store, enrich=invoice_fields)
+```
+
+Already-indexed collections don't need re-embedding to pick up enrichment: `mnemostack index docs/ --enrich ... --refresh-payloads` rewrites the payloads of existing chunks in place (Qdrant `set_payload`, vectors untouched) — only genuinely new chunks pay for embedding.
+
 **Structured payload fields in the answer prompt.** By default the answer context shows each memory's timestamp, source and text. `AnswerGenerator(context_fields=["author", "amount"])` additionally projects the named payload fields into each memory's context line (`author=…`, lists comma-joined, long values truncated; memories without the field render without it). Use it for structured facts the answer needs — who said it, amounts, your own ingest-time enrichments. Note the boundary: projection only changes what the answer prompt *shows* — retrieval ranks by `text`, so content that must be *findable* (image captions and similar) belongs in the text itself, not in a payload field.
 
 **Non-English corpora.** The built-in answer prompts and the question classifier are English; on other languages the extract/finalize passes degrade instead of helping. Both are pluggable:
