@@ -292,3 +292,29 @@ def test_delete_payload_keys(store):
     hit = next(iter(store.scroll()))
     assert "amount" not in hit.payload
     assert hit.payload["text"] == "hello"
+
+
+def test_cli_window_chunks_expose_window_metadata_to_enricher(
+    monkeypatch, tmp_path, store
+):
+    """Enrichers shared with Ingestor(enrich=...) branch on chunk_kind —
+    CLI window chunks must carry the window metadata on the item."""
+    mod = tmp_path / "win_enrichers.py"
+    mod.write_text(
+        "def kind_spy(item):\n"
+        "    return {'seen_kind': item.metadata.get('chunk_kind', 'plain')}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    doc = tmp_path / "note.md"
+    doc.write_text("a" * 900, encoding="utf-8")  # 2 chunks at chunk_size=800
+    _patch_stack(monkeypatch, store)
+
+    rc = cli.cmd_index(
+        _args(tmp_path, enrich="win_enrichers:kind_spy", window_size=2)
+    )
+
+    assert rc == 0
+    kinds = {hit.payload.get("chunk_kind"): hit.payload["seen_kind"] for hit in store.scroll()}
+    assert kinds.get("sliding_window") == "sliding_window"  # window chunk saw its kind
+    assert kinds.get(None) == "plain"  # plain chunks unchanged
