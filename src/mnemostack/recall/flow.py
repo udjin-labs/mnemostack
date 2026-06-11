@@ -24,6 +24,7 @@ def recall_flow(
     *,
     pipeline: Pipeline | None = None,
     reranker: Reranker | None = None,
+    filters: dict[str, object] | None = None,
     trace: RecallTrace | None = None,
 ) -> list[RecallResult]:
     """Run hybrid recall plus the canonical post-processing chain.
@@ -39,7 +40,7 @@ def recall_flow(
     should mark `reranker:unavailable` on the trace itself.
     """
     raw_limit = max(limit * 3, 30) if pipeline is not None else limit
-    recalled = recaller.recall(query, limit=raw_limit, trace=trace)
+    recalled = recaller.recall(query, limit=raw_limit, filters=filters, trace=trace)
     results = recalled
     if pipeline is not None:
         results = pipeline.apply(query, results)

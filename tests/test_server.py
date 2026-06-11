@@ -74,9 +74,11 @@ def test_recall_response_round_trip():
 class _FakeRecaller:
     def __init__(self):
         self.calls = []
+        self.last_filters = None
 
-    def recall(self, query, limit=10, **_):
+    def recall(self, query, limit=10, filters=None, **_):
         self.calls.append((query, limit))
+        self.last_filters = filters
         return [FakeResult(id=str(i), text=f"m{i}") for i in range(min(limit, 3))]
 
     def apply_vector_floor_after_rerank(self, results, recalled_results):
@@ -134,11 +136,13 @@ def _patched_app(
 
         class _FakeAnswerGen:
             last_kwargs = None
+            last_generate_kwargs = None
 
             def __init__(self, **kwargs):
                 type(self).last_kwargs = kwargs
 
-            def generate(self, q, memories):
+            def generate(self, q, memories, **kwargs):
+                type(self).last_generate_kwargs = kwargs
                 return _FakeAns()
 
         class _FakeLLM:
@@ -586,3 +590,31 @@ def test_answer_response_carries_degraded(monkeypatch):
     data = resp.json()
     assert data["degraded"] == []
     assert "trace" in data and data["trace"] is None
+
+
+def test_recall_endpoint_threads_filters_to_recaller(monkeypatch):
+    app, recaller = _patched_app(monkeypatch, with_answer=False)
+    client = TestClient(app)
+
+    resp = client.post(
+        "/recall", json={"query": "hello", "filters": {"tenant": "a"}}
+    )
+
+    assert resp.status_code == 200
+    assert recaller.last_filters == {"tenant": "a"}
+
+
+def test_answer_endpoint_threads_filters_to_recall_and_generator(monkeypatch):
+    import mnemostack.server as srv
+
+    app, recaller = _patched_app(monkeypatch)
+    client = TestClient(app)
+
+    resp = client.post(
+        "/answer", json={"query": "hello", "filters": {"tenant": "b"}}
+    )
+
+    assert resp.status_code == 200
+    assert recaller.last_filters == {"tenant": "b"}
+    # retry sub-recalls must stay inside the same filtered scope
+    assert srv.AnswerGenerator.last_generate_kwargs == {"recall_filters": {"tenant": "b"}}
