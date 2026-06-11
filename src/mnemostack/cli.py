@@ -607,6 +607,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip the ranking pipeline and LLM reranker (plain fused recall)",
     )
     p_search.add_argument(
+        "--rerank-mode",
+        choices=sorted(RERANK_MODES),
+        default=cfg.recall.rerank_mode,
+        help="LLM reranker contract: relevant_only returns a subset, full_reorder ranks all",
+    )
+    p_search.add_argument(
         "--tier",
         type=int,
         choices=[1, 2, 3],
@@ -718,6 +724,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--raw",
         action="store_true",
         help="Skip the ranking pipeline and LLM reranker (plain fused recall)",
+    )
+    p_answer.add_argument(
+        "--rerank-mode",
+        choices=sorted(RERANK_MODES),
+        default=cfg.recall.rerank_mode,
+        help="LLM reranker contract: relevant_only returns a subset, full_reorder ranks all",
     )
     p_answer.add_argument(
         "--tier",
