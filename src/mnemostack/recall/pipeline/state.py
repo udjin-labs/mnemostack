@@ -70,12 +70,34 @@ def default_state_path() -> str:
     base = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
     target = base / "mnemostack" / "server-state.json"
     if not target.exists() and _LEGACY_STATE_PATH.exists():
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(_LEGACY_STATE_PATH, target)
-        except OSError:
-            pass
+        _migrate_legacy_state(target)
     return str(target)
+
+
+def _migrate_legacy_state(target: Path) -> None:
+    """One-time copy of the legacy /tmp state file, safe under concurrency.
+
+    Takes the same lock file `FileStateStore` uses for this path and
+    re-checks existence inside it, so a process that lost the startup race
+    never clobbers newer state another process already wrote. The copy lands
+    via temp file + atomic replace, so a crash mid-copy can't leave partial
+    JSON at the destination (the migration is simply retried next start).
+    """
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = target.with_suffix(target.suffix + ".lock")
+        with open(lock_path, "a+") as fh:
+            with contextlib.suppress(ImportError):  # non-POSIX: best effort
+                import fcntl
+
+                fcntl.flock(fh, fcntl.LOCK_EX)  # released when fh closes
+            if target.exists():  # lost the race — newer state is in place
+                return
+            tmp = target.with_suffix(target.suffix + ".migrate-tmp")
+            shutil.copy2(_LEGACY_STATE_PATH, tmp)
+            tmp.replace(target)
+    except OSError:
+        pass
 
 
 class FileStateStore(StateStore):
