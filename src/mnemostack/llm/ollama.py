@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import urllib.request
 
-from .base import LLMProvider, LLMResponse
+from .base import DEFAULT_IMAGE_PROMPT, LLMProvider, LLMResponse
 
 
 class OllamaLLM(LLMProvider):
@@ -37,7 +38,6 @@ class OllamaLLM(LLMProvider):
         max_tokens: int = 200,
         temperature: float = 0.0,
     ) -> LLMResponse:
-        url = f"{self.host}/api/generate"
         payload = {
             "model": self.model,
             "prompt": prompt,
@@ -47,6 +47,33 @@ class OllamaLLM(LLMProvider):
                 "num_predict": max_tokens,
             },
         }
+        return self._post_generate(payload)
+
+    def describe_image(
+        self,
+        image: bytes,
+        mime_type: str = "image/jpeg",
+        prompt: str = DEFAULT_IMAGE_PROMPT,
+        max_tokens: int = 250,
+    ) -> LLMResponse:
+        """Describe an image for indexing via an Ollama vision model.
+
+        Requires a vision-capable model (llava, llama3.2-vision, qwen2.5-vl
+        and similar). Ollama infers the image format from the bytes, so
+        `mime_type` is accepted only for interface parity. Text-only models
+        surface the server's error via `.error` — never raised.
+        """
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "images": [base64.b64encode(image).decode()],
+            "stream": False,
+            "options": {"num_predict": max_tokens},
+        }
+        return self._post_generate(payload)
+
+    def _post_generate(self, payload: dict) -> LLMResponse:
+        url = f"{self.host}/api/generate"
         try:
             req = urllib.request.Request(
                 url,

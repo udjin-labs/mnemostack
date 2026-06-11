@@ -9,13 +9,9 @@ import time
 import urllib.request
 from urllib.error import HTTPError
 
-from .base import LLMProvider, LLMResponse
+from .base import DEFAULT_IMAGE_PROMPT, LLMProvider, LLMResponse
 
-DEFAULT_IMAGE_PROMPT = (
-    "Describe this image for a memory index in 2-3 dense sentences: visible objects "
-    "and their attributes, any text or signs VERBATIM, colors, setting, people and "
-    "what they are doing. No speculation beyond what is visible."
-)
+__all__ = ["DEFAULT_IMAGE_PROMPT", "GeminiLLM"]
 
 
 class GeminiLLM(LLMProvider):
@@ -135,13 +131,20 @@ class GeminiLLM(LLMProvider):
 
     @staticmethod
     def _extract_text(data: dict) -> str | None:
+        """Join the answer text parts, skipping thought parts.
+
+        Thinking models (Pro, or Flash with a thinking budget) may emit a
+        thought part before the answer; taking parts[0] blindly returns
+        None or reasoning text instead of the answer.
+        """
         candidates = data.get("candidates") or []
         if not candidates:
             return None
         parts = candidates[0].get("content", {}).get("parts") or []
-        if not parts:
+        texts = [p["text"] for p in parts if p.get("text") and not p.get("thought")]
+        if not texts:
             return None
-        return parts[0].get("text")
+        return "".join(texts)
 
     @staticmethod
     def _finish_reason(data: dict) -> str:
