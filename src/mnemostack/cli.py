@@ -522,10 +522,21 @@ def cmd_index(args: argparse.Namespace) -> int:
                 chunks.append((cid, chunk, payload))
 
     # Load existing point IDs once so re-runs skip unchanged chunks without
-    # re-embedding (saves API quota / local GPU time).
+    # re-embedding (saves API quota / local GPU time). When refreshing
+    # payloads we also need each point's recorded root: a chunk id carries no
+    # root, so an identical (source, offset, text) indexed from another root
+    # shares the id — rewriting its index_root would hijack the point and
+    # break prune isolation for the original root.
     existing_ids: set[str] = set()
+    existing_roots: dict[str, Any] = {}
     if not args.recreate and store.collection_exists():
-        existing_ids = {str(pid) for pid in store.iter_ids()}
+        if args.refresh_payloads:
+            for hit in store.scroll():
+                pid = str(hit.id)
+                existing_ids.add(pid)
+                existing_roots[pid] = hit.payload.get("index_root")
+        else:
+            existing_ids = {str(pid) for pid in store.iter_ids()}
 
     to_embed = [c for c in chunks if c[0] not in existing_ids]
     skipped = len(chunks) - len(to_embed)
@@ -548,14 +559,29 @@ def cmd_index(args: argparse.Namespace) -> int:
         inserted += 1
 
     refreshed = 0
+    foreign_skipped = 0
     if args.refresh_payloads and existing_ids:
         # Payload-only rewrite of chunks that were skipped as already
         # indexed: applies new payload fields (enrichment output,
         # index_root) to existing points without paying for re-embedding.
+        # Only points owned by this root — or unattributed legacy points
+        # (no index_root yet; adopting them IS the migration path) — are
+        # touched; a point recorded under another root is left alone.
         for cid, _text, payload in chunks:
-            if cid in existing_ids:
-                store.set_payload(cid, payload)
-                refreshed += 1
+            if cid not in existing_ids:
+                continue
+            owner = existing_roots.get(cid)
+            if owner is not None and owner != index_root:
+                foreign_skipped += 1
+                continue
+            store.set_payload(cid, payload)
+            refreshed += 1
+        if foreign_skipped:
+            print(
+                f"warning: {foreign_skipped} chunk(s) skipped by --refresh-payloads: "
+                "owned by another index root",
+                file=sys.stderr,
+            )
 
     pruned = 0
     if args.prune and not args.recreate:

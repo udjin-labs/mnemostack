@@ -170,3 +170,51 @@ def test_index_parser_accepts_new_flags():
     args = parser.parse_args(["index", "some/path"])
     assert args.enrich is None
     assert args.refresh_payloads is False
+
+
+def test_refresh_payloads_does_not_hijack_foreign_roots(
+    monkeypatch, tmp_path, store, enricher_module, capsys
+):
+    """Identical (source, offset, text) under two roots shares one chunk id —
+    refresh must not rewrite a point another root recorded as its own, or
+    that root's prune isolation breaks."""
+    doc = tmp_path / "note.md"
+    doc.write_text("hello world", encoding="utf-8")
+    pid = stable_chunk_id("note.md", 0, "hello world")
+    store.upsert(
+        pid,
+        VEC,
+        {"text": "hello world", "source": "note.md", "offset": 0, "index_root": "/elsewhere"},
+    )
+    _patch_stack(monkeypatch, store)
+
+    rc = cli.cmd_index(
+        _args(tmp_path, enrich=f"{enricher_module}:char_count", refresh_payloads=True)
+    )
+
+    assert rc == 0
+    hit = next(iter(store.scroll()))
+    assert hit.payload["index_root"] == "/elsewhere"  # ownership untouched
+    assert "char_count" not in hit.payload
+    assert "owned by another index root" in capsys.readouterr().err
+
+
+def test_refresh_payloads_adopts_unattributed_legacy_points(
+    monkeypatch, tmp_path, store, enricher_module
+):
+    """Points indexed before root tracking carry no index_root — adopting
+    them is the documented migration path."""
+    doc = tmp_path / "note.md"
+    doc.write_text("hello world", encoding="utf-8")
+    pid = stable_chunk_id("note.md", 0, "hello world")
+    store.upsert(pid, VEC, {"text": "hello world", "source": "note.md", "offset": 0})
+    _patch_stack(monkeypatch, store)
+
+    rc = cli.cmd_index(
+        _args(tmp_path, enrich=f"{enricher_module}:char_count", refresh_payloads=True)
+    )
+
+    assert rc == 0
+    hit = next(iter(store.scroll()))
+    assert hit.payload["index_root"] == str(tmp_path.resolve())
+    assert hit.payload["char_count"] == len("hello world")
