@@ -794,18 +794,30 @@ class AnswerGenerator:
         remainder = [m for m in contributing if id(m) not in matched_ids]
         return self._extract_sources(matched + remainder)
 
+    @staticmethod
+    def _render_field_value(value: object) -> str | None:
+        """One rendering for projected payload values, shared by the context
+        line and provenance matching — attribution must search exactly what
+        the prompt showed, including the truncation."""
+        if value is None or value == "":
+            return None
+        if isinstance(value, (list, tuple)):
+            value = ", ".join(str(v) for v in value)
+        rendered = str(value).replace("\n", " ")
+        if len(rendered) > 100:
+            rendered = rendered[:100] + "…"
+        return rendered
+
     def _provenance_haystack(self, memory: RecallResult) -> str:
         """Lower-cased searchable content of a memory for item attribution:
         the text plus any projected context_fields values, mirroring what
-        the extract prompt actually showed the LLM."""
+        the extract prompt actually showed the LLM (same rendering, same
+        truncation)."""
         parts = [memory.text or ""]
         for key in self.context_fields:
-            value = memory.payload.get(key)
-            if value is None or value == "":
-                continue
-            if isinstance(value, (list, tuple)):
-                value = ", ".join(str(v) for v in value)
-            parts.append(str(value))
+            rendered = self._render_field_value(memory.payload.get(key))
+            if rendered is not None:
+                parts.append(rendered)
         return "\n".join(parts).lower()
 
     def _extract_items_over_pool(
@@ -936,14 +948,9 @@ class AnswerGenerator:
             if source:
                 prefix = f"{prefix} ({source})"
             for key in context_fields:
-                value = m.payload.get(key)
-                if value is None or value == "":
+                rendered = AnswerGenerator._render_field_value(m.payload.get(key))
+                if rendered is None:
                     continue  # a memory without the field renders without it
-                if isinstance(value, (list, tuple)):
-                    value = ", ".join(str(v) for v in value)
-                rendered = str(value).replace("\n", " ")
-                if len(rendered) > 100:
-                    rendered = rendered[:100] + "…"
                 prefix = f"{prefix} {key}={rendered}"
             lines.append(f"{prefix} {text}")
         return "\n".join(lines)
