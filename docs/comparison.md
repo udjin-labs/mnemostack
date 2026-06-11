@@ -10,7 +10,7 @@ This is not a universal ranking of product quality. Memory systems make differen
 
 | System | Retrieval shape | Graph support | Feedback loop | Deployment model | MCP / API support | LoCoMo number to treat as directional |
 | --- | --- | --- | --- | --- | --- | --- |
-| Mnemostack | Hybrid: vector, BM25, temporal, optional graph, RRF, pipeline, optional reranker | Optional Memgraph temporal graph | Explicit feedback; stateful effects depend on the configured recall path | Self-hosted Python package, HTTP server, or MCP stdio server | MCP, HTTP, Python SDK | 82.5% strict in the README setup |
+| Mnemostack | Hybrid: vector, BM25, temporal, optional graph, RRF, pipeline, optional reranker | Optional Memgraph temporal graph | Explicit feedback; stateful effects depend on the configured recall path | Self-hosted Python package, HTTP server, or MCP stdio server | MCP, HTTP, Python SDK | 82.9% strict in the README setup |
 | Plain vector search | Embeddings + nearest-neighbor similarity | No, unless you build it | No, unless you build it | Self-hosted or managed vector DB | Depends on your wrapper | Usually not directly comparable |
 | Hand-rolled RAG memory | Whatever the team builds | Whatever the team builds | Whatever the team builds | Custom | Custom | Usually not directly comparable |
 | Mem0 | Managed or self-hosted memory layer; primarily vector, with a graph variant | Available in graph variant | Product-managed memory behavior | Managed service or self-hosted | API-oriented | ~68.5% reported for graph variant |
@@ -191,13 +191,13 @@ Good fit for:
 
 ## Benchmarks and methodology notes
 
-Mnemostack's README reports **82.5% strict accuracy** and **92.2% combined accuracy** on LoCoMo in the current evaluation setup. The same section lists externally reported or independently replicated numbers for other systems:
+Mnemostack's README reports **82.9% strict accuracy** and **92.7% combined accuracy** on LoCoMo in the current evaluation setup. The same section lists externally reported or independently replicated numbers for other systems:
 
 The table below mixes Mnemostack's own current setup with externally reported or independently replicated numbers for other systems, so it should not be read as a same-harness leaderboard.
 
 | System | LoCoMo number from README |
 | --- | --- |
-| Mnemostack | 82.5% strict |
+| Mnemostack | 82.9% strict |
 | Hindsight | 78-85% reported range |
 | Letta filesystem agent | 74% reported |
 | Mem0 graph variant | ~68.5% reported |
