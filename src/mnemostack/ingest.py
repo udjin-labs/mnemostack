@@ -132,7 +132,9 @@ def prune_stale_chunks(
     are never affected. The fresh set MUST contain every id the source
     currently produces (compute it via `stable_chunk_id` over all chunks,
     including ones skipped as already indexed) — an incomplete set would
-    delete live data.
+    delete live data. Likewise, do NOT include a source whose chunks failed
+    to embed or upsert in the current run: its fresh ids never landed, so
+    pruning would delete the previous data without a replacement.
     """
     removed = 0
     for source, fresh_ids in fresh_ids_by_source.items():

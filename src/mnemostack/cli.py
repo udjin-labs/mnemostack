@@ -484,10 +484,12 @@ def cmd_index(args: argparse.Namespace) -> int:
 
     inserted = 0
     failed = 0
+    failed_sources: set[str] = set()
     for cid, text, payload in to_embed:
         vec = provider.embed(text)
         if not vec:
             failed += 1
+            failed_sources.add(payload["source"])
             continue
         store.upsert(cid, vec, payload)
         inserted += 1
@@ -499,6 +501,17 @@ def cmd_index(args: argparse.Namespace) -> int:
         fresh_by_source: dict[str, set[str]] = {}
         for cid, _text, payload in chunks:
             fresh_by_source.setdefault(payload["source"], set()).add(cid)
+        # A source with a failed embedding has a fresh chunk that never landed.
+        # Pruning it would delete the previous chunk without a replacement, so
+        # leave such sources untouched this run.
+        for source in failed_sources:
+            fresh_by_source.pop(source, None)
+        if failed_sources:
+            print(
+                f"warning: prune skipped for {len(failed_sources)} source(s) "
+                "with failed embeddings; re-run after the provider recovers",
+                file=sys.stderr,
+            )
         pruned = prune_stale_chunks(store, fresh_by_source)
 
     print(

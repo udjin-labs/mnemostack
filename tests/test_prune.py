@@ -148,6 +148,34 @@ def test_cli_index_prune_deletes_stale_chunks(monkeypatch, tmp_path, store, caps
     assert "pruned 1 stale" in capsys.readouterr().out
 
 
+def test_cli_index_prune_spares_sources_with_failed_embeddings(monkeypatch, tmp_path, store, capsys):
+    """If the fresh chunk failed to embed, the old chunk is the only copy of
+    that source's data — pruning must leave it alone."""
+    doc = tmp_path / "note.md"
+    doc.write_text("hello world", encoding="utf-8")
+    old = _put(store, "note.md", 800, "previous revision chunk")
+
+    class _FailingProvider:
+        dimension = 4
+
+        def embed(self, text: str) -> list[float]:
+            return []
+
+    monkeypatch.setattr(cli, "get_provider", lambda _name, **_kw: _FailingProvider())
+    monkeypatch.setattr(cli, "VectorStore", lambda **_kw: store)
+    monkeypatch.setattr(cli, "_embedding_model", lambda _args: None, raising=False)
+    monkeypatch.setattr(cli, "model_kwargs", lambda _model: {})
+    monkeypatch.setattr(cli.sys, "stdin", types.SimpleNamespace(isatty=lambda: False))
+
+    rc = cli.cmd_index(_index_args(tmp_path))
+
+    assert rc == 0
+    assert old in {str(pid) for pid in store.iter_ids()}
+    captured = capsys.readouterr()
+    assert "pruned 0 stale" in captured.out
+    assert "prune skipped" in captured.err
+
+
 def test_cli_index_without_prune_keeps_stale_chunks(monkeypatch, tmp_path, store):
     doc = tmp_path / "note.md"
     doc.write_text("hello world", encoding="utf-8")
