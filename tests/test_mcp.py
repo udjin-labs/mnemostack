@@ -89,7 +89,11 @@ def test_mcp_search_strips_internal_vector_floor_payload(monkeypatch):
     result = asyncio.run(mcp.call_tool("mnemostack_search", {"query": "q", "limit": 1}))
 
     payload = result.structured_content
-    assert payload["results"][0]["payload"] == {"public": "ok"}
+    result_payload = payload["results"][0]["payload"]
+    # pipeline stages may annotate the payload (freshness, q_value, ...);
+    # the contract is: public keys present, internal floor metadata stripped
+    assert result_payload["public"] == "ok"
+    assert "_vector_floor_candidates" not in result_payload
 
 
 def test_mcp_search_preserves_vector_floor_after_rerank_slice(monkeypatch):

@@ -37,9 +37,9 @@ from ..recall import (
     Reranker,
     TemporalRetriever,
     VectorRetriever,
-    apply_rerank_safe,
     build_bm25_docs,
     build_full_pipeline,
+    recall_flow,
 )
 from ..recall.pipeline import FileStateStore, default_state_path
 from ..vector import VectorStore
@@ -92,6 +92,8 @@ def build_server(
         raise ValueError(f"rerank_mode must be one of: {allowed}")
 
     mcp = FastMCP("mnemostack")
+
+    resolved_state_path = state_path or default_state_path()
 
     # Lazy-initialize components so server boots even if e.g. GEMINI_API_KEY missing.
     # Tool calls can run concurrently; the lock makes each component initialize
@@ -150,6 +152,16 @@ def build_server(
             ),
         )
 
+    def _get_pipeline():
+        return _component(
+            "pipeline",
+            lambda: build_full_pipeline(
+                state_store=FileStateStore(resolved_state_path),
+                graph_uri=memgraph_uri,
+                graph_timeout=graph_timeout,
+            ),
+        )
+
     def _get_reranker():
         return _component(
             "reranker",
@@ -163,19 +175,20 @@ def build_server(
     def _run_recall(query: str, limit: int) -> tuple[list[Any], RecallTrace]:
         trace = RecallTrace()
         recaller = _get_recaller()
-        recalled_results = recaller.recall(query, limit=limit, trace=trace)
         try:
             reranker = _get_reranker()
         except Exception:  # noqa: BLE001 — LLM not configured; recall still works
             reranker = None
             trace.mark("reranker:unavailable")
-        results = apply_rerank_safe(reranker, query, recalled_results, trace)[:limit]
-        apply_vector_floor = getattr(recaller, "apply_vector_floor_after_rerank", None)
-        if apply_vector_floor is not None:
-            results = apply_vector_floor(results, recalled_results)
+        results = recall_flow(
+            recaller,
+            query,
+            limit,
+            pipeline=_get_pipeline(),
+            reranker=reranker,
+            trace=trace,
+        )
         return results, trace
-
-    resolved_state_path = state_path or default_state_path()
 
     def _get_feedback_pipeline():
         if "feedback_pipeline" not in _components:
