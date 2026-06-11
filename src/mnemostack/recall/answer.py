@@ -39,6 +39,18 @@ def _display_ts(ts: str) -> str:
 if TYPE_CHECKING:
     from .recaller import Recaller
 
+# Scripts written without word separators: word-boundary regexes never match
+# inside running text there (adjacent characters are all \w). Hiragana,
+# Katakana, CJK ideographs (ext. A + unified + compatibility), Hangul, Thai.
+_NONSPACED_SCRIPT_RE = re.compile(
+    "[\u3040-\u30ff"  # Hiragana, Katakana
+    "\u3400-\u4dbf"  # CJK ideographs extension A
+    "\u4e00-\u9fff"  # CJK unified ideographs
+    "\uf900-\ufaff"  # CJK compatibility ideographs
+    "\uac00-\ud7af"  # Hangul syllables
+    "\u0e00-\u0e7f]"  # Thai
+)
+
 _CONFIDENCE_RULES = """After your answer, on a NEW line, output ONLY:
 CONFIDENCE: <float 0.0-1.0>
 
@@ -364,6 +376,11 @@ class AnswerGenerator:
         prompt_overrides: dict[str, str] | None = None,
         abstention_text: str = "Not in memory.",
         question_classifier: Callable[[str], str] | None = None,
+        *,
+        # Keyword-only: AnswerGenerator is public API and some callers pass
+        # the options above positionally — new options must not shift them.
+        list_extract_batch_size: int = 40,
+        list_finalize: str = "llm",
     ):
         self.llm = llm
         self.max_memories = max_memories
@@ -383,6 +400,12 @@ class AnswerGenerator:
         }
         self.category_aware_prompts = category_aware_prompts
         self.list_extract_mode = list_extract_mode
+        if list_extract_batch_size < 1:
+            raise ValueError("list_extract_batch_size must be >= 1")
+        if list_finalize not in ("llm", "verbatim"):
+            raise ValueError('list_finalize must be "llm" or "verbatim"')
+        self.list_extract_batch_size = list_extract_batch_size
+        self.list_finalize = list_finalize
         self.specificity_resolver = specificity_resolver
         self.inference_retry = inference_retry
         self.recaller = recaller
@@ -660,28 +683,30 @@ class AnswerGenerator:
     def _generate_list_extract(
         self, query: str, memories: list[RecallResult], category: str = "list"
     ) -> Answer:
-        extract_memories = memories[:40]
-        context = self._format_context(extract_memories)
-        prompt = self.prompt_overrides.get(
-            "list_extract", self._localize_abstention(_LIST_EXTRACT_PROMPT)
-        ).format(
-            n_memories=len(extract_memories),
-            context=context,
-            query=query,
-        )
-
-        with histogram("mnemostack.answer.llm_latency_ms"):
-            extract_resp = self.llm.generate(prompt, max_tokens=self.max_tokens)
-        if not extract_resp.ok:
+        extracted = self._extract_items_over_pool(query, memories)
+        if extracted is not None and not extracted[0]:
+            # The pool is non-empty but extraction found nothing. Extraction
+            # is the lossy, non-deterministic step (not retrieval) — give it
+            # one more pass before abstaining.
+            counter("mnemostack.answer.list_extract_empty_retry", 1)
+            extracted = self._extract_items_over_pool(query, memories)
+        if extracted is None or not extracted[0]:  # every batch failed / still empty
             return self._fallback_list_answer(query, memories)
+        items, contributing = extracted
 
-        try:
-            items = self._parse_extracted_items(extract_resp.text)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return self._fallback_list_answer(query, memories)
+        sources = self._sources_for_items(items, contributing)
 
-        if not items:
-            return self._fallback_list_answer(query, memories)
+        if self.list_finalize == "verbatim":
+            # Deterministic assembly straight from the extracted items: no
+            # second LLM pass to paraphrase or distort them (a real failure
+            # mode on non-English corpora).
+            text = str(len(items)) if category == "count" else ", ".join(items)
+            return Answer(
+                text=text,
+                confidence=0.8,
+                sources=sources,
+                raw="",
+            )
 
         finalize_template = self.prompt_overrides.get(
             "list_finalize", self._localize_abstention(_LIST_FINALIZE_PROMPT)
@@ -700,16 +725,122 @@ class AnswerGenerator:
             return Answer(
                 text=text,
                 confidence=0.6,
-                sources=self._extract_sources(extract_memories),
+                sources=sources,
                 raw=final_resp.text,
             )
 
         return Answer(
             text=final_resp.text.strip(),
             confidence=0.8,
-            sources=self._extract_sources(extract_memories),
+            sources=sources,
             raw=final_resp.text,
         )
+
+    def _sources_for_items(
+        self, items: list[str], contributing: list[RecallResult]
+    ) -> list[str]:
+        """Source attribution for extracted items.
+
+        The extract output carries no item→memory mapping, so provenance is
+        recovered by matching the item as a whole word/phrase (boundary-
+        anchored, so a short item like "Ann" doesn't claim a memory that
+        only says "annual"): memories that contain an extracted item are
+        cited first. Without this, `_extract_sources`' truncation could
+        cite unrelated early memories of a contributing batch while
+        dropping the one that actually holds the answer. Items the LLM
+        paraphrased (no literal match) fall back to batch order.
+        """
+        matched_ids: set[int] = set()
+        lowered = [(m, (m.text or "").lower()) for m in contributing]
+        per_item: list[list[RecallResult]] = []
+        for item in items:
+            needle = item.lower().strip()
+            if not needle:
+                continue
+            pattern = re.compile(rf"(?<!\w){re.escape(needle)}(?!\w)")
+            item_matches: list[RecallResult] = []
+            for memory, text in lowered:
+                if id(memory) not in matched_ids and pattern.search(text):
+                    matched_ids.add(id(memory))
+                    item_matches.append(memory)
+            if not item_matches and _NONSPACED_SCRIPT_RE.search(needle):
+                # Non-spaced scripts (CJK, Thai): adjacent characters count
+                # as \w, so a correct phrase never matches with boundaries.
+                # Plain containment for these items only — spaced-script
+                # items keep the boundary requirement ("Ann" must not claim
+                # "annual").
+                for memory, text in lowered:
+                    if id(memory) not in matched_ids and needle in text:
+                        matched_ids.add(id(memory))
+                        item_matches.append(memory)
+            per_item.append(item_matches)
+        # Round-robin across items: every item's FIRST supporting memory
+        # outranks anyone's second mention, so one frequently-mentioned item
+        # can't crowd the others out of the truncated source list.
+        matched: list[RecallResult] = []
+        for rank in range(max((len(m) for m in per_item), default=0)):
+            for item_matches in per_item:
+                if rank < len(item_matches):
+                    matched.append(item_matches[rank])
+        remainder = [m for m in contributing if id(m) not in matched_ids]
+        return self._extract_sources(matched + remainder)
+
+    def _extract_items_over_pool(
+        self, query: str, memories: list[RecallResult]
+    ) -> tuple[list[str], list[RecallResult]] | None:
+        """Run the extract prompt over the WHOLE pool in batches.
+
+        A single fixed window made extraction order-sensitive: a relevant
+        memory below the cut silently never reached the LLM, and the pool
+        order itself is non-deterministic (RRF over expanded queries).
+        Walking every batch removes the order dependence — position in the
+        pool no longer decides whether a memory is seen.
+
+        Returns None when every batch failed (LLM error or unparseable
+        output); otherwise (items, contributing_memories) where items are
+        merged across batches preserving first-seen order and the memories
+        come from the batches that actually produced items — source
+        attribution must point at the supporting batches, not the pool
+        prefix (`_extract_sources` truncates, so an answer found deep in
+        the pool would otherwise cite unrelated earlier memories).
+        """
+        template = self.prompt_overrides.get(
+            "list_extract", self._localize_abstention(_LIST_EXTRACT_PROMPT)
+        )
+        merged: list[str] = []
+        seen: set[str] = set()
+        contributing: list[RecallResult] = []
+        any_batch_ok = False
+        for start in range(0, len(memories), self.list_extract_batch_size):
+            batch = memories[start : start + self.list_extract_batch_size]
+            prompt = template.format(
+                n_memories=len(batch),
+                context=self._format_context(batch),
+                query=query,
+            )
+            with histogram("mnemostack.answer.llm_latency_ms"):
+                resp = self.llm.generate(prompt, max_tokens=self.max_tokens)
+            if not resp.ok:
+                continue  # fail-open per batch: other batches still count
+            try:
+                items = self._parse_extracted_items(resp.text)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            any_batch_ok = True
+            if items:
+                contributing.extend(batch)
+            for item in items:
+                # Batches can't see each other's output, so the same item
+                # may come back with different casing or spacing — dedupe on
+                # a normalized key (counts use len(items)), keep the first
+                # display form.
+                key = " ".join(item.split()).casefold()
+                if key not in seen:
+                    seen.add(key)
+                    merged.append(item)
+        if not any_batch_ok:
+            return None
+        return merged, contributing
 
     def _fallback_list_answer(
         self,
