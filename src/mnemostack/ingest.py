@@ -156,12 +156,19 @@ def apply_enrichment(
             item.source,
         )
         return
+    applied: list[str] = []
     for key, value in extra.items():
         if key in _PROTECTED_PAYLOAD_KEYS:
             continue
         if key == "timestamp" and item.timestamp:
             continue  # the explicit item timestamp is authoritative
         payload[key] = value
+        applied.append(key)
+    if applied:
+        # Ownership record: which payload keys the enricher wrote. Payload
+        # refresh uses it to delete keys a newer enricher no longer
+        # produces, without touching fields written by other ingest paths.
+        payload["_enrich_keys"] = sorted(applied)
 
 
 def prune_stale_chunks(
