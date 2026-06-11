@@ -822,8 +822,13 @@ class AnswerGenerator:
             if items:
                 contributing.extend(batch)
             for item in items:
-                if item not in seen:
-                    seen.add(item)
+                # Batches can't see each other's output, so the same item
+                # may come back with different casing or spacing — dedupe on
+                # a normalized key (counts use len(items)), keep the first
+                # display form.
+                key = " ".join(item.split()).casefold()
+                if key not in seen:
+                    seen.add(key)
                     merged.append(item)
         if not any_batch_ok:
             return None
