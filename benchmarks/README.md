@@ -86,6 +86,13 @@ The first three honour `LOCOMO_DATASET` for the dataset path.
   harness. That inflates the headline aggregate; the main README's
   `signal-only` columns drop those 446 so the score reflects only the
   1540 questions that actually have a ground-truth answer.
+- Each `per_qa` row records the recall `degraded` tags for that question.
+  Empty-ground-truth rows skip recall entirely, so their `degraded: []`
+  means "stack not exercised", not "stack healthy" — only rows that were
+  actually answered carry meaningful degradation signals.
+- Subset probes (`locomo_single.py --only-questions <file>`) record the
+  subset path and selected QA count in the output `config`, so a probe
+  artifact is distinguishable from a full run when comparing results.
 - We publish the full aggregate across all 5 categories and all 1986 QA.
   Some vendors publish a single best sub-category. See the "Honest numbers
   disclaimer" in the main README.
