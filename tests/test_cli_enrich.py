@@ -218,3 +218,77 @@ def test_refresh_payloads_adopts_unattributed_legacy_points(
     hit = next(iter(store.scroll()))
     assert hit.payload["index_root"] == str(tmp_path.resolve())
     assert hit.payload["char_count"] == len("hello world")
+
+
+def test_refresh_removes_stale_enrichment_keys(monkeypatch, tmp_path, store, enricher_module):
+    """An enrichment key the new enricher no longer produces must disappear
+    on refresh — otherwise filters/context_fields keep seeing a stale fact."""
+    doc = tmp_path / "note.md"
+    doc.write_text("hello world", encoding="utf-8")
+    pid = stable_chunk_id("note.md", 0, "hello world")
+    store.upsert(
+        pid,
+        VEC,
+        {
+            "text": "hello world",
+            "source": "note.md",
+            "offset": 0,
+            "index_root": str(tmp_path.resolve()),
+            "amount": 100,  # written by a previous enricher...
+            "_enrich_keys": ["amount"],  # ...which recorded ownership
+            "user_meta": "kept",  # foreign field, NOT enrichment-owned
+        },
+    )
+    _patch_stack(monkeypatch, store)
+
+    # the new enricher returns char_count only — amount is stale
+    rc = cli.cmd_index(
+        _args(tmp_path, enrich=f"{enricher_module}:char_count", refresh_payloads=True)
+    )
+
+    assert rc == 0
+    hit = next(iter(store.scroll()))
+    assert "amount" not in hit.payload
+    assert hit.payload["char_count"] == len("hello world")
+    assert hit.payload["_enrich_keys"] == ["char_count"]
+    assert hit.payload["user_meta"] == "kept"  # foreign fields untouched
+
+
+def test_refresh_without_enricher_clears_all_owned_keys(monkeypatch, tmp_path, store):
+    """Refreshing with no enricher at all removes everything the previous
+    enrichment owned, plus the ownership record itself."""
+    doc = tmp_path / "note.md"
+    doc.write_text("hello world", encoding="utf-8")
+    pid = stable_chunk_id("note.md", 0, "hello world")
+    store.upsert(
+        pid,
+        VEC,
+        {
+            "text": "hello world",
+            "source": "note.md",
+            "offset": 0,
+            "index_root": str(tmp_path.resolve()),
+            "amount": 100,
+            "_enrich_keys": ["amount"],
+        },
+    )
+    _patch_stack(monkeypatch, store)
+
+    rc = cli.cmd_index(_args(tmp_path, refresh_payloads=True))
+
+    assert rc == 0
+    hit = next(iter(store.scroll()))
+    assert "amount" not in hit.payload
+    assert "_enrich_keys" not in hit.payload
+
+
+def test_delete_payload_keys(store):
+    pid = stable_chunk_id("a.md", 0, "hello")
+    store.upsert(pid, VEC, {"text": "hello", "source": "a.md", "amount": 7})
+
+    store.delete_payload_keys(pid, ["amount"])
+    store.delete_payload_keys(pid, [])  # no-op
+
+    hit = next(iter(store.scroll()))
+    assert "amount" not in hit.payload
+    assert hit.payload["text"] == "hello"

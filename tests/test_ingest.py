@@ -418,3 +418,28 @@ def test_enrich_sees_assembled_window_text():
     )
 
     assert any("first" in t and "second" in t for t in seen_texts)
+
+
+def test_enrich_records_ownership_of_written_keys():
+    emb = _FakeEmbedding()
+    store = _FakeStore()
+
+    ing = Ingestor(
+        embedding=emb,
+        vector_store=store,
+        enrich=lambda item: {"amount": 5, "lang_hint": "neutral"},
+    )
+    ing.ingest([IngestItem(text="a payment note", source="notes/a.md")])
+
+    payload = store.upserts[0][2]
+    assert payload["_enrich_keys"] == ["amount", "lang_hint"]
+
+
+def test_enrich_empty_result_records_no_ownership():
+    emb = _FakeEmbedding()
+    store = _FakeStore()
+
+    ing = Ingestor(embedding=emb, vector_store=store, enrich=lambda item: {})
+    ing.ingest([IngestItem(text="plain note", source="notes/a.md")])
+
+    assert "_enrich_keys" not in store.upserts[0][2]

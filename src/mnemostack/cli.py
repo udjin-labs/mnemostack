@@ -528,13 +528,13 @@ def cmd_index(args: argparse.Namespace) -> int:
     # shares the id — rewriting its index_root would hijack the point and
     # break prune isolation for the original root.
     existing_ids: set[str] = set()
-    existing_roots: dict[str, Any] = {}
+    existing_payloads: dict[str, dict] = {}
     if not args.recreate and store.collection_exists():
         if args.refresh_payloads:
             for hit in store.scroll():
                 pid = str(hit.id)
                 existing_ids.add(pid)
-                existing_roots[pid] = hit.payload.get("index_root")
+                existing_payloads[pid] = hit.payload or {}
         else:
             existing_ids = {str(pid) for pid in store.iter_ids()}
 
@@ -570,10 +570,21 @@ def cmd_index(args: argparse.Namespace) -> int:
         for cid, _text, payload in chunks:
             if cid not in existing_ids:
                 continue
-            owner = existing_roots.get(cid)
+            old_payload = existing_payloads.get(cid, {})
+            owner = old_payload.get("index_root")
             if owner is not None and owner != index_root:
                 foreign_skipped += 1
                 continue
+            # set_payload merges, so enrichment keys the new run no longer
+            # produces would survive and keep feeding filters/context_fields
+            # stale facts. The _enrich_keys ownership record names exactly
+            # what the previous enrichment wrote — delete what it owned and
+            # the new payload doesn't claim, leaving foreign fields alone.
+            old_enrich = old_payload.get("_enrich_keys") or []
+            stale_keys = [k for k in old_enrich if k not in payload]
+            if old_enrich and "_enrich_keys" not in payload:
+                stale_keys.append("_enrich_keys")
+            store.delete_payload_keys(cid, stale_keys)
             store.set_payload(cid, payload)
             refreshed += 1
         if foreign_skipped:
