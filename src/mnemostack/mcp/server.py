@@ -10,6 +10,7 @@ Design notes:
 from __future__ import annotations
 
 import os
+import threading
 from typing import Annotated, Any
 
 try:
@@ -92,60 +93,72 @@ def build_server(
 
     mcp = FastMCP("mnemostack")
 
-    # Lazy-initialize components so server boots even if e.g. GEMINI_API_KEY missing
+    # Lazy-initialize components so server boots even if e.g. GEMINI_API_KEY missing.
+    # Tool calls can run concurrently; the lock makes each component initialize
+    # exactly once instead of racing into duplicate providers/clients.
     _components: dict[str, Any] = {}
+    _components_lock = threading.RLock()
+
+    def _component(name: str, factory):
+        with _components_lock:
+            if name not in _components:
+                _components[name] = factory()
+            return _components[name]
 
     def _get_embedding():
-        if "embedding" not in _components:
-            _components["embedding"] = get_provider(
-                embedding_provider,
-                **model_kwargs(embedding_model),
-            )
-        return _components["embedding"]
+        return _component(
+            "embedding",
+            lambda: get_provider(embedding_provider, **model_kwargs(embedding_model)),
+        )
 
     def _get_vector():
-        if "vector" not in _components:
-            emb = _get_embedding()
-            _components["vector"] = VectorStore(
-                collection=collection, dimension=emb.dimension, host=qdrant_host
-            )
-        return _components["vector"]
+        return _component(
+            "vector",
+            lambda: VectorStore(
+                collection=collection,
+                dimension=_get_embedding().dimension,
+                host=qdrant_host,
+            ),
+        )
+
+    def _build_recaller():
+        emb = _get_embedding()
+        vec = _get_vector()
+        bm25_docs = build_bm25_docs(bm25_paths)
+        retrievers = [
+            VectorRetriever(embedding=emb, vector_store=vec),
+            BM25Retriever(docs=bm25_docs) if bm25_docs else None,
+            MemgraphRetriever(uri=memgraph_uri, timeout=graph_timeout)
+            if memgraph_uri
+            else None,
+            TemporalRetriever(embedding=emb, vector_store=vec),
+        ]
+        return Recaller(
+            retrievers=[r for r in retrievers if r is not None],
+            vector_floor=max(0, int(vector_floor)),
+        )
 
     def _get_recaller():
-        if "recaller" not in _components:
-            emb = _get_embedding()
-            vec = _get_vector()
-            bm25_docs = build_bm25_docs(bm25_paths)
-            retrievers = [
-                VectorRetriever(embedding=emb, vector_store=vec),
-                BM25Retriever(docs=bm25_docs) if bm25_docs else None,
-                MemgraphRetriever(uri=memgraph_uri, timeout=graph_timeout)
-                if memgraph_uri
-                else None,
-                TemporalRetriever(embedding=emb, vector_store=vec),
-            ]
-            _components["recaller"] = Recaller(
-                retrievers=[r for r in retrievers if r is not None],
-                vector_floor=max(0, int(vector_floor)),
-            )
-        return _components["recaller"]
+        return _component("recaller", _build_recaller)
 
     def _get_answer_gen():
-        if "answer" not in _components:
-            _components["answer"] = AnswerGenerator(
+        return _component(
+            "answer",
+            lambda: AnswerGenerator(
                 llm=get_llm(llm_provider, **model_kwargs(llm_model)),
                 recaller=_get_recaller(),
-            )
-        return _components["answer"]
+            ),
+        )
 
     def _get_reranker():
-        if "reranker" not in _components:
-            _components["reranker"] = Reranker(
+        return _component(
+            "reranker",
+            lambda: Reranker(
                 llm=get_llm(llm_provider, **model_kwargs(llm_model)),
                 max_items=20,
                 rerank_mode=rerank_mode,
-            )
-        return _components["reranker"]
+            ),
+        )
 
     def _run_recall(query: str, limit: int) -> tuple[list[Any], RecallTrace]:
         trace = RecallTrace()
