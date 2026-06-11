@@ -422,3 +422,28 @@ def test_invalid_list_finalize_rejected():
         AnswerGenerator(llm=llm, list_finalize="loose")
     with pytest.raises(ValueError, match="list_extract_batch_size"):
         AnswerGenerator(llm=llm, list_extract_batch_size=0)
+
+
+def test_sources_come_from_the_batch_that_produced_items(memories):
+    """An item found deep in the pool must cite its own batch's sources —
+    _extract_sources truncates to 5, so attributing from the pool prefix
+    would cite unrelated early memories and omit the real one."""
+    llm = SequenceLLM(
+        [
+            '{"items": []}',  # first 40 memories: nothing
+            '{"items": ["Bailey"]}',  # found in memories 41-45
+        ]
+    )
+    gen = AnswerGenerator(
+        llm=llm,
+        category_aware_prompts=True,
+        list_extract_mode=True,
+        list_finalize="verbatim",
+    )
+
+    answer = gen.generate("What are Melanie's pets?", memories)
+
+    assert answer.text == "Bailey"
+    # sources from the second batch (chat-41..45), not the pool prefix
+    assert answer.sources
+    assert all(src in {f"chat-{i}" for i in range(41, 46)} for src in answer.sources)
