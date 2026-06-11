@@ -356,8 +356,6 @@ class AnswerGenerator:
         prompt_template: str | None = None,
         category_aware_prompts: bool = True,
         list_extract_mode: bool = False,
-        list_extract_batch_size: int = 40,
-        list_finalize: str = "llm",
         specificity_resolver: bool = True,
         inference_retry: bool = True,
         recaller: Recaller | None = None,
@@ -366,6 +364,11 @@ class AnswerGenerator:
         prompt_overrides: dict[str, str] | None = None,
         abstention_text: str = "Not in memory.",
         question_classifier: Callable[[str], str] | None = None,
+        *,
+        # Keyword-only: AnswerGenerator is public API and some callers pass
+        # the options above positionally — new options must not shift them.
+        list_extract_batch_size: int = 40,
+        list_finalize: str = "llm",
     ):
         self.llm = llm
         self.max_memories = max_memories

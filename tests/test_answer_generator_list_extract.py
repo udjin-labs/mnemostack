@@ -502,3 +502,13 @@ def test_item_provenance_requires_word_boundaries():
 
     assert answer.text == "Ann"
     assert answer.sources[0] == "chat-2"  # not chat-1 via "annual"
+
+
+def test_new_options_are_keyword_only():
+    """AnswerGenerator is public API: callers passing pre-existing options
+    positionally must not have them re-bound to the new parameters."""
+    import inspect
+
+    sig = inspect.signature(AnswerGenerator.__init__)
+    for name in ("list_extract_batch_size", "list_finalize"):
+        assert sig.parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
