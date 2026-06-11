@@ -356,3 +356,42 @@ def test_mca_prefilter_stays_inside_filtered_scope():
     assert all(r.payload.get("tenant") == "a" for r in results)
     mca_sourced = [r for r in results if "mca" in (r.sources or [])]
     assert all(r.payload.get("tenant") == "a" for r in mca_sourced)
+
+
+def test_pipeline_appended_results_are_scoped_too(fused_recaller):
+    """Pipeline stages (e.g. graph resurrection) can append candidates that
+    never passed the filtered retrievers — recall_flow must enforce the
+    caller's scope on the pipeline output as well."""
+
+    class _ResurrectingPipeline:
+        def apply(self, query, results):
+            ghost = type(
+                "R",
+                (),
+                {
+                    "id": "ghost",
+                    "text": "resurrected graph record",
+                    "score": 9.9,
+                    "payload": {"source": "memgraph"},  # no tenant attribution
+                    "sources": ["memgraph"],
+                },
+            )()
+            return [ghost, *results]
+
+    results = recall_flow(
+        fused_recaller,
+        "quarterly report",
+        limit=10,
+        pipeline=_ResurrectingPipeline(),
+        filters={"tenant": "a"},
+    )
+
+    assert results
+    assert all(r.payload.get("tenant") == "a" for r in results)
+    assert not any(r.id == "ghost" for r in results)
+
+    # without filters the pipeline's contribution is untouched
+    unfiltered = recall_flow(
+        fused_recaller, "quarterly report", limit=10, pipeline=_ResurrectingPipeline()
+    )
+    assert any(r.id == "ghost" for r in unfiltered)
