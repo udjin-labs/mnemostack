@@ -177,3 +177,59 @@ def test_recall_flow_threads_filters(fused_recaller):
 
     assert results
     assert all(r.payload.get("tenant") == "b" for r in results)
+
+
+def test_payload_matches_array_any_element():
+    """Qdrant matches array payloads when ANY element satisfies the
+    condition — the local helper must mirror that, or filtered hybrid recall
+    drops valid lexical candidates the vector retriever returns."""
+    p = {"tags": ["urgent", "work"], "scores": [3, 9]}
+    assert payload_matches(p, {"tags": "urgent"})
+    assert payload_matches(p, {"tags": "work"})
+    assert not payload_matches(p, {"tags": "personal"})
+    assert payload_matches(p, {"scores": {"gte": 5}})
+    assert not payload_matches(p, {"scores": {"gte": 10}})
+
+
+def test_expansion_retry_stays_inside_filtered_scope():
+    """A low-confidence first answer triggers the expansion retry; its
+    vector searches must carry the same filters as the primary recall."""
+    from unittest.mock import MagicMock
+
+    from mnemostack.llm.base import LLMResponse
+    from mnemostack.recall import AnswerGenerator
+
+    llm = MagicMock()
+    # draft answer abstains -> retry path engages; retry answer is confident
+    llm.generate.side_effect = [
+        LLMResponse(text="Not in memory."),
+        LLMResponse(text="a confident retry answer"),
+    ]
+    expansion_llm = MagicMock()
+    expansion_llm.generate.return_value = LLMResponse(
+        text="variant one\nvariant two\nhypothetical answer"
+    )
+    def _mem(mid: str, text: str):
+        attrs = {"id": mid, "text": text, "score": 0.9, "payload": {"tenant": "a"}, "sources": ["vector"]}
+        return type("R", (), attrs)()
+
+    recaller = MagicMock()
+    recaller.embedding.embed_batch.return_value = [[0.1], [0.2], [0.3], [0.4]]
+    recaller.search_many.return_value = [_mem("a", "in-scope memory")]
+
+    gen = AnswerGenerator(
+        llm=llm,
+        recaller=recaller,
+        retry_with_expansion=True,
+        expansion_llm=expansion_llm,
+        specificity_resolver=False,
+        inference_retry=False,
+        category_aware_prompts=False,
+    )
+    memory = type(
+        "R", (), {"id": "m", "text": "some memory", "score": 0.5, "payload": {"tenant": "a"}, "sources": ["vector"]}
+    )()
+
+    gen.generate("a question", [memory], recall_filters={"tenant": "a"})
+
+    assert recaller.search_many.call_args.kwargs["filters"] == {"tenant": "a"}

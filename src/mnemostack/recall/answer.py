@@ -487,6 +487,7 @@ class AnswerGenerator:
                 memories=memories,
                 draft=answer,
                 prompt_template=prompt_template,
+                recall_filters=recall_filters,
             )
         elif (
             self.category_aware_prompts
@@ -510,8 +511,14 @@ class AnswerGenerator:
         memories: list[RecallResult],
         draft: Answer,
         prompt_template: str,
+        recall_filters: dict[str, object] | None = None,
     ) -> tuple[Answer, list[RecallResult]]:
-        """Retry low-confidence answers with expansion + HyDE vector RRF."""
+        """Retry low-confidence answers with expansion + HyDE vector RRF.
+
+        *recall_filters* keeps the retry inside the same filtered scope as
+        the primary recall — without it, a low-confidence first answer would
+        let this path pull unfiltered hits from outside the scope.
+        """
         if self.expansion_llm is None or self.recaller is None or self.recaller.embedding is None:
             return draft, memories
 
@@ -534,7 +541,11 @@ class AnswerGenerator:
         if not vectors:
             return draft, memories
 
-        merged_memories = self.recaller.search_many(vectors, limit=self.max_memories)
+        merged_memories = self.recaller.search_many(
+            vectors,
+            limit=self.max_memories,
+            filters=dict(recall_filters) if recall_filters is not None else None,
+        )
         if not merged_memories:
             return draft, memories
 

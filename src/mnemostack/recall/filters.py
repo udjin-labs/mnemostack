@@ -18,8 +18,10 @@ def payload_matches(payload: dict[str, Any] | None, filters: dict[str, Any] | No
     Mirrors `VectorStore._build_filter`: a plain value is an exact match; a
     `{"gte": ..., "lte": ...}` dict is an inclusive range (ISO timestamp
     strings compare lexicographically, which is correct for ISO-8601).
-    A missing key never matches — a point that cannot be attributed to the
-    filtered scope must not pass it.
+    Array-valued payload fields match when ANY element satisfies the
+    condition — the same semantics Qdrant applies to arrays. A missing key
+    never matches — a point that cannot be attributed to the filtered scope
+    must not pass it.
     """
     if not filters:
         return True
@@ -28,18 +30,25 @@ def payload_matches(payload: dict[str, Any] | None, filters: dict[str, Any] | No
         if key not in payload:
             return False
         value = payload[key]
+        candidates = value if isinstance(value, list) else [value]
         if isinstance(condition, dict) and ("gte" in condition or "lte" in condition):
-            gte = condition.get("gte")
-            lte = condition.get("lte")
-            try:
-                if gte is not None and value < gte:
-                    return False
-                if lte is not None and value > lte:
-                    return False
-            except TypeError:
-                # Incomparable types (e.g. str payload vs numeric bound):
-                # cannot be proven inside the range — exclude.
+            if not any(_in_range(c, condition) for c in candidates):
                 return False
-        elif value != condition:
+        elif condition not in candidates:
             return False
+    return True
+
+
+def _in_range(value: Any, condition: dict[str, Any]) -> bool:
+    gte = condition.get("gte")
+    lte = condition.get("lte")
+    try:
+        if gte is not None and value < gte:
+            return False
+        if lte is not None and value > lte:
+            return False
+    except TypeError:
+        # Incomparable types (e.g. str payload vs numeric bound): cannot be
+        # proven inside the range — exclude.
+        return False
     return True

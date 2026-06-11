@@ -393,7 +393,12 @@ class Recaller:
             counter("mnemostack.recall.results", len(results))
             return results
 
-    def search_many(self, vectors: list[list[float]], limit: int) -> list[RecallResult]:
+    def search_many(
+        self,
+        vectors: list[list[float]],
+        limit: int,
+        filters: dict[str, Any] | None = None,
+    ) -> list[RecallResult]:
         """Search Qdrant for multiple vectors and RRF-merge the ranked hits."""
         if not self.vector:
             return []
@@ -404,7 +409,7 @@ class Recaller:
             if not vector:
                 continue
             try:
-                hits = self.vector.search(vector, limit=limit)
+                hits = self.vector.search(vector, limit=limit, filters=filters)
             except Exception:
                 hits = []
             ranked: list[tuple[Any, float]] = []
