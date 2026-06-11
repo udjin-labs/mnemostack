@@ -356,6 +356,8 @@ class AnswerGenerator:
         prompt_template: str | None = None,
         category_aware_prompts: bool = True,
         list_extract_mode: bool = False,
+        list_extract_batch_size: int = 40,
+        list_finalize: str = "llm",
         specificity_resolver: bool = True,
         inference_retry: bool = True,
         recaller: Recaller | None = None,
@@ -383,6 +385,12 @@ class AnswerGenerator:
         }
         self.category_aware_prompts = category_aware_prompts
         self.list_extract_mode = list_extract_mode
+        if list_extract_batch_size < 1:
+            raise ValueError("list_extract_batch_size must be >= 1")
+        if list_finalize not in ("llm", "verbatim"):
+            raise ValueError('list_finalize must be "llm" or "verbatim"')
+        self.list_extract_batch_size = list_extract_batch_size
+        self.list_finalize = list_finalize
         self.specificity_resolver = specificity_resolver
         self.inference_retry = inference_retry
         self.recaller = recaller
@@ -660,28 +668,27 @@ class AnswerGenerator:
     def _generate_list_extract(
         self, query: str, memories: list[RecallResult], category: str = "list"
     ) -> Answer:
-        extract_memories = memories[:40]
-        context = self._format_context(extract_memories)
-        prompt = self.prompt_overrides.get(
-            "list_extract", self._localize_abstention(_LIST_EXTRACT_PROMPT)
-        ).format(
-            n_memories=len(extract_memories),
-            context=context,
-            query=query,
-        )
-
-        with histogram("mnemostack.answer.llm_latency_ms"):
-            extract_resp = self.llm.generate(prompt, max_tokens=self.max_tokens)
-        if not extract_resp.ok:
+        items = self._extract_items_over_pool(query, memories)
+        if items is not None and not items:
+            # The pool is non-empty but extraction found nothing. Extraction
+            # is the lossy, non-deterministic step (not retrieval) — give it
+            # one more pass before abstaining.
+            counter("mnemostack.answer.list_extract_empty_retry", 1)
+            items = self._extract_items_over_pool(query, memories)
+        if not items:  # None (every batch failed) or still empty
             return self._fallback_list_answer(query, memories)
 
-        try:
-            items = self._parse_extracted_items(extract_resp.text)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return self._fallback_list_answer(query, memories)
-
-        if not items:
-            return self._fallback_list_answer(query, memories)
+        if self.list_finalize == "verbatim":
+            # Deterministic assembly straight from the extracted items: no
+            # second LLM pass to paraphrase or distort them (a real failure
+            # mode on non-English corpora).
+            text = str(len(items)) if category == "count" else ", ".join(items)
+            return Answer(
+                text=text,
+                confidence=0.8,
+                sources=self._extract_sources(memories),
+                raw="",
+            )
 
         finalize_template = self.prompt_overrides.get(
             "list_finalize", self._localize_abstention(_LIST_FINALIZE_PROMPT)
@@ -700,16 +707,61 @@ class AnswerGenerator:
             return Answer(
                 text=text,
                 confidence=0.6,
-                sources=self._extract_sources(extract_memories),
+                sources=self._extract_sources(memories),
                 raw=final_resp.text,
             )
 
         return Answer(
             text=final_resp.text.strip(),
             confidence=0.8,
-            sources=self._extract_sources(extract_memories),
+            sources=self._extract_sources(memories),
             raw=final_resp.text,
         )
+
+    def _extract_items_over_pool(
+        self, query: str, memories: list[RecallResult]
+    ) -> list[str] | None:
+        """Run the extract prompt over the WHOLE pool in batches.
+
+        A single fixed window made extraction order-sensitive: a relevant
+        memory below the cut silently never reached the LLM, and the pool
+        order itself is non-deterministic (RRF over expanded queries).
+        Walking every batch removes the order dependence — position in the
+        pool no longer decides whether a memory is seen.
+
+        Returns None when every batch failed (LLM error or unparseable
+        output); an empty list means the LLM saw the whole pool and found
+        nothing. Items are merged across batches preserving first-seen order.
+        """
+        template = self.prompt_overrides.get(
+            "list_extract", self._localize_abstention(_LIST_EXTRACT_PROMPT)
+        )
+        merged: list[str] = []
+        seen: set[str] = set()
+        any_batch_ok = False
+        for start in range(0, len(memories), self.list_extract_batch_size):
+            batch = memories[start : start + self.list_extract_batch_size]
+            prompt = template.format(
+                n_memories=len(batch),
+                context=self._format_context(batch),
+                query=query,
+            )
+            with histogram("mnemostack.answer.llm_latency_ms"):
+                resp = self.llm.generate(prompt, max_tokens=self.max_tokens)
+            if not resp.ok:
+                continue  # fail-open per batch: other batches still count
+            try:
+                items = self._parse_extracted_items(resp.text)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            any_batch_ok = True
+            for item in items:
+                if item not in seen:
+                    seen.add(item)
+                    merged.append(item)
+        if not any_batch_ok:
+            return None
+        return merged
 
     def _fallback_list_answer(
         self,

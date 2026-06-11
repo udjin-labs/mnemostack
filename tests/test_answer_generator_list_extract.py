@@ -53,6 +53,7 @@ def test_list_extract_pass_returns_items_from_extracted_json(memories):
     llm = SequenceLLM(
         [
             '{"items": ["Luna", "Oliver"]}',
+            '{"items": ["Oliver"]}',  # second batch (45 memories, batch=40)
             "Luna, Oliver",
         ]
     )
@@ -62,15 +63,20 @@ def test_list_extract_pass_returns_items_from_extracted_json(memories):
 
     assert answer.text == "Luna, Oliver"
     assert answer.confidence == 0.8
-    assert len(llm.prompts) == 2
+    assert len(llm.prompts) == 3
     assert "extract ALL items matching the question" in llm.prompts[0]
-    assert 'EXTRACTED ITEMS: ["Luna", "Oliver"]' in llm.prompts[1]
+    assert "extract ALL items matching the question" in llm.prompts[1]
+    # items merged across batches, deduplicated, first-seen order
+    assert 'EXTRACTED ITEMS: ["Luna", "Oliver"]' in llm.prompts[2]
 
 
 def test_list_extract_falls_back_on_empty_items(memories):
     llm = SequenceLLM(
         [
             '{"items": []}',
+            '{"items": []}',  # both batches of pass 1 empty
+            '{"items": []}',
+            '{"items": []}',  # retry pass also empty
             "Not in memory.\nCONFIDENCE: 0.9",
         ]
     )
@@ -80,9 +86,9 @@ def test_list_extract_falls_back_on_empty_items(memories):
 
     assert answer.text == "Not in memory."
     assert answer.confidence == 0.3
-    assert len(llm.prompts) == 2
-    assert _LIST_PROMPT.split("\n", 1)[0] in llm.prompts[1]
-    assert "Memory 16" not in llm.prompts[1]
+    assert len(llm.prompts) == 5  # 2 batches + 2 retry batches + fallback
+    assert _LIST_PROMPT.split("\n", 1)[0] in llm.prompts[4]
+    assert "Memory 16" not in llm.prompts[4]
 
 
 @pytest.mark.parametrize("extract_output", ["not json", "[]", "{}"])
@@ -90,6 +96,7 @@ def test_list_extract_falls_back_on_malformed_json(memories, extract_output):
     llm = SequenceLLM(
         [
             extract_output,
+            extract_output,  # second batch equally malformed
             "Luna, Oliver\nCONFIDENCE: 0.8",
         ]
     )
@@ -99,8 +106,9 @@ def test_list_extract_falls_back_on_malformed_json(memories, extract_output):
 
     assert answer.text == "Luna, Oliver"
     assert answer.confidence == 0.3
-    assert len(llm.prompts) == 2
-    assert _LIST_PROMPT.split("\n", 1)[0] in llm.prompts[1]
+    # every batch failed -> direct fallback, NO empty-retry pass
+    assert len(llm.prompts) == 3
+    assert _LIST_PROMPT.split("\n", 1)[0] in llm.prompts[2]
 
 
 def test_list_extract_finalize_failure_returns_extracted_items(memories):
@@ -110,6 +118,7 @@ def test_list_extract_finalize_failure_returns_extracted_items(memories):
     llm = SequenceMaybeFailLLM(
         [
             LLMResponse(text='{"items": ["Luna", "Oliver"]}', tokens_used=10),
+            LLMResponse(text='{"items": []}', tokens_used=10),
             LLMResponse(text="", error="rate limited"),
         ]
     )
@@ -120,13 +129,14 @@ def test_list_extract_finalize_failure_returns_extracted_items(memories):
     assert answer.ok is True
     assert answer.text == "Luna, Oliver"
     assert answer.confidence == 0.6
-    assert len(llm.prompts) == 2  # extract + failed finalize, NO re-generation
+    assert len(llm.prompts) == 3  # 2 extract batches + failed finalize, NO re-generation
 
 
 def test_list_extract_finalize_failure_count_returns_number(memories):
     llm = SequenceMaybeFailLLM(
         [
             LLMResponse(text='{"items": ["a", "b", "c"]}', tokens_used=10),
+            LLMResponse(text='{"items": []}', tokens_used=10),
             LLMResponse(text="", error="rate limited"),
         ]
     )
@@ -160,6 +170,7 @@ def test_list_extract_passes_more_memories_than_max_memories(memories):
     llm = SequenceLLM(
         [
             '{"items": ["item"]}',
+            '{"items": []}',
             "item",
         ]
     )
@@ -175,6 +186,9 @@ def test_list_extract_passes_more_memories_than_max_memories(memories):
     assert "scan 40 memories" in llm.prompts[0]
     assert "Memory 40" in llm.prompts[0]
     assert "Memory 41" not in llm.prompts[0]
+    # the tail of the pool is no longer dropped — it lands in the next batch
+    assert "scan 5 memories" in llm.prompts[1]
+    assert "Memory 41" in llm.prompts[1]
 
 
 def test_list_extract_only_for_list_count_categories(memories):
@@ -194,14 +208,14 @@ def test_list_extract_only_for_list_count_categories(memories):
         assert len(llm.prompts) == 1
         assert _LIST_EXTRACT_PROMPT.split("\n", 1)[0] not in llm.prompts[0]
 
-    count_llm = SequenceLLM(['{"items": ["Luna", "Oliver"]}', "2"])
+    count_llm = SequenceLLM(['{"items": ["Luna", "Oliver"]}', '{"items": []}', "2"])
     count_gen = AnswerGenerator(
         llm=count_llm,
         category_aware_prompts=True,
         list_extract_mode=True,
     )
     count_gen.generate("How many pets does Melanie have?", memories)
-    assert len(count_llm.prompts) == 2
+    assert len(count_llm.prompts) == 3
     assert "extract ALL items matching the question" in count_llm.prompts[0]
 
 
@@ -233,6 +247,7 @@ def test_list_extract_handles_specificity(memories):
     llm = SequenceLLM(
         [
             '{"items": ["Oliver", "Luna", "Bailey"]}',
+            '{"items": []}',
             "Oliver, Luna, Bailey",
         ]
     )
@@ -242,7 +257,7 @@ def test_list_extract_handles_specificity(memories):
 
     assert answer.text == "Oliver, Luna, Bailey"
     items_line = next(
-        line for line in llm.prompts[1].splitlines() if line.startswith("EXTRACTED ITEMS:")
+        line for line in llm.prompts[2].splitlines() if line.startswith("EXTRACTED ITEMS:")
     )
     assert items_line == 'EXTRACTED ITEMS: ["Oliver", "Luna", "Bailey"]'
     assert "her dog" not in items_line
@@ -302,3 +317,108 @@ def test_should_retry_detects_localized_abstention():
     assert should_retry("eine echte Antwort", 0.9, abstention_text="Nicht im Speicher.") is False
     # the English literal is still recognized regardless of configuration
     assert should_retry("Not in memory.", 0.9, abstention_text="Nicht im Speicher.") is True
+
+
+def test_extract_finds_items_beyond_first_window(memories):
+    """Order-insensitivity: an item that only appears in the SECOND batch
+    (below the old [:40] cut) must still be extracted — pool position no
+    longer decides whether a memory is seen."""
+    llm = SequenceLLM(
+        [
+            '{"items": []}',  # nothing relevant in the first 40
+            '{"items": ["Bailey"]}',  # the relevant memory sits at position 41+
+            "Bailey",
+        ]
+    )
+    gen = AnswerGenerator(llm=llm, category_aware_prompts=True, list_extract_mode=True)
+
+    answer = gen.generate("What are Melanie's pets?", memories)
+
+    assert answer.text == "Bailey"
+    assert answer.confidence == 0.8
+    assert "Memory 41" in llm.prompts[1]
+
+
+def test_extract_retries_once_on_empty_then_succeeds(memories):
+    """A non-empty pool with an empty extract gets ONE retry pass before
+    abstaining — extraction is the non-deterministic step, not retrieval."""
+    llm = SequenceLLM(
+        [
+            '{"items": []}',
+            '{"items": []}',  # pass 1: both batches empty
+            '{"items": ["Luna"]}',
+            '{"items": []}',  # retry pass recovers the item
+            "Luna",
+        ]
+    )
+    gen = AnswerGenerator(llm=llm, category_aware_prompts=True, list_extract_mode=True)
+
+    answer = gen.generate("What are Melanie's pets?", memories)
+
+    assert answer.text == "Luna"
+    assert answer.confidence == 0.8
+    assert len(llm.prompts) == 5  # 2 + 2 retry + finalize
+
+
+def test_verbatim_finalize_skips_llm_pass(memories):
+    """list_finalize="verbatim" assembles the answer deterministically from
+    the extracted items — no second LLM pass to paraphrase or distort them."""
+    llm = SequenceLLM(
+        [
+            '{"items": ["Luna", "Oliver"]}',
+            '{"items": []}',
+            # NO finalize response — it must not be requested
+        ]
+    )
+    gen = AnswerGenerator(
+        llm=llm,
+        category_aware_prompts=True,
+        list_extract_mode=True,
+        list_finalize="verbatim",
+    )
+
+    answer = gen.generate("What are Melanie's pets?", memories)
+
+    assert answer.text == "Luna, Oliver"
+    assert answer.confidence == 0.8
+    assert len(llm.prompts) == 2  # extract batches only
+
+
+def test_verbatim_finalize_count_returns_number(memories):
+    llm = SequenceLLM(['{"items": ["a", "b", "c"]}', '{"items": []}'])
+    gen = AnswerGenerator(
+        llm=llm,
+        category_aware_prompts=True,
+        list_extract_mode=True,
+        list_finalize="verbatim",
+    )
+
+    answer = gen.generate("How many pets does Melanie have?", memories)
+
+    assert answer.text == "3"
+    assert answer.confidence == 0.8
+
+
+def test_partial_batch_failure_keeps_other_batches(memories):
+    """One failed batch must not discard items the other batches produced."""
+    llm = SequenceMaybeFailLLM(
+        [
+            LLMResponse(text="", error="rate limited"),  # batch 1 fails
+            LLMResponse(text='{"items": ["Luna"]}', tokens_used=10),
+            LLMResponse(text="Luna", tokens_used=10),
+        ]
+    )
+    gen = AnswerGenerator(llm=llm, category_aware_prompts=True, list_extract_mode=True)
+
+    answer = gen.generate("What are Melanie's pets?", memories)
+
+    assert answer.text == "Luna"
+    assert answer.confidence == 0.8
+
+
+def test_invalid_list_finalize_rejected():
+    llm = SequenceLLM([])
+    with pytest.raises(ValueError, match="list_finalize"):
+        AnswerGenerator(llm=llm, list_finalize="loose")
+    with pytest.raises(ValueError, match="list_extract_batch_size"):
+        AnswerGenerator(llm=llm, list_extract_batch_size=0)
