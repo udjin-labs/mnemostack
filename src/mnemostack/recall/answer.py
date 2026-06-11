@@ -727,11 +727,13 @@ class AnswerGenerator:
         """Source attribution for extracted items.
 
         The extract output carries no item→memory mapping, so provenance is
-        recovered by substring match: memories that literally contain an
-        extracted item are cited first. Without this, `_extract_sources`'
-        truncation could cite unrelated early memories of a contributing
-        batch while dropping the one that actually holds the answer. Items
-        the LLM paraphrased (no literal match) fall back to batch order.
+        recovered by matching the item as a whole word/phrase (boundary-
+        anchored, so a short item like "Ann" doesn't claim a memory that
+        only says "annual"): memories that contain an extracted item are
+        cited first. Without this, `_extract_sources`' truncation could
+        cite unrelated early memories of a contributing batch while
+        dropping the one that actually holds the answer. Items the LLM
+        paraphrased (no literal match) fall back to batch order.
         """
         matched: list[RecallResult] = []
         matched_ids: set[int] = set()
@@ -740,8 +742,9 @@ class AnswerGenerator:
             needle = item.lower().strip()
             if not needle:
                 continue
+            pattern = re.compile(rf"(?<!\w){re.escape(needle)}(?!\w)")
             for memory, text in lowered:
-                if needle in text and id(memory) not in matched_ids:
+                if id(memory) not in matched_ids and pattern.search(text):
                     matched_ids.add(id(memory))
                     matched.append(memory)
         remainder = [m for m in contributing if id(m) not in matched_ids]
