@@ -750,21 +750,20 @@ class AnswerGenerator:
         dropping the one that actually holds the answer. Items the LLM
         paraphrased (no literal match) fall back to batch order.
         """
-        matched: list[RecallResult] = []
         matched_ids: set[int] = set()
         lowered = [(m, (m.text or "").lower()) for m in contributing]
+        per_item: list[list[RecallResult]] = []
         for item in items:
             needle = item.lower().strip()
             if not needle:
                 continue
             pattern = re.compile(rf"(?<!\w){re.escape(needle)}(?!\w)")
-            item_matched = False
+            item_matches: list[RecallResult] = []
             for memory, text in lowered:
                 if id(memory) not in matched_ids and pattern.search(text):
                     matched_ids.add(id(memory))
-                    matched.append(memory)
-                    item_matched = True
-            if not item_matched and _NONSPACED_SCRIPT_RE.search(needle):
+                    item_matches.append(memory)
+            if not item_matches and _NONSPACED_SCRIPT_RE.search(needle):
                 # Non-spaced scripts (CJK, Thai): adjacent characters count
                 # as \w, so a correct phrase never matches with boundaries.
                 # Plain containment for these items only — spaced-script
@@ -773,7 +772,16 @@ class AnswerGenerator:
                 for memory, text in lowered:
                     if id(memory) not in matched_ids and needle in text:
                         matched_ids.add(id(memory))
-                        matched.append(memory)
+                        item_matches.append(memory)
+            per_item.append(item_matches)
+        # Round-robin across items: every item's FIRST supporting memory
+        # outranks anyone's second mention, so one frequently-mentioned item
+        # can't crowd the others out of the truncated source list.
+        matched: list[RecallResult] = []
+        for rank in range(max((len(m) for m in per_item), default=0)):
+            for item_matches in per_item:
+                if rank < len(item_matches):
+                    matched.append(item_matches[rank])
         remainder = [m for m in contributing if id(m) not in matched_ids]
         return self._extract_sources(matched + remainder)
 
