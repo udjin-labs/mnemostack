@@ -526,6 +526,8 @@ answer = gen.generate("how many trips did user A take", pool)
 
 `list_finalize="verbatim"` skips the finalize LLM pass and assembles the answer deterministically from the extracted items (the count for count questions, the comma-joined items otherwise). Recommended for non-English corpora: an LLM finalize pass can paraphrase or distort items instead of repeating them verbatim. The default `"llm"` keeps the formatting pass.
 
+**Structured payload fields in the answer prompt.** By default the answer context shows each memory's timestamp, source and text. `AnswerGenerator(context_fields=["author", "amount"])` additionally projects the named payload fields into each memory's context line (`author=…`, lists comma-joined, long values truncated; memories without the field render without it). Use it for structured facts the answer needs — who said it, amounts, your own ingest-time enrichments. Note the boundary: projection only changes what the answer prompt *shows* — retrieval ranks by `text`, so content that must be *findable* (image captions and similar) belongs in the text itself, not in a payload field.
+
 **Non-English corpora.** The built-in answer prompts and the question classifier are English; on other languages the extract/finalize passes degrade instead of helping. Both are pluggable:
 
 ```python

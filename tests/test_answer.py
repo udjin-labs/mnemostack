@@ -252,3 +252,81 @@ def test_format_context_renders_time_of_day():
         ]
     )
     assert "[2023-05-08 13:41]" in ctx
+
+
+def test_format_context_projects_context_fields():
+    from mnemostack.recall.answer import AnswerGenerator
+    from mnemostack.recall.recaller import RecallResult
+
+    memories = [
+        RecallResult(
+            id=1,
+            text="the payment was approved",
+            score=1.0,
+            payload={
+                "timestamp": "2026-03-02T10:15:00",
+                "source": "thread-1",
+                "author": "participant A",
+                "amount": 1250,
+                "tags": ["finance", "approved"],
+            },
+        ),
+        RecallResult(
+            id=2,
+            text="a note without extra fields",
+            score=0.9,
+            payload={"source": "thread-2"},
+        ),
+    ]
+
+    ctx = AnswerGenerator._format_context(memories, context_fields=("author", "amount", "tags"))
+
+    line1, line2 = ctx.splitlines()
+    assert "author=participant A" in line1
+    assert "amount=1250" in line1
+    assert "tags=finance, approved" in line1  # lists render comma-joined
+    # missing fields are silently skipped, not rendered empty
+    assert "author=" not in line2
+    assert "amount=" not in line2
+
+
+def test_format_context_truncates_long_field_values():
+    from mnemostack.recall.answer import AnswerGenerator
+    from mnemostack.recall.recaller import RecallResult
+
+    memories = [
+        RecallResult(
+            id=1,
+            text="short text",
+            score=1.0,
+            payload={"source": "s", "blob": "x" * 500},
+        )
+    ]
+
+    ctx = AnswerGenerator._format_context(memories, context_fields=("blob",))
+
+    assert "x" * 100 + "…" in ctx
+    assert "x" * 101 not in ctx
+
+
+def test_generator_threads_context_fields_into_prompt():
+    from mnemostack.recall import AnswerGenerator
+    from mnemostack.recall.recaller import RecallResult
+
+    llm = FakeLLM("ok\nCONFIDENCE: 0.9")
+    gen = AnswerGenerator(
+        llm=llm,
+        specificity_resolver=False,
+        inference_retry=False,
+        context_fields=["author"],
+    )
+    memory = RecallResult(
+        id=1,
+        text="the meeting was moved",
+        score=1.0,
+        payload={"source": "thread-3", "author": "Teilnehmer B"},
+    )
+
+    gen.generate("who moved the meeting?", [memory])
+
+    assert "author=Teilnehmer B" in llm.last_prompt
