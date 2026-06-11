@@ -5,6 +5,12 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
+DEFAULT_IMAGE_PROMPT = (
+    "Describe this image for a memory index in 2-3 dense sentences: visible objects "
+    "and their attributes, any text or signs VERBATIM, colors, setting, people and "
+    "what they are doing. No speculation beyond what is visible."
+)
+
 
 @dataclass
 class LLMResponse:
@@ -47,3 +53,21 @@ class LLMProvider(ABC):
         if resp.ok:
             return True, f"ok — {resp.text[:30]}"
         return False, resp.error or "unknown error"
+
+    def describe_image(
+        self,
+        image: bytes,
+        mime_type: str = "image/jpeg",
+        prompt: str = DEFAULT_IMAGE_PROMPT,
+        max_tokens: int = 250,
+    ) -> LLMResponse:
+        """Describe an image for indexing (multimodal ingest). Optional capability.
+
+        Providers with vision support override this; the default reports the
+        gap as a normal LLMResponse error (fail-open, never raises), so
+        callers can branch on `.ok` uniformly.
+        """
+        return LLMResponse(
+            text="",
+            error=f"{self.name} does not support image description",
+        )

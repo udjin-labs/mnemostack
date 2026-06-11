@@ -466,12 +466,12 @@ A memory stack that indexes only text answers "Not in memory" to questions whose
 ```python
 from mnemostack.llm import get_llm
 
-llm = get_llm("gemini")
+llm = get_llm("gemini")                 # or get_llm("ollama", model="llava") with a local vision model
 desc = llm.describe_image(photo_bytes, mime_type="image/jpeg")  # one vision call per image
 item = IngestItem(text=f"{message_text} [shared a photo: {desc.text}]", source=..., timestamp=...)
 ```
 
-`describe_image` is fully opt-in — nothing in the ingest or recall paths calls it, and text-only pipelines are unaffected. The default prompt produces a dense, index-oriented description (objects, any text/signs verbatim, setting, actions); pass `prompt=` to customize.
+`describe_image` is fully opt-in — nothing in the ingest or recall paths calls it, and text-only pipelines are unaffected. It works with any provider that has vision support (Gemini; Ollama vision models such as llava, llama3.2-vision, qwen2.5-vl) — providers without it return a normal fail-open error response. The default prompt produces a dense, index-oriented description (objects, any text/signs verbatim, setting, actions); pass `prompt=` to customize.
 - **Streaming-friendly.** `ing.stream(item_iter)` yields per-batch stats so long feeds can be monitored without waiting for the whole stream to drain.
 - **Graceful.** If a single item fails to embed, it is counted as `failed` but the rest of the batch still lands.
 
