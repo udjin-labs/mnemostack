@@ -545,3 +545,24 @@ def test_item_provenance_matches_nonspaced_scripts():
 
     assert answer.text == "猫"
     assert answer.sources[0] == "chat-2"
+
+
+def test_cross_batch_dedup_normalizes_casing(memories):
+    """Batches can't see each other's output — the same item returned with
+    different casing/spacing must not duplicate the list or inflate counts."""
+    llm = SequenceLLM(
+        [
+            '{"items": ["Ibuprofen", "Aspirin"]}',
+            '{"items": ["ibuprofen", "aspirin  forte"]}',
+        ]
+    )
+    gen = AnswerGenerator(
+        llm=llm,
+        category_aware_prompts=True,
+        list_extract_mode=True,
+        list_finalize="verbatim",
+    )
+
+    answer = gen.generate("How many distinct medications were mentioned?", memories)
+
+    assert answer.text == "3"  # Ibuprofen, Aspirin, aspirin forte — not 4
