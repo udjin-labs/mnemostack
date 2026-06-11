@@ -48,6 +48,8 @@ def _args(tmp_path, **overrides) -> argparse.Namespace:
         recreate=True,
         yes=False,
         prune=False,
+        enrich=None,
+        refresh_payloads=False,
         chunk_size=800,
         window_size=1,
     )
