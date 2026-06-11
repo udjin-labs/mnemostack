@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 try:
@@ -54,10 +54,10 @@ from mnemostack.recall import (
     Retriever,
     TemporalRetriever,
     VectorRetriever,
-    apply_rerank_safe,
     build_full_pipeline,
+    recall_flow,
 )
-from mnemostack.recall.pipeline import FileStateStore
+from mnemostack.recall.pipeline import FileStateStore, default_state_path
 from mnemostack.vector import VectorStore
 
 log = logging.getLogger(__name__)
@@ -193,7 +193,7 @@ class ServerConfig:
     bm25_paths: list[str] | None = None  # optional markdown dirs for BM25 corpus
     vector_floor: int = 0
     rerank_mode: str = "relevant_only"
-    state_path: str = "/tmp/mnemostack-server-state.json"
+    state_path: str = field(default_factory=default_state_path)
     auto_record_ior: bool = False
 
     def __post_init__(self) -> None:
@@ -417,16 +417,18 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
 
     def _run_recall_sync(query: str, limit: int, full_pipeline: bool):
         trace = RecallTrace()
-        raw_limit = max(limit * 3, 30) if full_pipeline else limit
-        recalled_results = recaller.recall(query, limit=raw_limit, trace=trace)
-        results = recalled_results
-        if full_pipeline:
-            results = pipeline.apply(query, results)
-            results = apply_rerank_safe(reranker, query, results, trace)
-        results = results[:limit]
-        results = recaller.apply_vector_floor_after_rerank(
-            results,
-            recalled_results,
+        # Reranking is part of the full pipeline; if it was requested but the
+        # LLM never initialized, that is a degradation worth surfacing. With
+        # full_pipeline=False the reranker is off by request, not degraded.
+        if full_pipeline and reranker is None:
+            trace.mark("reranker:unavailable")
+        results = recall_flow(
+            recaller,
+            query,
+            limit,
+            pipeline=pipeline if full_pipeline else None,
+            reranker=reranker if full_pipeline else None,
+            trace=trace,
         )
         if cfg.auto_record_ior:
             record_recall_events(pipeline, results)

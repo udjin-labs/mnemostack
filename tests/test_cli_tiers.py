@@ -88,6 +88,7 @@ def _run_search_capture(tier, json_out=False, results=None):
         limit=10,
         json=json_out,
         tier=tier,
+        raw=True,
     )
     mock_provider = MagicMock(dimension=3072)
     mock_store = MagicMock()
@@ -271,6 +272,7 @@ def test_answer_passes_llm_model_to_provider():
         limit=10,
         json=True,
         tier=None,
+        raw=True,
         bm25_path=[],
         memgraph_uri=None,
         min_confidence=0.5,
@@ -311,3 +313,107 @@ def test_answer_passes_llm_model_to_provider():
 
     assert rc == 0
     get_llm_mock.assert_called_once_with("fake-llm", model="llm-custom")
+
+
+def test_default_search_runs_full_flow():
+    """Without --raw the CLI ranks like the servers: pipeline + flow."""
+
+    args = argparse.Namespace(
+        provider="fake",
+        collection="test",
+        qdrant="http://localhost:6333",
+        query="anything",
+        limit=2,
+        json=True,
+        tier=None,
+        raw=False,
+        llm="fake-llm",
+        llm_model=None,
+        memgraph_uri=None,
+        bm25_path=[],
+    )
+    mock_provider = MagicMock(dimension=3072)
+    mock_store = MagicMock()
+    mock_store.collection_exists.return_value = True
+    mock_recaller = MagicMock()
+    mock_recaller.recall.return_value = FAKE_RESULTS[:6]
+    mock_recaller.apply_vector_floor_after_rerank.side_effect = lambda res, recalled: res
+    fake_pipeline = MagicMock()
+    fake_pipeline.apply.side_effect = lambda q, res: res
+
+    buf = StringIO()
+    with (
+        patch("mnemostack.cli.get_provider", return_value=mock_provider),
+        patch("mnemostack.cli.VectorStore", return_value=mock_store),
+        patch("mnemostack.cli.Recaller", return_value=mock_recaller),
+        patch("mnemostack.cli.build_full_pipeline", return_value=fake_pipeline),
+        patch("mnemostack.cli.get_llm", side_effect=RuntimeError("no key")),
+        patch("sys.stdout", buf),
+    ):
+        rc = cmd_search(args)
+
+    assert rc == 0
+    # wide raw pool requested (3x limit, min 30) — same as the servers
+    assert mock_recaller.recall.call_args.kwargs["limit"] == 30
+    fake_pipeline.apply.assert_called_once()
+    # reranker construction failed (no key) — search still worked, fail-open
+    payload = json.loads(buf.getvalue())
+    assert len(payload) == 2
+
+
+def test_search_passes_rerank_mode_to_reranker():
+    """`--rerank-mode` / config value must reach the Reranker — CLI ranks like
+    the servers only if the reranker contract matches too."""
+
+    args = argparse.Namespace(
+        provider="fake",
+        collection="test",
+        qdrant="http://localhost:6333",
+        query="anything",
+        limit=2,
+        json=True,
+        tier=None,
+        raw=False,
+        llm="fake-llm",
+        llm_model=None,
+        memgraph_uri=None,
+        bm25_path=[],
+        rerank_mode="full_reorder",
+    )
+    mock_provider = MagicMock(dimension=3072)
+    mock_store = MagicMock()
+    mock_store.collection_exists.return_value = True
+    mock_recaller = MagicMock()
+    mock_recaller.recall.return_value = FAKE_RESULTS[:6]
+    mock_recaller.apply_vector_floor_after_rerank.side_effect = lambda res, recalled: res
+    fake_pipeline = MagicMock()
+    fake_pipeline.apply.side_effect = lambda q, res: res
+    fake_reranker = MagicMock()
+    fake_reranker.rerank.side_effect = lambda q, res: res
+
+    with (
+        patch("mnemostack.cli.get_provider", return_value=mock_provider),
+        patch("mnemostack.cli.VectorStore", return_value=mock_store),
+        patch("mnemostack.cli.Recaller", return_value=mock_recaller),
+        patch("mnemostack.cli.build_full_pipeline", return_value=fake_pipeline),
+        patch("mnemostack.cli.get_llm", return_value=MagicMock()),
+        patch("mnemostack.cli.Reranker", return_value=fake_reranker) as reranker_cls,
+        patch("sys.stdout", StringIO()),
+    ):
+        rc = cmd_search(args)
+
+    assert rc == 0
+    assert reranker_cls.call_args.kwargs["rerank_mode"] == "full_reorder"
+
+
+def test_search_and_answer_parsers_accept_rerank_mode():
+    import mnemostack.cli as cli_mod
+
+    parser = cli_mod.build_parser()
+    args = parser.parse_args(["search", "q", "--rerank-mode", "full_reorder"])
+    assert args.rerank_mode == "full_reorder"
+    args = parser.parse_args(["answer", "q", "--rerank-mode", "full_reorder"])
+    assert args.rerank_mode == "full_reorder"
+    # default comes from config (relevant_only unless overridden)
+    args = parser.parse_args(["search", "q"])
+    assert args.rerank_mode

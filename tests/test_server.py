@@ -564,6 +564,20 @@ def test_recall_degraded_when_reranker_unavailable(monkeypatch):
     assert data["results"]  # fail-open: results still served
 
 
+def test_raw_recall_does_not_report_reranker_unavailable(monkeypatch):
+    """full_pipeline=false turns the reranker off by request — that is not a
+    degradation and must not be tagged as one."""
+    app, _ = _patched_app(monkeypatch, with_answer=False)
+    client = TestClient(app)
+
+    resp = client.post("/recall", json={"query": "hello", "full_pipeline": False})
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["degraded"] == []
+    assert data["results"]
+
+
 def test_answer_response_carries_degraded(monkeypatch):
     app, _ = _patched_app(monkeypatch)
     client = TestClient(app)

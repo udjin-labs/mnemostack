@@ -103,12 +103,14 @@ def test_list_extract_falls_back_on_malformed_json(memories, extract_output):
     assert _LIST_PROMPT.split("\n", 1)[0] in llm.prompts[1]
 
 
-def test_list_extract_falls_back_when_finalize_call_fails(memories):
+def test_list_extract_finalize_failure_returns_extracted_items(memories):
+    # Extract succeeded — a finalize hiccup must not discard verified items
+    # by re-generating (which can also leak default-language output when
+    # prompts are localized). Deterministic join instead, no extra LLM call.
     llm = SequenceMaybeFailLLM(
         [
             LLMResponse(text='{"items": ["Luna", "Oliver"]}', tokens_used=10),
             LLMResponse(text="", error="rate limited"),
-            LLMResponse(text="Luna, Oliver\nCONFIDENCE: 0.8", tokens_used=10),
         ]
     )
     gen = AnswerGenerator(llm=llm, category_aware_prompts=True, list_extract_mode=True)
@@ -117,9 +119,33 @@ def test_list_extract_falls_back_when_finalize_call_fails(memories):
 
     assert answer.ok is True
     assert answer.text == "Luna, Oliver"
-    assert answer.confidence == 0.3
-    assert len(llm.prompts) == 3
-    assert _LIST_PROMPT.split("\n", 1)[0] in llm.prompts[2]
+    assert answer.confidence == 0.6
+    assert len(llm.prompts) == 2  # extract + failed finalize, NO re-generation
+
+
+def test_list_extract_finalize_failure_count_returns_number(memories):
+    llm = SequenceMaybeFailLLM(
+        [
+            LLMResponse(text='{"items": ["a", "b", "c"]}', tokens_used=10),
+            LLMResponse(text="", error="rate limited"),
+        ]
+    )
+    gen = AnswerGenerator(llm=llm, category_aware_prompts=True, list_extract_mode=True)
+
+    answer = gen.generate("How many pets does Melanie have?", memories)
+
+    assert answer.text == "3"
+    assert answer.confidence == 0.6
+
+
+def test_abstention_text_is_localizable():
+    llm = SequenceMaybeFailLLM([])
+    gen = AnswerGenerator(llm=llm, abstention_text="Нет в памяти.")
+
+    answer = gen.generate("anything", [])
+
+    assert answer.text == "Нет в памяти."
+    assert answer.confidence == 0.0
 
 
 def test_parse_extracted_items_deduplicates_preserving_order():
@@ -220,3 +246,59 @@ def test_list_extract_handles_specificity(memories):
     )
     assert items_line == 'EXTRACTED ITEMS: ["Oliver", "Luna", "Bailey"]'
     assert "her dog" not in items_line
+
+
+def test_localized_abstention_reaches_builtin_prompts(memories):
+    """The built-in prompts instruct the literal English marker — with a
+    configured abstention text the instruction must use that text instead,
+    or localized deployments still get English abstentions back."""
+    llm = SequenceLLM(["irgendeine Antwort"])
+    gen = AnswerGenerator(
+        llm=llm,
+        abstention_text="Nicht im Speicher.",
+        specificity_resolver=False,
+        inference_retry=False,
+    )
+
+    gen.generate("wann ist es passiert?", memories[:3])
+
+    prompt = llm.prompts[0]
+    assert "Nicht im Speicher." in prompt
+    assert "Not in memory" not in prompt
+
+
+def test_default_abstention_prompts_unchanged(memories):
+    llm = SequenceLLM(["some answer"])
+    gen = AnswerGenerator(llm=llm, specificity_resolver=False, inference_retry=False)
+
+    gen.generate("when did it happen?", memories[:3])
+
+    assert 'reply: "Not in memory."' in llm.prompts[0]
+
+
+def test_prompt_overrides_left_verbatim_under_localized_abstention(memories):
+    """Override authors write their own abstention line — localization must
+    not rewrite their template."""
+    override = "Réponds: {query}\n{context}\nSi rien trouvé: \"Pas en mémoire.\""
+    llm = SequenceLLM(["réponse"])
+    gen = AnswerGenerator(
+        llm=llm,
+        abstention_text="Nicht im Speicher.",
+        prompt_overrides={"general": override},
+        specificity_resolver=False,
+        inference_retry=False,
+    )
+
+    gen.generate("une question quelconque", memories[:3])
+
+    assert "Pas en mémoire." in llm.prompts[0]
+    assert "Nicht im Speicher." not in llm.prompts[0]
+
+
+def test_should_retry_detects_localized_abstention():
+    from mnemostack.recall.inference_retry import should_retry
+
+    assert should_retry("Нет в памяти.", 0.9, abstention_text="Нет в памяти.") is True
+    assert should_retry("eine echte Antwort", 0.9, abstention_text="Nicht im Speicher.") is False
+    # the English literal is still recognized regardless of configuration
+    assert should_retry("Not in memory.", 0.9, abstention_text="Nicht im Speicher.") is True

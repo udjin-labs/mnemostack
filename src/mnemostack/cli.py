@@ -26,11 +26,14 @@ from .recall import (
     BM25Retriever,
     MemgraphRetriever,
     Recaller,
+    Reranker,
     Retriever,
     TemporalRetriever,
     VectorRetriever,
     build_bm25_docs,
+    recall_flow,
 )
+from .recall.pipeline import FileStateStore, build_full_pipeline, default_state_path
 from .synthesis import synthesize
 from .vector import VectorStore
 
@@ -98,6 +101,31 @@ def cmd_health(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def _recall_for_cli(args: argparse.Namespace, recaller, query: str, limit: int):
+    """Run the same recall flow as the HTTP and MCP servers.
+
+    Applies the 8-stage pipeline and the fail-open LLM reranker so the CLI
+    ranks results identically to the serving surfaces. `--raw` skips both
+    and returns plain fused recall (the historical CLI behavior).
+    """
+    if getattr(args, "raw", False):
+        return recaller.recall(query, limit=limit)
+    pipeline = build_full_pipeline(
+        state_store=FileStateStore(default_state_path()),
+        graph_uri=getattr(args, "memgraph_uri", None) or None,
+    )
+    reranker = None
+    try:
+        reranker = Reranker(
+            llm=get_llm(getattr(args, "llm", "gemini"), **model_kwargs(_llm_model(args))),
+            max_items=20,
+            rerank_mode=getattr(args, "rerank_mode", None) or "relevant_only",
+        )
+    except Exception:  # noqa: BLE001 — no LLM key: search still works, unranked by LLM
+        pass
+    return recall_flow(recaller, query, limit, pipeline=pipeline, reranker=reranker)
+
+
 def cmd_search(args: argparse.Namespace) -> int:
     profile = _apply_tier(args)
     provider = get_provider(args.provider, **model_kwargs(_embedding_model(args)))
@@ -114,7 +142,7 @@ def cmd_search(args: argparse.Namespace) -> int:
         return 2
 
     recaller = _build_recaller(args, provider, store)
-    results = recaller.recall(args.query, limit=args.limit)
+    results = _recall_for_cli(args, recaller, args.query, args.limit)
 
     if args.json:
         snippet_chars = profile["snippet_chars"] if profile else None
@@ -220,7 +248,7 @@ def cmd_answer(args: argparse.Namespace) -> int:
         return 2
 
     recaller = _build_recaller(args, provider, store)
-    results = recaller.recall(args.query, limit=args.limit)
+    results = _recall_for_cli(args, recaller, args.query, args.limit)
 
     llm = get_llm(args.llm, **model_kwargs(_llm_model(args)))
     answer_generator_kwargs = {
@@ -397,9 +425,18 @@ def cmd_index(args: argparse.Namespace) -> int:
         return 2
 
     chunks: list[tuple[str, str, dict]] = []  # (id, text, payload) triples
+    # Sources are stored relative to the indexed root, so different roots can
+    # produce the same source name. Record the root in the payload (additive,
+    # not part of the chunk id) so --prune can tell those documents apart.
+    index_root = str((target if target.is_dir() else target.parent).resolve())
+    # Every visited file counts as re-indexed even if it yields zero chunks
+    # (emptied / whitespace-only) — its old chunks are exactly what --prune
+    # must remove.
+    visited_sources: set[str] = set()
     for f in files:
         text = f.read_text(encoding="utf-8", errors="ignore")
         source = str(f.relative_to(target if target.is_dir() else target.parent))
+        visited_sources.add(source)
         file_chunks: list[tuple[int, str]] = []
         for i in range(0, len(text), args.chunk_size):
             chunk = text[i : i + args.chunk_size]
@@ -415,6 +452,7 @@ def cmd_index(args: argparse.Namespace) -> int:
                         "text": chunk,
                         "source": source,
                         "offset": i,
+                        "index_root": index_root,
                     },
                 )
             )
@@ -432,6 +470,7 @@ def cmd_index(args: argparse.Namespace) -> int:
                             "text": chunk,
                             "source": source,
                             "offset": middle_offset,
+                            "index_root": index_root,
                             "chunk_window": args.window_size,
                             "chunk_kind": "sliding_window",
                             "chunk_start_offset": window[0][0],
@@ -456,18 +495,41 @@ def cmd_index(args: argparse.Namespace) -> int:
 
     inserted = 0
     failed = 0
+    failed_sources: set[str] = set()
     for cid, text, payload in to_embed:
         vec = provider.embed(text)
         if not vec:
             failed += 1
+            failed_sources.add(payload["source"])
             continue
         store.upsert(cid, vec, payload)
         inserted += 1
 
+    pruned = 0
+    if args.prune and not args.recreate:
+        from .ingest import prune_stale_chunks
+
+        fresh_by_source: dict[str, set[str]] = {source: set() for source in visited_sources}
+        for cid, _text, payload in chunks:
+            fresh_by_source[payload["source"]].add(cid)
+        # A source with a failed embedding has a fresh chunk that never landed.
+        # Pruning it would delete the previous chunk without a replacement, so
+        # leave such sources untouched this run.
+        for source in failed_sources:
+            fresh_by_source.pop(source, None)
+        if failed_sources:
+            print(
+                f"warning: prune skipped for {len(failed_sources)} source(s) "
+                "with failed embeddings; re-run after the provider recovers",
+                file=sys.stderr,
+            )
+        pruned = prune_stale_chunks(store, fresh_by_source, index_root=index_root)
+
     print(
         f"Done: inserted/updated {inserted}, skipped {skipped},"
         f" failed-embedding {failed}, total chunks seen {len(chunks)}"
-        f" in collection '{args.collection}'."
+        + (f", pruned {pruned} stale" if args.prune else "")
+        + f" in collection '{args.collection}'."
     )
     return 0
 
@@ -549,6 +611,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--memgraph-uri",
         default=cfg.graph.uri,
         help="Memgraph URI to enable graph recall (e.g. bolt://localhost:7687)",
+    )
+    p_search.add_argument(
+        "--raw",
+        action="store_true",
+        help="Skip the ranking pipeline and LLM reranker (plain fused recall)",
+    )
+    p_search.add_argument(
+        "--rerank-mode",
+        choices=sorted(RERANK_MODES),
+        default=cfg.recall.rerank_mode,
+        help="LLM reranker contract: relevant_only returns a subset, full_reorder ranks all",
     )
     p_search.add_argument(
         "--tier",
@@ -659,6 +732,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Memgraph URI to enable graph recall (e.g. bolt://localhost:7687)",
     )
     p_answer.add_argument(
+        "--raw",
+        action="store_true",
+        help="Skip the ranking pipeline and LLM reranker (plain fused recall)",
+    )
+    p_answer.add_argument(
+        "--rerank-mode",
+        choices=sorted(RERANK_MODES),
+        default=cfg.recall.rerank_mode,
+        help="LLM reranker contract: relevant_only returns a subset, full_reorder ranks all",
+    )
+    p_answer.add_argument(
         "--tier",
         type=int,
         choices=[1, 2, 3],
@@ -712,6 +796,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_index.add_argument("--recreate", action="store_true", help="Drop existing collection")
     p_index.add_argument(
+        "--prune",
+        action="store_true",
+        help=(
+            "After indexing, delete stale chunks of the indexed files — points whose "
+            "ids the files no longer produce (edits shifted offsets, documents shrank). "
+            "Scoped to this indexing root: other sources, same-named files indexed "
+            "from other roots, and chunks indexed by versions that did not record a "
+            "root are not touched."
+        ),
+    )
+    p_index.add_argument(
         "--yes",
         "-y",
         action="store_true",
@@ -755,7 +850,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_feedback.add_argument(
         "--state-path",
-        default="/tmp/mnemostack-server-state.json",
+        default=default_state_path(),
         help="Pipeline state file path",
     )
     p_feedback.add_argument("--json", action="store_true", help="JSON output")
@@ -791,7 +886,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_mcp.add_argument(
         "--state-path",
-        default="/tmp/mnemostack-server-state.json",
+        default=default_state_path(),
         help="Pipeline state file path for feedback",
     )
     p_mcp.add_argument(
@@ -857,7 +952,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_serve.add_argument(
         "--state-path",
-        default="/tmp/mnemostack-server-state.json",
+        default=default_state_path(),
         help="Pipeline state file path",
     )
     p_serve.add_argument(

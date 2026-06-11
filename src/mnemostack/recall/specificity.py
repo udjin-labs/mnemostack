@@ -159,6 +159,10 @@ def resolve_specificity(
     if not resp.ok:
         return draft_answer
     rewritten = resp.text.strip()
+    # LLMs occasionally echo the prompt's final label back; strip it so the
+    # marker never leaks into the answer the caller shows.
+    if rewritten.upper().startswith("REWRITTEN_ANSWER:"):
+        rewritten = rewritten[len("REWRITTEN_ANSWER:") :].strip()
     return rewritten or draft_answer
 
 

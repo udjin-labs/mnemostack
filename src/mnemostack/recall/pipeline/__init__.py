@@ -34,7 +34,7 @@ from .stages import (
     QLearningReranker,
     is_exact_token_query,
 )
-from .state import FileStateStore, InMemoryStateStore, StateStore
+from .state import FileStateStore, InMemoryStateStore, StateStore, default_state_path
 
 __all__ = [
     "Pipeline",
@@ -43,6 +43,7 @@ __all__ = [
     "StateStore",
     "InMemoryStateStore",
     "FileStateStore",
+    "default_state_path",
     "ClassifyQuery",
     "ExactTokenRescue",
     "GraphResurrection",
