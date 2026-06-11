@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import time
 import urllib.request
 from urllib.error import HTTPError
@@ -12,6 +13,11 @@ from urllib.error import HTTPError
 from .base import EmbeddingProvider
 
 logger = logging.getLogger(__name__)
+
+def _backoff(attempt: int, base: float = 1.0) -> float:
+    """Exponential backoff with jitter so concurrent retries don't synchronize."""
+    return base * (2**attempt) * (0.5 + random.random())
+
 
 
 class GeminiProvider(EmbeddingProvider):
@@ -78,18 +84,38 @@ class GeminiProvider(EmbeddingProvider):
                         attempt + 1,
                         self.max_retries,
                     )
-                    time.sleep(2**attempt)
+                    time.sleep(_backoff(attempt))
                     continue
                 logger.error("gemini embed failed: HTTP %d %s", e.code, e.reason)
                 return []
             except Exception as e:  # noqa: BLE001
                 if attempt < self.max_retries - 1:
                     logger.warning("gemini embed retry: %s", e)
-                    time.sleep(1)
+                    time.sleep(_backoff(0))
                     continue
                 logger.error("gemini embed exhausted retries: %s", e)
                 return []
         return []
+
+
+    def _sequential_fallback(self, texts: list[str]) -> list[list[float]]:
+        """Per-item fallback with a storm guard.
+
+        When the batch endpoint dies while the API itself is down, falling
+        back to N sequential calls multiplies the retry traffic by N against
+        an already-failing service. Probe with the first item: if even that
+        fails, report failure for the whole batch instead of hammering.
+        """
+        if not texts:
+            return []
+        first = self.embed(texts[0])
+        if not first:
+            logger.error(
+                "gemini sequential fallback probe failed — skipping %d remaining items",
+                len(texts) - 1,
+            )
+            return [first] + [[] for _ in texts[1:]]
+        return [first] + [self.embed(t) for t in texts[1:]]
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         """Batch embedding via :batchEmbedContents endpoint.
@@ -134,7 +160,7 @@ class GeminiProvider(EmbeddingProvider):
                 embeddings = data.get("embeddings", [])
                 if len(embeddings) != len(texts):
                     # Fallback to sequential if batch mis-aligned
-                    return [self.embed(t) for t in texts]
+                    return self._sequential_fallback(texts)
                 return [e.get("values", []) for e in embeddings]
             except HTTPError as e:
                 if e.code in (429, 500, 502, 503, 504) and attempt < self.max_retries - 1:
@@ -144,18 +170,18 @@ class GeminiProvider(EmbeddingProvider):
                         attempt + 1,
                         self.max_retries,
                     )
-                    time.sleep(2**attempt)
+                    time.sleep(_backoff(attempt))
                     continue
                 logger.warning(
                     "gemini batch endpoint failed (HTTP %d), falling back to sequential",
                     e.code,
                 )
-                return [self.embed(t) for t in texts]
+                return self._sequential_fallback(texts)
             except Exception as e:  # noqa: BLE001
                 if attempt < self.max_retries - 1:
                     logger.warning("gemini batch retry: %s", e)
-                    time.sleep(1)
+                    time.sleep(_backoff(0))
                     continue
                 logger.warning("gemini batch failed, falling back to sequential: %s", e)
-                return [self.embed(t) for t in texts]
-        return [self.embed(t) for t in texts]
+                return self._sequential_fallback(texts)
+        return self._sequential_fallback(texts)

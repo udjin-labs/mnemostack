@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import random
 import time
 import urllib.request
 from urllib.error import HTTPError
@@ -119,12 +120,12 @@ class GeminiLLM(LLMProvider):
                 )
             except HTTPError as e:
                 if e.code in (429, 500, 502, 503, 504) and attempt < self.max_retries - 1:
-                    time.sleep(2**attempt)
+                    time.sleep((2**attempt) * (0.5 + random.random()))
                     continue
                 return LLMResponse(text="", error=f"HTTP {e.code}: {e.reason}")
             except Exception as e:  # noqa: BLE001
                 if attempt < self.max_retries - 1:
-                    time.sleep(1)
+                    time.sleep(0.5 + random.random())
                     continue
                 return LLMResponse(text="", error=str(e))
         return LLMResponse(text="", error="exhausted retries")
