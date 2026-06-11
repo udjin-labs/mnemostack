@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-11
+
 ### Security
 
 - **Tenant-isolation leak in filtered recall (affects 0.5.0 and earlier)**: in all prior releases, several recall paths ignored `filters=`, so a filtered fused recall could return data from outside the filtered scope — in multi-tenant deployments, **one tenant's query could return another tenant's chunks**. `Recaller.recall(filters=)` and `AnswerGenerator.generate(recall_filters=)` were library-level APIs in those releases (HTTP/MCP/CLI did not expose filters yet), so deployments that relied on them for isolation — rather than post-filtering results themselves — are affected and **should upgrade**. The leaking paths, all fixed and covered by adversarial isolation tests: `BM25Retriever` (silently ignored filters; now applies the same semantics in-process via the new exported `payload_matches`, restricting candidates *before* the top-K cut), the MCA exact-token arm, the legacy `Recaller(bm25_docs=...)` constructor path, `TemporalRetriever` (replaced a caller timestamp constraint with the parsed query window instead of intersecting), the answer generator's expansion-retry sub-recalls, and pipeline-appended results (graph resurrection). Sources that cannot attribute results to the filtered scope (the knowledge-graph retriever — graph nodes carry no chunk payload) now contribute nothing rather than leak.
@@ -21,6 +23,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Payload refresh without re-embedding**: `mnemostack index --refresh-payloads` rewrites the payloads of already-indexed chunks in place via the new `VectorStore.set_payload(id, payload)` (merge semantics, vectors untouched), so enrichment output and other new payload fields reach existing collections without paying for re-embedding. Enrichment records which keys it wrote (`_enrich_keys` in the payload); refresh deletes keys a previous enrichment owned that the new run no longer produces (new `VectorStore.delete_payload_keys`), so stale enriched facts stop feeding `filters=` and `context_fields=` while fields written by other paths are left alone. Points owned by another index root are never refreshed.
 
 ### Changed
+
+- **Ollama thinking is disabled by default**: `OllamaLLM` now sends `think=False` unless callers opt into another value. Reasoning-model users who relied on thinking should pass `think=True`; pass `think=None` to omit the field and keep the model's own default.
+
+### Fixed
 
 - **List/count extraction is order-insensitive**: in `list_extract_mode` the extract pass now walks the whole candidate pool in batches (`list_extract_batch_size`, default 40) and merges items across batches, instead of reading only the top 40. Pool position no longer decides whether a memory is seen — the pool order itself is non-deterministic (RRF over expanded queries), which made extraction results vary run-to-run. Cost is one LLM call per batch instead of one total; a failed batch is skipped without discarding the other batches' items.
 - **Empty extracts are retried once**: a non-empty pool with a zero-item extract gets one more extraction pass before falling back/abstaining (counter: `mnemostack.answer.list_extract_empty_retry`). Extraction is the lossy, non-deterministic step — retrieval doesn't change between passes, the LLM's reading does.
