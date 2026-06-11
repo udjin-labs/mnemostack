@@ -12,9 +12,11 @@ configured embedding provider (GEMINI_API_KEY for gemini, or a running Ollama).
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 from . import __version__
 from .config import DEFAULT_CONFIG_PATHS, Config, generate_example_config, model_kwargs
@@ -99,6 +101,23 @@ def cmd_health(args: argparse.Namespace) -> int:
         return 1
 
     return 0 if ok else 1
+
+
+def _load_enricher(spec: str):
+    """Import a payload enricher from a 'package.module:function' spec."""
+    module_name, sep, attr = spec.partition(":")
+    if not sep or not module_name or not attr:
+        print("error: --enrich must look like 'package.module:function'", file=sys.stderr)
+        raise SystemExit(2)
+    try:
+        func = getattr(importlib.import_module(module_name), attr)
+    except (ImportError, AttributeError) as e:
+        print(f"error: cannot load --enrich {spec!r}: {e}", file=sys.stderr)
+        raise SystemExit(2) from e
+    if not callable(func):
+        print(f"error: --enrich {spec!r} is not callable", file=sys.stderr)
+        raise SystemExit(2)
+    return func
 
 
 def _parse_filters(args: argparse.Namespace) -> dict | None:
@@ -445,6 +464,10 @@ def cmd_index(args: argparse.Namespace) -> int:
         print("error: --window-size must be >= 1", file=sys.stderr)
         return 2
 
+    from .ingest import IngestItem, apply_enrichment
+
+    enricher = _load_enricher(args.enrich) if args.enrich else None
+
     chunks: list[tuple[str, str, dict]] = []  # (id, text, payload) triples
     # Sources are stored relative to the indexed root, so different roots can
     # produce the same source name. Record the root in the payload (additive,
@@ -465,40 +488,38 @@ def cmd_index(args: argparse.Namespace) -> int:
                 continue
             file_chunks.append((i, chunk))
             cid = _stable_chunk_id(source, i, chunk)
-            chunks.append(
-                (
-                    cid,
-                    chunk,
-                    {
-                        "text": chunk,
-                        "source": source,
-                        "offset": i,
-                        "index_root": index_root,
-                    },
-                )
-            )
+            payload: dict[str, Any] = {
+                "text": chunk,
+                "source": source,
+                "offset": i,
+                "index_root": index_root,
+            }
+            if enricher is not None:
+                apply_enrichment(enricher, IngestItem(text=chunk, source=source, offset=i), payload)
+            chunks.append((cid, chunk, payload))
         if args.window_size > 1:
             for start in range(0, len(file_chunks) - args.window_size + 1):
                 window = file_chunks[start : start + args.window_size]
                 middle_offset, _middle_text = window[args.window_size // 2]
                 chunk = "\n".join(piece for _offset, piece in window)
                 cid = _stable_chunk_id(source, middle_offset, chunk)
-                chunks.append(
-                    (
-                        cid,
-                        chunk,
-                        {
-                            "text": chunk,
-                            "source": source,
-                            "offset": middle_offset,
-                            "index_root": index_root,
-                            "chunk_window": args.window_size,
-                            "chunk_kind": "sliding_window",
-                            "chunk_start_offset": window[0][0],
-                            "chunk_end_offset": window[-1][0],
-                        },
+                payload = {
+                    "text": chunk,
+                    "source": source,
+                    "offset": middle_offset,
+                    "index_root": index_root,
+                    "chunk_window": args.window_size,
+                    "chunk_kind": "sliding_window",
+                    "chunk_start_offset": window[0][0],
+                    "chunk_end_offset": window[-1][0],
+                }
+                if enricher is not None:
+                    apply_enrichment(
+                        enricher,
+                        IngestItem(text=chunk, source=source, offset=middle_offset),
+                        payload,
                     )
-                )
+                chunks.append((cid, chunk, payload))
 
     # Load existing point IDs once so re-runs skip unchanged chunks without
     # re-embedding (saves API quota / local GPU time).
@@ -526,6 +547,16 @@ def cmd_index(args: argparse.Namespace) -> int:
         store.upsert(cid, vec, payload)
         inserted += 1
 
+    refreshed = 0
+    if args.refresh_payloads and existing_ids:
+        # Payload-only rewrite of chunks that were skipped as already
+        # indexed: applies new payload fields (enrichment output,
+        # index_root) to existing points without paying for re-embedding.
+        for cid, _text, payload in chunks:
+            if cid in existing_ids:
+                store.set_payload(cid, payload)
+                refreshed += 1
+
     pruned = 0
     if args.prune and not args.recreate:
         from .ingest import prune_stale_chunks
@@ -549,6 +580,7 @@ def cmd_index(args: argparse.Namespace) -> int:
     print(
         f"Done: inserted/updated {inserted}, skipped {skipped},"
         f" failed-embedding {failed}, total chunks seen {len(chunks)}"
+        + (f", refreshed {refreshed} payloads" if args.refresh_payloads else "")
         + (f", pruned {pruned} stale" if args.prune else "")
         + f" in collection '{args.collection}'."
     )
@@ -832,6 +864,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Adjacent chunks to concatenate into overlapping context chunks (1 disables)",
     )
     p_index.add_argument("--recreate", action="store_true", help="Drop existing collection")
+    p_index.add_argument(
+        "--enrich",
+        default=None,
+        help=(
+            "Dotted path 'package.module:function' to a payload enricher: called "
+            "with each chunk as an IngestItem, returns a dict merged into the "
+            "chunk payload (fail-open; cannot override text/source/offset)"
+        ),
+    )
+    p_index.add_argument(
+        "--refresh-payloads",
+        action="store_true",
+        help=(
+            "Rewrite payloads of already-indexed chunks in place, without "
+            "re-embedding — applies --enrich output and other new payload "
+            "fields to existing points"
+        ),
+    )
     p_index.add_argument(
         "--prune",
         action="store_true",

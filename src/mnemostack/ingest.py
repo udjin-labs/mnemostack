@@ -37,7 +37,7 @@ import logging
 import re
 import uuid
 from collections import OrderedDict, deque
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -115,6 +115,53 @@ def _item_tags(item: IngestItem) -> list[str]:
     if isinstance(raw_tags, str):
         raw_tags = [raw_tags]
     return [str(tag) for tag in raw_tags if str(tag)]
+
+
+# Keys an enricher may never override: text/source/offset feed
+# stable_chunk_id, index_root scopes pruning.
+_PROTECTED_PAYLOAD_KEYS = frozenset({"text", "source", "offset", "index_root"})
+
+
+def apply_enrichment(
+    enrich: Callable[[IngestItem], dict[str, Any]] | None,
+    item: IngestItem,
+    payload: dict[str, Any],
+) -> None:
+    """Merge an enricher's output into *payload*, fail-open.
+
+    The enricher is user-supplied (dates, amounts, entities — content
+    extraction is corpus-specific and stays out of core); a raising or
+    misbehaving hook logs a warning and the item is indexed without
+    enrichment. Protected keys and an explicit item timestamp are never
+    overridden; for other keys the enricher wins over `metadata` (it runs
+    later in the pipeline).
+    """
+    if enrich is None:
+        return
+    try:
+        extra = enrich(item)
+    except Exception as exc:  # noqa: BLE001 — user hook must not break ingest
+        counter("mnemostack.ingest.enrich_failed", 1)
+        log.warning(
+            "enrich hook failed for %s (%s) — indexing without enrichment",
+            item.source,
+            exc,
+        )
+        return
+    if not isinstance(extra, dict):
+        counter("mnemostack.ingest.enrich_failed", 1)
+        log.warning(
+            "enrich hook returned %s for %s — expected dict; ignored",
+            type(extra).__name__,
+            item.source,
+        )
+        return
+    for key, value in extra.items():
+        if key in _PROTECTED_PAYLOAD_KEYS:
+            continue
+        if key == "timestamp" and item.timestamp:
+            continue  # the explicit item timestamp is authoritative
+        payload[key] = value
 
 
 def prune_stale_chunks(
@@ -373,6 +420,11 @@ class Ingestor:
         graph: optional graph store used to link indexed files to tag nodes
         window_size: number of adjacent items to concatenate into overlapping
             context chunks. 1 preserves the current one-item-per-chunk behavior.
+        enrich: optional payload enricher `callable(IngestItem) -> dict`,
+            called for every final item (including assembled window chunks);
+            the returned dict is merged into the payload. Fail-open: a
+            raising hook logs a warning and the item is indexed without
+            enrichment. See `apply_enrichment` for override rules.
 
     The ingestor does NOT create the Qdrant collection — call `store.ensure_collection()`
     yourself. This keeps the ingestor cheap to instantiate in servers where
@@ -390,6 +442,7 @@ class Ingestor:
         graph: Any | None = None,
         window_size: int = 1,
         window_separator: str = DEFAULT_WINDOW_SEPARATOR,
+        enrich: Callable[[IngestItem], dict[str, Any]] | None = None,
     ):
         self.embedding = embedding
         self.store = vector_store
@@ -401,6 +454,7 @@ class Ingestor:
         self.graph = graph
         self.window_size = window_size
         self.window_separator = window_separator
+        self.enrich = enrich
         self._seen = _SeenCache(seen_cache_size) if skip_seen else None
 
     # ---- Public API ----
@@ -487,6 +541,7 @@ class Ingestor:
             }
             if item.timestamp:
                 payload["timestamp"] = item.timestamp
+            apply_enrichment(self.enrich, item, payload)
             payload.setdefault("indexed_at", datetime.now(timezone.utc).isoformat())
             tags = _item_tags(item)
             if tags:

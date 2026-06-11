@@ -310,3 +310,111 @@ def test_window_chunks_without_ts_omit_range_keys():
     assert "window_start_ts" not in windows[0]
     assert "window_end_ts" not in windows[0]
     assert "timestamp" not in windows[0]
+
+
+def test_enrich_merges_into_payload():
+    emb = _FakeEmbedding()
+    store = _FakeStore()
+
+    def enricher(item):
+        return {"char_count": len(item.text), "lang_hint": "neutral"}
+
+    ing = Ingestor(embedding=emb, vector_store=store, enrich=enricher)
+    ing.ingest([IngestItem(text="participant A sent a payment", source="notes/a.md")])
+
+    payload = store.upserts[0][2]
+    assert payload["char_count"] == len("participant A sent a payment")
+    assert payload["lang_hint"] == "neutral"
+
+
+def test_enrich_failure_is_fail_open():
+    emb = _FakeEmbedding()
+    store = _FakeStore()
+
+    def broken(item):
+        raise RuntimeError("user extractor exploded")
+
+    ing = Ingestor(embedding=emb, vector_store=store, enrich=broken)
+    stats = ing.ingest([IngestItem(text="still indexed", source="notes/a.md")])
+
+    assert stats.upserted == 1
+    payload = store.upserts[0][2]
+    assert payload["text"] == "still indexed"
+
+
+def test_enrich_non_dict_return_ignored():
+    emb = _FakeEmbedding()
+    store = _FakeStore()
+
+    ing = Ingestor(embedding=emb, vector_store=store, enrich=lambda item: ["not", "a", "dict"])
+    stats = ing.ingest([IngestItem(text="still indexed", source="notes/a.md")])
+
+    assert stats.upserted == 1
+
+
+def test_enrich_cannot_override_protected_keys():
+    emb = _FakeEmbedding()
+    store = _FakeStore()
+
+    def hostile(item):
+        return {
+            "text": "REPLACED",
+            "source": "elsewhere.md",
+            "offset": 999,
+            "index_root": "/evil",
+            "timestamp": "1970-01-01T00:00:00Z",
+            "extra": "kept",
+        }
+
+    ing = Ingestor(embedding=emb, vector_store=store, enrich=hostile)
+    ing.ingest(
+        [
+            IngestItem(
+                text="original",
+                source="notes/a.md",
+                timestamp="2026-06-01T10:00:00Z",
+            )
+        ]
+    )
+
+    payload = store.upserts[0][2]
+    assert payload["text"] == "original"
+    assert payload["source"] == "notes/a.md"
+    assert payload["offset"] == 0
+    assert "index_root" not in payload
+    assert payload["timestamp"] == "2026-06-01T10:00:00Z"  # explicit item ts wins
+    assert payload["extra"] == "kept"
+
+
+def test_enrich_without_explicit_timestamp_may_set_it():
+    emb = _FakeEmbedding()
+    store = _FakeStore()
+
+    ing = Ingestor(
+        embedding=emb,
+        vector_store=store,
+        enrich=lambda item: {"timestamp": "2026-05-01T00:00:00Z"},
+    )
+    ing.ingest([IngestItem(text="undated note", source="notes/a.md")])
+
+    assert store.upserts[0][2]["timestamp"] == "2026-05-01T00:00:00Z"
+
+
+def test_enrich_sees_assembled_window_text():
+    emb = _FakeEmbedding()
+    store = _FakeStore()
+    seen_texts: list[str] = []
+
+    def spy(item):
+        seen_texts.append(item.text)
+        return {}
+
+    ing = Ingestor(embedding=emb, vector_store=store, window_size=2, enrich=spy)
+    ing.ingest(
+        [
+            IngestItem(text="first", source="notes/a.md", offset=0),
+            IngestItem(text="second", source="notes/a.md", offset=100),
+        ]
+    )
+
+    assert any("first" in t and "second" in t for t in seen_texts)
