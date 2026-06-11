@@ -77,3 +77,34 @@ def test_describe_image_error_is_fail_open(monkeypatch):
     resp = llm.describe_image(b"x")
 
     assert not resp.ok and "network down" in (resp.error or "")
+
+
+def test_extract_text_skips_thought_parts(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(req, timeout=0):
+        captured["body"] = json.loads(req.data.decode())
+        return _FakeResponse(
+            json.dumps(
+                {
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [
+                                    {"text": "let me reason about this...", "thought": True},
+                                    {"text": "21 May "},
+                                    {"text": "2023"},
+                                ]
+                            }
+                        }
+                    ]
+                }
+            ).encode()
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    llm = GeminiLLM(api_key="test-key")
+
+    resp = llm.generate("when?")
+
+    assert resp.ok and resp.text == "21 May 2023"
