@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import time
@@ -9,6 +10,12 @@ import urllib.request
 from urllib.error import HTTPError
 
 from .base import LLMProvider, LLMResponse
+
+DEFAULT_IMAGE_PROMPT = (
+    "Describe this image for a memory index in 2-3 dense sentences: visible objects "
+    "and their attributes, any text or signs VERBATIM, colors, setting, people and "
+    "what they are doing. No speculation beyond what is visible."
+)
 
 
 class GeminiLLM(LLMProvider):
@@ -51,6 +58,34 @@ class GeminiLLM(LLMProvider):
         max_tokens: int = 200,
         temperature: float = 0.0,
     ) -> LLMResponse:
+        return self._generate_content([{"text": prompt}], max_tokens, temperature)
+
+    def describe_image(
+        self,
+        image: bytes,
+        mime_type: str = "image/jpeg",
+        prompt: str = DEFAULT_IMAGE_PROMPT,
+        max_tokens: int = 250,
+    ) -> LLMResponse:
+        """Describe an image for indexing (multimodal ingest).
+
+        Returns a dense textual description suitable for embedding alongside
+        the message that shared the image. Without it, a memory stack
+        silently loses whatever the image conveyed — append the result to
+        the ingested item text, e.g. ``f"{text} [shared a photo: {desc}]"``.
+        """
+        parts: list[dict] = [
+            {"text": prompt},
+            {"inline_data": {"mime_type": mime_type, "data": base64.b64encode(image).decode()}},
+        ]
+        return self._generate_content(parts, max_tokens, temperature=0.0)
+
+    def _generate_content(
+        self,
+        parts: list[dict],
+        max_tokens: int,
+        temperature: float,
+    ) -> LLMResponse:
         url = f"{self.BASE_URL}/{self.model}:generateContent"
         gen_config: dict = {
             "temperature": temperature,
@@ -60,7 +95,7 @@ class GeminiLLM(LLMProvider):
             # thinkingBudget=0 only supported on Flash variants, not Pro
             gen_config["thinkingConfig"] = {"thinkingBudget": self.thinking_budget}
         payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
+            "contents": [{"parts": parts}],
             "generationConfig": gen_config,
         }
 
