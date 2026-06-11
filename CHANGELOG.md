@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-06-11
+
+### Added
+
+- **Provider-universal image description**: `describe_image()` is now available on the `LLMProvider` base class. `OllamaLLM.describe_image()` adds a real implementation through `/api/generate` with the `images` field for vision-capable models such as llava, llama3.2-vision, and qwen2.5-vl. Providers without vision support return a fail-open `LLMResponse` error instead of breaking ingestion.
+
+### Fixed
+
+- **Gemini thinking-model text extraction**: `GeminiLLM._extract_text()` now joins answer text parts and skips thought parts, so Gemini Pro and Flash models with a thinking budget no longer return empty extraction when a thought part appears first.
+
 ## [0.4.6] - 2026-06-11
 
 ### Added
