@@ -514,9 +514,22 @@ def cmd_index(args: argparse.Namespace) -> int:
                     "chunk_end_offset": window[-1][0],
                 }
                 if enricher is not None:
+                    # Window metadata travels on the item so enrichers shared
+                    # with Ingestor(enrich=...) can branch on chunk_kind /
+                    # window offsets for CLI window chunks too.
                     apply_enrichment(
                         enricher,
-                        IngestItem(text=chunk, source=source, offset=middle_offset),
+                        IngestItem(
+                            text=chunk,
+                            source=source,
+                            offset=middle_offset,
+                            metadata={
+                                "chunk_window": args.window_size,
+                                "chunk_kind": "sliding_window",
+                                "chunk_start_offset": window[0][0],
+                                "chunk_end_offset": window[-1][0],
+                            },
+                        ),
                         payload,
                     )
                 chunks.append((cid, chunk, payload))
