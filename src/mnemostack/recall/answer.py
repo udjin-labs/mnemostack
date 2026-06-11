@@ -236,6 +236,19 @@ _PROMPT_BY_CATEGORY = {
     "general": _DEFAULT_PROMPT,
 }
 
+# Placeholders each overridable prompt must contain (see prompt_overrides).
+_OVERRIDE_PLACEHOLDERS = {
+    "list": ("{context}", "{query}"),
+    "count": ("{context}", "{query}"),
+    "temporal": ("{context}", "{query}"),
+    "multihop": ("{context}", "{query}"),
+    "inference": ("{context}", "{query}"),
+    "adversarial": ("{context}", "{query}"),
+    "general": ("{context}", "{query}"),
+    "list_extract": ("{context}", "{query}"),
+    "list_finalize": ("{query}", "{items}"),
+}
+
 _MONTH_PATTERN = (
     r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
     r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|sept|oct(?:ober)?|"
@@ -347,6 +360,7 @@ class AnswerGenerator:
         recaller: Recaller | None = None,
         retry_with_expansion: bool = False,
         expansion_llm: LLMProvider | None = None,
+        prompt_overrides: dict[str, str] | None = None,
     ):
         self.llm = llm
         self.max_memories = max_memories
@@ -361,27 +375,57 @@ class AnswerGenerator:
         self.recaller = recaller
         self.retry_with_expansion = retry_with_expansion
         self.expansion_llm = expansion_llm
+        self.prompt_overrides = dict(prompt_overrides or {})
+        for name, template in self.prompt_overrides.items():
+            placeholders = _OVERRIDE_PLACEHOLDERS.get(name)
+            if placeholders is None:
+                raise ValueError(
+                    f"unknown prompt override {name!r}; "
+                    f"valid names: {sorted(_OVERRIDE_PLACEHOLDERS)}"
+                )
+            missing = [ph for ph in placeholders if ph not in template]
+            if missing:
+                raise ValueError(
+                    f"prompt override {name!r} must contain {missing} placeholders"
+                )
 
     def generate(
         self,
         query: str,
         memories: list[RecallResult],
         recall_filters: dict[str, object] | None = None,
+        category: str | None = None,
     ) -> Answer:
-        """Synthesize answer from retrieved memories."""
+        """Synthesize answer from retrieved memories.
+
+        `category` overrides the built-in question classifier — pass it when
+        the caller routes question classes itself (the classifier's patterns
+        are English; non-English pipelines should classify on their side).
+        Valid values: the keys of the category prompt map ("list", "count",
+        "temporal", "multihop", "inference", "adversarial", "general").
+        """
         counter("mnemostack.answer.calls", 1)
 
+        if category is not None and category not in _PROMPT_BY_CATEGORY:
+            raise ValueError(
+                f"unknown category {category!r}; valid: {sorted(_PROMPT_BY_CATEGORY)}"
+            )
+
         prompt_template = self.prompt_template
-        category = "general"
+        explicit_category = category
+        category = explicit_category or "general"
         if self.category_aware_prompts:
-            category = classify_question(query)
+            if explicit_category is None:
+                category = classify_question(query)
             counter(
                 "mnemostack.answer.question_category",
                 1,
                 labels={"category": category},
             )
             if not self._custom_prompt_template:
-                prompt_template = _PROMPT_BY_CATEGORY[category]
+                prompt_template = self.prompt_overrides.get(
+                    category, _PROMPT_BY_CATEGORY[category]
+                )
 
         if not memories:
             counter("mnemostack.answer.empty_memory", 1)
@@ -572,7 +616,7 @@ class AnswerGenerator:
     def _generate_list_extract(self, query: str, memories: list[RecallResult]) -> Answer:
         extract_memories = memories[:40]
         context = self._format_context(extract_memories)
-        prompt = _LIST_EXTRACT_PROMPT.format(
+        prompt = self.prompt_overrides.get("list_extract", _LIST_EXTRACT_PROMPT).format(
             n_memories=len(extract_memories),
             context=context,
             query=query,
@@ -591,7 +635,8 @@ class AnswerGenerator:
         if not items:
             return self._fallback_list_answer(query, memories)
 
-        finalize_prompt = _LIST_FINALIZE_PROMPT.format(query=query, items=json.dumps(items))
+        finalize_template = self.prompt_overrides.get("list_finalize", _LIST_FINALIZE_PROMPT)
+        finalize_prompt = finalize_template.format(query=query, items=json.dumps(items))
         with histogram("mnemostack.answer.llm_latency_ms"):
             final_resp = self.llm.generate(finalize_prompt, max_tokens=self.max_tokens)
         if not final_resp.ok:
@@ -612,7 +657,7 @@ class AnswerGenerator:
         answer = self._generate_single_prompt(
             query=query,
             memories=memories[: self.max_memories],
-            prompt_template=_LIST_PROMPT,
+            prompt_template=self.prompt_overrides.get("list", _LIST_PROMPT),
         )
         if answer.ok:
             answer.confidence = 0.3
