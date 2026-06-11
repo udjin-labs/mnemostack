@@ -67,6 +67,12 @@ def rewrite_followup(
         missing = [ph for ph in _REQUIRED_PLACEHOLDERS if ph not in prompt_template]
         if missing:
             raise ValueError(f"prompt_template must contain {missing} placeholders")
+    if max_history <= 0:
+        # -0 == 0 in Python, so a [-max_history:] slice would send the WHOLE
+        # history; this parameter gates privacy and token budget, so zero
+        # must mean "show none" — and with no history there is nothing to
+        # resolve against.
+        return query
     if not query.strip() or not history:
         return query
     if needs_rewrite is not None and not needs_rewrite(query):
