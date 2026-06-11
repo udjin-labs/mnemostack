@@ -509,6 +509,34 @@ answer = gen.generate("what did we decide", results)
 print(answer.text, answer.confidence, answer.sources)
 ```
 
+**Count and "list all X" questions** need set completeness, which similarity top-K does not guarantee — the model counts what it sees and undercounts, returning a subset. For those, retrieve a wide candidate pool and enable the two-pass extract-and-aggregate mode:
+
+```python
+gen = AnswerGenerator(llm=get_llm("gemini"), list_extract_mode=True)
+pool = recaller.recall("how many trips did user A take", limit=150)   # wide pool, not top-10
+answer = gen.generate("how many trips did user A take", pool)
+```
+
+`list_extract_mode` routes count/list questions through an extract pass (pulls every matching item as JSON) and a finalize pass (formats the list or count). Costs one extra LLM call per question; other question categories are unaffected. Note the mechanics: the extract pass reads the top 40 of the pool you pass in — a wide pool helps because fusion and the pipeline get more candidates to rank into that window, not because every result is read. If your corpus ranks relevant items beyond the top 40, completeness still suffers; for guaranteed exhaustiveness build the pool from a full scan (`VectorStore.scroll`) filtered to the relevant slice. To evaluate it on your own data, the benchmark harness exposes the same knobs: `benchmarks/locomo_single.py --list-extract --pool 150`.
+
+**Non-English corpora.** The built-in answer prompts and the question classifier are English; on other languages the extract/finalize passes degrade instead of helping. Both are pluggable:
+
+```python
+gen = AnswerGenerator(
+    llm=llm,
+    list_extract_mode=True,
+    prompt_overrides={                       # any subset; templates in YOUR corpus language
+        "list_extract": MY_EXTRACT_TEMPLATE,    # must contain {context} and {query}
+        "list_finalize": MY_FINALIZE_TEMPLATE,  # must contain {query} and {items}
+        "temporal": MY_TEMPORAL_TEMPLATE,       # category prompts: {context} and {query}
+    },
+)
+# the classifier's patterns are English too — route question classes yourself:
+answer = gen.generate(query, pool, category="count")
+```
+
+Override names: the seven category prompts (`general`, `list`, `count`, `temporal`, `multihop`, `inference`, `adversarial`) plus `list_extract` / `list_finalize`. Required placeholders are validated at construction. mnemostack ships no translations by design — prompt quality is corpus- and domain-specific, so you own the templates.
+
 #### Full stack: 4-source retrieval + 8-stage pipeline + reranker
 
 This is the full runtime configuration. The LoCoMo numbers above are produced by a subset of it: the benchmark loop runs Vector + BM25 retrieval, the 8-stage pipeline, `window_size=3`, query expansion, and top-K 25 — the LLM reranker and the graph retriever are runtime-only features and are not part of the benchmark methodology (see `benchmarks/run_locomo.sh` for the exact reproduction path).
