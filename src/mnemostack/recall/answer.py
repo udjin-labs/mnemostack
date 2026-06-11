@@ -361,6 +361,7 @@ class AnswerGenerator:
         retry_with_expansion: bool = False,
         expansion_llm: LLMProvider | None = None,
         prompt_overrides: dict[str, str] | None = None,
+        abstention_text: str = "Not in memory.",
     ):
         self.llm = llm
         self.max_memories = max_memories
@@ -375,6 +376,7 @@ class AnswerGenerator:
         self.recaller = recaller
         self.retry_with_expansion = retry_with_expansion
         self.expansion_llm = expansion_llm
+        self.abstention_text = abstention_text
         self.prompt_overrides = dict(prompt_overrides or {})
         for name, template in self.prompt_overrides.items():
             placeholders = _OVERRIDE_PLACEHOLDERS.get(name)
@@ -430,13 +432,13 @@ class AnswerGenerator:
         if not memories:
             counter("mnemostack.answer.empty_memory", 1)
             answer = Answer(
-                text="Not in memory.",
+                text=self.abstention_text,
                 confidence=0.0,
                 sources=[],
                 raw="",
             )
         elif self.list_extract_mode and category in {"list", "count"}:
-            answer = self._generate_list_extract(query, memories)
+            answer = self._generate_list_extract(query, memories, category)
         else:
             answer = self._generate_single_prompt(
                 query=query,
@@ -613,7 +615,9 @@ class AnswerGenerator:
         answer.text = rewritten
         return answer
 
-    def _generate_list_extract(self, query: str, memories: list[RecallResult]) -> Answer:
+    def _generate_list_extract(
+        self, query: str, memories: list[RecallResult], category: str = "list"
+    ) -> Answer:
         extract_memories = memories[:40]
         context = self._format_context(extract_memories)
         prompt = self.prompt_overrides.get("list_extract", _LIST_EXTRACT_PROMPT).format(
@@ -639,8 +643,20 @@ class AnswerGenerator:
         finalize_prompt = finalize_template.format(query=query, items=json.dumps(items))
         with histogram("mnemostack.answer.llm_latency_ms"):
             final_resp = self.llm.generate(finalize_prompt, max_tokens=self.max_tokens)
-        if not final_resp.ok:
-            return self._fallback_list_answer(query, memories)
+        if not final_resp.ok or not final_resp.text.strip():
+            # The extract pass already produced verified items — losing them
+            # to a re-generation fallback discards correct data and, with
+            # localized prompts, can leak a default-language answer. Format
+            # deterministically instead: a count for count questions, the
+            # comma-joined items otherwise.
+            counter("mnemostack.answer.list_finalize_fallback", 1)
+            text = str(len(items)) if category == "count" else ", ".join(items)
+            return Answer(
+                text=text,
+                confidence=0.6,
+                sources=self._extract_sources(extract_memories),
+                raw=final_resp.text,
+            )
 
         return Answer(
             text=final_resp.text.strip(),
