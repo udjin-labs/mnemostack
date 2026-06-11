@@ -360,6 +360,10 @@ def main():
         "list_extract": bool(args.list_extract),
         "pool": args.pool,
         "samples": args.samples,
+        # A subset run is not comparable to a full run — record what was
+        # actually evaluated so later artifact comparison can tell them apart.
+        "only_questions": args.only_questions,
+        "only_questions_count": len(only_questions) if only_questions is not None else None,
         "timestamp": run_started_at,
         "dataset": DATASET,
     }

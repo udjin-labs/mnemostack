@@ -151,6 +151,8 @@ The 8-stage pipeline can use a small state store between calls (Q-learning weigh
 
 Any retriever can fail (Memgraph down, Qdrant unreachable, BM25 corpus empty). `Recaller` logs and continues with the remaining sources. The LLM reranker is wrapped in try/except by convention — if the LLM is rate-limited, the pre-rerank order is returned. This is deliberate: a memory stack that goes dark because one component hiccuped is worse than a slightly degraded one.
 
+One exception: query expansion runs *before* retrieval, so a misconfigured expansion step (`query_expansion=True` without an `expansion_llm`, or a provider error inside it) surfaces as an error instead of degrading silently — see [ARCHITECTURE.md](ARCHITECTURE.md) for the full fail-open contract. Degradations themselves are visible, not silent: every HTTP/MCP response carries `degraded` tags, and the full per-retriever trace is available opt-in via `include_trace`.
+
 ## Comparison and benchmarks
 
 On LoCoMo, Mnemostack reaches **82.9% strict accuracy** in our evaluation setup. The table below includes our baseline runs and externally reported numbers for context. Results depend on dataset version, configuration, judge model, scoring rules, and query type. Treat externally reported numbers as directional unless they were run with the same harness and settings.
@@ -468,7 +470,8 @@ from mnemostack.llm import get_llm
 
 llm = get_llm("gemini")                 # or get_llm("ollama", model="llava") with a local vision model
 desc = llm.describe_image(photo_bytes, mime_type="image/jpeg")  # one vision call per image
-item = IngestItem(text=f"{message_text} [shared a photo: {desc.text}]", source=..., timestamp=...)
+caption = f" [shared a photo: {desc.text}]" if desc.ok and desc.text else ""
+item = IngestItem(text=f"{message_text}{caption}", source=..., timestamp=...)
 ```
 
 `describe_image` is fully opt-in — nothing in the ingest or recall paths calls it, and text-only pipelines are unaffected. It works with any provider that has vision support (Gemini; Ollama vision models such as llava, llama3.2-vision, qwen2.5-vl) — providers without it return a normal fail-open error response. The default prompt produces a dense, index-oriented description (objects, any text/signs verbatim, setting, actions); pass `prompt=` to customize.
