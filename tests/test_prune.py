@@ -239,3 +239,23 @@ def test_cli_index_prune_ignores_other_roots(monkeypatch, tmp_path, store):
     remaining = {str(pid) for pid in store.iter_ids()}
     assert stale_ours not in remaining
     assert same_name_other_root in remaining
+
+
+def test_cli_index_prune_clears_emptied_file(monkeypatch, tmp_path, store, capsys):
+    """A file that now yields zero chunks (emptied / whitespace-only) is still
+    a re-indexed source — its old chunks are exactly what --prune removes."""
+    emptied = tmp_path / "note.md"
+    emptied.write_text("   \n", encoding="utf-8")
+    kept_doc = tmp_path / "real.md"
+    kept_doc.write_text("hello world", encoding="utf-8")
+    root = str(tmp_path.resolve())
+    old = _put(store, "note.md", 0, "content the file used to have", index_root=root)
+    _patch_stack(monkeypatch, store)
+
+    rc = cli.cmd_index(_index_args(tmp_path))
+
+    assert rc == 0
+    remaining = {str(pid) for pid in store.iter_ids()}
+    assert old not in remaining
+    assert stable_chunk_id("real.md", 0, "hello world") in remaining
+    assert "pruned 1 stale" in capsys.readouterr().out

@@ -429,9 +429,14 @@ def cmd_index(args: argparse.Namespace) -> int:
     # produce the same source name. Record the root in the payload (additive,
     # not part of the chunk id) so --prune can tell those documents apart.
     index_root = str((target if target.is_dir() else target.parent).resolve())
+    # Every visited file counts as re-indexed even if it yields zero chunks
+    # (emptied / whitespace-only) — its old chunks are exactly what --prune
+    # must remove.
+    visited_sources: set[str] = set()
     for f in files:
         text = f.read_text(encoding="utf-8", errors="ignore")
         source = str(f.relative_to(target if target.is_dir() else target.parent))
+        visited_sources.add(source)
         file_chunks: list[tuple[int, str]] = []
         for i in range(0, len(text), args.chunk_size):
             chunk = text[i : i + args.chunk_size]
@@ -504,9 +509,9 @@ def cmd_index(args: argparse.Namespace) -> int:
     if args.prune and not args.recreate:
         from .ingest import prune_stale_chunks
 
-        fresh_by_source: dict[str, set[str]] = {}
+        fresh_by_source: dict[str, set[str]] = {source: set() for source in visited_sources}
         for cid, _text, payload in chunks:
-            fresh_by_source.setdefault(payload["source"], set()).add(cid)
+            fresh_by_source[payload["source"]].add(cid)
         # A source with a failed embedding has a fresh chunk that never landed.
         # Pruning it would delete the previous chunk without a replacement, so
         # leave such sources untouched this run.
