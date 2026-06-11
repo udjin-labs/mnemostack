@@ -103,12 +103,14 @@ def test_list_extract_falls_back_on_malformed_json(memories, extract_output):
     assert _LIST_PROMPT.split("\n", 1)[0] in llm.prompts[1]
 
 
-def test_list_extract_falls_back_when_finalize_call_fails(memories):
+def test_list_extract_finalize_failure_returns_extracted_items(memories):
+    # Extract succeeded — a finalize hiccup must not discard verified items
+    # by re-generating (which can also leak default-language output when
+    # prompts are localized). Deterministic join instead, no extra LLM call.
     llm = SequenceMaybeFailLLM(
         [
             LLMResponse(text='{"items": ["Luna", "Oliver"]}', tokens_used=10),
             LLMResponse(text="", error="rate limited"),
-            LLMResponse(text="Luna, Oliver\nCONFIDENCE: 0.8", tokens_used=10),
         ]
     )
     gen = AnswerGenerator(llm=llm, category_aware_prompts=True, list_extract_mode=True)
@@ -117,9 +119,33 @@ def test_list_extract_falls_back_when_finalize_call_fails(memories):
 
     assert answer.ok is True
     assert answer.text == "Luna, Oliver"
-    assert answer.confidence == 0.3
-    assert len(llm.prompts) == 3
-    assert _LIST_PROMPT.split("\n", 1)[0] in llm.prompts[2]
+    assert answer.confidence == 0.6
+    assert len(llm.prompts) == 2  # extract + failed finalize, NO re-generation
+
+
+def test_list_extract_finalize_failure_count_returns_number(memories):
+    llm = SequenceMaybeFailLLM(
+        [
+            LLMResponse(text='{"items": ["a", "b", "c"]}', tokens_used=10),
+            LLMResponse(text="", error="rate limited"),
+        ]
+    )
+    gen = AnswerGenerator(llm=llm, category_aware_prompts=True, list_extract_mode=True)
+
+    answer = gen.generate("How many pets does Melanie have?", memories)
+
+    assert answer.text == "3"
+    assert answer.confidence == 0.6
+
+
+def test_abstention_text_is_localizable():
+    llm = SequenceMaybeFailLLM([])
+    gen = AnswerGenerator(llm=llm, abstention_text="Нет в памяти.")
+
+    answer = gen.generate("anything", [])
+
+    assert answer.text == "Нет в памяти."
+    assert answer.confidence == 0.0
 
 
 def test_parse_extracted_items_deduplicates_preserving_order():
