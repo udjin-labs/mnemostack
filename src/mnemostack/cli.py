@@ -492,10 +492,20 @@ def cmd_index(args: argparse.Namespace) -> int:
         store.upsert(cid, vec, payload)
         inserted += 1
 
+    pruned = 0
+    if args.prune and not args.recreate:
+        from .ingest import prune_stale_chunks
+
+        fresh_by_source: dict[str, set[str]] = {}
+        for cid, _text, payload in chunks:
+            fresh_by_source.setdefault(payload["source"], set()).add(cid)
+        pruned = prune_stale_chunks(store, fresh_by_source)
+
     print(
         f"Done: inserted/updated {inserted}, skipped {skipped},"
         f" failed-embedding {failed}, total chunks seen {len(chunks)}"
-        f" in collection '{args.collection}'."
+        + (f", pruned {pruned} stale" if args.prune else "")
+        + f" in collection '{args.collection}'."
     )
     return 0
 
@@ -749,6 +759,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Adjacent chunks to concatenate into overlapping context chunks (1 disables)",
     )
     p_index.add_argument("--recreate", action="store_true", help="Drop existing collection")
+    p_index.add_argument(
+        "--prune",
+        action="store_true",
+        help=(
+            "After indexing, delete stale chunks of the indexed files — points whose "
+            "ids the files no longer produce (edits shifted offsets, documents shrank). "
+            "Other sources in the collection are not touched."
+        ),
+    )
     p_index.add_argument(
         "--yes",
         "-y",
