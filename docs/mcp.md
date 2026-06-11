@@ -177,6 +177,8 @@ For clients that do not support per-server `env`, export variables before starti
 
 ## Available tools
 
+Four base tools are always registered (`health`, `search`, `answer`, `feedback`); two graph tools (`graph_query`, `graph_add_triple`) appear only when a Memgraph URI is configured.
+
 ### `mnemostack_health`
 
 **Purpose:** Check health of mnemostack components: embedding provider, vector store, and optional graph.
@@ -227,6 +229,7 @@ On failure, a component contains `{"ok": false, "error": "..."}` and top-level `
 | --- | --- | --- | --- |
 | `query` | `string` | Required | Natural-language or exact-token query. |
 | `limit` | `integer` | `10` | Maximum number of recall hits to return. |
+| `include_trace` | `boolean` | `false` | Also return the recall `trace` (per-retriever ranked lists, fused and post-rerank order). Verbose; debugging only. |
 
 **Return shape:**
 
@@ -235,6 +238,7 @@ On failure, a component contains `{"ok": false, "error": "..."}` and top-level `
   "ok": true,
   "query": "what did we decide about auth?",
   "count": 2,
+  "degraded": [],
   "results": [
     {
       "id": "2f6a...",
@@ -250,6 +254,8 @@ On failure, a component contains `{"ok": false, "error": "..."}` and top-level `
   ]
 }
 ```
+
+`degraded` lists components that fell back while serving the call (e.g. `"retriever:bm25:failed"`, `"reranker:fallback"`, `"temporal:no_parse"`); it is empty when the stack was fully healthy. With `include_trace: true` the response additionally carries a `trace` object.
 
 On failure:
 
@@ -283,10 +289,13 @@ On failure:
   "answer": "We picked Memgraph, with temporal facts stored as subject-predicate-object triples.",
   "confidence": 0.86,
   "sources": ["architecture-notes.md"],
+  "degraded": [],
   "fallback_recommended": false,
   "error": null
 }
 ```
+
+`degraded` has the same semantics as in `mnemostack_search`. The answer tool does not take `include_trace` (use the HTTP `/answer` endpoint when you need the full trace).
 
 If the answer generator cannot produce a reliable answer, `ok` may be `false`, `confidence` may be low, and `fallback_recommended` may be `true`. On exceptions, the tool returns:
 

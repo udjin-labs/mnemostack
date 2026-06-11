@@ -39,7 +39,7 @@ mnemostack config       # show resolved config
 ## 5. Index your notes
 
 ```bash
-mnemostack index ./my-notes/ --provider ollama --recreate
+mnemostack index ./my-notes/ --provider ollama --recreate   # asks for confirmation; add --yes in scripts/CI
 ```
 
 ## 6. Search
