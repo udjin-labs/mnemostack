@@ -757,7 +757,10 @@ class AnswerGenerator:
         paraphrased (no literal match) fall back to batch order.
         """
         matched_ids: set[int] = set()
-        lowered = [(m, (m.text or "").lower()) for m in contributing]
+        # Items can be extracted from projected payload fields too (the
+        # context line shows them) — match against the same content the LLM
+        # saw, not just the memory text.
+        lowered = [(m, self._provenance_haystack(m)) for m in contributing]
         per_item: list[list[RecallResult]] = []
         for item in items:
             needle = item.lower().strip()
@@ -790,6 +793,20 @@ class AnswerGenerator:
                     matched.append(item_matches[rank])
         remainder = [m for m in contributing if id(m) not in matched_ids]
         return self._extract_sources(matched + remainder)
+
+    def _provenance_haystack(self, memory: RecallResult) -> str:
+        """Lower-cased searchable content of a memory for item attribution:
+        the text plus any projected context_fields values, mirroring what
+        the extract prompt actually showed the LLM."""
+        parts = [memory.text or ""]
+        for key in self.context_fields:
+            value = memory.payload.get(key)
+            if value is None or value == "":
+                continue
+            if isinstance(value, (list, tuple)):
+                value = ", ".join(str(v) for v in value)
+            parts.append(str(value))
+        return "\n".join(parts).lower()
 
     def _extract_items_over_pool(
         self, query: str, memories: list[RecallResult]
