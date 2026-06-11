@@ -540,6 +540,15 @@ Already-indexed collections don't need re-embedding to pick up enrichment: `mnem
 
 **Structured payload fields in the answer prompt.** By default the answer context shows each memory's timestamp, source and text. `AnswerGenerator(context_fields=["author", "amount"])` additionally projects the named payload fields into each memory's context line (`author=…`, lists comma-joined, long values truncated; memories without the field render without it). Use it for structured facts the answer needs — who said it, amounts, your own ingest-time enrichments. Note the boundary: projection only changes what the answer prompt *shows* — retrieval ranks by `text`, so content that must be *findable* (image captions and similar) belongs in the text itself, not in a payload field.
 
+**Conversational follow-ups.** "And who wrote that?" carries none of the conversation, so recall misses. `rewrite_followup(query, history, llm)` resolves pronouns and ellipses into a standalone question before recall — mnemostack holds no dialog state, you pass the history (`(question, answer)` pairs or plain lines, oldest first). One LLM call; the prompt instructs the model to return a self-contained question unchanged, and any failure falls back to the original query. To skip the call entirely for queries you already know are standalone, pass `needs_rewrite=callable` — that trigger heuristic is language-dependent, so core ships none (same boundary as `question_classifier`).
+
+```python
+from mnemostack.recall import rewrite_followup
+
+standalone = rewrite_followup("а кто это написал?", history, llm)
+results = recall_flow(recaller, standalone, limit=10, pipeline=pipeline)
+```
+
 **Non-English corpora.** The built-in answer prompts and the question classifier are English; on other languages the extract/finalize passes degrade instead of helping. Both are pluggable:
 
 ```python
