@@ -363,3 +363,36 @@ def test_file_state_store_cross_process_lockfile(tmp_path):
 
     assert store.get("k") == {"v": 1}
     assert (tmp_path / "state.json.lock").exists()
+
+
+def test_legacy_migration_does_not_clobber_existing_state(monkeypatch, tmp_path):
+    """A process that lost the startup race re-checks under the lock and must
+    not overwrite state another process already wrote."""
+    import mnemostack.recall.pipeline.state as state_mod
+
+    legacy = tmp_path / "legacy-state.json"
+    legacy.write_text('{"q": "stale"}')
+    monkeypatch.setattr(state_mod, "_LEGACY_STATE_PATH", legacy)
+    target = tmp_path / "xdg" / "mnemostack" / "server-state.json"
+    target.parent.mkdir(parents=True)
+    target.write_text('{"q": "newer"}')
+
+    state_mod._migrate_legacy_state(target)
+
+    assert target.read_text() == '{"q": "newer"}'
+
+
+def test_legacy_migration_is_atomic_and_leaves_no_temp(monkeypatch, tmp_path):
+    import mnemostack.recall.pipeline.state as state_mod
+
+    legacy = tmp_path / "legacy-state.json"
+    legacy.write_text('{"q": 1}')
+    monkeypatch.setattr(state_mod, "_LEGACY_STATE_PATH", legacy)
+    target = tmp_path / "xdg" / "mnemostack" / "server-state.json"
+
+    state_mod._migrate_legacy_state(target)
+
+    assert target.read_text() == '{"q": 1}'
+    assert not list(target.parent.glob("*.migrate-tmp"))
+    # the migration shares FileStateStore's lock file for this path
+    assert (target.parent / "server-state.json.lock").exists()
