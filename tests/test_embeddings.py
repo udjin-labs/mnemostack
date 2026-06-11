@@ -202,3 +202,83 @@ def test_gemini_sequential_fallback_continues_after_probe_ok(monkeypatch):
     out = provider.embed_batch(["a", "b", "c"])
 
     assert out == [[0.1, 0.2]] * 3
+
+
+def test_gemini_sequential_fallback_content_failure_does_not_skip_rest(monkeypatch):
+    """A content-specific rejection (400 on one oversized chunk) must fail only
+    that item — the storm guard is for provider-wide failures, not bad input."""
+    import json as _json
+    import urllib.error
+
+    from mnemostack.embeddings.gemini import GeminiProvider
+
+    class _Resp:
+        def __init__(self, body):
+            self._body = body
+
+        def read(self):
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def urlopen(req, timeout=0):
+        if "batchEmbedContents" in req.full_url:
+            raise urllib.error.HTTPError(req.full_url, 500, "boom", {}, None)
+        body = _json.loads(req.data)
+        text = body["content"]["parts"][0]["text"]
+        if text == "oversized":
+            raise urllib.error.HTTPError(req.full_url, 400, "too large", {}, None)
+        return _Resp(_json.dumps({"embedding": {"values": [0.1, 0.2]}}).encode())
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setattr("time.sleep", lambda *_: None)
+    provider = GeminiProvider(api_key="test-key", max_retries=1)
+
+    out = provider.embed_batch(["oversized", "b", "c"])
+
+    assert out == [[], [0.1, 0.2], [0.1, 0.2]]
+
+
+def test_gemini_sequential_fallback_stops_on_midbatch_provider_failure(monkeypatch):
+    """If the provider goes down mid-batch, the remaining items are failed
+    without further calls."""
+    import json as _json
+    import urllib.error
+
+    from mnemostack.embeddings.gemini import GeminiProvider
+
+    calls = {"n": 0}
+
+    class _Resp:
+        def __init__(self, body):
+            self._body = body
+
+        def read(self):
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def urlopen(req, timeout=0):
+        if "batchEmbedContents" in req.full_url:
+            raise urllib.error.HTTPError(req.full_url, 500, "boom", {}, None)
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise urllib.error.HTTPError(req.full_url, 503, "down", {}, None)
+        return _Resp(_json.dumps({"embedding": {"values": [0.1, 0.2]}}).encode())
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setattr("time.sleep", lambda *_: None)
+    provider = GeminiProvider(api_key="test-key", max_retries=1)
+
+    out = provider.embed_batch(["a", "b", "c", "d", "e"])
+
+    assert out == [[0.1, 0.2], [], [], [], []]
+    assert calls["n"] == 2  # item 2 failed provider-wide; items 3-5 never tried
