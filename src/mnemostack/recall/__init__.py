@@ -20,6 +20,7 @@ from .corpus import build_bm25_docs
 from .expansion import QueryExpander
 from .filters import payload_matches
 from .flow import recall_flow
+from .followup import rewrite_followup
 from .fusion import reciprocal_rank_fusion
 from .mca_prefilter import extract_exact_tokens, mca_prefilter
 from .pipeline import (
@@ -69,6 +70,7 @@ __all__ = [
     "apply_rerank_safe",
     "payload_matches",
     "recall_flow",
+    "rewrite_followup",
     "extract_exact_tokens",
     "mca_prefilter",
     "Recaller",
