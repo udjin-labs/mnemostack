@@ -101,15 +101,33 @@ def cmd_health(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def _parse_filters(args: argparse.Namespace) -> dict | None:
+    """Parse the --filters JSON argument; exits with code 2 on bad input."""
+    raw = getattr(args, "filters", None)
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(f"error: --filters must be valid JSON: {e}", file=sys.stderr)
+        raise SystemExit(2) from e
+    if not isinstance(parsed, dict):
+        print("error: --filters must be a JSON object", file=sys.stderr)
+        raise SystemExit(2)
+    return parsed
+
+
 def _recall_for_cli(args: argparse.Namespace, recaller, query: str, limit: int):
     """Run the same recall flow as the HTTP and MCP servers.
 
     Applies the 8-stage pipeline and the fail-open LLM reranker so the CLI
     ranks results identically to the serving surfaces. `--raw` skips both
-    and returns plain fused recall (the historical CLI behavior).
+    and returns plain fused recall (the historical CLI behavior); filters
+    apply on both paths.
     """
+    filters = _parse_filters(args)
     if getattr(args, "raw", False):
-        return recaller.recall(query, limit=limit)
+        return recaller.recall(query, limit=limit, filters=filters)
     pipeline = build_full_pipeline(
         state_store=FileStateStore(default_state_path()),
         graph_uri=getattr(args, "memgraph_uri", None) or None,
@@ -123,7 +141,9 @@ def _recall_for_cli(args: argparse.Namespace, recaller, query: str, limit: int):
         )
     except Exception:  # noqa: BLE001 — no LLM key: search still works, unranked by LLM
         pass
-    return recall_flow(recaller, query, limit, pipeline=pipeline, reranker=reranker)
+    return recall_flow(
+        recaller, query, limit, pipeline=pipeline, reranker=reranker, filters=filters
+    )
 
 
 def cmd_search(args: argparse.Namespace) -> int:
@@ -264,7 +284,8 @@ def cmd_answer(args: argparse.Namespace) -> int:
             }
         )
     gen = AnswerGenerator(**answer_generator_kwargs)
-    answer = gen.generate(args.query, results)
+    # recall_filters keeps retry sub-recalls inside the same filtered scope.
+    answer = gen.generate(args.query, results, recall_filters=_parse_filters(args))
 
     # Tier caps how many sources we emit (answer text itself is model-sized).
     sources_out = answer.sources
@@ -624,6 +645,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="LLM reranker contract: relevant_only returns a subset, full_reorder ranks all",
     )
     p_search.add_argument(
+        "--filters",
+        default=None,
+        help=(
+            "JSON object of payload filters applied inside every retriever, "
+            'e.g. \'{"tenant": "a"}\' or \'{"timestamp": {"gte": "2026-01-01"}}\''
+        ),
+    )
+    p_search.add_argument(
         "--tier",
         type=int,
         choices=[1, 2, 3],
@@ -741,6 +770,14 @@ def build_parser() -> argparse.ArgumentParser:
         choices=sorted(RERANK_MODES),
         default=cfg.recall.rerank_mode,
         help="LLM reranker contract: relevant_only returns a subset, full_reorder ranks all",
+    )
+    p_answer.add_argument(
+        "--filters",
+        default=None,
+        help=(
+            "JSON object of payload filters applied inside every retriever, "
+            'e.g. \'{"tenant": "a"}\' or \'{"timestamp": {"gte": "2026-01-01"}}\''
+        ),
     )
     p_answer.add_argument(
         "--tier",

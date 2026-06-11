@@ -84,6 +84,15 @@ class RecallRequest(BaseModel):
         False,
         description="Return the per-retriever recall trace (debug; verbose).",
     )
+    filters: dict[str, Any] | None = Field(
+        None,
+        description=(
+            "Payload filters applied inside every retriever (exact match, or "
+            '{"gte"/"lte"} ranges), e.g. {"tenant": "a"} or '
+            '{"timestamp": {"gte": "2026-01-01"}}. Results never include '
+            "points outside the filtered scope."
+        ),
+    )
 
 
 class AnswerRequest(BaseModel):
@@ -91,6 +100,7 @@ class AnswerRequest(BaseModel):
     limit: int = Field(10, ge=1, le=100)
     full_pipeline: bool = Field(True)
     include_trace: bool = Field(False)
+    filters: dict[str, Any] | None = Field(None)
 
 
 class FeedbackRequest(BaseModel):
@@ -415,7 +425,12 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
 
     import asyncio
 
-    def _run_recall_sync(query: str, limit: int, full_pipeline: bool):
+    def _run_recall_sync(
+        query: str,
+        limit: int,
+        full_pipeline: bool,
+        filters: dict[str, Any] | None = None,
+    ):
         trace = RecallTrace()
         # Reranking is part of the full pipeline; if it was requested but the
         # LLM never initialized, that is a degradation worth surfacing. With
@@ -428,20 +443,26 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             limit,
             pipeline=pipeline if full_pipeline else None,
             reranker=reranker if full_pipeline else None,
+            filters=filters,
             trace=trace,
         )
         if cfg.auto_record_ior:
             record_recall_events(pipeline, results)
         return results, trace
 
-    async def _run_recall(query: str, limit: int, full_pipeline: bool):
+    async def _run_recall(
+        query: str,
+        limit: int,
+        full_pipeline: bool,
+        filters: dict[str, Any] | None = None,
+    ):
         """Offload the blocking recall stack to a worker thread.
 
         Recaller/pipeline/reranker all do blocking I/O or CPU work. Running
         them inline in the event loop would serialise every HTTP request
         behind the slowest retriever.
         """
-        return await asyncio.to_thread(_run_recall_sync, query, limit, full_pipeline)
+        return await asyncio.to_thread(_run_recall_sync, query, limit, full_pipeline, filters)
 
     @app.get("/", include_in_schema=False)
     def root():
@@ -485,7 +506,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     @app.post("/recall", response_model=RecallResponse)
     async def recall_endpoint(req: RecallRequest):
         try:
-            results, trace = await _run_recall(req.query, req.limit, req.full_pipeline)
+            results, trace = await _run_recall(req.query, req.limit, req.full_pipeline, req.filters)
         except Exception as exc:
             log.exception("recall endpoint failed")
             raise HTTPException(status_code=500, detail="recall failed") from exc
@@ -504,8 +525,12 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 detail="answer generator unavailable (LLM not configured)",
             )
         try:
-            results, trace = await _run_recall(req.query, req.limit, req.full_pipeline)
-            ans = await asyncio.to_thread(answer_gen.generate, req.query, results)
+            results, trace = await _run_recall(req.query, req.limit, req.full_pipeline, req.filters)
+            # recall_filters keeps the answer generator's retry sub-recalls
+            # inside the same filtered scope as the primary recall.
+            ans = await asyncio.to_thread(
+                answer_gen.generate, req.query, results, recall_filters=req.filters
+            )
         except Exception as exc:
             log.exception("answer endpoint failed")
             raise HTTPException(status_code=500, detail="answer failed") from exc

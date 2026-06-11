@@ -35,6 +35,7 @@ try:
 except ImportError:  # pragma: no cover - qdrant-client is a runtime dependency
     DatetimeRange = FieldCondition = Filter = None  # type: ignore[assignment,misc]
 from .bm25 import BM25, BM25Doc
+from .filters import payload_matches
 from .recaller import RecallResult
 
 logger = logging.getLogger(__name__)
@@ -280,7 +281,17 @@ class BM25Retriever(Retriever):
         return cls(docs=docs)
 
     def search(self, query, limit=20, filters=None):
-        hits = self.bm25.search(query, limit=limit)
+        # Same filter semantics the vector store applies natively. Without
+        # this, a fused recall with filters= mixed unfiltered BM25 candidates
+        # into the output — in multi-tenant deployments that is an isolation
+        # leak. The candidate set is restricted before the top-K cut.
+        predicate = None
+        if filters:
+
+            def predicate(d: BM25Doc) -> bool:
+                return payload_matches(d.payload, filters)
+
+        hits = self.bm25.search(query, limit=limit, predicate=predicate)
         return [
             RecallResult(
                 id=d.id,
@@ -442,6 +453,12 @@ class MemgraphRetriever(Retriever):
             self._driver = None
 
     def search(self, query, limit=20, filters=None):
+        if filters:
+            # Graph nodes carry no chunk payload, so a result here cannot be
+            # proven to belong to the filtered scope (tenant, source, time
+            # range). Under the isolation contract anything unattributable
+            # is excluded rather than leaked.
+            return []
         driver = self._get_driver()
         if driver is None:
             return []
@@ -696,6 +713,39 @@ def _around_slack(q: str, match_start: int) -> int:
     return 3 if _AROUND_QUALIFIER_RE.search(prefix) else 1
 
 
+def _intersect_timestamp_window(
+    start: str,
+    end: str,
+    caller_condition: Any,
+) -> tuple[str, str] | None:
+    """Intersect the parsed query window with a caller timestamp filter.
+
+    The caller condition may be a `{"gte"/"lte"}` range or an exact value
+    (treated as a degenerate range). Returns None when the intersection is
+    empty or the bounds are incomparable — the temporal retriever must then
+    contribute nothing rather than hits outside the caller's scope.
+    """
+    if caller_condition is None:
+        return start, end
+    if isinstance(caller_condition, dict) and (
+        "gte" in caller_condition or "lte" in caller_condition
+    ):
+        gte = caller_condition.get("gte")
+        lte = caller_condition.get("lte")
+    else:
+        gte = lte = caller_condition
+    try:
+        if gte is not None and gte > start:
+            start = gte
+        if lte is not None and lte < end:
+            end = lte
+        if start > end:
+            return None
+    except TypeError:
+        return None
+    return start, end
+
+
 def _strict_day_window(day: date) -> tuple[str, str]:
     start = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
     end = datetime.combine(day, datetime.max.time(), tzinfo=timezone.utc)
@@ -924,16 +974,32 @@ class TemporalRetriever(Retriever):
             date_focused = False
 
         # Flat filter shape understood by VectorStore._build_filter. Preserve
-        # caller filters (workspace/source/tenant scope) and add the temporal
-        # timestamp constraint instead of replacing the whole filter map.
+        # caller filters (workspace/source/tenant scope) and INTERSECT any
+        # caller timestamp constraint with the parsed query window — replacing
+        # it would return hits outside the caller's advertised scope.
         temporal_filter = dict(filters or {})
+        window = _intersect_timestamp_window(start, end, temporal_filter.get("timestamp"))
+        if window is None:
+            # The query's date range lies entirely outside the caller's
+            # timestamp scope — no temporal hit can satisfy both.
+            return []
+        start, end = window
         temporal_filter["timestamp"] = {"gte": start, "lte": end}
 
-        if date_focused and target_date is not None and hasattr(self.vector_store, "scroll"):
+        strict_bounds = None
+        if date_focused and target_date is not None:
+            # The target day must itself fall inside the (already intersected)
+            # window; otherwise skip the date-focused pass and keep only the
+            # in-scope neighborhood search below.
+            strict_start, strict_end = _strict_day_window(target_date)
+            strict_bounds = _intersect_timestamp_window(
+                strict_start, strict_end, {"gte": start, "lte": end}
+            )
+
+        if strict_bounds is not None and hasattr(self.vector_store, "scroll"):
             try:
-                strict_start, strict_end = _strict_day_window(target_date)
                 strict_filter = dict(temporal_filter)
-                strict_filter["timestamp"] = {"gte": strict_start, "lte": strict_end}
+                strict_filter["timestamp"] = {"gte": strict_bounds[0], "lte": strict_bounds[1]}
 
                 buffer_limit = max(
                     limit * self.DATE_FOCUSED_SCROLL_BUFFER_MULTIPLIER,

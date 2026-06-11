@@ -172,7 +172,11 @@ def build_server(
             ),
         )
 
-    def _run_recall(query: str, limit: int) -> tuple[list[Any], RecallTrace]:
+    def _run_recall(
+        query: str,
+        limit: int,
+        filters: dict[str, Any] | None = None,
+    ) -> tuple[list[Any], RecallTrace]:
         trace = RecallTrace()
         recaller = _get_recaller()
         try:
@@ -186,6 +190,7 @@ def build_server(
             limit,
             pipeline=_get_pipeline(),
             reranker=reranker,
+            filters=filters,
             trace=trace,
         )
         return results, trace
@@ -275,6 +280,17 @@ def build_server(
             bool,
             Field(description="Include the per-retriever recall trace (debug; verbose)"),
         ] = False,
+        filters: Annotated[
+            dict[str, Any] | None,
+            Field(
+                description=(
+                    "Payload filters applied inside every retriever: exact match "
+                    '({"tenant": "a"}) or gte/lte range ({"timestamp": '
+                    '{"gte": "2026-01-01"}}). Results never include points '
+                    "outside the filtered scope."
+                )
+            ),
+        ] = None,
     ) -> dict:
         """Search indexed memories with hybrid recall.
 
@@ -287,7 +303,7 @@ def build_server(
         score, sources, and payload.
         """
         try:
-            results, trace = _run_recall(query, limit)
+            results, trace = _run_recall(query, limit, filters)
             response = {
                 "ok": True,
                 "query": query,
@@ -320,6 +336,16 @@ def build_server(
             int,
             Field(description="Maximum number of results to return (default 10)"),
         ] = 10,
+        filters: Annotated[
+            dict[str, Any] | None,
+            Field(
+                description=(
+                    "Payload filters applied inside every retriever (exact match "
+                    "or gte/lte ranges); the answer is generated only from "
+                    "memories inside the filtered scope."
+                )
+            ),
+        ] = None,
     ) -> dict:
         """Answer a question using retrieved memories.
 
@@ -331,9 +357,11 @@ def build_server(
         fallback_recommended, and error.
         """
         try:
-            memories, trace = _run_recall(query, limit)
+            memories, trace = _run_recall(query, limit, filters)
             gen = _get_answer_gen()
-            answer = gen.generate(query, memories)
+            # recall_filters keeps the generator's retry sub-recalls inside
+            # the same filtered scope as the primary recall.
+            answer = gen.generate(query, memories, recall_filters=filters)
             return {
                 "ok": answer.ok,
                 "query": query,
