@@ -470,3 +470,35 @@ def test_sources_prefer_memories_containing_the_items(memories):
 
     assert answer.sources
     assert answer.sources[0] == "chat-30"  # the supporting memory leads
+
+
+def test_item_provenance_requires_word_boundaries():
+    """A short item must not claim a memory via substring inside a longer
+    word ("Ann" in "annual") — boundary-anchored match only."""
+    from mnemostack.recall import RecallResult
+
+    def _mem(i, text):
+        return RecallResult(
+            id=str(i),
+            text=text,
+            score=1.0 - i * 0.01,
+            payload={"source": f"chat-{i}"},
+            sources=["vector"],
+        )
+
+    pool = [
+        _mem(1, "the annual report was published in May, maybe earlier"),
+        _mem(2, "participant Ann joined the call"),
+    ]
+    llm = SequenceLLM(['{"items": ["Ann"]}'])
+    gen = AnswerGenerator(
+        llm=llm,
+        category_aware_prompts=True,
+        list_extract_mode=True,
+        list_finalize="verbatim",
+    )
+
+    answer = gen.generate("List the participants of the call", pool)
+
+    assert answer.text == "Ann"
+    assert answer.sources[0] == "chat-2"  # not chat-1 via "annual"
