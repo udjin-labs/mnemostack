@@ -272,7 +272,7 @@ volumes:
 
 The state file is small JSON. It is not the memory corpus. Losing it resets learned feedback and stateful ranking behavior, but does not delete indexed memories from Qdrant.
 
-For multiple HTTP server processes writing feedback concurrently, do not share one JSON file over an unsafe filesystem. Use one writer, disable stateful writes, or implement a custom `StateStore` backed by Redis or your database.
+Since 0.5.0 the default state location is `$XDG_STATE_HOME/mnemostack/server-state.json` (falling back to `~/.local/state/...`; a legacy `/tmp` state file is migrated once, atomically), and `FileStateStore` takes a cross-process `flock` around reads and writes — CLI, HTTP and MCP processes on the same host can safely share one state file on a local POSIX filesystem. The caveat that remains: do not share the state file over a network filesystem (NFS and friends — advisory locks are unreliable there) and do not rely on `flock` on non-POSIX platforms. For those cases use one writer, disable stateful writes, or implement a custom `StateStore` backed by Redis or your database.
 
 ### BM25 corpus
 
@@ -430,6 +430,8 @@ Only do this behind a reverse proxy with:
 
 Treat `/recall`, `/answer`, and `/feedback` as sensitive. They can reveal indexed memory and influence future ranking state.
 
+The `filters` parameter on `/recall` and `/answer` provides data isolation inside the retrievers (no point outside the filtered scope is returned), but it is **caller-supplied — not an authorization boundary**. A client that can reach the endpoint can pass any filter, or none. For multi-tenant deployments, inject the tenant filter in your reverse proxy or API gateway and strip whatever the client sent; never let end clients choose their own scope. Upgrade note: on 0.5.0 and earlier, several retrievers ignored `filters=` entirely — see the Security section of the changelog.
+
 ### MCP
 
 The MCP server is stdio-based:
@@ -555,7 +557,7 @@ If your workload is read-heavy, use read replicas or a managed Qdrant topology t
 
 MCP servers are normally launched per client over stdio. They are mostly stateless and can point at the same Qdrant collection and Memgraph instance.
 
-Be careful with `MNEMOSTACK_STATE_PATH` if multiple instances record feedback. A local JSON state file is not safe as a shared concurrent write target. For multi-process learning state, use one writer or implement a shared `StateStore`.
+Multiple MCP instances on the same host can share one `MNEMOSTACK_STATE_PATH`: since 0.5.0 `FileStateStore` locks the file across processes (`flock`) for every read and write. Do not share the file over a network filesystem — for multi-host learning state, use one writer or implement a shared `StateStore`.
 
 ### Multiple HTTP server instances
 
@@ -565,7 +567,7 @@ The HTTP server can be replicated behind a load balancer because Qdrant and Memg
 2. Use sticky routing to a single stateful instance.
 3. Replace `FileStateStore` with a database-backed store.
 
-Do not put the same JSON state file on a shared network mount and assume concurrent writes are safe.
+Same-host replicas can share the state file (cross-process `flock` since 0.5.0). Do not put it on a shared network mount and assume concurrent writes are safe — advisory locks are unreliable over NFS.
 
 ## Upgrades and rollback
 
