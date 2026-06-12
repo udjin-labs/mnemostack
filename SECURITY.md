@@ -7,8 +7,13 @@ receives security fixes.
 
 | Version | Supported |
 | --- | --- |
-| 0.4.x   | ✅ |
-| < 0.4.0 | ❌ |
+| latest minor release | ✅ |
+| older                | ❌ |
+
+> Note: 0.5.0 and earlier contain a known tenant-isolation issue in filtered
+> recall (several retrievers ignored `filters=`). If you rely on payload
+> filters for isolation, upgrade to the first release containing the fix —
+> see the Security section of `CHANGELOG.md`.
 
 ## Reporting a Vulnerability
 
@@ -41,6 +46,11 @@ Relevant attack surfaces:
 The HTTP server has no built-in authentication or rate limiting. It binds to
 `127.0.0.1` by default; if you expose it with `--host 0.0.0.0`, put it behind
 your own auth, TLS, and rate-limit layer.
+
+Recall `filters=` provide data isolation inside the retrievers, but they are
+caller-supplied — **not an authorization boundary**. In multi-tenant
+deployments, inject the tenant filter at your proxy/gateway and ignore
+client-supplied scopes.
 
 LLM-backed features (`/answer`, LLM reranking, HyDE, triple extraction, query
 expansion) send retrieved memory text and/or user queries to the configured LLM

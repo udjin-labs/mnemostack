@@ -53,7 +53,8 @@ mnemostack mcp-serve \
   --llm gemini \
   --llm-model gemini-2.5-flash \
   --bm25-path ./notes \
-  --state-path /tmp/mnemostack-server-state.json
+  --rerank-mode relevant_only \
+  --state-path ~/.local/state/mnemostack/server-state.json
 ```
 
 Enable graph tools by adding Memgraph:
@@ -77,7 +78,8 @@ export MNEMOSTACK_QDRANT_HOST=http://localhost:6333
 export MNEMOSTACK_MEMGRAPH_URI=bolt://localhost:7687
 export MNEMOSTACK_GRAPH_TIMEOUT=5.0
 export MNEMOSTACK_BM25_PATHS="./notes:./docs"
-export MNEMOSTACK_STATE_PATH=/tmp/mnemostack-server-state.json
+export MNEMOSTACK_STATE_PATH=~/.local/state/mnemostack/server-state.json
+export MNEMOSTACK_RERANK_MODE=relevant_only
 ```
 
 ## Client configuration
@@ -221,7 +223,7 @@ On failure, a component contains `{"ok": false, "error": "..."}` and top-level `
 
 ### `mnemostack_search`
 
-**Purpose:** Hybrid recall over indexed memories. Returns top-K results ranked by reciprocal rank fusion across vector recall, temporal recall, optional BM25, and optional Memgraph.
+**Purpose:** Hybrid recall over indexed memories. Returns top-K results ranked by reciprocal rank fusion across vector recall, temporal recall, optional BM25, and optional Memgraph, refined by the same 8-stage ranking pipeline and fail-open LLM reranker the HTTP server uses (since 0.5.0 all entry points rank identically).
 
 **Input parameters:**
 
@@ -230,6 +232,7 @@ On failure, a component contains `{"ok": false, "error": "..."}` and top-level `
 | `query` | `string` | Required | Natural-language or exact-token query. |
 | `limit` | `integer` | `10` | Maximum number of recall hits to return. |
 | `include_trace` | `boolean` | `false` | Also return the recall `trace` (per-retriever ranked lists, fused and post-rerank order). Verbose; debugging only. |
+| `filters` | `object` | `null` | Payload filters applied inside every retriever: exact match (`{"tenant": "a"}`) or `gte`/`lte` ranges (`{"timestamp": {"gte": "2026-01-01"}}`). Results never include points outside the filtered scope — the isolation contract for multi-tenant memory. Note: filters are caller-supplied, not an authorization boundary; in multi-tenant deployments inject them in your proxy. |
 
 **Return shape:**
 
@@ -248,7 +251,7 @@ On failure, a component contains `{"ok": false, "error": "..."}` and top-level `
       "payload": {
         "source": "notes/auth.md",
         "offset": 120,
-        "ts": "2026-04-20T10:15:00Z"
+        "timestamp": "2026-04-20T10:15:00Z"
       }
     }
   ]
@@ -279,6 +282,7 @@ On failure:
 | --- | --- | --- | --- |
 | `query` | `string` | Required | Question to answer from memory. |
 | `limit` | `integer` | `10` | Number of memories to retrieve before answer synthesis. |
+| `filters` | `object` | `null` | Same semantics as in `mnemostack_search`; the answer is generated only from in-scope memories, including the generator's retry sub-recalls. |
 
 **Return shape:**
 
@@ -311,7 +315,7 @@ If the answer generator cannot produce a reliable answer, `ok` may be `false`, `
 
 ### `mnemostack_feedback`
 
-**Purpose:** Record explicit feedback into the configured state store for Q-learning weights and inhibition-of-return tracking. In the default MCP server configuration, feedback is persisted to the state file but the default `mnemostack_search` does not apply stateful pipeline stages. This tool is most useful for deployments that wire the same state store into their recall pipeline, and for observability (tracking which results agents find useful).
+**Purpose:** Record explicit feedback into the configured state store for Q-learning weights and inhibition-of-return tracking. Since 0.5.0 `mnemostack_search` runs the full 8-stage pipeline against the same state store, so recorded feedback influences subsequent search ranking in the same deployment (Q-learning weights, inhibition-of-return).
 
 **Input parameters:**
 
@@ -350,7 +354,7 @@ Validation failures return structured errors:
 }
 ```
 
-**Example usage scenario:** After the agent uses a result from `mnemostack_search`, call feedback with the hit id, `signal: "useful"`, the original query, and the result's `sources` array. Note: in the default MCP server, this records the signal for observability and external pipeline consumers; it does not directly alter subsequent `mnemostack_search` ranking unless the deployment wires the state store into the Recaller pipeline.
+**Example usage scenario:** After the agent uses a result from `mnemostack_search`, call feedback with the hit id, `signal: "useful"`, the original query, and the result's `sources` array; subsequent searches in the same deployment pick the signal up through the stateful pipeline stages.
 
 ### `mnemostack_graph_query`
 
@@ -595,7 +599,8 @@ These are the MCP-relevant environment variables read by `mnemostack mcp-serve` 
 | `MNEMOSTACK_MEMGRAPH_URI` | unset | Memgraph Bolt URI. If unset, graph tools are not registered. Alias of `MNEMOSTACK_GRAPH_URI`. |
 | `MNEMOSTACK_GRAPH_TIMEOUT` | `5.0` | Memgraph operation timeout in seconds. |
 | `MNEMOSTACK_BM25_PATHS` | unset | File or directory paths for BM25 exact-token retrieval, separated by `os.pathsep` (`:` on Unix, `;` on Windows). |
-| `MNEMOSTACK_STATE_PATH` | `/tmp/mnemostack-server-state.json` | JSON state file for feedback and stateful recall stages. **Note:** only read by the module entrypoint (`python -m mnemostack.mcp.server`); the CLI `mnemostack mcp-serve` uses `--state-path` instead. |
+| `MNEMOSTACK_RERANK_MODE` | `relevant_only` | LLM reranker contract: `relevant_only` returns a relevant subset, `full_reorder` ranks the whole candidate list. |
+| `MNEMOSTACK_STATE_PATH` | `$XDG_STATE_HOME/mnemostack/server-state.json` (falling back to `~/.local/state/mnemostack/server-state.json`; a legacy `/tmp` state file is migrated once) | JSON state file for feedback and stateful recall stages. **Note:** only read by the module entrypoint (`python -m mnemostack.mcp.server`); the CLI `mnemostack mcp-serve` uses `--state-path` instead (same default). |
 
 Common provider variables:
 
