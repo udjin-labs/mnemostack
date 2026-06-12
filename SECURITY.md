@@ -7,12 +7,13 @@ receives security fixes.
 
 | Version | Supported |
 | --- | --- |
-| latest minor (0.6.x) | ✅ |
+| latest minor release | ✅ |
 | older                | ❌ |
 
 > Note: 0.5.0 and earlier contain a known tenant-isolation issue in filtered
-> recall (several retrievers ignored `filters=`); see the Security section of
-> `CHANGELOG.md` and upgrade if you rely on payload filters for isolation.
+> recall (several retrievers ignored `filters=`). If you rely on payload
+> filters for isolation, upgrade to the first release containing the fix —
+> see the Security section of `CHANGELOG.md`.
 
 ## Reporting a Vulnerability
 
