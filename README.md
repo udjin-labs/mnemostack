@@ -283,6 +283,9 @@ Not the best fit if you only need a single call to `text-embedding-3-small` + co
 - ⚙ **Consolidation runtime** — phase orchestrator for nightly memory lifecycle
 - 🔌 **MCP server** — expose memory tools to Claude Desktop, ChatGPT, Cursor, etc.
 - 🛡 **Graceful degradation** — retrieval keeps working if graph or any retriever is down
+- 🔐 **Multi-tenant filters** — `filters={"tenant": "a"}` applies inside *every* retriever (exact match + ranges) on HTTP/MCP/CLI/library; results never include points outside the scope, verified by adversarial isolation tests. See the HTTP API section.
+- 🧩 **Ingest enrichment + answer projection** — `Ingestor(enrich=callable)` extracts structured facts into payloads at ingest (fail-open, `--refresh-payloads` updates existing collections without re-embedding); `context_fields=[...]` shows them to the answer LLM; `rewrite_followup()` resolves conversational follow-ups before recall.
+- 🧠 **Reasoning-model friendly** — Ollama `think` is off by default (reasoning models otherwise burn the whole token budget on thoughts and return empty text); `options={...}` passes any generation option through.
 
 ## Recall tuning: fusion weights & HyDE
 
@@ -581,7 +584,7 @@ from mnemostack.recall import (
     MemgraphRetriever, TemporalRetriever,
     build_full_pipeline,
 )
-from mnemostack.recall.pipeline import FileStateStore
+from mnemostack.recall.pipeline import FileStateStore, default_state_path
 
 emb = get_provider("gemini")
 store = VectorStore(collection="my-memory", dimension=emb.dimension)
@@ -595,7 +598,7 @@ retrievers = [
 recaller = Recaller(retrievers=retrievers)
 raw = recaller.recall("what did we decide", limit=30)
 
-pipeline = build_full_pipeline(state_store=FileStateStore("/tmp/mnemo-state.json"))
+pipeline = build_full_pipeline(state_store=FileStateStore(default_state_path()))
 reranked = pipeline.apply("what did we decide", raw)
 reranker = Reranker(llm=get_llm("gemini"), max_items=20)
 final = reranker.rerank("what did we decide", reranked)[:10]
@@ -872,6 +875,12 @@ The plugin defaults to `http://127.0.0.1:18793/answer`, supports English/Russian
 - [x] Progressive Tiers API on `search`/`answer` (`--tier {1,2,3}`, backward-compatible)
 - [x] MCP integration guides for Claude Desktop/Code, Cursor, OpenClaw (`integrations/`)
 - [x] Silent-zero fix in `TemporalRetriever` + dispatch-by-type filter builder (`0.2.0a1`)
+- [x] Canonical `recall_flow()` — CLI/HTTP/MCP rank identically (`0.5.0`)
+- [x] Chunk lifecycle: `index --prune` (root-scoped) + `--refresh-payloads` without re-embedding
+- [x] Recall `filters=` on every surface with adversarially-tested tenant isolation
+- [x] Ingest-time enrichment hook (`Ingestor(enrich=...)`) + `context_fields` answer projection
+- [x] Ollama `think` control (off by default) + generation `options` passthrough
+- [x] Follow-up question rewriting (`rewrite_followup`)
 
 ## Contributing
 
