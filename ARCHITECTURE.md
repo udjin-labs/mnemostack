@@ -46,12 +46,15 @@ Qdrant wrapper. Collection holds chunked documents with payload:
 ```json
 {
   "text": "...",
-  "source_file": "notes/2024-01-15.md",
-  "line_start": 12, "line_end": 28,
+  "source": "notes/2024-01-15.md",
+  "offset": 120,
   "timestamp": "2024-01-15T10:30:00Z",
-  "memory_class": "decision"
+  "index_root": "/abs/indexed/root",
+  "indexed_at": "2026-06-12T10:30:00Z"
 }
 ```
+
+Arbitrary additional fields arrive via `IngestItem.metadata` or the ingest-time enrichment hook (`Ingestor(enrich=callable)` / `mnemostack index --enrich pkg.mod:func`); they are filterable in recall (`filters=`) and projectable into the answer prompt (`context_fields=`). Chunk identity is the deterministic `stable_chunk_id(source, offset, text)`; lifecycle is handled by opt-in pruning (`index --prune`, scoped to the indexing root) and payload-only refresh (`index --refresh-payloads`, no re-embedding).
 
 Chunking depends on the ingest surface. The CLI uses deterministic character windows by default; the Python chunking package also provides fixed-size, paragraph, markdown, and message-pair chunkers for applications that need richer boundaries. The `vector.window_size` config (default `1`) carries adjacent-turn context inside each message chunk — `window_size=3` was worth **+5.8pp strict / +4.1pp combined** on LoCoMo in v0.4.0. Timestamp payloads are indexed as datetime for temporal queries.
 
@@ -65,17 +68,19 @@ Memgraph (Cypher-compatible) with temporal validity:
 
 ### Recall pipeline (hybrid)
 
-Retrieval and reranking are fail-open: a broken retriever contributes nothing, a failing LLM reranker leaves the pre-rerank order. Query expansion is the exception — it runs before retrieval, and a misconfigured expansion step (`query_expansion=True` without an `expansion_llm`, or a provider error inside `expand_query`) surfaces as an error rather than degrading. Since v0.4.5 those degradations are observable instead of silent: pass a per-call `RecallTrace` to `Recaller.recall(trace=...)` to capture per-retriever ranked lists (with errors and latency), the fused order, the post-rerank order, and stable `degraded` tags (`retriever:<name>:failed`, `reranker:fallback`, `temporal:no_parse`). The HTTP and MCP surfaces always expose `degraded` in responses and offer the full trace opt-in via `include_trace`; the shared `apply_rerank_safe` helper implements the reranker's fail-open contract for all entry points.
+Retrieval and reranking are fail-open: a broken retriever contributes nothing, a failing LLM reranker leaves the pre-rerank order. Query expansion is the exception — it runs before retrieval, and a misconfigured expansion step (`query_expansion=True` without an `expansion_llm`, or a provider error inside `expand_query`) surfaces as an error rather than degrading. Since v0.4.5 those degradations are observable instead of silent: pass a per-call `RecallTrace` to `Recaller.recall(trace=...)` to capture per-retriever ranked lists (with errors and latency), the fused order, the post-rerank order, and stable `degraded` tags (`retriever:<name>:failed`, `reranker:fallback`, `reranker:unavailable`, `temporal:no_parse`). The HTTP and MCP surfaces always expose `degraded` in responses and offer the full trace opt-in via `include_trace`; the shared `apply_rerank_safe` helper implements the reranker's fail-open contract for all entry points.
 
-Query goes through a staged pipeline:
+Since v0.5.0 every entry point (CLI, HTTP, MCP) ranks through one canonical chain, `recall_flow()`: recall with a 3x candidate pool → ranking pipeline → fail-open rerank → top-K cut → vector-floor. The pipeline is the default everywhere; `--raw` (CLI) or `full_pipeline=false` (HTTP) opt back out to plain fused recall.
 
-1. Optional **query expansion** (`Recaller(expansion_llm=...)`) — reformulate the query into multiple variants before retrieval (v0.4.0).
-2. **Parallel retrieval**: Qdrant vector, Temporal vector, optional BM25, optional Memgraph.
+Query goes through that staged chain:
+
+1. Optional **query expansion** (`Recaller(expansion_llm=...)`) — reformulate the query into multiple variants before retrieval (v0.4.0). Conversational follow-ups can be resolved into standalone questions first with the `rewrite_followup()` helper (the caller supplies the dialog history).
+2. **Parallel retrieval**: Qdrant vector, Temporal vector, optional BM25, optional Memgraph. Optional payload `filters=` apply *inside every retriever* (exact match and `gte`/`lte` ranges, native in Qdrant, mirrored in-process for BM25/MCA via `payload_matches`) — the isolation contract for multi-tenant memory: a source that cannot attribute its results to the filtered scope contributes nothing rather than leak.
 3. **Reciprocal Rank Fusion (RRF)** — equal-weight by default; optionally weighted (`reciprocal_rank_fusion(weights=...)`) or per-query-shape adaptive (`Recaller(adaptive_weights=True)`).
-4. **8-stage pipeline** (opt-in): ClassifyQuery → ExactTokenRescue → GravityDampen → HubDampen → FreshnessBlend → InhibitionOfReturn → CuriosityBoost → QLearningReranker. The final stage and IoR pull from a `StateStore`; `/feedback` (HTTP, CLI, MCP) drives Q-learning updates.
-5. **Graph spreading activation** — optional `GraphResurrection` stage walks 1 hop in Memgraph from RRF seeds.
-6. **LLM reranker** for top-K.
-7. **Inference layer** (Answer mode) — LLM synthesizes a concise factual answer from top memories, with category-aware prompts, specificity resolver, and `cat_3` inference retry on by default. With `retry_with_expansion=True`, low-confidence answers are retried with an expanded query and a HyDE-style hypothetical before giving up.
+4. **8-stage ranking pipeline** (default on all surfaces since v0.5.0): ClassifyQuery → ExactTokenRescue → GravityDampen → HubDampen → FreshnessBlend → InhibitionOfReturn → CuriosityBoost → QLearningReranker. The final stage and IoR pull from a `StateStore`; `/feedback` (HTTP, CLI, MCP) drives Q-learning updates.
+5. **Graph spreading activation** — optional `GraphResurrection` stage walks 1 hop in Memgraph from RRF seeds (its unattributable additions are dropped under `filters=`).
+6. **LLM reranker** for top-K (`rerank_mode`: `relevant_only` subset or `full_reorder`).
+7. **Inference layer** (Answer mode) — LLM synthesizes a concise factual answer from top memories, with category-aware prompts, specificity resolver, and `cat_3` inference retry on by default. With `retry_with_expansion=True`, low-confidence answers are retried with an expanded query and a HyDE-style hypothetical before giving up. Localization hooks: `prompt_overrides=`, `question_classifier=`, `abstention_text=`; count/list questions get the two-pass batched extract path (`list_extract_mode`, optional `list_finalize="verbatim"`).
 
 Output:
 
@@ -98,8 +103,8 @@ Nightly lifecycle runtime:
 Expose mnemostack tools over Model Context Protocol so LLM clients (Claude Desktop, Cursor, etc.) can call:
 
 - `mnemostack_health()` — config + reachability summary
-- `mnemostack_search(query, limit)` — hybrid recall
-- `mnemostack_answer(query, limit)` — concise answer with confidence + source citations
+- `mnemostack_search(query, limit, include_trace, filters)` — hybrid recall through the full ranking chain
+- `mnemostack_answer(query, limit, filters)` — concise answer with confidence + source citations
 - `mnemostack_feedback(hit_id, signal, query, ...)` — explicit feedback into the stateful pipeline (Q-learning + inhibition-of-return)
 - `mnemostack_graph_query(subject, predicate, obj, as_of)` — point-in-time graph query *(only registered when `--memgraph-uri` is set)*
 - `mnemostack_graph_add_triple(subject, predicate, obj, valid_from, valid_until)` *(only registered when `--memgraph-uri` is set)*
@@ -128,6 +133,8 @@ recall:
   top_k: 10
   confidence_threshold: 0.5
   bm25_paths: []
+  vector_floor: 0             # append missing top-N raw-vector candidates after fusion/rerank
+  rerank_mode: relevant_only  # or full_reorder
 
 llm:
   provider: gemini
@@ -178,3 +185,9 @@ services:
 - [x] Sliding-window message chunking (`window_size`) — v0.4.0
 - [x] Query expansion + smart retry on low-confidence answers — v0.4.0
 - [x] Knowledge synthesis (`synthesize()`) — v0.3.0
+- [x] Canonical `recall_flow()` shared by CLI/HTTP/MCP — v0.5.0
+- [x] Chunk lifecycle: `index --prune` (root-scoped) + `--refresh-payloads` — v0.5.0+
+- [x] Recall `filters=` with adversarially-tested tenant isolation — post-0.5.0
+- [x] Ingest-time payload enrichment (`Ingestor(enrich=...)`) + `context_fields` projection — post-0.5.0
+- [x] Ollama `think` control (off by default) + generation options passthrough — post-0.5.0
+- [x] Follow-up question rewriting (`rewrite_followup`) — post-0.5.0

@@ -42,7 +42,7 @@ Numbers in this table come from the Mnemostack README. They are not all from the
 
 Mnemostack is a self-hosted memory layer for AI agents. It can run as a Python library, an HTTP service, or an MCP stdio server.
 
-On recall, configured retrievers run in parallel. The default shape uses vector and temporal retrieval, with BM25 and Memgraph when configured. Results are fused with Reciprocal Rank Fusion. When enabled, the 8-stage pipeline can classify queries, rescue exact tokens, dampen hubs, blend freshness, apply inhibition-of-return, add curiosity boosts, use Q-learning weights from a state store, and resurrect graph-linked memories. Stateful stages require the configured state store to be persisted if those effects matter across restarts. An optional LLM reranker can reorder the final candidates.
+On recall, configured retrievers run in parallel. The default shape uses vector and temporal retrieval, with BM25 and Memgraph when configured. Results are fused with Reciprocal Rank Fusion. The 8-stage pipeline (default on every surface since 0.5.0) classifies queries, rescues exact tokens, dampens hubs, blends freshness, applies inhibition-of-return, adds curiosity boosts, uses Q-learning weights from a state store, and can resurrect graph-linked memories. Stateful stages require the configured state store to be persisted if those effects matter across restarts. An optional LLM reranker can reorder the final candidates.
 
 Strengths:
 
@@ -51,6 +51,7 @@ Strengths:
 - Temporal and graph-aware retrieval when Memgraph is configured.
 - Self-hosted deployment with control over data, providers, and storage.
 - Multiple integration paths: MCP, HTTP, and Python SDK.
+- Payload filters with a tested isolation contract for multi-tenant / per-user memory.
 - Graceful degradation when optional components such as graph retrieval are unavailable.
 
 Costs:
