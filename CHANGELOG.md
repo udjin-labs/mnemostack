@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-06-15
+
 ### Fixed
 
 - **`FreshnessStage` crash on a `None` source from BM25 hits** ([#72](https://github.com/udjin-labs/mnemostack/issues/72)): `BM25Retriever.from_qdrant` wrote `source=None` for Qdrant points that carry neither `source` nor `source_file`, and `FreshnessStage` read it with `payload.get("source", "")` (which returns the present `None`, not the default) before passing it to a regex — raising `TypeError` and aborting the whole 8-stage pipeline for any query whose fused pool contained such a BM25 hit. Fixed at both ends: the BM25 loader no longer writes a `None` source, and the stage normalizes `None → ""` before the date-from-source parse.
