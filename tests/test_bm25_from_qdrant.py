@@ -85,6 +85,19 @@ def test_bm25_docs_from_qdrant_reads_payload_text_and_metadata():
     assert client.calls[0]["with_vectors"] is False
 
 
+def test_bm25_docs_from_qdrant_omits_source_when_absent():
+    # Regression (#72): a point with neither source nor source_file must NOT
+    # get source=None written into its doc payload — that None poisoned every
+    # downstream `.get("source", "")` consumer and crashed FreshnessStage.
+    client = FakeQdrantClient([point("a", {"text": "MERGED pull request 71706"})])
+
+    docs = bm25_docs_from_qdrant(client, "memory")
+
+    assert len(docs) == 1
+    assert "source" not in docs[0].payload  # absent, not present-and-None
+    assert docs[0].payload.get("source", "") == ""  # downstream consumers stay safe
+
+
 def test_bm25_docs_from_qdrant_supports_filter_and_limit():
     client = FakeQdrantClient(
         [
