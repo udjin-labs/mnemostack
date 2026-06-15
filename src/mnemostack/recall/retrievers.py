@@ -193,7 +193,12 @@ def bm25_docs_from_qdrant(
             qdrant_id = str(getattr(point, "id", len(docs)))
             doc_payload = dict(payload)
             doc_payload.setdefault("qdrant_id", qdrant_id)
-            doc_payload.setdefault("source", payload.get("source_file") or payload.get("source"))
+            # Only set a source when one actually exists — Qdrant points often
+            # carry neither key, and writing source=None poisons every
+            # consumer that does payload.get("source", "") expecting a string.
+            src = payload.get("source_file") or payload.get("source")
+            if src is not None:
+                doc_payload.setdefault("source", src)
             doc_id = qdrant_id if id_prefix is None else f"bm25:{id_prefix}:{qdrant_id}"
             docs.append(
                 BM25Doc(

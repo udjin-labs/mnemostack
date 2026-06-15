@@ -185,6 +185,16 @@ def test_freshness_blend_falls_back_to_filename_date():
     assert out[0].payload["freshness"] < 0.5
 
 
+def test_freshness_blend_tolerates_explicit_none_source():
+    # Regression (#72): BM25 hits from Qdrant points without a source key
+    # carried an explicit source=None, which reached _date_from_source's
+    # regex as None and crashed the whole pipeline with a TypeError.
+    rs = [_mk_result(1, "x", score=0.5, source=None)]
+    ctx = PipelineContext(query="x")
+    out = FreshnessBlend(weight=0.5).apply(ctx, rs)
+    assert out[0].payload["freshness"] == 0.5  # no timestamp, no source date
+
+
 def test_ior_penalizes_recent_recalls():
     store = InMemoryStateStore()
     stage = InhibitionOfReturn(state_store=store, penalty_per_recall=0.1)

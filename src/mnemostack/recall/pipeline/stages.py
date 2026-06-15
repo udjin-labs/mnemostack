@@ -355,7 +355,10 @@ class FreshnessBlend(Stage):
         for r in results:
             ts_dt = self._parse_timestamp(r.payload)
             if ts_dt is None:
-                ts_dt = self._date_from_source(r.payload.get("source", ""))
+                # `or ""` (not a get-default): a present-but-None source —
+                # e.g. a BM25 hit from a Qdrant point with no source key —
+                # must not reach _date_from_source's regex as None.
+                ts_dt = self._date_from_source(r.payload.get("source") or "")
             freshness = 0.5
             age_minutes = None
             if ts_dt is not None:
