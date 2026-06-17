@@ -5,21 +5,19 @@
 [![CI](https://github.com/udjin-labs/mnemostack/actions/workflows/ci.yml/badge.svg)](https://github.com/udjin-labs/mnemostack/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-> Durable, searchable memory for AI agents.
+> Self-hosted hybrid memory & retrieval for AI apps.
 
-Mnemostack was built to solve a real problem: AI agents forget useful context between sessions.
+`mnemostack` is a durable retrieval layer over your own Qdrant (and optional Memgraph): semantic, keyword (BM25), temporal, and graph recall, fused with Reciprocal Rank Fusion and refined by an 8-stage ranking pipeline — with payload filters for multi-tenant isolation, optional LLM answer synthesis (confidence + citations), and an ingest path that enriches and projects structured fields. One `recall(query)` call, usable as a Python library, an HTTP service, or an MCP server.
 
-Every long-running agent eventually hits the same wall: context gets compacted, sessions restart, useful decisions disappear, and the next run pays the re-orientation tax again.
+**Flagship use case — durable memory for AI agents.** Long-running agents hit the same wall: context gets compacted, sessions restart, useful decisions disappear, and the next run pays the re-orientation tax again. mnemostack gives them a persistent memory layer to query when the context window is not enough — durable, searchable, scoped, and explainable, not just embedded and hoped for.
 
-`mnemostack` gives agents a persistent memory layer they can query when the current context window is not enough. It is designed for agent workflows where memory needs to be durable, searchable, scoped, and explainable — not just embedded and hoped for.
-
-Under the hood, Mnemostack uses hybrid retrieval across semantic search, keyword search, and graph relationships, then ranks results through a unified recall pipeline.
+The same engine backs other retrieval-heavy work: RAG over mixed corpora, multi-tenant or per-user knowledge stores, and time-aware search backends — anywhere pure vector similarity falls short on its own.
 
 **Status:** Actively developed — public API is stable; new functionality lands additively in minor releases. Breaking changes are rare and called out in [CHANGELOG.md](CHANGELOG.md).
 
-## MCP quickstart
+## Quickstart: agent memory over MCP
 
-This is the main entrypoint if you want to give Claude Desktop, Claude Code, Cursor, ChatGPT, or another MCP-capable agent durable memory.
+The fastest on-ramp is the MCP server — it gives Claude Desktop, Claude Code, Cursor, ChatGPT, or another MCP-capable agent durable memory in a few commands. Building an app instead of wiring up an agent? Use the [HTTP API or the Python library](#three-ways-to-use-mnemostack) over the same collection.
 
 ### 1. Install
 
@@ -89,15 +87,25 @@ mnemostack answer "what did we decide about auth" --provider gemini --collection
 
 ## Why hybrid memory?
 
-Vector search answers "what sounds similar?" Agent memory needs to answer "what matters in this context?" That requires exact matches, semantic similarity, relationship tracking, recency, user/project scope, and feedback from past recalls. Mnemostack uses hybrid retrieval so memory recall is reliable instead of embedding roulette.
+Vector search answers "what sounds similar?" Real retrieval over a growing corpus needs to answer "what actually matters for this query?" — which takes exact matches, semantic similarity, relationship tracking, recency, user/project scope, and feedback from past recalls. Mnemostack uses hybrid retrieval so recall is reliable instead of embedding roulette. (Agent memory is the most demanding version of this problem, which is why it's the flagship use case.)
 
 ## Use cases
 
+**Agent and chatbot memory (flagship):**
+
 - Long-running coding agents that need to survive compaction and session restarts.
-- Personal assistant memory for preferences, decisions, recurring tasks, and long-horizon context.
-- Team or project knowledge recall across docs, notes, tickets, and chat history.
+- Chat assistants and conversational bots that remember a user's earlier messages, preferences, and decisions across sessions — scope each user's memory with payload `filters` so one user never sees another's history.
+- Personal assistant memory for preferences, recurring tasks, and long-horizon context.
 - Multi-agent context sharing through one durable memory backend.
 - Session compaction recovery when the useful details no longer fit in the prompt.
+
+**Beyond agents — the same engine as a retrieval backend:**
+
+- A searchable knowledge base in memory: ingest your docs/notes/FAQ once, then serve hybrid search or grounded `answer()` (with confidence and source citations) over it from the CLI, HTTP, or library.
+- RAG over mixed corpora (code, docs, transcripts) where exact-token and temporal recall beat pure vector similarity.
+- Multi-tenant or per-user knowledge stores — payload `filters` isolate each tenant's data inside every retriever (see the [HTTP API](#http-server-optional)).
+- Time-aware search and knowledge bases — "what changed last week", point-in-time graph facts, freshness-weighted ranking.
+- Team or project knowledge recall across docs, notes, tickets, and chat history.
 
 ## Three ways to use Mnemostack
 
@@ -129,7 +137,7 @@ Most memory tools in the agent ecosystem pick one axis and optimize for it: simp
 
 mnemostack takes a different slice: it is a **recall quality layer**, offered as a plain Python package. Four retrievers (Vector + BM25 + Memgraph + Temporal), RRF fusion, an 8-stage pipeline, and an optional LLM reranker — composed to handle mixed workloads on the same corpus: exact-token lookups, semantic queries, temporal questions, and multi-hop reasoning, without forcing you to choose one mode over another.
 
-We are not a replacement for your agent framework and not a full platform runtime. We are the piece that actually finds the right fact in a growing corpus. Drop mnemostack into your own Python agent, or let a higher-level memory service call `recall()` over a plain function boundary. The retrievers, pipeline, and reranker are individually composable — take only the parts you need.
+We are not a replacement for your agent framework and not a full platform runtime. We are the piece that actually finds the right fact in a growing corpus. Drop mnemostack into your own Python agent or application, or let a higher-level service call `recall()` over a plain function boundary. The retrievers, pipeline, and reranker are individually composable — take only the parts you need.
 
 ### Design
 
