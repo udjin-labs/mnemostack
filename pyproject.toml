@@ -5,14 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mnemostack"
 version = "0.6.1"
-description = "Memory stack for AI agents: BM25 + Qdrant + Memgraph + RRF retrieval, Gemini Flash inference layer, 8-stage recall pipeline."
+description = "Self-hosted hybrid memory & retrieval for AI apps: semantic + BM25 + temporal + graph recall over Qdrant/Memgraph, RRF fusion, 8-stage ranking, multi-tenant filters, answer synthesis."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
 authors = [
     {name = "mnemostack contributors"},
 ]
-keywords = ["memory", "ai", "agent", "rag", "qdrant", "memgraph", "retrieval", "bm25", "embeddings"]
+keywords = ["memory", "ai", "agent", "chatbot", "rag", "knowledge-base", "qdrant", "memgraph", "retrieval", "bm25", "embeddings"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
