@@ -34,7 +34,7 @@ try:
     from qdrant_client.models import DatetimeRange, FieldCondition, Filter
 except ImportError:  # pragma: no cover - qdrant-client is a runtime dependency
     DatetimeRange = FieldCondition = Filter = None  # type: ignore[assignment,misc]
-from .bm25 import BM25, BM25Doc
+from .bm25 import BM25, BM25Doc, Tokenizer, tokenize
 from .filters import payload_matches
 from .recaller import RecallResult
 
@@ -134,6 +134,7 @@ def bm25_docs_from_qdrant(
     payload_filter: Callable[[dict[str, Any]], bool] | None = None,
     newer_than: str | None = None,
     older_than: str | None = None,
+    tokenizer: Tokenizer | None = None,
 ) -> list[BM25Doc]:
     """Create BM25 documents from Qdrant payload text.
 
@@ -157,6 +158,11 @@ def bm25_docs_from_qdrant(
             ``payload["timestamp"] >= newer_than``.
         older_than: Optional ISO timestamp; keep chunks with
             ``payload["timestamp"] <= older_than``.
+        tokenizer: Optional analyzer used to pre-tokenize document text. If you
+            pass these docs to ``BM25``/``BM25Retriever`` with the same
+            tokenizer directly, use ``retokenize=False`` there to avoid a
+            second corpus pass. ``BM25Retriever.from_qdrant`` handles this
+            automatically.
 
     Warning:
         For very large collections (>1M chunks), consider passing a Filter to
@@ -205,6 +211,7 @@ def bm25_docs_from_qdrant(
                     id=doc_id,
                     text=text,
                     payload=doc_payload,
+                    tokens=(tokenizer or tokenize)(text),
                 )
             )
             if limit is not None and len(docs) >= limit:
@@ -219,8 +226,14 @@ class BM25Retriever(Retriever):
 
     name = "bm25"
 
-    def __init__(self, docs: list[BM25Doc]):
-        self.bm25 = BM25(docs)
+    def __init__(
+        self,
+        docs: list[BM25Doc],
+        tokenizer: Tokenizer = tokenize,
+        *,
+        retokenize: bool | None = None,
+    ):
+        self.bm25 = BM25(docs, tokenizer=tokenizer, retokenize=retokenize)
 
     @classmethod
     def from_qdrant(
@@ -236,6 +249,7 @@ class BM25Retriever(Retriever):
         payload_filter: Callable[[dict[str, Any]], bool] | None = None,
         newer_than: str | None = None,
         older_than: str | None = None,
+        tokenizer: Tokenizer | None = None,
     ) -> BM25Retriever:
         """Build a BM25 retriever from Qdrant payload text.
 
@@ -261,6 +275,8 @@ class BM25Retriever(Retriever):
                 ``payload["timestamp"] >= newer_than``.
             older_than: Optional ISO timestamp; keep chunks with
                 ``payload["timestamp"] <= older_than``.
+            tokenizer: Optional analyzer applied consistently to corpus and
+                query text.
 
         Warning:
             For very large collections (>1M chunks), consider passing a Filter
@@ -282,8 +298,9 @@ class BM25Retriever(Retriever):
             payload_filter=payload_filter,
             newer_than=newer_than,
             older_than=older_than,
+            tokenizer=tokenizer,
         )
-        return cls(docs=docs)
+        return cls(docs=docs, tokenizer=tokenizer or tokenize, retokenize=False)
 
     def search(self, query, limit=20, filters=None):
         # Same filter semantics the vector store applies natively. Without

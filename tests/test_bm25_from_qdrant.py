@@ -142,6 +142,42 @@ def test_bm25_retriever_from_qdrant_finds_exact_token():
     assert results[0].sources == ["bm25"]
 
 
+def test_bm25_retriever_from_qdrant_uses_custom_tokenizer():
+    def analyzer(text: str) -> list[str]:
+        return [
+            {"forms": "form", "form": "form"}.get(token, token)
+            for token in text.lower().split()
+        ]
+
+    client = FakeQdrantClient([point("a", {"text": "forms"})])
+
+    retriever = BM25Retriever.from_qdrant(client, "memory", tokenizer=analyzer)
+    results = retriever.search("form", limit=1)
+
+    assert [r.id for r in results] == ["a"]
+
+
+def test_bm25_retriever_from_qdrant_does_not_retokenize_custom_corpus():
+    calls = []
+
+    def analyzer(text: str) -> list[str]:
+        calls.append(text)
+        return [
+            {"forms": "form", "form": "form"}.get(token, token)
+            for token in text.lower().split()
+        ]
+
+    client = FakeQdrantClient([point("a", {"text": "forms"})])
+
+    retriever = BM25Retriever.from_qdrant(client, "memory", tokenizer=analyzer)
+    assert calls == ["forms"]
+
+    results = retriever.search("form", limit=1)
+
+    assert [r.id for r in results] == ["a"]
+    assert calls == ["forms", "form"]
+
+
 def test_bm25_from_qdrant_fuses_with_vector_result_by_qdrant_id():
     class FakeVectorRetriever:
         name = "vector"
