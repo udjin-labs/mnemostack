@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Iterable
 from typing import Protocol
 
 from .recaller import RecallResult
@@ -52,7 +53,7 @@ class ScoringReranker:
         head = results[: self.max_items]
         tail = results[self.max_items :]
         try:
-            scores = self.scorer.score(query, [r.text for r in head])
+            scores = _materialize_scores(self.scorer.score(query, [r.text for r in head]))
         except Exception as exc:  # noqa: BLE001 - reranking must stay fail-open
             logger.warning("scoring rerank failed, keeping original order: %s", exc)
             self.last_fallback_reason = "reranker:fallback"
@@ -81,3 +82,9 @@ class ScoringReranker:
 def _finite_score_or_floor(score: float) -> float:
     """Use non-finite scorer output as the lowest possible relevance score."""
     return score if math.isfinite(score) else -math.inf
+
+
+def _materialize_scores(scores: object) -> list[float]:
+    if scores is None or isinstance(scores, (str, bytes)) or not isinstance(scores, Iterable):
+        raise TypeError("score backend must return an iterable of numeric scores")
+    return list(scores)

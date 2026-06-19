@@ -20,6 +20,14 @@ class FakeScorer:
         return list(self.scores)
 
 
+class RawScorer:
+    def __init__(self, scores):
+        self.scores = scores
+
+    def score(self, query: str, documents: list[str]):
+        return self.scores
+
+
 @pytest.fixture
 def sample_results():
     return [
@@ -78,6 +86,24 @@ def test_scoring_reranker_fail_open_on_non_numeric_scores(sample_results):
     out = reranker.rerank("query", sample_results)
 
     assert out is sample_results
+
+
+def test_scoring_reranker_fail_open_on_none_scores(sample_results):
+    reranker = ScoringReranker(RawScorer(None))
+
+    out = reranker.rerank("query", sample_results)
+
+    assert out is sample_results
+    assert reranker.last_fallback_reason == "reranker:fallback"
+
+
+def test_scoring_reranker_accepts_generator_scores(sample_results):
+    reranker = ScoringReranker(RawScorer(score for score in [0.1, 0.9, 0.4, 0.2]))
+
+    out = reranker.rerank("query", sample_results)
+
+    assert [r.id for r in out] == ["b", "c", "d", "a"]
+    assert reranker.last_fallback_reason is None
 
 
 def test_scoring_reranker_treats_non_finite_scores_as_lowest(sample_results):
