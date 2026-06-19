@@ -21,7 +21,7 @@ of generated IDs.
 from mnemostack.recall import RelevanceScorer, ScoringReranker
 
 class MyScorer:
-    def score(self, query: str, documents: list[str]) -> list[float]:
+    def score(self, query: str, documents: list[str]) -> Iterable[float]:
         ...
 
 reranker = ScoringReranker(MyScorer(), max_items=100)
@@ -29,9 +29,10 @@ reranked = reranker.rerank(query, results)
 ```
 
 The scorer must return exactly one numeric score per document, in the same
-order. Scores are used only relatively: higher score ranks earlier. Items past
-`max_items` keep their original order. If scoring fails or returns malformed
-output, reranking is fail-open and the original order is preserved.
+order. Lists and one-shot iterables are accepted. Scores are used only
+relatively: higher score ranks earlier. Items past `max_items` keep their
+original order. If scoring fails or returns malformed output, reranking is
+fail-open and the original order is preserved.
 
 ## Recommended Backends
 

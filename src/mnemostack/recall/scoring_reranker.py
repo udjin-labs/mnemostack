@@ -26,7 +26,7 @@ class RelevanceScorer(Protocol):
     the same order. Scores are compared only relative to each other.
     """
 
-    def score(self, query: str, documents: list[str]) -> list[float]: ...
+    def score(self, query: str, documents: list[str]) -> Iterable[float]: ...
 
 
 class ScoringReranker:

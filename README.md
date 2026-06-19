@@ -623,10 +623,10 @@ scoring_reranker = ScoringReranker(scorer=my_relevance_scorer, max_items=100)
 final = scoring_reranker.rerank("retention policy", reranked)[:10]
 ```
 
-The scorer object only needs `score(query, documents) -> list[float]`. Scores
-are relative; no absolute threshold is applied by default. Generative LLMs can
-be wrapped as scorers, but dedicated rerank models/services are the more stable
-default because they avoid ID-format parsing.
+The scorer object only needs `score(query, documents) -> Iterable[float]`.
+Scores are relative; no absolute threshold is applied by default. Generative
+LLMs can be wrapped as scorers, but dedicated rerank models/services are the
+more stable default because they avoid ID-format parsing.
 
 ##### Building a BM25 corpus
 
