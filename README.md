@@ -612,6 +612,22 @@ reranker = Reranker(llm=get_llm("gemini"), max_items=20)
 final = reranker.rerank("what did we decide", reranked)[:10]
 ```
 
+`Reranker` is generative: it asks an LLM to return candidate IDs. If you have
+a backend that returns numeric relevance scores instead (a local cross-encoder
+or a hosted rerank service), use `ScoringReranker`:
+
+```python
+from mnemostack.recall import ScoringReranker
+
+scoring_reranker = ScoringReranker(scorer=my_relevance_scorer, max_items=100)
+final = scoring_reranker.rerank("retention policy", reranked)[:10]
+```
+
+The scorer object only needs `score(query, documents) -> Iterable[float]`.
+Scores are relative; no absolute threshold is applied by default. Generative
+LLMs can be wrapped as scorers, but dedicated rerank models/services are the
+more stable default because they avoid ID-format parsing.
+
 ##### Building a BM25 corpus
 
 `BM25Retriever` needs a list of `BM25Doc`. Each doc is the atomic unit BM25 will rank — typically a paragraph or chunk of one of your source files:
@@ -634,9 +650,9 @@ for i, path in enumerate(Path("my-notes/").rglob("*.md")):
             ))
 ```
 
-For transcript-like inputs (user↔assistant messages), prefer `MessagePairChunker` so a question and its answer stay in the same chunk. See `mnemostack.chunking`.
+For transcript-like inputs (adjacent user and assistant turns), prefer `MessagePairChunker` so related turns stay in the same chunk. See `mnemostack.chunking`.
 
-If your canonical memory corpus is already stored in Qdrant payloads, build the BM25 corpus from the same collection instead of maintaining a separate markdown export. This keeps exact-token lookup aligned with vector search (message IDs, commit hashes, filenames, quoted phrases):
+If your canonical memory corpus is already stored in Qdrant payloads, build the BM25 corpus from the same collection instead of maintaining a separate markdown export. This keeps exact-token lookup aligned with vector search (IDs, commit hashes, filenames, quoted phrases):
 
 ```python
 from qdrant_client import QdrantClient
@@ -653,10 +669,28 @@ bm25 = BM25Retriever.from_qdrant(
     limit=40_000,
 )
 
-hits = bm25.search("MERGED 71706", limit=5)
+hits = bm25.search("api_key_rotation", limit=5)
 ```
 
 You can also call `bm25_docs_from_qdrant(...)` directly if you want to combine Qdrant payload chunks with local `BM25Doc`s before constructing `BM25Retriever`.
+
+For morphologically rich languages or domain-specific normalization, pass a
+custom tokenizer/analyzer. The same analyzer is applied to corpus and query
+text; the default exact-token behavior is unchanged when omitted.
+
+```python
+from mnemostack.recall import BM25Retriever
+
+def analyzer(text: str) -> list[str]:
+    # Normalize only what your corpus needs; preserve IDs, hashes and paths.
+    ...
+
+bm25 = BM25Retriever.from_qdrant(client, "memory", tokenizer=analyzer)
+```
+
+If you pre-tokenize `BM25Doc` objects yourself, pass `retokenize=False` when
+constructing `BM25`/`BM25Retriever` with the same analyzer. The
+`BM25Retriever.from_qdrant(...)` helper does this automatically.
 
 ### HTTP server (optional)
 

@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Pluggable BM25 tokenizer/analyzer**: `BM25`, `BM25Retriever`, and `BM25Retriever.from_qdrant(...)` accept `tokenizer=...` so applications can apply language-aware or domain-specific normalization consistently to both corpus and query text. The default tokenizer and exact-token behavior are unchanged.
+- **Score-based reranking**: `ScoringReranker` and `RelevanceScorer` provide a backend-agnostic reranker for scorers that return one numeric relevance score per candidate. Dedicated rerank models/services can now plug in without using the generative LLM ID-output contract.
+
 ## [0.6.1] - 2026-06-15
 
 ### Fixed

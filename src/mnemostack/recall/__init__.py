@@ -15,7 +15,7 @@ Usage:
 """
 
 from .answer import Answer, AnswerGenerator, classify_question
-from .bm25 import BM25, BM25Doc, tokenize
+from .bm25 import BM25, BM25Doc, Tokenizer, tokenize
 from .corpus import build_bm25_docs
 from .expansion import QueryExpander
 from .filters import payload_matches
@@ -56,12 +56,14 @@ from .retrievers import (
     bm25_docs_from_qdrant,
     extract_temporal,
 )
+from .scoring_reranker import RelevanceScorer, ScoringReranker
 from .specificity import detect_placeholders, resolve_specificity
 from .trace import RecallTrace, RetrieverTrace, apply_rerank_safe
 
 __all__ = [
     "BM25",
     "BM25Doc",
+    "Tokenizer",
     "build_bm25_docs",
     "tokenize",
     "reciprocal_rank_fusion",
@@ -93,6 +95,8 @@ __all__ = [
     "detect_placeholders",
     "resolve_specificity",
     "Reranker",
+    "RelevanceScorer",
+    "ScoringReranker",
     "RERANK_MODES",
     "Pipeline",
     "PipelineContext",

@@ -176,6 +176,22 @@ def test_apply_rerank_safe_fallback_marks_degraded():
     assert trace.post_rerank is None
 
 
+def test_apply_rerank_safe_self_fail_open_marks_degraded():
+    from mnemostack.recall import ScoringReranker
+
+    class _BadScorer:
+        def score(self, query, documents):
+            return [0.1]
+
+    results = _results("vector", ["a", "b"])
+    trace = RecallTrace()
+    out = apply_rerank_safe(ScoringReranker(_BadScorer()), "q", results, trace)
+
+    assert out == results
+    assert trace.degraded == ["reranker:fallback"]
+    assert trace.post_rerank is None
+
+
 def test_apply_rerank_safe_none_reranker_noop():
     results = _results("vector", ["a"])
     trace = RecallTrace()

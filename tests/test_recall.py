@@ -55,6 +55,20 @@ def test_bm25_unknown_term(sample_corpus):
     assert bm25.search("quantumphysics", limit=5) == []
 
 
+def test_bm25_custom_tokenizer_applies_to_corpus_and_query():
+    def analyzer(text: str) -> list[str]:
+        return [
+            {"forms": "form", "form": "form"}.get(token, token)
+            for token in text.lower().split()
+        ]
+
+    bm25 = BM25([BM25Doc(id="doc", text="forms")], tokenizer=analyzer)
+
+    results = bm25.search("form")
+
+    assert [doc.id for doc, _score in results] == ["doc"]
+
+
 def test_bm25_payload_preserved(sample_corpus):
     docs = [
         BM25Doc(id=1, text="foo bar baz", payload={"source": "a.md", "line": 5}),

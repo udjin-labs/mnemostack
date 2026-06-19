@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 _TOKEN_RE = re.compile(r"\w+", re.UNICODE)
+Tokenizer = Callable[[str], list[str]]
 
 
 def tokenize(text: str) -> list[str]:
@@ -47,6 +48,9 @@ class BM25:
     Parameters:
         k1: term frequency saturation (1.2–2.0 typical)
         b:  length normalization (0.75 typical)
+        tokenizer: analyzer applied to query text and, by default, corpus text.
+        retokenize: set to ``False`` when ``documents`` already carry tokens
+            produced by ``tokenizer``.
     """
 
     def __init__(
@@ -54,15 +58,30 @@ class BM25:
         documents: list[BM25Doc],
         k1: float = 1.5,
         b: float = 0.75,
+        tokenizer: Tokenizer = tokenize,
+        *,
+        retokenize: bool | None = None,
     ):
-        self.docs = documents
         self.k1 = k1
         self.b = b
-        self.doc_count = len(documents)
-        self.avgdl = sum(len(d.tokens or []) for d in documents) / max(self.doc_count, 1)
+        self.tokenizer = tokenizer
+        if retokenize is None:
+            retokenize = tokenizer is not tokenize
+        if not retokenize:
+            self.docs = documents
+        else:
+            # Existing BM25Doc instances may already carry tokens produced by
+            # the default analyzer. A custom analyzer must be applied to both
+            # corpus and query text, so rebuild the token lists consistently.
+            self.docs = [
+                BM25Doc(id=d.id, text=d.text, payload=d.payload, tokens=tokenizer(d.text))
+                for d in documents
+            ]
+        self.doc_count = len(self.docs)
+        self.avgdl = sum(len(d.tokens or []) for d in self.docs) / max(self.doc_count, 1)
         # Document frequency per term
         self.df: dict[str, int] = defaultdict(int)
-        for d in documents:
+        for d in self.docs:
             for term in set(d.tokens or []):
                 self.df[term] += 1
         # IDF per term
@@ -97,7 +116,7 @@ class BM25:
         post-cut filter would return fewer than K matching results whenever
         foreign docs out-scored them, losing recall.
         """
-        q_tokens = tokenize(query)
+        q_tokens = self.tokenizer(query)
         if not q_tokens:
             return []
         candidates = self.docs if predicate is None else [d for d in self.docs if predicate(d)]
