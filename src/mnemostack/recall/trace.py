@@ -101,5 +101,9 @@ def apply_rerank_safe(
             trace.mark("reranker:fallback")
         return results
     if trace is not None:
+        fallback_reason = getattr(reranker, "last_fallback_reason", None)
+        if fallback_reason:
+            trace.mark(str(fallback_reason))
+            return out
         trace.post_rerank = [(str(r.id), r.score) for r in out]
     return out
