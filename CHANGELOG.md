@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-20
+
 ### Added
 
 - **Pluggable BM25 tokenizer/analyzer**: `BM25`, `BM25Retriever`, and `BM25Retriever.from_qdrant(...)` accept `tokenizer=...` so applications can apply language-aware or domain-specific normalization consistently to both corpus and query text. The default tokenizer and exact-token behavior are unchanged.
