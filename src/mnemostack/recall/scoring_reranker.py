@@ -36,7 +36,11 @@ class ScoringReranker:
         scorer: backend returning one score per candidate document.
         max_items: rerank only this prefix; later results keep their order.
 
-    If scoring fails or returns malformed output, the original order is kept.
+    Fail-open contract: if scoring fails or returns malformed output, the
+    original order is kept by returning the **same** ``results`` list object;
+    a successful rerank always returns a new list. ``apply_rerank_safe`` uses
+    that identity to record the fallback in the recall trace, so there is no
+    per-instance state and one reranker can safely serve concurrent requests.
     """
 
     def __init__(self, scorer: RelevanceScorer, max_items: int = 200):
@@ -44,10 +48,8 @@ class ScoringReranker:
             raise ValueError("max_items must be >= 1")
         self.scorer = scorer
         self.max_items = max_items
-        self.last_fallback_reason: str | None = None
 
     def rerank(self, query: str, results: list[RecallResult]) -> list[RecallResult]:
-        self.last_fallback_reason = None
         if not results:
             return []
         head = results[: self.max_items]
@@ -56,7 +58,6 @@ class ScoringReranker:
             scores = _materialize_scores(self.scorer.score(query, [r.text for r in head]))
         except Exception as exc:  # noqa: BLE001 - reranking must stay fail-open
             logger.warning("scoring rerank failed, keeping original order: %s", exc)
-            self.last_fallback_reason = "reranker:fallback"
             return results
         if len(scores) != len(head):
             logger.warning(
@@ -64,7 +65,6 @@ class ScoringReranker:
                 len(scores),
                 len(head),
             )
-            self.last_fallback_reason = "reranker:fallback"
             return results
         try:
             scored = [
@@ -73,7 +73,6 @@ class ScoringReranker:
             ]
         except (TypeError, ValueError):
             logger.warning("scoring rerank returned non-numeric scores; keeping original order")
-            self.last_fallback_reason = "reranker:fallback"
             return results
         scored.sort(key=lambda item: (-item[1], item[2]))
         return [result for result, _score, _idx in scored] + tail
