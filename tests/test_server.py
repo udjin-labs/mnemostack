@@ -158,7 +158,7 @@ def _patched_app(
                 pass
 
             def rerank(self, q, rs):
-                return rs
+                return list(rs)  # successful no-op rerank returns a new list
 
         monkeypatch.setattr(srv, "Reranker", _FakeReranker)
         monkeypatch.setattr(srv, "get_llm", lambda _n, **_kwargs: _FakeLLM())

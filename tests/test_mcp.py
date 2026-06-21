@@ -130,7 +130,7 @@ def test_mcp_search_preserves_vector_floor_after_rerank_slice(monkeypatch):
             pass
 
         def rerank(self, query, results):
-            return results
+            return list(results)  # successful no-op rerank returns a new list
 
     monkeypatch.setattr(srv, "get_provider", lambda *_args, **_kwargs: _FakeEmbedding())
     monkeypatch.setattr(srv, "get_llm", lambda *_args, **_kwargs: object())
@@ -283,7 +283,7 @@ def _patch_minimal(monkeypatch, srv, recaller_cls, reranker_cls=None):
             pass
 
         def rerank(self, query, results):
-            return results
+            return list(results)  # successful no-op rerank returns a new list
 
     monkeypatch.setattr(srv, "get_provider", lambda *_args, **_kwargs: _FakeEmbedding())
     monkeypatch.setattr(srv, "get_llm", lambda *_args, **_kwargs: object())

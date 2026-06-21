@@ -192,6 +192,24 @@ def test_apply_rerank_safe_self_fail_open_marks_degraded():
     assert trace.post_rerank is None
 
 
+def test_apply_rerank_safe_inplace_reranker_not_misread_as_fallback():
+    # A custom reranker that sorts the supplied list in place and returns the
+    # same object is a SUCCESSFUL reorder, not a fallback. Without the opt-in
+    # `fallback_keeps_input_object` marker, identity must not flag it.
+    class _InPlaceReranker:
+        def rerank(self, query, results):
+            results.sort(key=lambda r: r.id, reverse=True)
+            return results  # same object, but order changed → success
+
+    results = _results("vector", ["a", "b", "c"])
+    trace = RecallTrace()
+    out = apply_rerank_safe(_InPlaceReranker(), "q", results, trace)
+
+    assert [r.id for r in out] == ["c", "b", "a"]
+    assert trace.degraded == []  # not a fallback
+    assert trace.post_rerank == [("c", out[0].score), ("b", out[1].score), ("a", out[2].score)]
+
+
 def test_apply_rerank_safe_none_reranker_noop():
     results = _results("vector", ["a"])
     trace = RecallTrace()
