@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-06-21
+
 ### Fixed
 
 - **`ScoringReranker` fallback signal is now thread-safe**: it previously recorded its keep-original-order fallback in a per-instance `last_fallback_reason` attribute that `apply_rerank_safe` read back. A single reranker instance is shared across concurrent requests (the HTTP server runs recall in a thread pool), so that mutable state raced — a fallback could be mis-attributed to, or lost from, another request's recall trace (results were always correct; only the `degraded`/`post_rerank` trace fields were affected). The signal is now stateless: a reranker opts into an identity contract via a `fallback_keeps_input_object` class marker — it returns the same `results` object on a kept-order fallback and a new list on success — and `apply_rerank_safe` detects the fallback by identity only for rerankers that advertise it. Rerankers that sort in place and return the input list are unaffected (a successful reorder is never misread as a fallback).

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mnemostack"
-version = "0.7.0"
+version = "0.7.1"
 description = "Self-hosted hybrid memory & retrieval for AI apps: semantic + BM25 + temporal + graph recall over Qdrant/Memgraph, RRF fusion, 8-stage ranking, multi-tenant filters, answer synthesis."
 readme = "README.md"
 requires-python = ">=3.10"
