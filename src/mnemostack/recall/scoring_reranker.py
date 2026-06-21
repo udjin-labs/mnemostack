@@ -43,6 +43,12 @@ class ScoringReranker:
     per-instance state and one reranker can safely serve concurrent requests.
     """
 
+    #: Opt-in marker read by ``apply_rerank_safe``: this reranker signals a
+    #: kept-order fallback by returning the *same* ``results`` object (and a new
+    #: list on success). Rerankers that sort in place and return the input must
+    #: NOT set this, or a successful reorder would be misread as a fallback.
+    fallback_keeps_input_object = True
+
     def __init__(self, scorer: RelevanceScorer, max_items: int = 200):
         if max_items < 1:
             raise ValueError("max_items must be >= 1")
