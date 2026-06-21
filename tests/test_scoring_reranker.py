@@ -94,7 +94,6 @@ def test_scoring_reranker_fail_open_on_none_scores(sample_results):
     out = reranker.rerank("query", sample_results)
 
     assert out is sample_results
-    assert reranker.last_fallback_reason == "reranker:fallback"
 
 
 def test_scoring_reranker_accepts_generator_scores(sample_results):
@@ -103,7 +102,7 @@ def test_scoring_reranker_accepts_generator_scores(sample_results):
     out = reranker.rerank("query", sample_results)
 
     assert [r.id for r in out] == ["b", "c", "d", "a"]
-    assert reranker.last_fallback_reason is None
+    assert out is not sample_results  # success returns a new list, not the input
 
 
 def test_scoring_reranker_treats_non_finite_scores_as_lowest(sample_results):
@@ -114,13 +113,14 @@ def test_scoring_reranker_treats_non_finite_scores_as_lowest(sample_results):
     assert [r.id for r in out] == ["b", "a", "c", "d"]
 
 
-def test_scoring_reranker_exposes_fallback_reason(sample_results):
+def test_scoring_reranker_fallback_returns_input_object(sample_results):
+    # The fallback signal is identity, not state: a kept-order fallback returns
+    # the exact input list, which apply_rerank_safe detects as the degradation.
     reranker = ScoringReranker(FakeScorer([0.1]))
 
     out = reranker.rerank("query", sample_results)
 
     assert out is sample_results
-    assert reranker.last_fallback_reason == "reranker:fallback"
 
 
 def test_scoring_reranker_empty_input_does_not_call_scorer():
@@ -129,7 +129,6 @@ def test_scoring_reranker_empty_input_does_not_call_scorer():
 
     assert reranker.rerank("query", []) == []
     assert scorer.calls == []
-    assert reranker.last_fallback_reason is None
 
 
 def test_scoring_reranker_validates_max_items():

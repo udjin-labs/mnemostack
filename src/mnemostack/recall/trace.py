@@ -100,10 +100,17 @@ def apply_rerank_safe(
         if trace is not None:
             trace.mark("reranker:fallback")
         return results
+    # Stateless fallback detection by identity — correct under concurrency (no
+    # per-instance state). Only for rerankers that advertise the contract
+    # (`fallback_keeps_input_object`): they return the exact input list object
+    # on a kept-order fallback and a new list on success. Rerankers that sort
+    # in place and return the input don't set the marker, so a successful
+    # reorder is never misread as a fallback.
+    kept_input = out is results and getattr(reranker, "fallback_keeps_input_object", False)
+    if kept_input:
+        if trace is not None:
+            trace.mark("reranker:fallback")
+        return out
     if trace is not None:
-        fallback_reason = getattr(reranker, "last_fallback_reason", None)
-        if fallback_reason:
-            trace.mark(str(fallback_reason))
-            return out
         trace.post_rerank = [(str(r.id), r.score) for r in out]
     return out
