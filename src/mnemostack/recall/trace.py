@@ -100,10 +100,14 @@ def apply_rerank_safe(
         if trace is not None:
             trace.mark("reranker:fallback")
         return results
+    # A self-fail-open reranker (e.g. ScoringReranker) returns the exact input
+    # list object when it keeps the original order; a successful rerank returns
+    # a new list. Detect the fallback by identity — no shared per-instance
+    # state, so this stays correct when one reranker serves concurrent requests.
+    if out is results:
+        if trace is not None:
+            trace.mark("reranker:fallback")
+        return out
     if trace is not None:
-        fallback_reason = getattr(reranker, "last_fallback_reason", None)
-        if fallback_reason:
-            trace.mark(str(fallback_reason))
-            return out
         trace.post_rerank = [(str(r.id), r.score) for r in out]
     return out
