@@ -68,3 +68,39 @@ def recall_flow(
     if token_budget is not None:
         results, _ = apply_token_budget(results, token_budget, token_counter)
     return results
+
+
+async def recall_flow_async(
+    recaller: Recaller,
+    query: str,
+    limit: int = 10,
+    *,
+    pipeline: Pipeline | None = None,
+    reranker: Reranker | None = None,
+    filters: dict[str, object] | None = None,
+    trace: RecallTrace | None = None,
+    token_budget: int | None = None,
+    token_counter: TokenCounter | None = None,
+) -> list[RecallResult]:
+    """Async wrapper around `recall_flow`.
+
+    Runs the blocking recall stack (embedding calls, Qdrant HTTP, Memgraph
+    Bolt, CPU-bound BM25, pipeline stages, LLM rerank) in a worker thread so
+    asyncio services are not blocked. Same contract and results as
+    `recall_flow`; the public signature stays stable if the internals ever
+    switch to native-async retrievers.
+    """
+    import asyncio
+
+    return await asyncio.to_thread(
+        recall_flow,
+        recaller,
+        query,
+        limit,
+        pipeline=pipeline,
+        reranker=reranker,
+        filters=filters,
+        trace=trace,
+        token_budget=token_budget,
+        token_counter=token_counter,
+    )
