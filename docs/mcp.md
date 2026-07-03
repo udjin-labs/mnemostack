@@ -233,6 +233,7 @@ On failure, a component contains `{"ok": false, "error": "..."}` and top-level `
 | `limit` | `integer` | `10` | Maximum number of recall hits to return. |
 | `include_trace` | `boolean` | `false` | Also return the recall `trace` (per-retriever ranked lists, fused and post-rerank order). Verbose; debugging only. |
 | `filters` | `object` | `null` | Payload filters applied inside every retriever: exact match (`{"tenant": "a"}`) or `gte`/`lte` ranges (`{"timestamp": {"gte": "2026-01-01"}}`). Results never include points outside the filtered scope — the isolation contract for multi-tenant memory. Note: filters are caller-supplied, not an authorization boundary; in multi-tenant deployments inject them in your proxy. |
+| `token_budget` | `integer` | `null` | Hard cap on the total (estimated) text tokens of the returned results: the final ranking is cut to the prefix that fits (never overshot). Unset falls back to the server-wide default (`--token-budget` / `MNEMOSTACK_TOKEN_BUDGET`), if any. |
 
 **Return shape:**
 
@@ -242,6 +243,7 @@ On failure, a component contains `{"ok": false, "error": "..."}` and top-level `
   "query": "what did we decide about auth?",
   "count": 2,
   "degraded": [],
+  "tokens_estimate": 34,
   "results": [
     {
       "id": "2f6a...",
@@ -258,7 +260,7 @@ On failure, a component contains `{"ok": false, "error": "..."}` and top-level `
 }
 ```
 
-`degraded` lists components that fell back while serving the call (e.g. `"retriever:bm25:failed"`, `"reranker:fallback"`, `"temporal:no_parse"`); it is empty when the stack was fully healthy. With `include_trace: true` the response additionally carries a `trace` object.
+`degraded` lists components that fell back while serving the call (e.g. `"retriever:bm25:failed"`, `"reranker:fallback"`, `"temporal:no_parse"`); it is empty when the stack was fully healthy. `tokens_estimate` is the estimated total text tokens of the returned results — the value `token_budget` is enforced against (heuristic: ≈4 chars/token for ASCII, ≈2 for non-ASCII scripts; leave margin rather than budgeting to an exact context limit). With `include_trace: true` the response additionally carries a `trace` object.
 
 On failure:
 
@@ -283,6 +285,7 @@ On failure:
 | `query` | `string` | Required | Question to answer from memory. |
 | `limit` | `integer` | `10` | Number of memories to retrieve before answer synthesis. |
 | `filters` | `object` | `null` | Same semantics as in `mnemostack_search`; the answer is generated only from in-scope memories, including the generator's retry sub-recalls. |
+| `token_budget` | `integer` | `null` | Hard cap on the total (estimated) text tokens of the memories fed to the answer LLM; same contract as in `mnemostack_search`. Unset falls back to the server-wide default. |
 
 **Return shape:**
 
@@ -295,11 +298,13 @@ On failure:
   "sources": ["architecture-notes.md"],
   "degraded": [],
   "fallback_recommended": false,
+  "tokens_estimate": 41,
+  "tokens_used": 187,
   "error": null
 }
 ```
 
-`degraded` has the same semantics as in `mnemostack_search`. The answer tool does not take `include_trace` (use the HTTP `/answer` endpoint when you need the full trace).
+`degraded` has the same semantics as in `mnemostack_search`. `tokens_estimate` is the estimated text tokens of the context memories; `tokens_used` is the LLM provider's reported usage for the generation call that produced the answer (provider-specific semantics; `null` when the provider reports nothing). The answer tool does not take `include_trace` (use the HTTP `/answer` endpoint when you need the full trace).
 
 If the answer generator cannot produce a reliable answer, `ok` may be `false`, `confidence` may be low, and `fallback_recommended` may be `true`. On exceptions, the tool returns:
 
@@ -600,6 +605,7 @@ These are the MCP-relevant environment variables read by `mnemostack mcp-serve` 
 | `MNEMOSTACK_GRAPH_TIMEOUT` | `5.0` | Memgraph operation timeout in seconds. |
 | `MNEMOSTACK_BM25_PATHS` | unset | File or directory paths for BM25 exact-token retrieval, separated by `os.pathsep` (`:` on Unix, `;` on Windows). |
 | `MNEMOSTACK_RERANK_MODE` | `relevant_only` | LLM reranker contract: `relevant_only` returns a relevant subset, `full_reorder` ranks the whole candidate list. |
+| `MNEMOSTACK_TOKEN_BUDGET` | unset | Server-wide default token budget for `mnemostack_search` / `mnemostack_answer`; per-call `token_budget` overrides it. |
 | `MNEMOSTACK_STATE_PATH` | `$XDG_STATE_HOME/mnemostack/server-state.json` (falling back to `~/.local/state/mnemostack/server-state.json`; a legacy `/tmp` state file is migrated once) | JSON state file for feedback and stateful recall stages. **Note:** only read by the module entrypoint (`python -m mnemostack.mcp.server`); the CLI `mnemostack mcp-serve` uses `--state-path` instead (same default). |
 
 Common provider variables:

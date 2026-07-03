@@ -16,6 +16,7 @@ from .filters import payload_matches
 from .fusion import reciprocal_rank_fusion
 from .mca_prefilter import mca_prefilter as run_mca_prefilter
 from .query_expansion import expand_query
+from .tokens import TokenCounter, apply_token_budget
 from .trace import RecallTrace, RetrieverTrace
 
 logger = logging.getLogger(__name__)
@@ -212,6 +213,8 @@ class Recaller:
         filters: dict[str, Any] | None = None,
         *,
         trace: RecallTrace | None = None,
+        token_budget: int | None = None,
+        token_counter: TokenCounter | None = None,
     ) -> list[RecallResult]:
         """Async wrapper around `recall`.
 
@@ -231,6 +234,8 @@ class Recaller:
             bm25_limit,
             filters,
             trace=trace,
+            token_budget=token_budget,
+            token_counter=token_counter,
         )
 
     def recall(
@@ -242,16 +247,24 @@ class Recaller:
         filters: dict[str, Any] | None = None,
         *,
         trace: RecallTrace | None = None,
+        token_budget: int | None = None,
+        token_counter: TokenCounter | None = None,
     ) -> list[RecallResult]:
         """Run hybrid recall and return fused top-K results.
 
         Pass a fresh `RecallTrace` to capture per-retriever ranked lists, the
         fused order, and degradation tags for this call. Results are identical
         with or without a trace.
+
+        `token_budget` trims the fused list to the ranked prefix whose total
+        text tokens fit the budget (see `apply_token_budget`); `token_counter`
+        overrides the default dependency-free estimator. When post-processing
+        reorders results afterwards (pipeline/reranker), pass the budget to
+        `recall_flow` instead so it trims the final order, not this one.
         """
         counter("mnemostack.recall.calls", 1)
         if self.query_expansion:
-            return self._recall_with_query_expansion(
+            results = self._recall_with_query_expansion(
                 query=query,
                 limit=limit,
                 vector_limit=vector_limit,
@@ -259,7 +272,13 @@ class Recaller:
                 filters=filters,
                 trace=trace,
             )
-        return self._recall_once(query, limit, vector_limit, bm25_limit, filters, trace=trace)
+        else:
+            results = self._recall_once(
+                query, limit, vector_limit, bm25_limit, filters, trace=trace
+            )
+        if token_budget is not None:
+            results, _ = apply_token_budget(results, token_budget, token_counter)
+        return results
 
     def _recall_once(
         self,

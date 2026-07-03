@@ -40,6 +40,7 @@ from ..recall import (
     build_bm25_docs,
     build_full_pipeline,
     recall_flow,
+    sum_tokens,
 )
 from ..recall.pipeline import FileStateStore, default_state_path
 from ..vector import VectorStore
@@ -64,6 +65,7 @@ def build_server(
     state_path: str | None = None,
     vector_floor: int = 0,
     rerank_mode: str = "relevant_only",
+    token_budget: int | None = None,
 ) -> Any:
     """Build and return a configured FastMCP server.
 
@@ -78,6 +80,8 @@ def build_server(
         state_path: JSON state file for feedback / stateful recall stages
         vector_floor: protect top-N raw-vector candidates from later ranking stages
         rerank_mode: LLM reranker mode for service parity
+        token_budget: default token budget applied to search/answer recall when
+            the tool call does not pass one (None = no budget)
 
     Returns:
         FastMCP instance ready to .run()
@@ -94,6 +98,9 @@ def build_server(
     mcp = FastMCP("mnemostack")
 
     resolved_state_path = state_path or default_state_path()
+    # The tool functions take a per-call `token_budget` parameter that
+    # shadows the factory argument; keep the server-wide default reachable.
+    default_token_budget = token_budget
 
     # Lazy-initialize components so server boots even if e.g. GEMINI_API_KEY missing.
     # Tool calls can run concurrently; the lock makes each component initialize
@@ -176,6 +183,7 @@ def build_server(
         query: str,
         limit: int,
         filters: dict[str, Any] | None = None,
+        token_budget_override: int | None = None,
     ) -> tuple[list[Any], RecallTrace]:
         trace = RecallTrace()
         recaller = _get_recaller()
@@ -192,6 +200,12 @@ def build_server(
             reranker=reranker,
             filters=filters,
             trace=trace,
+            # Per-call budget wins; unset falls back to the server-wide default.
+            token_budget=(
+                token_budget_override
+                if token_budget_override is not None
+                else default_token_budget
+            ),
         )
         return results, trace
 
@@ -291,24 +305,37 @@ def build_server(
                 )
             ),
         ] = None,
+        token_budget: Annotated[
+            int | None,
+            Field(
+                description=(
+                    "Hard cap on the total (estimated) text tokens of the "
+                    "returned results; the final ranking is cut to the prefix "
+                    "that fits. Unset uses the server-wide default, if any."
+                ),
+                ge=1,
+            ),
+        ] = None,
     ) -> dict:
         """Search indexed memories with hybrid recall.
 
         Read-only, no side effects, no authentication required. Use this when
         you need raw memory matches rather than a synthesized answer. Returns a
-        JSON object with ok, query, count, results, and degraded (which
+        JSON object with ok, query, count, results, tokens_estimate (estimated
+        total text tokens of the results), and degraded (which
         components fell back while serving the call; empty when healthy).
         Results are ranked by reciprocal rank fusion of BM25, semantic, graph,
         and temporal retrievers when configured; each result includes id, text,
         score, sources, and payload.
         """
         try:
-            results, trace = _run_recall(query, limit, filters)
+            results, trace = _run_recall(query, limit, filters, token_budget)
             response = {
                 "ok": True,
                 "query": query,
                 "count": len(results),
                 "degraded": trace.degraded,
+                "tokens_estimate": sum_tokens(results),
                 "results": [
                     {
                         "id": r.id,
@@ -346,6 +373,17 @@ def build_server(
                 )
             ),
         ] = None,
+        token_budget: Annotated[
+            int | None,
+            Field(
+                description=(
+                    "Hard cap on the total (estimated) text tokens of the "
+                    "memories fed to the answer LLM (same contract as "
+                    "mnemostack_search). Unset uses the server-wide default."
+                ),
+                ge=1,
+            ),
+        ] = None,
     ) -> dict:
         """Answer a question using retrieved memories.
 
@@ -354,14 +392,23 @@ def build_server(
         instead of the raw matches returned by mnemostack_search. Returns a JSON
         object with ok, query, answer text, confidence (0.0-1.0), sources,
         degraded (components that fell back while serving the call),
-        fallback_recommended, and error.
+        fallback_recommended, tokens_estimate (estimated text tokens of the
+        context memories), tokens_used (LLM-provider-reported usage for the
+        answer call; null when unreported), and error.
         """
+        effective_budget = token_budget if token_budget is not None else default_token_budget
         try:
-            memories, trace = _run_recall(query, limit, filters)
+            memories, trace = _run_recall(query, limit, filters, effective_budget)
             gen = _get_answer_gen()
             # recall_filters keeps the generator's retry sub-recalls inside
-            # the same filtered scope as the primary recall.
-            answer = gen.generate(query, memories, recall_filters=filters)
+            # the same filtered scope; the budget must reach the generator
+            # too, or those sub-recalls would prompt unbudgeted.
+            answer = gen.generate(
+                query,
+                memories,
+                recall_filters=filters,
+                token_budget=effective_budget,
+            )
             return {
                 "ok": answer.ok,
                 "query": query,
@@ -370,6 +417,10 @@ def build_server(
                 "sources": answer.sources,
                 "degraded": trace.degraded,
                 "fallback_recommended": gen.should_fallback(answer),
+                "tokens_estimate": sum_tokens(memories),
+                # getattr: custom/duck-typed answer generators may return
+                # objects predating the tokens_used field.
+                "tokens_used": getattr(answer, "tokens_used", None),
                 "error": answer.error,
             }
         except Exception as e:  # noqa: BLE001
@@ -513,6 +564,7 @@ def main() -> None:
         MNEMOSTACK_STATE_PATH       (default: $XDG_STATE_HOME/mnemostack/server-state.json,
                                      falling back to ~/.local/state/mnemostack/server-state.json)
         MNEMOSTACK_RERANK_MODE      (default: relevant_only)
+        MNEMOSTACK_TOKEN_BUDGET     (default: none — no recall token budget)
     """
     cfg = Config.load()
     mcp = build_server(
@@ -528,6 +580,7 @@ def main() -> None:
         state_path=os.environ.get("MNEMOSTACK_STATE_PATH"),
         vector_floor=max(0, int(cfg.recall.vector_floor)),
         rerank_mode=cfg.recall.rerank_mode,
+        token_budget=cfg.recall.token_budget,
     )
     mcp.run()
 
