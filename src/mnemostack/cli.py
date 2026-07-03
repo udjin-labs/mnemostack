@@ -137,6 +137,12 @@ def _parse_filters(args: argparse.Namespace) -> dict | None:
     return parsed
 
 
+def _effective_token_budget(args: argparse.Namespace) -> int | None:
+    """Token budget from CLI flags; 0 or negative means "no budget"."""
+    budget = getattr(args, "token_budget", None)
+    return budget if budget is not None and budget > 0 else None
+
+
 def _recall_for_cli(args: argparse.Namespace, recaller, query: str, limit: int):
     """Run the same recall flow as the HTTP and MCP servers.
 
@@ -146,7 +152,7 @@ def _recall_for_cli(args: argparse.Namespace, recaller, query: str, limit: int):
     apply on both paths.
     """
     filters = _parse_filters(args)
-    token_budget = getattr(args, "token_budget", None)
+    token_budget = _effective_token_budget(args)
     if getattr(args, "raw", False):
         return recaller.recall(query, limit=limit, filters=filters, token_budget=token_budget)
     pipeline = build_full_pipeline(
@@ -318,13 +324,19 @@ def cmd_answer(args: argparse.Namespace) -> int:
         args.query,
         results,
         recall_filters=_parse_filters(args),
-        token_budget=getattr(args, "token_budget", None),
+        token_budget=_effective_token_budget(args),
     )
 
     # Tier caps how many sources we emit (answer text itself is model-sized).
     sources_out = answer.sources
     if profile is not None:
         sources_out = answer.sources[: profile["max_sources"]]
+
+    # Prefer the generator's own estimate: its retry paths can swap in a
+    # freshly recalled context pool that differs from the primary results.
+    tokens_estimate = getattr(answer, "context_tokens_estimate", None)
+    if tokens_estimate is None:
+        tokens_estimate = sum_tokens(results)
 
     if args.json:
         print(
@@ -335,7 +347,7 @@ def cmd_answer(args: argparse.Namespace) -> int:
                     "confidence": round(answer.confidence, 3),
                     "sources": sources_out,
                     "fallback_recommended": gen.should_fallback(answer),
-                    "tokens_estimate": sum_tokens(results),
+                    "tokens_estimate": tokens_estimate,
                     "tokens_used": getattr(answer, "tokens_used", None),
                     "error": answer.error,
                 },
@@ -1212,7 +1224,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         bm25_paths=list(args.bm25_path) if args.bm25_path else None,
         vector_floor=max(0, int(args.vector_floor)),
         rerank_mode=args.rerank_mode,
-        token_budget=getattr(args, "token_budget", None),
+        token_budget=_effective_token_budget(args),
         state_path=args.state_path,
         auto_record_ior=args.auto_record_ior,
     )
@@ -1302,7 +1314,7 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
         state_path=args.state_path,
         vector_floor=max(0, int(args.vector_floor)),
         rerank_mode=args.rerank_mode,
-        token_budget=getattr(args, "token_budget", None),
+        token_budget=_effective_token_budget(args),
     )
     mcp.run()
     return 0
