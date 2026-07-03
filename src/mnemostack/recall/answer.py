@@ -19,7 +19,7 @@ from ..observability import counter, histogram
 from .inference_retry import decompose_query, merge_results, should_retry
 from .recaller import RecallResult
 from .specificity import detect_placeholders, resolve_specificity
-from .tokens import TokenCounter, apply_token_budget
+from .tokens import TokenCounter, apply_token_budget, sum_tokens
 
 
 def _display_ts(ts: str) -> str:
@@ -354,6 +354,10 @@ class Answer:
     raw: str = ""
     error: str | None = None
     tokens_used: int | None = None
+    #: Estimated text tokens of the memory pool that produced the final
+    #: answer. The retry paths can swap in a freshly recalled pool, so this
+    #: may differ from an estimate over the memories the caller passed in.
+    context_tokens_estimate: int | None = None
 
     @property
     def ok(self) -> bool:
@@ -592,7 +596,16 @@ class AnswerGenerator:
                 token_budget=token_budget,
                 token_counter=token_counter,
             )
-        return self._apply_specificity_resolver(query, answer, specificity_memories, category)
+        answer = self._apply_specificity_resolver(query, answer, specificity_memories, category)
+        # Report the context that actually produced the answer: after an
+        # accepted retry that is the merged retry pool, not the caller's
+        # memories. list/count extraction walks the full pool; every other
+        # path prompts over at most max_memories.
+        context_pool = specificity_memories
+        if not (self.list_extract_mode and category in {"list", "count"}):
+            context_pool = context_pool[: self.max_memories]
+        answer.context_tokens_estimate = sum_tokens(context_pool, token_counter)
+        return answer
 
     def _retry_with_expansion_answer(
         self,
@@ -809,7 +822,10 @@ class AnswerGenerator:
                 confidence=0.6,
                 sources=sources,
                 raw=final_resp.text,
-                tokens_used=getattr(final_resp, "tokens_used", None),
+                # The failed finalizer call did not produce this text (it is
+                # assembled deterministically from the extracted items), so
+                # its usage would misattribute a discarded call.
+                tokens_used=None,
             )
 
         return Answer(

@@ -665,3 +665,21 @@ def test_provenance_haystack_truncates_like_the_prompt():
     # chat-1's match would come only from the truncated-away tail — the LLM
     # never saw it; the visible plain-text occurrence in chat-2 must lead.
     assert answer.sources[0] == "chat-2"
+
+
+def test_finalize_fallback_does_not_report_discarded_call_usage(memories):
+    llm = SequenceMaybeFailLLM(
+        [
+            LLMResponse(text='{"items": ["Luna", "Oliver"]}', tokens_used=10),
+            LLMResponse(text='{"items": []}', tokens_used=10),
+            LLMResponse(text="", error="rate limited", tokens_used=10),
+        ]
+    )
+    gen = AnswerGenerator(llm=llm, category_aware_prompts=True, list_extract_mode=True)
+
+    answer = gen.generate("What are Melanie's pets?", memories)
+
+    assert answer.text == "Luna, Oliver"
+    # The failed finalizer call was discarded (deterministic assembly took
+    # over), so its usage must not be attributed to this answer.
+    assert answer.tokens_used is None

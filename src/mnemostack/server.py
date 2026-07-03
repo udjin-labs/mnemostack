@@ -247,6 +247,10 @@ class ServerConfig:
         if self.rerank_mode not in RERANK_MODES:
             allowed = ", ".join(sorted(RERANK_MODES))
             raise ValueError(f"rerank_mode must be one of: {allowed}")
+        # 0 or negative means "no budget" — apply_token_budget requires >= 1
+        # and a bad value here would 500 every request.
+        if self.token_budget is not None and self.token_budget <= 0:
+            self.token_budget = None
 
     @classmethod
     def from_env(cls) -> ServerConfig:
@@ -591,6 +595,12 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         except Exception as exc:
             log.exception("answer endpoint failed")
             raise HTTPException(status_code=500, detail="answer failed") from exc
+        # Prefer the generator's own estimate: its retry paths can swap in a
+        # freshly recalled context pool, and the primary recall results would
+        # then misreport what the answer prompt actually contained.
+        tokens_estimate = getattr(ans, "context_tokens_estimate", None)
+        if tokens_estimate is None:
+            tokens_estimate = sum_tokens(results)
         return AnswerResponse(
             query=req.query,
             answer=ans.text,
@@ -599,7 +609,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             memories=[_memory_of(r) for r in results],
             degraded=trace.degraded,
             trace=trace.to_dict() if req.include_trace else None,
-            tokens_estimate=sum_tokens(results),
+            tokens_estimate=tokens_estimate,
             tokens_used=getattr(ans, "tokens_used", None),
         )
 
