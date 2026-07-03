@@ -19,7 +19,7 @@ from .bm25 import BM25, BM25Doc, Tokenizer, tokenize
 from .corpus import build_bm25_docs
 from .expansion import QueryExpander
 from .filters import payload_matches
-from .flow import recall_flow
+from .flow import recall_flow, recall_flow_async
 from .followup import rewrite_followup
 from .fusion import reciprocal_rank_fusion
 from .mca_prefilter import extract_exact_tokens, mca_prefilter
@@ -73,6 +73,7 @@ __all__ = [
     "apply_rerank_safe",
     "payload_matches",
     "recall_flow",
+    "recall_flow_async",
     "TokenCounter",
     "estimate_tokens",
     "apply_token_budget",

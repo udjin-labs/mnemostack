@@ -497,6 +497,27 @@ class Ingestor:
         """Convenience: ingest a single item. Same stats shape as `ingest`."""
         return self.ingest([item])
 
+    async def ingest_async(self, items: Iterable[IngestItem]) -> IngestStats:
+        """Async wrapper around `ingest`.
+
+        Runs the blocking work (embedding HTTP, Qdrant upserts, wrapper-file
+        writes, optional graph sync) in a worker thread so asyncio services
+        are not blocked. The items iterable is consumed inside that thread.
+
+        Concurrency caveat: the skip-seen cache is per-instance and not
+        synchronized — gather concurrent ingests on *separate* Ingestor
+        instances, or run one ingest at a time per instance.
+        """
+        import asyncio
+
+        return await asyncio.to_thread(self.ingest, items)
+
+    async def ingest_one_async(self, item: IngestItem) -> IngestStats:
+        """Async convenience: ingest a single item (see `ingest_async`)."""
+        import asyncio
+
+        return await asyncio.to_thread(self.ingest, [item])
+
     def stream(self, item_iter: Iterable[IngestItem]) -> Iterator[IngestStats]:
         """Yield an IngestStats per flushed batch — useful for long feeds.
 
