@@ -610,6 +610,34 @@ class AnswerGenerator:
             )
         return answer
 
+    async def generate_async(
+        self,
+        query: str,
+        memories: list[RecallResult],
+        recall_filters: dict[str, object] | None = None,
+        category: str | None = None,
+        *,
+        token_budget: int | None = None,
+        token_counter: TokenCounter | None = None,
+    ) -> Answer:
+        """Async wrapper around `generate`.
+
+        Runs the blocking work (LLM calls, retry sub-recalls) in a worker
+        thread so asyncio services are not blocked. Safe for concurrent calls
+        on one generator: generation keeps no per-call state on the instance.
+        """
+        import asyncio
+
+        return await asyncio.to_thread(
+            self.generate,
+            query,
+            memories,
+            recall_filters,
+            category,
+            token_budget=token_budget,
+            token_counter=token_counter,
+        )
+
     def _retry_with_expansion_answer(
         self,
         query: str,

@@ -17,6 +17,7 @@ __all__ = [
     "SynthesisFact",
     "SynthesisResult",
     "synthesize",
+    "synthesize_async",
 ]
 
 
@@ -34,12 +35,13 @@ def __getattr__(name: str):
             "Ingestor": Ingestor,
             "stable_chunk_id": stable_chunk_id,
         }[name]
-    if name in {"SynthesisFact", "SynthesisResult", "synthesize"}:
-        from .synthesis import SynthesisFact, SynthesisResult, synthesize
+    if name in {"SynthesisFact", "SynthesisResult", "synthesize", "synthesize_async"}:
+        from .synthesis import SynthesisFact, SynthesisResult, synthesize, synthesize_async
 
         return {
             "SynthesisFact": SynthesisFact,
             "SynthesisResult": SynthesisResult,
             "synthesize": synthesize,
+            "synthesize_async": synthesize_async,
         }[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

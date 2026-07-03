@@ -200,6 +200,27 @@ def synthesize(
     )
 
 
+async def synthesize_async(
+    entity: str,
+    sources: list[str] | None = None,
+    format: str = "markdown",
+    max_results: int = 50,
+    llm_summarize: bool = False,
+    **kwargs: Any,
+) -> SynthesisResult:
+    """Async wrapper around `synthesize`.
+
+    Runs the blocking work (recall across backends, optional LLM summary) in
+    a worker thread so asyncio services are not blocked. Same contract and
+    result as `synthesize`.
+    """
+    import asyncio
+
+    return await asyncio.to_thread(
+        synthesize, entity, sources, format, max_results, llm_summarize, **kwargs
+    )
+
+
 def _normalize_sources(sources: list[str] | None) -> set[str] | None:
     if sources is None:
         return None
