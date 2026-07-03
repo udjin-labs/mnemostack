@@ -264,3 +264,24 @@ def test_token_budget_env_override(isolated_env, tmp_path, monkeypatch):
     isolated_env.setenv("MNEMOSTACK_TOKEN_BUDGET", "1500")
     cfg = Config.load()
     assert cfg.recall.token_budget == 1500
+
+
+def test_token_budget_zero_in_yaml_means_no_budget(isolated_env, tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text("recall:\n  token_budget: 0\n")
+    cfg = Config.load(p)
+    assert cfg.recall.token_budget is None
+
+
+def test_token_budget_negative_in_yaml_means_no_budget(isolated_env, tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text("recall:\n  token_budget: -5\n")
+    cfg = Config.load(p)
+    assert cfg.recall.token_budget is None
+
+
+def test_token_budget_zero_env_means_no_budget(isolated_env, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    isolated_env.setenv("MNEMOSTACK_TOKEN_BUDGET", "0")
+    cfg = Config.load()
+    assert cfg.recall.token_budget is None

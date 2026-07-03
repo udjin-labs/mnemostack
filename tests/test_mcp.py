@@ -528,3 +528,34 @@ def test_mcp_answer_reports_tokens(monkeypatch):
     assert payload["ok"] is True
     assert payload["tokens_estimate"] == 2
     assert payload["tokens_used"] == 123
+
+
+def test_mcp_answer_prefers_generator_context_estimate(monkeypatch):
+    import mnemostack.mcp.server as srv
+
+    class _FakeAnswerGen:
+        def __init__(self, **_):
+            pass
+
+        def generate(self, query, memories, **kwargs):
+            return SimpleNamespace(
+                ok=True,
+                text="42",
+                confidence=0.9,
+                sources=["s"],
+                error=None,
+                tokens_used=None,
+                # the retry paths can answer from a different pool than the
+                # primary recall — the surface must report this value
+                context_tokens_estimate=77,
+            )
+
+        def should_fallback(self, answer):
+            return False
+
+    _patch_minimal(monkeypatch, srv, _ThreeHitRecaller)
+    monkeypatch.setattr(srv, "AnswerGenerator", _FakeAnswerGen)
+    mcp = build_server(collection="test", embedding_provider="ollama")
+
+    result = asyncio.run(mcp.call_tool("mnemostack_answer", {"query": "q", "limit": 3}))
+    assert result.structured_content["tokens_estimate"] == 77

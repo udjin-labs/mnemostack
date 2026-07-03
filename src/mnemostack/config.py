@@ -130,6 +130,14 @@ class Config:
         # 2. Env vars (MNEMOSTACK_*)
         cfg = _apply_env_overrides(cfg)
 
+        # A configured budget of 0 or less means "no budget", not a broken
+        # deployment: apply_token_budget requires >= 1, so passing a bad
+        # file/env value through verbatim would turn a config typo into a
+        # ValueError on every recall (HTTP 500s / CLI crashes).
+        budget = cfg.recall.token_budget
+        if budget is not None and int(budget) <= 0:
+            cfg.recall.token_budget = None
+
         return cfg
 
     def save(self, path: str | Path) -> None:
@@ -242,7 +250,8 @@ def _apply_env_overrides(cfg: Config) -> Config:
     if v := env.get("MNEMOSTACK_RERANK_MODE"):
         cfg.recall.rerank_mode = v
     if v := env.get("MNEMOSTACK_TOKEN_BUDGET"):
-        cfg.recall.token_budget = max(1, int(v))
+        # <= 0 is normalized to "no budget" by Config.load
+        cfg.recall.token_budget = int(v)
 
     return cfg
 
@@ -284,5 +293,5 @@ recall:
   bm25_paths: []
   vector_floor: 0
   rerank_mode: relevant_only  # relevant_only | full_reorder
-  token_budget: null          # e.g. 2000 = trim recall results to ~2000 text tokens
+  token_budget: null          # e.g. 2000 = trim recall results to ~2000 text tokens; 0/null = off
 """
