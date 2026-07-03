@@ -330,3 +330,30 @@ def test_generator_threads_context_fields_into_prompt():
     gen.generate("who moved the meeting?", [memory])
 
     assert "author=Teilnehmer B" in llm.last_prompt
+
+
+def test_answer_carries_provider_token_usage(sample_memories):
+    llm = FakeLLM(response_text="Postgres\nCONFIDENCE: 0.95")
+    gen = AnswerGenerator(llm=llm)
+    answer = gen.generate("what database did we migrate to", sample_memories)
+    assert answer.ok
+    # FakeLLM reports tokens_used=50; the Answer must not drop it.
+    assert answer.tokens_used == 50
+
+
+def test_answer_token_usage_none_when_provider_silent(sample_memories):
+    class SilentLLM(FakeLLM):
+        def generate(self, prompt, max_tokens=200, temperature=0.0):
+            return LLMResponse(text=self.response_text)  # no tokens_used
+
+    gen = AnswerGenerator(llm=SilentLLM(response_text="Postgres\nCONFIDENCE: 0.9"))
+    answer = gen.generate("what database did we migrate to", sample_memories)
+    assert answer.ok
+    assert answer.tokens_used is None
+
+
+def test_answer_empty_memories_has_no_token_usage():
+    gen = AnswerGenerator(llm=FakeLLM(response_text="unused"))
+    answer = gen.generate("anything", [])
+    # abstention is assembled without an LLM call
+    assert answer.tokens_used is None

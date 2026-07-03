@@ -341,6 +341,7 @@ Built-in profiles cover OpenClaw webchat and Telegram envelopes; pass `profiles=
 | `MNEMOSTACK_VECTOR_HOST` / `MNEMOSTACK_VECTOR_COLLECTION` | Aliases for the Qdrant URL / collection | CLI / HTTP / MCP |
 | `MNEMOSTACK_VECTOR_FLOOR` | Keep top-N raw vector hits in results even when fusion/rerank would drop them (0 = off) | Recall tuning |
 | `MNEMOSTACK_RERANK_MODE` | LLM reranker mode: `relevant_only` (default) or `full_reorder` | HTTP / MCP runtime reranker |
+| `MNEMOSTACK_TOKEN_BUDGET` | Default recall token budget — cut results to the ranked prefix that fits (unset = off) | CLI / HTTP / MCP recall surfaces |
 | `MNEMOSTACK_GRAPH_TIMEOUT` / `MNEMOSTACK_GRAPH_HEALTH_TIMEOUT` | Memgraph query / health-check timeouts in seconds | Graph retriever |
 | `MNEMOSTACK_CONFIG` | Path to the YAML config file | All entry points |
 
@@ -730,15 +731,18 @@ Response shape (abridged):
   "results": [
     { "id": "...", "text": "...", "score": 0.72, "source": "notes/...md", "metadata": {} }
   ],
-  "degraded": []   // components that fell back while serving the call, e.g. "retriever:bm25:failed", "reranker:fallback"; empty when healthy
+  "degraded": [],  // components that fell back while serving the call, e.g. "retriever:bm25:failed", "reranker:fallback"; empty when healthy
+  "tokens_estimate": 512   // estimated text tokens of the returned results
 }
 ```
 
 Pass `"include_trace": true` in the request body to additionally get a `trace` object with per-retriever ranked lists, the fused order, and the post-rerank order — useful when debugging why a memory did or didn't surface.
 
+Pass `"token_budget": 2000` to cap how much prompt space the results may occupy: the final ranking is cut to the prefix whose total text tokens fit the budget (a hard cap — never overshot, so an oversized top hit yields an empty list rather than a blown prompt). `tokens_estimate` in the response is the value the budget is enforced against; counting uses a dependency-free heuristic (≈4 chars/token for ASCII, ≈2 for non-ASCII scripts), so leave yourself margin rather than budgeting to the exact context limit. A server-wide default can be set with `recall.token_budget` in the config file (or `MNEMOSTACK_TOKEN_BUDGET`); per-request values override it. The same parameter is available on `/answer` (caps the memories fed to the LLM), on MCP `mnemostack_search` / `mnemostack_answer`, on the CLI as `--token-budget`, and in the library as `recall_flow(..., token_budget=...)` — where you can also pass an exact `token_counter=` (e.g. a tiktoken encoder) instead of the heuristic.
+
 Pass `"filters": {...}` to scope recall by payload fields — exact match (`{"tenant": "a"}`) or inclusive ranges (`{"timestamp": {"gte": "2026-01-01"}}`). Filters apply inside **every** retriever, not as a post-filter on the output: the candidate pool itself is restricted, so top-K stays full and results never include points outside the scope — this is the isolation contract for multi-tenant and per-user memory. Sources that cannot attribute their results to the scope (the knowledge-graph retriever — graph nodes carry no chunk payload) contribute nothing rather than leak. The same `filters` parameter is available on `/answer` (the answer is generated only from in-scope memories, including retry sub-recalls), on MCP `mnemostack_search` / `mnemostack_answer`, on the CLI as `--filters '{"tenant": "a"}'`, and in the library as `recaller.recall(query, filters=...)` / `recall_flow(..., filters=...)`.
 
-The `/answer` endpoint adds `{ answer, confidence, sources }` alongside the memories and carries the same `degraded` / opt-in `trace` fields. If the LLM isn't configured, `/answer` returns `503` and `/recall` still works — graceful degradation applies at the HTTP layer too.
+The `/answer` endpoint adds `{ answer, confidence, sources }` alongside the memories and carries the same `degraded` / opt-in `trace` fields, plus `tokens_used` — the LLM provider's reported token usage for the generation call that produced the answer (provider-specific semantics; `null` when the provider reports nothing). If the LLM isn't configured, `/answer` returns `503` and `/recall` still works — graceful degradation applies at the HTTP layer too.
 
 Stateful learning is explicit. Start the server with `--auto-record-ior` if you want `/recall` and `/answer` responses to update inhibition-of-return state. Send user actions to `/feedback` to update Q-learning:
 

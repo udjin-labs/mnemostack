@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Token-budget recall**: recall can now trim its final ranking to a hard token budget — the ranked prefix whose total result-text tokens fit the cap; the budget is never overshot (an oversized top hit yields an empty list rather than a blown budget). Available everywhere: `recall_flow(..., token_budget=...)` / `Recaller.recall(...)` / `recall_async(...)` in the library, `token_budget` on `POST /recall` and `POST /answer`, on the `mnemostack_search` / `mnemostack_answer` MCP tools, and `--token-budget` on `mnemostack search` / `answer` / `mcp-serve`. A server-wide default can be set via `recall.token_budget` in the config file or `MNEMOSTACK_TOKEN_BUDGET`; per-request values override it. Counting uses a dependency-free estimator (ASCII ≈ 4 chars/token, non-ASCII scripts ≈ 2 chars/token so multilingual text is not under-budgeted); library callers can pass an exact `token_counter=` (e.g. a tiktoken encoder) instead. New helpers are exported from `mnemostack.recall`: `estimate_tokens`, `sum_tokens`, `apply_token_budget`, `TokenCounter`.
+- **Token usage reporting**: `/recall`, `/answer`, `mnemostack_search`, `mnemostack_answer`, and `mnemostack answer --json` now report `tokens_estimate` (estimated text tokens of the returned results/context — the value the budget is enforced against). Answer surfaces additionally report `tokens_used` — the LLM provider's reported usage for the generation call that produced the answer (`Answer.tokens_used` in the library; provider-specific semantics, `null` when the provider reports nothing).
+
 ## [0.7.1] - 2026-06-21
 
 ### Fixed

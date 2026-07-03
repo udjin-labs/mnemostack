@@ -91,6 +91,9 @@ class RecallConfig:
     bm25_paths: list[str] = field(default_factory=list)
     vector_floor: int = 0
     rerank_mode: str = "relevant_only"
+    #: Default token budget applied to recall results on the HTTP/MCP/CLI
+    #: surfaces when the caller does not pass one. None = no budget.
+    token_budget: int | None = None
 
 
 @dataclass
@@ -185,6 +188,7 @@ def _apply_env_overrides(cfg: Config) -> Config:
         MNEMOSTACK_BM25_PATHS       (os.pathsep-separated)
         MNEMOSTACK_VECTOR_FLOOR
         MNEMOSTACK_RERANK_MODE      (relevant_only | full_reorder)
+        MNEMOSTACK_TOKEN_BUDGET     (default recall token budget; unset = none)
         MNEMOSTACK_QDRANT_HOST  (alias for VECTOR_HOST)
         MNEMOSTACK_COLLECTION   (alias for VECTOR_COLLECTION)
         MNEMOSTACK_MEMGRAPH_URI (alias for GRAPH_URI)
@@ -237,6 +241,8 @@ def _apply_env_overrides(cfg: Config) -> Config:
         cfg.recall.vector_floor = max(0, int(v))
     if v := env.get("MNEMOSTACK_RERANK_MODE"):
         cfg.recall.rerank_mode = v
+    if v := env.get("MNEMOSTACK_TOKEN_BUDGET"):
+        cfg.recall.token_budget = max(1, int(v))
 
     return cfg
 
@@ -278,4 +284,5 @@ recall:
   bm25_paths: []
   vector_floor: 0
   rerank_mode: relevant_only  # relevant_only | full_reorder
+  token_budget: null          # e.g. 2000 = trim recall results to ~2000 text tokens
 """
