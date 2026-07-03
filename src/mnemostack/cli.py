@@ -311,8 +311,15 @@ def cmd_answer(args: argparse.Namespace) -> int:
             }
         )
     gen = AnswerGenerator(**answer_generator_kwargs)
-    # recall_filters keeps retry sub-recalls inside the same filtered scope.
-    answer = gen.generate(args.query, results, recall_filters=_parse_filters(args))
+    # recall_filters keeps retry sub-recalls inside the same filtered scope;
+    # the token budget must reach the generator too, or its retry paths
+    # would prompt over fresh unbudgeted sub-recalls.
+    answer = gen.generate(
+        args.query,
+        results,
+        recall_filters=_parse_filters(args),
+        token_budget=getattr(args, "token_budget", None),
+    )
 
     # Tier caps how many sources we emit (answer text itself is model-sized).
     sources_out = answer.sources
@@ -1144,6 +1151,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="LLM reranker contract: relevant_only returns a subset, full_reorder ranks all",
     )
     p_serve.add_argument(
+        "--token-budget",
+        type=int,
+        default=cfg.recall.token_budget,
+        help="Server-wide default recall token budget; per-request token_budget overrides it",
+    )
+    p_serve.add_argument(
         "--reload", action="store_true", help="Enable uvicorn auto-reload (dev only)"
     )
     p_serve.set_defaults(func=cmd_serve)
@@ -1199,6 +1212,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         bm25_paths=list(args.bm25_path) if args.bm25_path else None,
         vector_floor=max(0, int(args.vector_floor)),
         rerank_mode=args.rerank_mode,
+        token_budget=getattr(args, "token_budget", None),
         state_path=args.state_path,
         auto_record_ior=args.auto_record_ior,
     )

@@ -98,6 +98,9 @@ def build_server(
     mcp = FastMCP("mnemostack")
 
     resolved_state_path = state_path or default_state_path()
+    # The tool functions take a per-call `token_budget` parameter that
+    # shadows the factory argument; keep the server-wide default reachable.
+    default_token_budget = token_budget
 
     # Lazy-initialize components so server boots even if e.g. GEMINI_API_KEY missing.
     # Tool calls can run concurrently; the lock makes each component initialize
@@ -198,7 +201,11 @@ def build_server(
             filters=filters,
             trace=trace,
             # Per-call budget wins; unset falls back to the server-wide default.
-            token_budget=token_budget_override if token_budget_override is not None else token_budget,
+            token_budget=(
+                token_budget_override
+                if token_budget_override is not None
+                else default_token_budget
+            ),
         )
         return results, trace
 
@@ -389,12 +396,19 @@ def build_server(
         context memories), tokens_used (LLM-provider-reported usage for the
         answer call; null when unreported), and error.
         """
+        effective_budget = token_budget if token_budget is not None else default_token_budget
         try:
-            memories, trace = _run_recall(query, limit, filters, token_budget)
+            memories, trace = _run_recall(query, limit, filters, effective_budget)
             gen = _get_answer_gen()
             # recall_filters keeps the generator's retry sub-recalls inside
-            # the same filtered scope as the primary recall.
-            answer = gen.generate(query, memories, recall_filters=filters)
+            # the same filtered scope; the budget must reach the generator
+            # too, or those sub-recalls would prompt unbudgeted.
+            answer = gen.generate(
+                query,
+                memories,
+                recall_filters=filters,
+                token_budget=effective_budget,
+            )
             return {
                 "ok": answer.ok,
                 "query": query,

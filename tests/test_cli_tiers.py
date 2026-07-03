@@ -501,3 +501,43 @@ def test_token_budget_flag_parses_on_all_recall_commands(monkeypatch):
     assert parser.parse_args(["mcp-serve", "--token-budget", "900"]).token_budget == 900
     # without the flag (and without config/env) there is no budget
     assert parser.parse_args(["search", "q"]).token_budget is None
+
+
+def test_serve_passes_token_budget_to_server_config():
+    import mnemostack.server as srv
+    from mnemostack.cli import cmd_serve
+
+    args = argparse.Namespace(
+        provider="fake",
+        embedding_model=None,
+        llm="fake-llm",
+        llm_model=None,
+        collection="test",
+        qdrant="http://localhost:6333",
+        memgraph_uri=None,
+        graph_timeout=5.0,
+        bm25_path=[],
+        state_path="/tmp/state.json",
+        vector_floor=0,
+        rerank_mode="relevant_only",
+        token_budget=1234,
+        auto_record_ior=False,
+        host="127.0.0.1",
+        port=8000,
+        reload=False,
+    )
+
+    captured = {}
+
+    def _fake_build_app(cfg):
+        captured["cfg"] = cfg
+        return MagicMock()
+
+    with (
+        patch.object(srv, "build_app", _fake_build_app),
+        patch("uvicorn.run", MagicMock()),
+    ):
+        rc = cmd_serve(args)
+
+    assert rc == 0
+    assert captured["cfg"].token_budget == 1234

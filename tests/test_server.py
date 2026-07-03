@@ -617,7 +617,10 @@ def test_answer_endpoint_threads_filters_to_recall_and_generator(monkeypatch):
     assert resp.status_code == 200
     assert recaller.last_filters == {"tenant": "b"}
     # retry sub-recalls must stay inside the same filtered scope
-    assert srv.AnswerGenerator.last_generate_kwargs == {"recall_filters": {"tenant": "b"}}
+    assert srv.AnswerGenerator.last_generate_kwargs == {
+        "recall_filters": {"tenant": "b"},
+        "token_budget": None,
+    }
 
 
 def test_recall_endpoint_reports_tokens_estimate(monkeypatch):
@@ -699,3 +702,8 @@ def test_answer_endpoint_token_budget_trims_memories_and_reports_tokens(monkeypa
     assert data["tokens_estimate"] == 2
     # The fake answer object carries no provider usage — surfaced as null.
     assert data["tokens_used"] is None
+    # The budget must reach the generator too, or its retry-path sub-recalls
+    # would prompt unbudgeted.
+    import mnemostack.server as srv
+
+    assert srv.AnswerGenerator.last_generate_kwargs["token_budget"] == 2
