@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from io import StringIO
 from unittest.mock import MagicMock, patch
 
@@ -19,6 +20,7 @@ from mnemostack.cli import (
     TIER_PROFILES,
     _apply_tier,
     _build_recaller,
+    build_parser,
     cmd_answer,
     cmd_mcp_serve,
     cmd_search,
@@ -487,3 +489,15 @@ def test_search_filters_invalid_json_exits_2(capsys):
 
     assert exc_info.value.code == 2
     assert "--filters" in capsys.readouterr().err
+
+
+def test_token_budget_flag_parses_on_all_recall_commands(monkeypatch):
+    for key in list(os.environ):
+        if key.startswith("MNEMOSTACK_"):
+            monkeypatch.delenv(key)
+    parser = build_parser()
+    assert parser.parse_args(["search", "q", "--token-budget", "500"]).token_budget == 500
+    assert parser.parse_args(["answer", "q", "--token-budget", "800"]).token_budget == 800
+    assert parser.parse_args(["mcp-serve", "--token-budget", "900"]).token_budget == 900
+    # without the flag (and without config/env) there is no budget
+    assert parser.parse_args(["search", "q"]).token_budget is None

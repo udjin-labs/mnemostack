@@ -34,6 +34,7 @@ from .recall import (
     VectorRetriever,
     build_bm25_docs,
     recall_flow,
+    sum_tokens,
 )
 from .recall.pipeline import FileStateStore, build_full_pipeline, default_state_path
 from .synthesis import synthesize
@@ -145,8 +146,9 @@ def _recall_for_cli(args: argparse.Namespace, recaller, query: str, limit: int):
     apply on both paths.
     """
     filters = _parse_filters(args)
+    token_budget = getattr(args, "token_budget", None)
     if getattr(args, "raw", False):
-        return recaller.recall(query, limit=limit, filters=filters)
+        return recaller.recall(query, limit=limit, filters=filters, token_budget=token_budget)
     pipeline = build_full_pipeline(
         state_store=FileStateStore(default_state_path()),
         graph_uri=getattr(args, "memgraph_uri", None) or None,
@@ -161,7 +163,13 @@ def _recall_for_cli(args: argparse.Namespace, recaller, query: str, limit: int):
     except Exception:  # noqa: BLE001 — no LLM key: search still works, unranked by LLM
         pass
     return recall_flow(
-        recaller, query, limit, pipeline=pipeline, reranker=reranker, filters=filters
+        recaller,
+        query,
+        limit,
+        pipeline=pipeline,
+        reranker=reranker,
+        filters=filters,
+        token_budget=token_budget,
     )
 
 
@@ -320,6 +328,8 @@ def cmd_answer(args: argparse.Namespace) -> int:
                     "confidence": round(answer.confidence, 3),
                     "sources": sources_out,
                     "fallback_recommended": gen.should_fallback(answer),
+                    "tokens_estimate": sum_tokens(results),
+                    "tokens_used": getattr(answer, "tokens_used", None),
                     "error": answer.error,
                 },
                 ensure_ascii=False,
@@ -766,6 +776,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=cfg.recall.vector_floor,
         help="Append missing top-N raw-vector candidates after fusion/rerank",
     )
+    p_search.add_argument(
+        "--token-budget",
+        type=int,
+        default=cfg.recall.token_budget,
+        help=(
+            "Hard cap on the total (estimated) text tokens of the returned "
+            "results: the final ranking is cut to the prefix that fits"
+        ),
+    )
     p_search.set_defaults(func=cmd_search)
 
     p_synthesize = sub.add_parser(
@@ -898,6 +917,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=cfg.recall.vector_floor,
         help="Append missing top-N raw-vector candidates after fusion/rerank",
+    )
+    p_answer.add_argument(
+        "--token-budget",
+        type=int,
+        default=cfg.recall.token_budget,
+        help=(
+            "Hard cap on the total (estimated) text tokens of the memories "
+            "fed to the answer LLM"
+        ),
     )
     p_answer.add_argument("--json", action="store_true", help="JSON output")
     p_answer.set_defaults(func=cmd_answer)
@@ -1037,6 +1065,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=sorted(RERANK_MODES),
         default=cfg.recall.rerank_mode,
         help="LLM reranker contract: relevant_only returns a subset, full_reorder ranks all",
+    )
+    p_mcp.add_argument(
+        "--token-budget",
+        type=int,
+        default=cfg.recall.token_budget,
+        help="Default recall token budget for search/answer tool calls",
     )
     p_mcp.set_defaults(func=cmd_mcp_serve)
 
@@ -1254,6 +1288,7 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
         state_path=args.state_path,
         vector_floor=max(0, int(args.vector_floor)),
         rerank_mode=args.rerank_mode,
+        token_budget=getattr(args, "token_budget", None),
     )
     mcp.run()
     return 0

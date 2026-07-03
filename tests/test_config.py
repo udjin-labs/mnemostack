@@ -244,3 +244,23 @@ nonexistent_section:
     cfg = Config.load(cfg_path)
     assert cfg.embedding.provider == "ollama"  # known key applied
     assert not hasattr(cfg.embedding, "nonexistent_key")
+
+
+def test_token_budget_default_is_none(isolated_env, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg = Config.load()
+    assert cfg.recall.token_budget is None
+
+
+def test_token_budget_from_yaml(isolated_env, tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text("recall:\n  token_budget: 2000\n")
+    cfg = Config.load(p)
+    assert cfg.recall.token_budget == 2000
+
+
+def test_token_budget_env_override(isolated_env, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    isolated_env.setenv("MNEMOSTACK_TOKEN_BUDGET", "1500")
+    cfg = Config.load()
+    assert cfg.recall.token_budget == 1500

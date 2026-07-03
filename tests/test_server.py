@@ -618,3 +618,84 @@ def test_answer_endpoint_threads_filters_to_recall_and_generator(monkeypatch):
     assert recaller.last_filters == {"tenant": "b"}
     # retry sub-recalls must stay inside the same filtered scope
     assert srv.AnswerGenerator.last_generate_kwargs == {"recall_filters": {"tenant": "b"}}
+
+
+def test_recall_endpoint_reports_tokens_estimate(monkeypatch):
+    app, _ = _patched_app(monkeypatch, with_answer=False)
+    client = TestClient(app)
+
+    r = client.post("/recall", json={"query": "q", "limit": 3, "full_pipeline": False})
+
+    assert r.status_code == 200
+    data = r.json()
+    # 3 fake results, each "m{i}" — 2 ASCII chars ≈ 1 estimated token
+    assert data["tokens_estimate"] == 3
+
+
+def test_recall_endpoint_token_budget_trims_results(monkeypatch):
+    app, _ = _patched_app(monkeypatch, with_answer=False)
+    client = TestClient(app)
+
+    r = client.post(
+        "/recall",
+        json={"query": "q", "limit": 3, "full_pipeline": False, "token_budget": 2},
+    )
+
+    assert r.status_code == 200
+    data = r.json()
+    assert len(data["results"]) == 2
+    assert data["tokens_estimate"] == 2
+
+
+def test_recall_endpoint_rejects_non_positive_token_budget(monkeypatch):
+    app, _ = _patched_app(monkeypatch, with_answer=False)
+    client = TestClient(app)
+
+    r = client.post("/recall", json={"query": "q", "token_budget": 0})
+
+    assert r.status_code == 422
+
+
+def test_recall_endpoint_uses_server_default_token_budget(monkeypatch):
+    app, _ = _patched_app(
+        monkeypatch,
+        with_answer=False,
+        config=ServerConfig(
+            provider_name="fake",
+            llm_name="fake",
+            graph_uri=None,
+            token_budget=1,
+        ),
+    )
+    client = TestClient(app)
+
+    r = client.post("/recall", json={"query": "q", "limit": 3, "full_pipeline": False})
+
+    assert r.status_code == 200
+    data = r.json()
+    # Server-wide default budget of 1 token keeps only the first 1-token hit.
+    assert len(data["results"]) == 1
+
+    # An explicit per-request budget overrides the server default.
+    r = client.post(
+        "/recall",
+        json={"query": "q", "limit": 3, "full_pipeline": False, "token_budget": 3},
+    )
+    assert len(r.json()["results"]) == 3
+
+
+def test_answer_endpoint_token_budget_trims_memories_and_reports_tokens(monkeypatch):
+    app, _ = _patched_app(monkeypatch)
+    client = TestClient(app)
+
+    r = client.post(
+        "/answer",
+        json={"query": "q", "limit": 3, "full_pipeline": False, "token_budget": 2},
+    )
+
+    assert r.status_code == 200
+    data = r.json()
+    assert len(data["memories"]) == 2
+    assert data["tokens_estimate"] == 2
+    # The fake answer object carries no provider usage — surfaced as null.
+    assert data["tokens_used"] is None

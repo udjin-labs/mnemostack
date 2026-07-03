@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from .filters import payload_matches
+from .tokens import TokenCounter, apply_token_budget
 from .trace import RecallTrace, apply_rerank_safe
 
 if TYPE_CHECKING:
@@ -27,6 +28,8 @@ def recall_flow(
     reranker: Reranker | None = None,
     filters: dict[str, object] | None = None,
     trace: RecallTrace | None = None,
+    token_budget: int | None = None,
+    token_counter: TokenCounter | None = None,
 ) -> list[RecallResult]:
     """Run hybrid recall plus the canonical post-processing chain.
 
@@ -39,6 +42,10 @@ def recall_flow(
     `reranker=None` means "no reranking requested" and leaves the trace
     untouched. A caller that *wanted* a reranker but could not build one
     should mark `reranker:unavailable` on the trace itself.
+
+    `token_budget` trims the *final* order (after rerank, top-K cut and
+    vector floor) to the ranked prefix whose total text tokens fit the
+    budget — see `apply_token_budget` for the exact contract.
     """
     raw_limit = max(limit * 3, 30) if pipeline is not None else limit
     recalled = recaller.recall(query, limit=raw_limit, filters=filters, trace=trace)
@@ -58,4 +65,6 @@ def recall_flow(
     apply_floor = getattr(recaller, "apply_vector_floor_after_rerank", None)
     if apply_floor is not None:
         results = apply_floor(results, recalled)
+    if token_budget is not None:
+        results, _ = apply_token_budget(results, token_budget, token_counter)
     return results

@@ -58,6 +58,7 @@ from .retrievers import (
 )
 from .scoring_reranker import RelevanceScorer, ScoringReranker
 from .specificity import detect_placeholders, resolve_specificity
+from .tokens import TokenCounter, apply_token_budget, estimate_tokens, sum_tokens
 from .trace import RecallTrace, RetrieverTrace, apply_rerank_safe
 
 __all__ = [
@@ -72,6 +73,10 @@ __all__ = [
     "apply_rerank_safe",
     "payload_matches",
     "recall_flow",
+    "TokenCounter",
+    "estimate_tokens",
+    "apply_token_budget",
+    "sum_tokens",
     "rewrite_followup",
     "extract_exact_tokens",
     "mca_prefilter",

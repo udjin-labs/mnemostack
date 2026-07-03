@@ -336,13 +336,22 @@ def classify_question(query: str) -> str:
 
 @dataclass
 class Answer:
-    """Synthesized answer with provenance."""
+    """Synthesized answer with provenance.
+
+    `tokens_used` is the token usage the LLM provider reported for the
+    generation call that produced this answer's text (semantics are
+    provider-specific — e.g. total tokens vs output-only) and `None` when
+    the provider reports nothing or the text was assembled without an LLM
+    call. Preliminary calls (classification, extraction batches, retries
+    that were discarded) are not included.
+    """
 
     text: str
     confidence: float
     sources: list[str] = field(default_factory=list)
     raw: str = ""
     error: str | None = None
+    tokens_used: int | None = None
 
     @property
     def ok(self) -> bool:
@@ -733,6 +742,7 @@ class AnswerGenerator:
                 confidence=0.6,
                 sources=sources,
                 raw=final_resp.text,
+                tokens_used=final_resp.tokens_used,
             )
 
         return Answer(
@@ -740,6 +750,7 @@ class AnswerGenerator:
             confidence=0.8,
             sources=sources,
             raw=final_resp.text,
+            tokens_used=final_resp.tokens_used,
         )
 
     def _sources_for_items(
@@ -914,6 +925,7 @@ class AnswerGenerator:
                 sources=[],
                 raw="",
                 error=resp.error,
+                tokens_used=resp.tokens_used,
             )
 
         text, confidence = self._parse_response(resp.text)
@@ -924,6 +936,7 @@ class AnswerGenerator:
             confidence=confidence,
             sources=self._extract_sources(memories),
             raw=resp.text,
+            tokens_used=resp.tokens_used,
         )
 
     def should_fallback(self, answer: Answer) -> bool:
