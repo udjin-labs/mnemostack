@@ -56,6 +56,7 @@ from mnemostack.recall import (
     VectorRetriever,
     build_full_pipeline,
     recall_flow,
+    sum_tokens,
 )
 from mnemostack.recall.pipeline import FileStateStore, default_state_path
 from mnemostack.vector import VectorStore
@@ -93,6 +94,15 @@ class RecallRequest(BaseModel):
             "points outside the filtered scope."
         ),
     )
+    token_budget: int | None = Field(
+        None,
+        ge=1,
+        description=(
+            "Hard cap on the total (estimated) text tokens of the returned "
+            "results: the final ranking is cut to the prefix that fits. "
+            "Unset falls back to the server-wide recall.token_budget config."
+        ),
+    )
 
 
 class AnswerRequest(BaseModel):
@@ -101,6 +111,14 @@ class AnswerRequest(BaseModel):
     full_pipeline: bool = Field(True)
     include_trace: bool = Field(False)
     filters: dict[str, Any] | None = Field(None)
+    token_budget: int | None = Field(
+        None,
+        ge=1,
+        description=(
+            "Hard cap on the total (estimated) text tokens of the memories "
+            "fed to the answer LLM (same contract as /recall)."
+        ),
+    )
 
 
 class FeedbackRequest(BaseModel):
@@ -155,6 +173,13 @@ class RecallResponse(BaseModel):
             "re-appends items."
         ),
     )
+    tokens_estimate: int = Field(
+        0,
+        description=(
+            "Estimated total text tokens of the returned results (heuristic, "
+            "not a tokenizer). This is what token_budget is enforced against."
+        ),
+    )
 
 
 class AnswerResponse(BaseModel):
@@ -165,6 +190,17 @@ class AnswerResponse(BaseModel):
     memories: list[Memory]
     degraded: list[str] = Field(default_factory=list)
     trace: dict[str, Any] | None = None
+    tokens_estimate: int = Field(
+        0, description="Estimated total text tokens of the memories used as context."
+    )
+    tokens_used: int | None = Field(
+        None,
+        description=(
+            "Token usage reported by the LLM provider for the answer "
+            "generation call (provider-specific semantics; null when the "
+            "provider reports nothing)."
+        ),
+    )
 
 
 class FeedbackResponse(BaseModel):
@@ -203,6 +239,7 @@ class ServerConfig:
     bm25_paths: list[str] | None = None  # optional markdown dirs for BM25 corpus
     vector_floor: int = 0
     rerank_mode: str = "relevant_only"
+    token_budget: int | None = None  # default recall token budget; requests may override
     state_path: str = field(default_factory=default_state_path)
     auto_record_ior: bool = False
 
@@ -227,6 +264,7 @@ class ServerConfig:
             bm25_paths=list(cfg.recall.bm25_paths) or None,
             vector_floor=max(0, int(cfg.recall.vector_floor)),
             rerank_mode=cfg.recall.rerank_mode,
+            token_budget=cfg.recall.token_budget,
             auto_record_ior=_env_bool("MNEMOSTACK_AUTO_RECORD_IOR"),
         )
 
@@ -430,6 +468,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         limit: int,
         full_pipeline: bool,
         filters: dict[str, Any] | None = None,
+        token_budget: int | None = None,
     ):
         trace = RecallTrace()
         # Reranking is part of the full pipeline; if it was requested but the
@@ -445,6 +484,9 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             reranker=reranker if full_pipeline else None,
             filters=filters,
             trace=trace,
+            # Per-request budget wins; unset falls back to the server-wide
+            # default so operators can cap every client uniformly.
+            token_budget=token_budget if token_budget is not None else cfg.token_budget,
         )
         if cfg.auto_record_ior:
             record_recall_events(pipeline, results)
@@ -455,6 +497,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         limit: int,
         full_pipeline: bool,
         filters: dict[str, Any] | None = None,
+        token_budget: int | None = None,
     ):
         """Offload the blocking recall stack to a worker thread.
 
@@ -462,7 +505,9 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         them inline in the event loop would serialise every HTTP request
         behind the slowest retriever.
         """
-        return await asyncio.to_thread(_run_recall_sync, query, limit, full_pipeline, filters)
+        return await asyncio.to_thread(
+            _run_recall_sync, query, limit, full_pipeline, filters, token_budget
+        )
 
     @app.get("/", include_in_schema=False)
     def root():
@@ -506,7 +551,9 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     @app.post("/recall", response_model=RecallResponse)
     async def recall_endpoint(req: RecallRequest):
         try:
-            results, trace = await _run_recall(req.query, req.limit, req.full_pipeline, req.filters)
+            results, trace = await _run_recall(
+                req.query, req.limit, req.full_pipeline, req.filters, req.token_budget
+            )
         except Exception as exc:
             log.exception("recall endpoint failed")
             raise HTTPException(status_code=500, detail="recall failed") from exc
@@ -515,6 +562,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             results=[_memory_of(r) for r in results],
             degraded=trace.degraded,
             trace=trace.to_dict() if req.include_trace else None,
+            tokens_estimate=sum_tokens(results),
         )
 
     @app.post("/answer", response_model=AnswerResponse)
@@ -524,12 +572,21 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 status_code=503,
                 detail="answer generator unavailable (LLM not configured)",
             )
+        # Resolve the effective budget once: the generator needs it too, or
+        # its retry paths would prompt over fresh unbudgeted sub-recalls.
+        token_budget = req.token_budget if req.token_budget is not None else cfg.token_budget
         try:
-            results, trace = await _run_recall(req.query, req.limit, req.full_pipeline, req.filters)
+            results, trace = await _run_recall(
+                req.query, req.limit, req.full_pipeline, req.filters, token_budget
+            )
             # recall_filters keeps the answer generator's retry sub-recalls
             # inside the same filtered scope as the primary recall.
             ans = await asyncio.to_thread(
-                answer_gen.generate, req.query, results, recall_filters=req.filters
+                answer_gen.generate,
+                req.query,
+                results,
+                recall_filters=req.filters,
+                token_budget=token_budget,
             )
         except Exception as exc:
             log.exception("answer endpoint failed")
@@ -542,6 +599,8 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             memories=[_memory_of(r) for r in results],
             degraded=trace.degraded,
             trace=trace.to_dict() if req.include_trace else None,
+            tokens_estimate=sum_tokens(results),
+            tokens_used=getattr(ans, "tokens_used", None),
         )
 
     @app.post("/feedback", response_model=FeedbackResponse)

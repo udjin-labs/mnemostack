@@ -440,3 +440,91 @@ def test_mcp_search_threads_filters_to_recaller(monkeypatch):
 
     assert result.structured_content["ok"] is True
     assert captured["filters"] == {"tenant": "a"}
+
+
+class _ThreeHitRecaller:
+    def __init__(self, **_):
+        pass
+
+    def recall(self, query, limit=10, **kwargs):
+        # each text is 4 ASCII chars ≈ 1 estimated token
+        return [
+            SimpleNamespace(
+                id=str(i), text="tttt", score=0.9 - i * 0.1, sources=["vector"], payload={}
+            )
+            for i in range(min(limit, 3))
+        ]
+
+
+def test_mcp_search_reports_tokens_estimate(monkeypatch):
+    import mnemostack.mcp.server as srv
+
+    _patch_minimal(monkeypatch, srv, _ThreeHitRecaller)
+    mcp = build_server(collection="test", embedding_provider="ollama")
+
+    result = asyncio.run(mcp.call_tool("mnemostack_search", {"query": "q", "limit": 3}))
+    payload = result.structured_content
+
+    assert payload["ok"] is True
+    assert payload["tokens_estimate"] == 3
+
+
+def test_mcp_search_token_budget_trims_results(monkeypatch):
+    import mnemostack.mcp.server as srv
+
+    _patch_minimal(monkeypatch, srv, _ThreeHitRecaller)
+    mcp = build_server(collection="test", embedding_provider="ollama")
+
+    result = asyncio.run(
+        mcp.call_tool("mnemostack_search", {"query": "q", "limit": 3, "token_budget": 2})
+    )
+    payload = result.structured_content
+
+    assert payload["ok"] is True
+    assert payload["count"] == 2
+    assert payload["tokens_estimate"] == 2
+
+
+def test_mcp_server_default_token_budget_applies(monkeypatch):
+    import mnemostack.mcp.server as srv
+
+    _patch_minimal(monkeypatch, srv, _ThreeHitRecaller)
+    mcp = build_server(collection="test", embedding_provider="ollama", token_budget=1)
+
+    result = asyncio.run(mcp.call_tool("mnemostack_search", {"query": "q", "limit": 3}))
+    assert result.structured_content["count"] == 1
+
+    # per-call budget overrides the server-wide default
+    result = asyncio.run(
+        mcp.call_tool("mnemostack_search", {"query": "q", "limit": 3, "token_budget": 3})
+    )
+    assert result.structured_content["count"] == 3
+
+
+def test_mcp_answer_reports_tokens(monkeypatch):
+    import mnemostack.mcp.server as srv
+
+    class _FakeAnswerGen:
+        def __init__(self, **_):
+            pass
+
+        def generate(self, query, memories, **kwargs):
+            return SimpleNamespace(
+                ok=True, text="42", confidence=0.9, sources=["s"], error=None, tokens_used=123
+            )
+
+        def should_fallback(self, answer):
+            return False
+
+    _patch_minimal(monkeypatch, srv, _ThreeHitRecaller)
+    monkeypatch.setattr(srv, "AnswerGenerator", _FakeAnswerGen)
+    mcp = build_server(collection="test", embedding_provider="ollama")
+
+    result = asyncio.run(
+        mcp.call_tool("mnemostack_answer", {"query": "q", "limit": 3, "token_budget": 2})
+    )
+    payload = result.structured_content
+
+    assert payload["ok"] is True
+    assert payload["tokens_estimate"] == 2
+    assert payload["tokens_used"] == 123

@@ -81,7 +81,11 @@ select = ["E", "F", "W", "I", "B", "UP"]
 ignore = ["E501"]
 
 [tool.mypy]
-python_version = "3.10"
+# 3.12, not our 3.10 floor: numpy >= 2.5 ships PEP 695 `type` statements in
+# its stubs, which mypy refuses to parse under python_version < 3.12 and
+# aborts the whole run. 3.10 runtime compatibility is covered by the CI test
+# matrix (3.10-3.13), not by mypy's stdlib gating.
+python_version = "3.12"
 ignore_missing_imports = true
 no_implicit_optional = true
 warn_unused_ignores = true

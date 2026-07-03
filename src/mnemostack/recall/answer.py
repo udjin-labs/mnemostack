@@ -19,6 +19,7 @@ from ..observability import counter, histogram
 from .inference_retry import decompose_query, merge_results, should_retry
 from .recaller import RecallResult
 from .specificity import detect_placeholders, resolve_specificity
+from .tokens import TokenCounter, apply_token_budget
 
 
 def _display_ts(ts: str) -> str:
@@ -336,17 +337,51 @@ def classify_question(query: str) -> str:
 
 @dataclass
 class Answer:
-    """Synthesized answer with provenance."""
+    """Synthesized answer with provenance.
+
+    `tokens_used` is the token usage the LLM provider reported for the
+    generation call(s) that produced this answer's text (semantics are
+    provider-specific — e.g. total tokens vs output-only) and `None` when
+    the provider reports nothing or the text was assembled without an LLM
+    call. When the specificity resolver rewrites the text, its usage is
+    added on top of the draft's. Preliminary calls (classification,
+    extraction batches, retries that were discarded) are not included.
+    """
 
     text: str
     confidence: float
     sources: list[str] = field(default_factory=list)
     raw: str = ""
     error: str | None = None
+    tokens_used: int | None = None
 
     @property
     def ok(self) -> bool:
         return self.error is None
+
+
+class _UsageTrackingLLM(LLMProvider):
+    """Pass-through LLM wrapper that sums reported `tokens_used` across calls.
+
+    Per-call object, never stored on the generator — the generator instance
+    is shared across server worker threads, so usage must not accumulate in
+    instance state (same race the reranker fallback signal had).
+    """
+
+    def __init__(self, llm: LLMProvider):
+        self._llm = llm
+        self.tokens_used: int | None = None
+
+    def generate(self, prompt, max_tokens=200, temperature=0.0):
+        resp = self._llm.generate(prompt, max_tokens=max_tokens, temperature=temperature)
+        used = getattr(resp, "tokens_used", None)
+        if used is not None:
+            self.tokens_used = (self.tokens_used or 0) + used
+        return resp
+
+    @property
+    def name(self) -> str:
+        return getattr(self._llm, "name", "unknown")
 
 
 class AnswerGenerator:
@@ -440,12 +475,26 @@ class AnswerGenerator:
             "Not in memory", self.abstention_text
         )
 
+    @staticmethod
+    def _cap_memories(
+        memories: list[RecallResult],
+        token_budget: int | None,
+        token_counter: TokenCounter | None,
+    ) -> list[RecallResult]:
+        if token_budget is None:
+            return memories
+        capped, _ = apply_token_budget(memories, token_budget, token_counter)
+        return capped
+
     def generate(
         self,
         query: str,
         memories: list[RecallResult],
         recall_filters: dict[str, object] | None = None,
         category: str | None = None,
+        *,
+        token_budget: int | None = None,
+        token_counter: TokenCounter | None = None,
     ) -> Answer:
         """Synthesize answer from retrieved memories.
 
@@ -455,8 +504,15 @@ class AnswerGenerator:
         built-in classifier's patterns are English).
         Valid values: the keys of the category prompt map ("list", "count",
         "temporal", "multihop", "inference", "adversarial", "general").
+
+        `token_budget` caps the total text tokens of the memories fed to any
+        LLM prompt this call makes — including the fresh sub-recalls of the
+        expansion/inference retry paths, which would otherwise bypass a
+        budget the caller applied to `memories` up front (see
+        `apply_token_budget` for the trimming contract).
         """
         counter("mnemostack.answer.calls", 1)
+        memories = self._cap_memories(memories, token_budget, token_counter)
 
         if category is not None and category not in _PROMPT_BY_CATEGORY:
             raise ValueError(
@@ -517,6 +573,8 @@ class AnswerGenerator:
                 draft=answer,
                 prompt_template=prompt_template,
                 recall_filters=recall_filters,
+                token_budget=token_budget,
+                token_counter=token_counter,
             )
         elif (
             self.category_aware_prompts
@@ -531,6 +589,8 @@ class AnswerGenerator:
                 draft=answer,
                 prompt_template=prompt_template,
                 recall_filters=recall_filters,
+                token_budget=token_budget,
+                token_counter=token_counter,
             )
         return self._apply_specificity_resolver(query, answer, specificity_memories, category)
 
@@ -541,6 +601,8 @@ class AnswerGenerator:
         draft: Answer,
         prompt_template: str,
         recall_filters: dict[str, object] | None = None,
+        token_budget: int | None = None,
+        token_counter: TokenCounter | None = None,
     ) -> tuple[Answer, list[RecallResult]]:
         """Retry low-confidence answers with expansion + HyDE vector RRF.
 
@@ -575,6 +637,9 @@ class AnswerGenerator:
             limit=self.max_memories,
             filters=dict(recall_filters) if recall_filters is not None else None,
         )
+        # The fresh sub-recall bypassed any budget the caller applied to the
+        # primary memories; re-cap before this pool reaches another prompt.
+        merged_memories = self._cap_memories(merged_memories, token_budget, token_counter)
         if not merged_memories:
             return draft, memories
 
@@ -616,6 +681,8 @@ class AnswerGenerator:
         draft: Answer,
         prompt_template: str,
         recall_filters: dict[str, object] | None,
+        token_budget: int | None = None,
+        token_counter: TokenCounter | None = None,
     ) -> tuple[Answer, list[RecallResult]]:
         """Retry low-confidence inference answers with decomposed evidence queries."""
         if self.recaller is None:
@@ -641,6 +708,9 @@ class AnswerGenerator:
                 sub_results.append([])
 
         merged_memories = merge_results(memories, *sub_results)
+        # Decomposed sub-recalls bypassed any caller-applied budget; re-cap
+        # before the merged pool reaches another prompt.
+        merged_memories = self._cap_memories(merged_memories, token_budget, token_counter)
         if not merged_memories:
             return draft, memories
 
@@ -675,15 +745,21 @@ class AnswerGenerator:
         if not detect_placeholders(answer.text):
             return answer
 
+        # Track the resolver's own LLM usage: when it rewrites the text, the
+        # returned answer was produced by draft + resolver calls together, so
+        # reporting only the draft's tokens would underreport.
+        tracking_llm = _UsageTrackingLLM(self.llm)
         rewritten = resolve_specificity(
             query=query,
             draft_answer=answer.text,
             candidate_memories=memories[: self.max_memories],
-            llm=self.llm,
+            llm=tracking_llm,
         )
         if rewritten == answer.text:
             return answer
         answer.text = rewritten
+        if tracking_llm.tokens_used is not None:
+            answer.tokens_used = (answer.tokens_used or 0) + tracking_llm.tokens_used
         return answer
 
     def _generate_list_extract(
@@ -733,6 +809,7 @@ class AnswerGenerator:
                 confidence=0.6,
                 sources=sources,
                 raw=final_resp.text,
+                tokens_used=getattr(final_resp, "tokens_used", None),
             )
 
         return Answer(
@@ -740,6 +817,7 @@ class AnswerGenerator:
             confidence=0.8,
             sources=sources,
             raw=final_resp.text,
+            tokens_used=getattr(final_resp, "tokens_used", None),
         )
 
     def _sources_for_items(
@@ -914,6 +992,9 @@ class AnswerGenerator:
                 sources=[],
                 raw="",
                 error=resp.error,
+                # getattr: duck-typed providers may return LLMResponse-like
+                # objects without a usage field.
+                tokens_used=getattr(resp, "tokens_used", None),
             )
 
         text, confidence = self._parse_response(resp.text)
@@ -924,6 +1005,7 @@ class AnswerGenerator:
             confidence=confidence,
             sources=self._extract_sources(memories),
             raw=resp.text,
+            tokens_used=getattr(resp, "tokens_used", None),
         )
 
     def should_fallback(self, answer: Answer) -> bool:

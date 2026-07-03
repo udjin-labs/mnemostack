@@ -34,6 +34,7 @@ from .recall import (
     VectorRetriever,
     build_bm25_docs,
     recall_flow,
+    sum_tokens,
 )
 from .recall.pipeline import FileStateStore, build_full_pipeline, default_state_path
 from .synthesis import synthesize
@@ -145,8 +146,9 @@ def _recall_for_cli(args: argparse.Namespace, recaller, query: str, limit: int):
     apply on both paths.
     """
     filters = _parse_filters(args)
+    token_budget = getattr(args, "token_budget", None)
     if getattr(args, "raw", False):
-        return recaller.recall(query, limit=limit, filters=filters)
+        return recaller.recall(query, limit=limit, filters=filters, token_budget=token_budget)
     pipeline = build_full_pipeline(
         state_store=FileStateStore(default_state_path()),
         graph_uri=getattr(args, "memgraph_uri", None) or None,
@@ -161,7 +163,13 @@ def _recall_for_cli(args: argparse.Namespace, recaller, query: str, limit: int):
     except Exception:  # noqa: BLE001 — no LLM key: search still works, unranked by LLM
         pass
     return recall_flow(
-        recaller, query, limit, pipeline=pipeline, reranker=reranker, filters=filters
+        recaller,
+        query,
+        limit,
+        pipeline=pipeline,
+        reranker=reranker,
+        filters=filters,
+        token_budget=token_budget,
     )
 
 
@@ -303,8 +311,15 @@ def cmd_answer(args: argparse.Namespace) -> int:
             }
         )
     gen = AnswerGenerator(**answer_generator_kwargs)
-    # recall_filters keeps retry sub-recalls inside the same filtered scope.
-    answer = gen.generate(args.query, results, recall_filters=_parse_filters(args))
+    # recall_filters keeps retry sub-recalls inside the same filtered scope;
+    # the token budget must reach the generator too, or its retry paths
+    # would prompt over fresh unbudgeted sub-recalls.
+    answer = gen.generate(
+        args.query,
+        results,
+        recall_filters=_parse_filters(args),
+        token_budget=getattr(args, "token_budget", None),
+    )
 
     # Tier caps how many sources we emit (answer text itself is model-sized).
     sources_out = answer.sources
@@ -320,6 +335,8 @@ def cmd_answer(args: argparse.Namespace) -> int:
                     "confidence": round(answer.confidence, 3),
                     "sources": sources_out,
                     "fallback_recommended": gen.should_fallback(answer),
+                    "tokens_estimate": sum_tokens(results),
+                    "tokens_used": getattr(answer, "tokens_used", None),
                     "error": answer.error,
                 },
                 ensure_ascii=False,
@@ -766,6 +783,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=cfg.recall.vector_floor,
         help="Append missing top-N raw-vector candidates after fusion/rerank",
     )
+    p_search.add_argument(
+        "--token-budget",
+        type=int,
+        default=cfg.recall.token_budget,
+        help=(
+            "Hard cap on the total (estimated) text tokens of the returned "
+            "results: the final ranking is cut to the prefix that fits"
+        ),
+    )
     p_search.set_defaults(func=cmd_search)
 
     p_synthesize = sub.add_parser(
@@ -898,6 +924,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=cfg.recall.vector_floor,
         help="Append missing top-N raw-vector candidates after fusion/rerank",
+    )
+    p_answer.add_argument(
+        "--token-budget",
+        type=int,
+        default=cfg.recall.token_budget,
+        help=(
+            "Hard cap on the total (estimated) text tokens of the memories "
+            "fed to the answer LLM"
+        ),
     )
     p_answer.add_argument("--json", action="store_true", help="JSON output")
     p_answer.set_defaults(func=cmd_answer)
@@ -1038,6 +1073,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=cfg.recall.rerank_mode,
         help="LLM reranker contract: relevant_only returns a subset, full_reorder ranks all",
     )
+    p_mcp.add_argument(
+        "--token-budget",
+        type=int,
+        default=cfg.recall.token_budget,
+        help="Default recall token budget for search/answer tool calls",
+    )
     p_mcp.set_defaults(func=cmd_mcp_serve)
 
     p_init = sub.add_parser(
@@ -1110,6 +1151,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="LLM reranker contract: relevant_only returns a subset, full_reorder ranks all",
     )
     p_serve.add_argument(
+        "--token-budget",
+        type=int,
+        default=cfg.recall.token_budget,
+        help="Server-wide default recall token budget; per-request token_budget overrides it",
+    )
+    p_serve.add_argument(
         "--reload", action="store_true", help="Enable uvicorn auto-reload (dev only)"
     )
     p_serve.set_defaults(func=cmd_serve)
@@ -1165,6 +1212,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         bm25_paths=list(args.bm25_path) if args.bm25_path else None,
         vector_floor=max(0, int(args.vector_floor)),
         rerank_mode=args.rerank_mode,
+        token_budget=getattr(args, "token_budget", None),
         state_path=args.state_path,
         auto_record_ior=args.auto_record_ior,
     )
@@ -1254,6 +1302,7 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
         state_path=args.state_path,
         vector_floor=max(0, int(args.vector_floor)),
         rerank_mode=args.rerank_mode,
+        token_budget=getattr(args, "token_budget", None),
     )
     mcp.run()
     return 0
