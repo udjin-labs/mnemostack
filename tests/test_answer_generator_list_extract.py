@@ -683,3 +683,39 @@ def test_finalize_fallback_does_not_report_discarded_call_usage(memories):
     # The failed finalizer call was discarded (deterministic assembly took
     # over), so its usage must not be attributed to this answer.
     assert answer.tokens_used is None
+
+
+def test_successful_extraction_reports_full_pool_context(memories):
+    llm = SequenceLLM(
+        [
+            '{"items": ["Luna", "Oliver"]}',
+            '{"items": ["Oliver"]}',
+            "Luna, Oliver",
+        ]
+    )
+    gen = AnswerGenerator(llm=llm, category_aware_prompts=True, list_extract_mode=True)
+
+    answer = gen.generate("What are Melanie's pets?", memories, token_counter=lambda s: 1)
+
+    # extraction walked all 45 memories in batches
+    assert answer.context_tokens_estimate == len(memories)
+
+
+def test_failed_extraction_fallback_reports_max_memories_context(memories):
+    # every extract batch fails -> single-prompt fallback sees only
+    # max_memories, and the estimate must reflect that smaller context,
+    # not the full pool extraction failed to use
+    llm = SequenceMaybeFailLLM(
+        [
+            LLMResponse(text="", error="rate limited"),
+            LLMResponse(text="", error="rate limited"),
+            LLMResponse(text="Luna\nCONFIDENCE: 0.8"),
+        ]
+    )
+    gen = AnswerGenerator(llm=llm, category_aware_prompts=True, list_extract_mode=True)
+
+    answer = gen.generate("What are Melanie's pets?", memories, token_counter=lambda s: 1)
+
+    assert answer.ok
+    assert answer.context_tokens_estimate == gen.max_memories
+    assert answer.context_tokens_estimate < len(memories)

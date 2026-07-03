@@ -552,7 +552,9 @@ class AnswerGenerator:
                 raw="",
             )
         elif self.list_extract_mode and category in {"list", "count"}:
-            answer = self._generate_list_extract(query, memories, category)
+            answer = self._generate_list_extract(
+                query, memories, category, token_counter=token_counter
+            )
         else:
             answer = self._generate_single_prompt(
                 query=query,
@@ -599,12 +601,13 @@ class AnswerGenerator:
         answer = self._apply_specificity_resolver(query, answer, specificity_memories, category)
         # Report the context that actually produced the answer: after an
         # accepted retry that is the merged retry pool, not the caller's
-        # memories. list/count extraction walks the full pool; every other
-        # path prompts over at most max_memories.
-        context_pool = specificity_memories
-        if not (self.list_extract_mode and category in {"list", "count"}):
-            context_pool = context_pool[: self.max_memories]
-        answer.context_tokens_estimate = sum_tokens(context_pool, token_counter)
+        # memories. Successful list/count extraction walks the full pool and
+        # sets the estimate itself; every other path (including extraction's
+        # single-prompt fallback) prompts over at most max_memories.
+        if answer.context_tokens_estimate is None:
+            answer.context_tokens_estimate = sum_tokens(
+                specificity_memories[: self.max_memories], token_counter
+            )
         return answer
 
     def _retry_with_expansion_answer(
@@ -776,7 +779,11 @@ class AnswerGenerator:
         return answer
 
     def _generate_list_extract(
-        self, query: str, memories: list[RecallResult], category: str = "list"
+        self,
+        query: str,
+        memories: list[RecallResult],
+        category: str = "list",
+        token_counter: TokenCounter | None = None,
     ) -> Answer:
         extracted = self._extract_items_over_pool(query, memories)
         if extracted is not None and not extracted[0]:
@@ -786,8 +793,15 @@ class AnswerGenerator:
             counter("mnemostack.answer.list_extract_empty_retry", 1)
             extracted = self._extract_items_over_pool(query, memories)
         if extracted is None or not extracted[0]:  # every batch failed / still empty
+            # The single-prompt fallback sees only max_memories; leave the
+            # context estimate unset so generate() reports that smaller pool,
+            # not the full pool extraction failed to use.
             return self._fallback_list_answer(query, memories)
         items, contributing = extracted
+
+        # Extraction walked the FULL pool in batches — that is the context
+        # that produced whatever answer the paths below assemble.
+        pool_tokens = sum_tokens(memories, token_counter)
 
         sources = self._sources_for_items(items, contributing)
 
@@ -801,6 +815,7 @@ class AnswerGenerator:
                 confidence=0.8,
                 sources=sources,
                 raw="",
+                context_tokens_estimate=pool_tokens,
             )
 
         finalize_template = self.prompt_overrides.get(
@@ -826,6 +841,7 @@ class AnswerGenerator:
                 # assembled deterministically from the extracted items), so
                 # its usage would misattribute a discarded call.
                 tokens_used=None,
+                context_tokens_estimate=pool_tokens,
             )
 
         return Answer(
@@ -834,6 +850,7 @@ class AnswerGenerator:
             sources=sources,
             raw=final_resp.text,
             tokens_used=getattr(final_resp, "tokens_used", None),
+            context_tokens_estimate=pool_tokens,
         )
 
     def _sources_for_items(
