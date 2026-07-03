@@ -100,7 +100,8 @@ def build_server(
     resolved_state_path = state_path or default_state_path()
     # The tool functions take a per-call `token_budget` parameter that
     # shadows the factory argument; keep the server-wide default reachable.
-    default_token_budget = token_budget
+    # 0 or negative means "no budget" (apply_token_budget requires >= 1).
+    default_token_budget = token_budget if token_budget is not None and token_budget > 0 else None
 
     # Lazy-initialize components so server boots even if e.g. GEMINI_API_KEY missing.
     # Tool calls can run concurrently; the lock makes each component initialize
@@ -409,6 +410,12 @@ def build_server(
                 recall_filters=filters,
                 token_budget=effective_budget,
             )
+            # Prefer the generator's own estimate: its retry paths can swap
+            # in a freshly recalled context pool. getattr: custom/duck-typed
+            # answer generators may return objects predating these fields.
+            tokens_estimate = getattr(answer, "context_tokens_estimate", None)
+            if tokens_estimate is None:
+                tokens_estimate = sum_tokens(memories)
             return {
                 "ok": answer.ok,
                 "query": query,
@@ -417,9 +424,7 @@ def build_server(
                 "sources": answer.sources,
                 "degraded": trace.degraded,
                 "fallback_recommended": gen.should_fallback(answer),
-                "tokens_estimate": sum_tokens(memories),
-                # getattr: custom/duck-typed answer generators may return
-                # objects predating the tokens_used field.
+                "tokens_estimate": tokens_estimate,
                 "tokens_used": getattr(answer, "tokens_used", None),
                 "error": answer.error,
             }

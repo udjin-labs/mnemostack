@@ -513,3 +513,52 @@ def test_specificity_rewrite_adds_resolver_usage(monkeypatch, sample_memories):
     assert answer.text == "rewritten answer"
     # draft call (50) + resolver call (50)
     assert answer.tokens_used == 100
+
+
+def test_answer_reports_context_tokens_estimate(sample_memories):
+    llm = FakeLLM(response_text="Postgres\nCONFIDENCE: 0.95")
+    gen = AnswerGenerator(llm=llm, specificity_resolver=False, inference_retry=False)
+    answer = gen.generate(
+        "what database did we migrate to",
+        sample_memories,
+        token_counter=lambda s: 1,
+    )
+    # two memories in the prompt, one "token" each under the custom counter
+    assert answer.context_tokens_estimate == 2
+
+
+def test_retry_answer_reports_context_of_merged_pool(monkeypatch, sample_memories):
+    import mnemostack.recall.answer as answer_mod
+
+    big = RecallResult(
+        id=99,
+        text="fresh sub-recall memory",
+        score=0.99,
+        payload={"source": "sub.md"},
+    )
+
+    class _StubRecaller:
+        def recall(self, query, limit=10, filters=None, **_):
+            return [big]
+
+    llm = _PromptCapturingLLM(["draft\nCONFIDENCE: 0.1", "final\nCONFIDENCE: 0.9"])
+    gen = AnswerGenerator(
+        llm=llm,
+        recaller=_StubRecaller(),
+        specificity_resolver=False,
+        inference_retry=True,
+        retry_with_expansion=False,
+    )
+    monkeypatch.setattr(answer_mod, "decompose_query", lambda q, llm: ["sub question"])
+
+    answer = gen.generate(
+        "why did the migration happen",
+        sample_memories,
+        category="inference",
+        token_budget=1,
+        token_counter=lambda s: 1,
+    )
+
+    # the accepted retry prompted over the budget-capped merged pool
+    # (1 memory x 1 token), not the caller's 2 primary memories
+    assert answer.context_tokens_estimate == 1
