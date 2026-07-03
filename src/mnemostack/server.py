@@ -572,14 +572,21 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 status_code=503,
                 detail="answer generator unavailable (LLM not configured)",
             )
+        # Resolve the effective budget once: the generator needs it too, or
+        # its retry paths would prompt over fresh unbudgeted sub-recalls.
+        token_budget = req.token_budget if req.token_budget is not None else cfg.token_budget
         try:
             results, trace = await _run_recall(
-                req.query, req.limit, req.full_pipeline, req.filters, req.token_budget
+                req.query, req.limit, req.full_pipeline, req.filters, token_budget
             )
             # recall_filters keeps the answer generator's retry sub-recalls
             # inside the same filtered scope as the primary recall.
             ans = await asyncio.to_thread(
-                answer_gen.generate, req.query, results, recall_filters=req.filters
+                answer_gen.generate,
+                req.query,
+                results,
+                recall_filters=req.filters,
+                token_budget=token_budget,
             )
         except Exception as exc:
             log.exception("answer endpoint failed")

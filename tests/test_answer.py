@@ -357,3 +357,159 @@ def test_answer_empty_memories_has_no_token_usage():
     answer = gen.generate("anything", [])
     # abstention is assembled without an LLM call
     assert answer.tokens_used is None
+
+
+class _PromptCapturingLLM(FakeLLM):
+    """FakeLLM returning queued responses and recording every prompt."""
+
+    def __init__(self, responses):
+        super().__init__()
+        self.responses = list(responses)
+        self.prompts: list[str] = []
+
+    def generate(self, prompt, max_tokens=200, temperature=0.0):
+        self.prompts.append(prompt)
+        text = self.responses.pop(0) if self.responses else ""
+        return LLMResponse(text=text, tokens_used=50)
+
+
+def test_generate_applies_token_budget_to_prompt(sample_memories):
+    llm = _PromptCapturingLLM(["Postgres\nCONFIDENCE: 0.95"])
+    gen = AnswerGenerator(llm=llm, specificity_resolver=False, inference_retry=False)
+
+    gen.generate(
+        "what database did we migrate to",
+        sample_memories,
+        token_budget=1,
+        token_counter=lambda s: 1,  # each memory costs 1 token -> only the first fits
+    )
+
+    prompt = llm.prompts[0]
+    assert "migrate to Postgres" in prompt
+    assert "Migration completed" not in prompt
+
+
+def test_inference_retry_recall_honors_token_budget(monkeypatch, sample_memories):
+    import mnemostack.recall.answer as answer_mod
+
+    big = RecallResult(
+        id=99,
+        text="fresh sub-recall memory that must not blow the budget",
+        score=0.99,
+        payload={"source": "sub.md"},
+    )
+
+    class _StubRecaller:
+        def recall(self, query, limit=10, filters=None, **_):
+            return [big]
+
+    # draft is low-confidence -> retry runs; retry answer is confident
+    llm = _PromptCapturingLLM(
+        ["draft\nCONFIDENCE: 0.1", "final\nCONFIDENCE: 0.9"]
+    )
+    gen = AnswerGenerator(
+        llm=llm,
+        recaller=_StubRecaller(),
+        specificity_resolver=False,
+        inference_retry=True,
+        retry_with_expansion=False,
+    )
+    monkeypatch.setattr(answer_mod, "decompose_query", lambda q, llm: ["sub question"])
+
+    # merge_results puts the sub-recall hit ahead of the primary memories when
+    # it scores higher; a 1-token budget must keep only the first merged hit.
+    gen.generate(
+        "why did the migration happen",
+        sample_memories,
+        category="inference",
+        token_budget=1,
+        token_counter=lambda s: 1,
+    )
+
+    retry_prompt = llm.prompts[-1]
+    memory_texts = [m.text for m in sample_memories] + [big.text]
+    included = [t for t in memory_texts if t[:30] in retry_prompt]
+    assert len(included) == 1, f"budget of 1 token must keep exactly one memory: {included}"
+
+
+def test_expansion_retry_recall_honors_token_budget(sample_memories):
+    big = RecallResult(
+        id=77,
+        text="expansion sub-recall memory",
+        score=0.99,
+        payload={"source": "exp.md"},
+    )
+
+    class _StubEmbedding:
+        def embed_batch(self, texts):
+            return [[0.1, 0.2]] * len(texts)
+
+    class _StubRecaller:
+        embedding = _StubEmbedding()
+
+        def search_many(self, vectors, limit, filters=None):
+            return [big, *sample_memories]
+
+    # call order: draft answer -> expansion rephrase -> retry answer
+    llm = _PromptCapturingLLM(
+        [
+            "draft\nCONFIDENCE: 0.1",
+            "rephrase one\nrephrase two\nhypothetical answer",
+            "final\nCONFIDENCE: 0.9",
+        ]
+    )
+    gen = AnswerGenerator(
+        llm=llm,
+        recaller=_StubRecaller(),
+        expansion_llm=llm,
+        retry_with_expansion=True,
+        specificity_resolver=False,
+        inference_retry=False,
+    )
+
+    gen.generate(
+        "what happened",
+        sample_memories,
+        token_budget=1,
+        token_counter=lambda s: 1,
+    )
+
+    retry_prompt = llm.prompts[-1]
+    assert "expansion sub-recall memory" in retry_prompt
+    assert "migrate to Postgres" not in retry_prompt
+    assert "Migration completed" not in retry_prompt
+
+
+def test_duck_typed_llm_response_without_usage_field(sample_memories):
+    from types import SimpleNamespace
+
+    class _DuckLLM(FakeLLM):
+        def generate(self, prompt, max_tokens=200, temperature=0.0):
+            # LLMResponse-like object: ok/text/error but no tokens_used
+            return SimpleNamespace(ok=True, text="Postgres\nCONFIDENCE: 0.9", error=None)
+
+    gen = AnswerGenerator(
+        llm=_DuckLLM(), specificity_resolver=False, inference_retry=False
+    )
+    answer = gen.generate("what database did we migrate to", sample_memories)
+    assert answer.ok
+    assert answer.tokens_used is None
+
+
+def test_specificity_rewrite_adds_resolver_usage(monkeypatch, sample_memories):
+    import mnemostack.recall.answer as answer_mod
+
+    def _fake_resolver(query, draft_answer, candidate_memories, llm):
+        llm.generate("rewrite it")  # tracked call, reports tokens_used=50
+        return "rewritten answer"
+
+    monkeypatch.setattr(answer_mod, "detect_placeholders", lambda text: True)
+    monkeypatch.setattr(answer_mod, "resolve_specificity", _fake_resolver)
+
+    llm = FakeLLM(response_text="draft with placeholder\nCONFIDENCE: 0.9")
+    gen = AnswerGenerator(llm=llm, inference_retry=False)
+    answer = gen.generate("who did it", sample_memories)
+
+    assert answer.text == "rewritten answer"
+    # draft call (50) + resolver call (50)
+    assert answer.tokens_used == 100
