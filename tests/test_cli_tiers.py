@@ -503,9 +503,14 @@ def test_token_budget_flag_parses_on_all_recall_commands(monkeypatch):
     assert parser.parse_args(["search", "q"]).token_budget is None
 
 
-def test_serve_passes_token_budget_to_server_config():
+def test_serve_passes_token_budget_to_server_config(monkeypatch):
+    import sys
+
     import mnemostack.server as srv
     from mnemostack.cli import cmd_serve
+
+    # uvicorn is not a test dependency; cmd_serve only needs it importable
+    monkeypatch.setitem(sys.modules, "uvicorn", MagicMock())
 
     args = argparse.Namespace(
         provider="fake",
@@ -533,10 +538,7 @@ def test_serve_passes_token_budget_to_server_config():
         captured["cfg"] = cfg
         return MagicMock()
 
-    with (
-        patch.object(srv, "build_app", _fake_build_app),
-        patch("uvicorn.run", MagicMock()),
-    ):
+    with patch.object(srv, "build_app", _fake_build_app):
         rc = cmd_serve(args)
 
     assert rc == 0
