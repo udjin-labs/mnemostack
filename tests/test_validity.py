@@ -606,3 +606,46 @@ def test_neither_marker_retriever_gets_no_validity_kwargs():
     recaller = Recaller(retrievers=[_PlainRetriever()])
     out = recaller.recall("q", limit=5, as_of="2026-03-01", include_invalidated=True)
     assert [r.id for r in out] == ["p"]  # works, no TypeError
+
+
+# ---------- review round 6 ----------
+
+
+def test_to_utc_instant_expands_bare_date():
+    from mnemostack.recall.validity import to_utc_instant
+
+    # bare date -> full midnight-UTC instant with Z (so it compares against
+    # full-instant graph bounds, not shorter than valid_from='...T00:00:00Z')
+    assert to_utc_instant("2026-03-01") == "2026-03-01T00:00:00Z"
+    assert to_utc_instant("2026-03-01T00:00:00+02:00") == "2026-02-28T22:00:00Z"
+    assert to_utc_instant("current") == "current"
+    assert to_utc_instant(None) is None
+
+
+def test_bare_date_as_of_matches_full_instant_bound_lexically():
+    # The exact-boundary case the fix targets: a fact starting at midnight is
+    # valid at a bare-date as_of once as_of is expanded to the full instant.
+    from mnemostack.recall.validity import to_utc_instant
+
+    as_of = to_utc_instant("2026-03-01")           # "2026-03-01T00:00:00Z"
+    valid_from = "2026-03-01T00:00:00Z"            # stored full instant
+    assert valid_from <= as_of                     # was False without expansion
+
+
+def test_search_many_filters_per_vector_before_fusion():
+    from mnemostack.recall.recaller import Recaller
+    from mnemostack.vector.qdrant import Hit
+
+    class _FakeVector:
+        def search(self, vector, limit, filters=None):
+            # a stale hit that would recur across vectors and get RRF-boosted
+            return [
+                Hit(id="stale", score=0.99, payload={"invalidated_at": "2026-07-04", "text": "s"}),
+                Hit(id="fresh", score=0.5, payload={"text": "f"}),
+            ][:limit]
+
+    recaller = Recaller.__new__(Recaller)
+    recaller.vector = _FakeVector()
+    recaller.rrf_k = 60
+    out = recaller.search_many([[0.1], [0.2]], limit=5)
+    assert {r.id for r in out} == {"fresh"}  # stale filtered per vector

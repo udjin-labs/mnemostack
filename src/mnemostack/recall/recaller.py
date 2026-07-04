@@ -498,20 +498,35 @@ class Recaller:
         vectors: list[list[float]],
         limit: int,
         filters: dict[str, Any] | None = None,
+        *,
+        include_invalidated: bool = False,
+        as_of: str | None = None,
     ) -> list[RecallResult]:
-        """Search Qdrant for multiple vectors and RRF-merge the ranked hits."""
+        """Search Qdrant for multiple vectors and RRF-merge the ranked hits.
+
+        Validity filtering happens **per vector, before fusion**: each vector's
+        list is over-fetched, filtered, and trimmed back to `limit` so a stale
+        hit that recurs across expanded vectors can't be RRF-boosted into the
+        merged result ahead of a valid single-vector hit.
+        """
         if not self.vector:
             return []
 
+        fetch = _fetch_limit(limit, include_invalidated, as_of)
         ranked_lists: list[list[tuple[Any, float]]] = []
         id_to_hit: dict[Any, Hit] = {}
         for vector in vectors:
             if not vector:
                 continue
             try:
-                hits = self.vector.search(vector, limit=limit, filters=filters)
+                hits = self.vector.search(vector, limit=fetch, filters=filters)
             except Exception:
                 hits = []
+            hits = [
+                h
+                for h in hits
+                if keep_payload(h.payload, include_invalidated=include_invalidated, as_of=as_of)
+            ][:limit]
             ranked: list[tuple[Any, float]] = []
             for hit in hits:
                 id_to_hit.setdefault(hit.id, hit)

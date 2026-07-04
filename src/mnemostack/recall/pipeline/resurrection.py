@@ -17,7 +17,7 @@ from typing import Any
 
 from ..recaller import RecallResult
 from ..retrievers import graph_valid_clause
-from ..validity import to_utc_iso
+from ..validity import to_utc_instant
 from .base import PipelineContext, Stage
 from .stages import STOPWORDS
 
@@ -112,7 +112,7 @@ class GraphResurrection(Stage):
         # `as_of` (point-in-time), and don't suppress closed edges when the
         # caller asked to include invalidated facts. Both ride in via
         # PipelineContext.extras; `as_of` is UTC-normalized for string compare.
-        as_of = to_utc_iso(context.extras.get("as_of"))
+        as_of = to_utc_instant(context.extras.get("as_of"))
         include_invalidated = bool(context.extras.get("include_invalidated", False))
         n_valid = graph_valid_clause("n", as_of, include_invalidated)
         m_valid = graph_valid_clause("m", as_of, include_invalidated)

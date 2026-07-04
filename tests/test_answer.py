@@ -447,7 +447,7 @@ def test_expansion_retry_recall_honors_token_budget(sample_memories):
     class _StubRecaller:
         embedding = _StubEmbedding()
 
-        def search_many(self, vectors, limit, filters=None):
+        def search_many(self, vectors, limit, filters=None, **_):
             return [big, *sample_memories]
 
     # call order: draft answer -> expansion rephrase -> retry answer
@@ -614,8 +614,15 @@ def test_expansion_retry_filters_sub_recall_by_validity(sample_memories):
     class _StubRecaller:
         embedding = _StubEmbedding()
 
-        def search_many(self, vectors, limit, filters=None):
-            return [stale, fresh]  # search_many has no validity awareness
+        def search_many(self, vectors, limit, filters=None, *,
+                        include_invalidated=False, as_of=None):
+            # search_many now filters for validity itself (per vector, before
+            # RRF); mirror that so the retry pool matches the real behavior.
+            from mnemostack.recall import filter_by_validity
+
+            return filter_by_validity(
+                [stale, fresh], include_invalidated=include_invalidated, as_of=as_of
+            )
 
     llm = _PromptCapturingLLM(
         ["draft\nCONFIDENCE: 0.1", "r1\nr2\nhypothetical", "final\nCONFIDENCE: 0.9"]

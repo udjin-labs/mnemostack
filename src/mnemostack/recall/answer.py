@@ -21,7 +21,6 @@ from .inference_retry import decompose_query, merge_results, should_retry
 from .recaller import RecallResult
 from .specificity import detect_placeholders, resolve_specificity
 from .tokens import TokenCounter, apply_token_budget, sum_tokens
-from .validity import filter_by_validity
 
 
 def _display_ts(ts: str) -> str:
@@ -699,22 +698,16 @@ class AnswerGenerator:
         if not vectors:
             return draft, memories
 
-        # Over-fetch: search_many is a raw vector RRF with no validity
-        # awareness, so a top-N of stale/out-of-window hits could fill the
-        # window and be dropped by the filter below, forcing the retry back to
-        # the draft even though valid hits exist just past max_memories. Fetch
-        # wider, filter, then trim to max_memories.
-        validity_active = (not include_invalidated) or (as_of is not None)
-        fetch = max(self.max_memories * 3, self.max_memories + 20) if validity_active \
-            else self.max_memories
+        # search_many filters each vector's list for validity and trims before
+        # RRF, so a stale hit recurring across expanded vectors can't be boosted
+        # into the merged context ahead of a valid single-vector hit.
         merged_memories = self.recaller.search_many(
             vectors,
-            limit=fetch,
+            limit=self.max_memories,
             filters=dict(recall_filters) if recall_filters is not None else None,
+            include_invalidated=include_invalidated,
+            as_of=as_of,
         )
-        merged_memories = filter_by_validity(
-            merged_memories, include_invalidated=include_invalidated, as_of=as_of
-        )[: self.max_memories]
         # The fresh sub-recall bypassed any budget the caller applied to the
         # primary memories; re-cap before this pool reaches another prompt.
         merged_memories = self._cap_memories(merged_memories, token_budget, token_counter)

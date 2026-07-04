@@ -37,7 +37,7 @@ except ImportError:  # pragma: no cover - qdrant-client is a runtime dependency
 from .bm25 import BM25, BM25Doc, Tokenizer, tokenize
 from .filters import payload_matches
 from .recaller import RecallResult
-from .validity import to_utc_iso
+from .validity import to_utc_instant
 
 logger = logging.getLogger(__name__)
 
@@ -522,9 +522,10 @@ class MemgraphRetriever(Retriever):
         words = [w.lower() for w in query.split() if len(w) >= self.min_word]
         if not words:
             return []
-        # Compare instants, not raw strings: normalize `as_of` to UTC (graph
-        # facts written via GraphStore are UTC-normalized too).
-        as_of = to_utc_iso(as_of)
+        # Normalize `as_of` to a full UTC instant (expanding a bare date to
+        # midnight-Z) so the raw-string Cypher comparison is correct against
+        # full-instant bounds written via GraphStore.
+        as_of = to_utc_instant(as_of)
         node_valid = self._valid_clause("n", as_of, include_invalidated)
         rel_valid = self._valid_clause("r", as_of, include_invalidated)
         target_valid = self._valid_clause("m", as_of, include_invalidated)
