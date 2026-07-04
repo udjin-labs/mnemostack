@@ -7,6 +7,7 @@ where blocking I/O would hurt concurrency.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
@@ -119,6 +120,54 @@ class AsyncVectorStore:
             await self.client.upsert(collection_name=self.collection, points=structs)
             total += len(structs)
         return total
+
+    async def set_payload(self, id: str | int, payload: dict[str, Any]) -> None:
+        """Merge payload keys into an existing point (vector untouched)."""
+        await self.client.set_payload(
+            collection_name=self.collection,
+            payload=payload,
+            points=[id],
+        )
+
+    async def invalidate(
+        self,
+        ids: str | int | list[str | int],
+        *,
+        invalidated_at: str | None = None,
+        valid_until: str | None = None,
+        index_root: str | None = None,
+    ) -> int:
+        """Async mirror of ``VectorStore.invalidate``."""
+        if isinstance(ids, (str, int)):
+            ids = [ids]
+        ids = list(ids)
+        if not ids:
+            return 0
+        payload: dict[str, Any] = {
+            "invalidated_at": invalidated_at or datetime.now(timezone.utc).isoformat()
+        }
+        if valid_until is not None:
+            payload["valid_until"] = valid_until
+        retrieved = await self.client.retrieve(
+            collection_name=self.collection, ids=ids, with_payload=True
+        )
+        existing = {str(pt.id): (pt.payload or {}) for pt in retrieved}
+        target: list[Any] = []
+        for pid in ids:
+            current = existing.get(str(pid))
+            if current is None:
+                continue
+            if index_root is not None:
+                owner = current.get("index_root")
+                if owner is not None and owner != index_root:
+                    continue
+            target.append(pid)
+        if not target:
+            return 0
+        await self.client.set_payload(
+            collection_name=self.collection, payload=payload, points=target
+        )
+        return len(target)
 
     async def search(
         self,

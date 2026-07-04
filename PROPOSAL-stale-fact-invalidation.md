@@ -164,23 +164,17 @@ non-destructive close, and the two sides should agree.
   asserted true again). This is the correct semantics (you re-stated it) and is
   called out so it isn't a surprise.
 
-## Open decisions (the reason this is a proposal, not a PR)
+## Decisions (settled 2026-07-04)
 
-1. **Two keys or three?** Full bi-temporal (`invalidated_at` system-time +
-   `valid_until` world-time) vs. collapsing to just `invalidated_at`. Recommend
-   **both**, because the graph already exposes world-time (`valid_until`) and
-   dropping it on the vector side would make the two halves disagree — but it is
-   more surface. Cutting to `invalidated_at`-only is a viable smaller stage 1.
-2. **Default `include_invalidated=False`** — accept the (opt-in-triggered)
-   behavior change, or make exclusion opt-*in* (`exclude_invalidated=True`)?
-   Recommend default-exclude: a stale fact resurfacing is the bug users are
-   asking us to fix; an index that never invalidates sees no change anyway.
-3. **`POST /invalidate` on the HTTP server at all?** The server is read+feedback
-   today and never writes vector payloads. Adding a write endpoint is a real
-   surface-area step. Alternative: keep invalidation CLI/library-only for stage
-   1 (matching how `GraphStore.invalidate` is library-only today) and add the
-   endpoint later if asked. Recommend **library + CLI + MCP, defer HTTP** unless
-   you want it now.
+1. **Three keys.** Full bi-temporal: `valid_from` + `valid_until` (world-time) +
+   `invalidated_at` (system-time). Keeps parity with the graph's world-time
+   `valid_until` so the two halves agree.
+2. **Default `include_invalidated=False`.** Default-exclude — a stale fact
+   resurfacing is the bug users want fixed, and an index that never invalidates
+   sees no change (no chunk carries the key).
+3. **Library + CLI + MCP; defer HTTP.** No `POST /invalidate` in stage 1
+   (matching `GraphStore.invalidate`, which is library-only today). The HTTP
+   server stays read+feedback; the write endpoint can be added later if asked.
 
 ## Relationship to existing prior art
 

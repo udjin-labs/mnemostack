@@ -30,6 +30,8 @@ def recall_flow(
     trace: RecallTrace | None = None,
     token_budget: int | None = None,
     token_counter: TokenCounter | None = None,
+    include_invalidated: bool = False,
+    as_of: str | None = None,
 ) -> list[RecallResult]:
     """Run hybrid recall plus the canonical post-processing chain.
 
@@ -46,9 +48,20 @@ def recall_flow(
     `token_budget` trims the *final* order (after rerank, top-K cut and
     vector floor) to the ranked prefix whose total text tokens fit the
     budget — see `apply_token_budget` for the exact contract.
+
+    `include_invalidated` / `as_of` control validity: by default stale
+    facts are dropped from the candidate pool (before the pipeline) so
+    they never influence ranking — see `Recaller.recall`.
     """
     raw_limit = max(limit * 3, 30) if pipeline is not None else limit
-    recalled = recaller.recall(query, limit=raw_limit, filters=filters, trace=trace)
+    recalled = recaller.recall(
+        query,
+        limit=raw_limit,
+        filters=filters,
+        trace=trace,
+        include_invalidated=include_invalidated,
+        as_of=as_of,
+    )
     results = recalled
     if pipeline is not None:
         results = pipeline.apply(query, results)
@@ -81,6 +94,8 @@ async def recall_flow_async(
     trace: RecallTrace | None = None,
     token_budget: int | None = None,
     token_counter: TokenCounter | None = None,
+    include_invalidated: bool = False,
+    as_of: str | None = None,
 ) -> list[RecallResult]:
     """Async wrapper around `recall_flow`.
 
@@ -103,4 +118,6 @@ async def recall_flow_async(
         trace=trace,
         token_budget=token_budget,
         token_counter=token_counter,
+        include_invalidated=include_invalidated,
+        as_of=as_of,
     )
