@@ -65,15 +65,22 @@ results = recall_flow(recaller, query, limit=10, reranker=reranker)
 
 ### Faster CPU / GPU inference
 
-`sentence-transformers` can load quantized/optimized backends of the same
-weights: OpenVINO INT8 on CPU and ONNX (O4) on GPU both give roughly 2–3×
-throughput at near-identical quality — worth it when reranking is on the hot
-path:
+`sentence-transformers` can run the model through an OpenVINO (CPU) or ONNX
+(GPU) backend instead of plain PyTorch:
 
 ```python
 CrossEncoder("BAAI/bge-reranker-v2-m3", backend="openvino")  # CPU
 CrossEncoder("BAAI/bge-reranker-v2-m3", backend="onnx")      # GPU
 ```
+
+Note that `backend=` alone loads (or exports) the *unoptimized* backend model.
+The larger wins — OpenVINO INT8 quantization (~2–3× on CPU) and ONNX O4
+optimization (GPU) — require a separate one-time export step, after which you
+point the loader at the saved artifact via
+`model_kwargs={"file_name": "openvino/openvino_model_qint8_quantized.xml"}`
+(or the ONNX equivalent). See the sentence-transformers "Speeding up Inference"
+guide for the exact export commands; benchmark the optimized file, not the
+plain `backend=` load, or you'll measure the wrong model.
 
 ### Quality-first (larger, still Apache-2.0)
 
@@ -94,8 +101,12 @@ corpora.
 
 ### What NOT to use
 
-- **Jina rerankers.** All of Jina's open reranker weights are **CC-BY-NC** —
-  non-commercial only. Do not ship them in a commercial self-hosted product.
+- **Jina's multilingual rerankers.** The multilingual `jina-reranker-v2`/`v3`
+  weights are **CC-BY-NC** — non-commercial only, so don't ship them in a
+  commercial self-hosted product. (Jina's older English-only v1 models such as
+  `jina-reranker-v1-tiny-en` / `v1-turbo-en` are Apache-2.0, but being
+  English-only they aren't a multilingual option anyway — use `bge-reranker-v2-m3`
+  for that.)
 - **Pre-2024 rerankers on non-English text.** Older models (e.g.
   `bge-reranker-large`) collapse on Russian and other non-English corpora
   (reported RU nDCG in the mid-40s vs. ~68 for `bge-reranker-v2-m3`). Never
@@ -203,7 +214,12 @@ per-language analyzers so you build each stemmer once:
 import re
 
 import Stemmer
-from langdetect import LangDetectException, detect
+from langdetect import DetectorFactory, LangDetectException, detect
+
+# langdetect is nondeterministic on short/ambiguous text unless seeded — and an
+# unseeded detector could stem the same text as different languages at index
+# time vs. query time, silently breaking lexical matches. Seed once at import.
+DetectorFactory.seed = 0
 
 _WORD_RE = re.compile(r"\w+", re.UNICODE)
 # langdetect codes -> Snowball language names you support
