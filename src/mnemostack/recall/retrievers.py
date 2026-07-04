@@ -592,26 +592,36 @@ class MemgraphRetriever(Retriever):
                         counts[name]["count"] += 1
                         counts[name]["type"] = n.get("type", "") or ""
                         counts[name]["mc"] = n.get("mc", "") or ""
-                # Fetch relationships for top-N
-                ranked = sorted(counts.items(), key=lambda kv: -kv[1]["count"])[: self.max_nodes]
+                # Over-fetch node candidates so a window of stale-only nodes
+                # doesn't hide valid ones below it before the bare-node skip.
+                validity_active = as_of is not None or not include_invalidated
+                node_budget = self.max_nodes * 3 if validity_active else self.max_nodes
+                ranked = sorted(counts.items(), key=lambda kv: -kv[1]["count"])[:node_budget]
                 results: list[RecallResult] = []
                 for name, info in ranked:
+                    if len(results) >= self.max_nodes:
+                        break
                     rel_rows = session.run(
-                        "MATCH (n {name: $name})-[r]->(m) "
-                        # Filter the target node `m` too, or a stale/future
-                        # neighbor would still be serialized into rel_text.
+                        # Undirected: a target-only node (e.g. `Team A` in
+                        # `Alice -[MEMBER_OF]-> Team A`) has a valid incoming
+                        # edge but no outgoing one, so only checking `->` would
+                        # wrongly drop it under the bare-node skip. startNode/
+                        # endNode render the true direction. Filter the other
+                        # endpoint `m` too so a stale/future neighbor isn't
+                        # serialized into rel_text.
+                        "MATCH (n {name: $name})-[r]-(m) "
                         f"WHERE {node_valid} AND {rel_valid} AND {target_valid} "
-                        "RETURN n.name AS from_n, type(r) AS rel, m.name AS to_n "
-                        "LIMIT $lim",
+                        "RETURN startNode(r).name AS from_n, type(r) AS rel, "
+                        "endNode(r).name AS to_n LIMIT $lim",
                         name=name,
                         lim=self.max_rels,
                         **extra,
                     ).data()
                     # Nodes carry no valid_from and invalidate() closes edges,
                     # not nodes — so under a validity view a node can pass its
-                    # own probe while all its facts are out of window. Don't
-                    # emit a bare entity with no valid incident fact then.
-                    if not rel_rows and (as_of is not None or not include_invalidated):
+                    # own probe while all its incident facts are out of window.
+                    # Don't emit a bare entity with no valid incident fact then.
+                    if not rel_rows and validity_active:
                         continue
                     rel_text = "; ".join(
                         f"{r['from_n']}-[{r['rel']}]->{r['to_n']}" for r in rel_rows
