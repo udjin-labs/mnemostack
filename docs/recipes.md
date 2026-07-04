@@ -23,9 +23,12 @@ relevant. A cross-encoder fits this interface directly.
 
 For a self-hosted default, `BAAI/bge-reranker-v2-m3` is a strong pick:
 **Apache-2.0** (usable in commercial self-hosting), ~0.6 B params (CPU-viable),
-and the best small multilingual reranker in public benchmarks — reported MIRACL
-nDCG@10 ≈ 69 overall and ≈ 68 on Russian, and it tops RusBEIR among small
-models. Run it through `sentence-transformers`' `CrossEncoder`:
+and a well-tested small multilingual reranker — reported MIRACL nDCG@10 ≈ 69
+overall and ≈ 68 on Russian, near the top of RusBEIR among small models. A
+same-size Apache-2.0 alternative worth benchmarking is `Qwen/Qwen3-Reranker-0.6B`,
+which reports higher reranking scores on some public tables but is more
+instruction/format-sensitive — validate it on your own data before switching.
+Run either through `sentence-transformers`' `CrossEncoder`:
 
 ```python
 # pip install sentence-transformers   (your app's dependency, not mnemostack's)
@@ -71,9 +74,12 @@ also applies reranking internally, so you don't pass `reranker=` twice):
 
 ```python
 from mnemostack.recall import recall_flow
-from mnemostack.recall.pipeline import build_full_pipeline
+from mnemostack.recall.pipeline import InMemoryStateStore, build_full_pipeline
 
-pipeline = build_full_pipeline(state_store=..., graph_uri=None)
+# The stateful stages (Q-learning / inhibition-of-return / curiosity) read and
+# write a state store; use InMemoryStateStore for a stateless process, or
+# FileStateStore(path) to persist feedback across restarts.
+pipeline = build_full_pipeline(state_store=InMemoryStateStore(), graph_uri=None)
 results = recall_flow(recaller, query, limit=10, pipeline=pipeline, reranker=reranker)
 # recall_flow fetches ~30 candidates, reranks, then cuts to limit=10
 ```
