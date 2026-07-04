@@ -16,14 +16,16 @@ from urllib.parse import unquote
 
 import yaml
 
+from ..chunking.fences import code_ranges
+
 logger = logging.getLogger(__name__)
 
 # A frontmatter block is a YAML document fenced by --- lines at the very top of
-# the file. The closing fence is a line that is exactly --- (or ...); it may be
-# the last line of the file (no trailing newline) — common for frontmatter-only
-# notes — so accept either a newline or end-of-string after it.
+# the file. The content between the fences may be empty (``---\n---``), so the
+# intermediate newline is optional; the closing fence is a line that is exactly
+# --- (or ...) and may be the last line of the file (no trailing newline).
 _FRONTMATTER_RE = re.compile(
-    r"^---[ \t]*\r?\n(.*?)\r?\n(?:---|\.\.\.)[ \t]*(?:\r?\n|\Z)", re.DOTALL
+    r"^---[ \t]*\r?\n(.*?)(?:\r?\n)?(?:---|\.\.\.)[ \t]*(?:\r?\n|\Z)", re.DOTALL
 )
 
 # ``[[Target]]`` / ``[[Target|alias]]`` / ``[[Target#heading]]`` — capture the
@@ -32,52 +34,27 @@ _WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]")
 
 # ``[text](target)`` inline links. The destination is either angle-bracketed
 # (``<My Note.md>`` — allows spaces) or a bare run of non-space chars; capture
-# both forms (groups 1 and 2). A leading ``!`` (image embed) is excluded.
+# both forms (groups 1 and 2). A leading ``!`` (image embed) is excluded. An
+# optional CommonMark title in any of the three forms — ``"..."``, ``'...'``,
+# ``(...)`` — is allowed after the destination.
 _MDLINK_RE = re.compile(
-    r"(?<!\!)\[[^\]]*\]\(\s*(?:<([^>]*)>|([^)\s]+))(?:\s+\"[^\"]*\")?\s*\)"
+    r"(?<!\!)\[[^\]]*\]\(\s*(?:<([^>]*)>|([^)\s]+))"
+    r"""(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)"""
 )
-
-# Fenced code block delimiter: a run of >=3 backticks or tildes at line start,
-# optionally indented up to 3 spaces (still a valid CommonMark fence). Link-like
-# syntax inside a fence is a code sample, not a real reference.
-_CODE_FENCE_RE = re.compile(r"^ {0,3}([`~]{3,})", re.MULTILINE)
 
 # An inline code span: a backtick run, content, matching backtick run, on one
 # line. README notes often show link syntax inline (``Use `[[Example]]` here``).
 _INLINE_CODE_RE = re.compile(r"`+[^`\n]*`+")
 
 
-def _code_fence_ranges(text: str) -> list[tuple[int, int]]:
-    """(start, end) spans of fenced code blocks.
-
-    A fence closes only on a matching delimiter — same character and at least
-    the opening length — so a ``~~~`` block containing a ``` line (or vice
-    versa) stays a single block instead of pairing the opener with the inner,
-    mismatched fence and exposing the sample links after it.
-    """
-    ranges: list[tuple[int, int]] = []
-    open_start: int | None = None
-    open_fence = ""
-    for m in _CODE_FENCE_RE.finditer(text):
-        token = m.group(1)
-        if open_start is None:
-            open_start, open_fence = m.start(), token
-        elif token[0] == open_fence[0] and len(token) >= len(open_fence):
-            ranges.append((open_start, m.start()))
-            open_start, open_fence = None, ""
-    # An unterminated fence runs to EOF (CommonMark), so mask the rest.
-    if open_start is not None:
-        ranges.append((open_start, len(text)))
-    return ranges
-
-
 def _masked_ranges(text: str) -> list[tuple[int, int]]:
-    """Ranges whose link syntax is code, not a reference: fences + inline spans.
+    """Ranges whose link syntax is code, not a reference.
 
-    Inline-span matches inside a fenced block are redundant but harmless (both
-    mask the same region), so the two range sets are simply unioned.
+    Fenced blocks and indented code blocks (shared with the chunker via
+    ``chunking.fences``) plus inline code spans. Overlapping ranges are harmless
+    — they all mask the same regions — so the sets are simply unioned.
     """
-    ranges = _code_fence_ranges(text)
+    ranges = code_ranges(text)
     ranges.extend((m.start(), m.end()) for m in _INLINE_CODE_RE.finditer(text))
     return ranges
 

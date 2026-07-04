@@ -5,12 +5,11 @@ from __future__ import annotations
 import re
 
 from .base import Chunk, Chunker
+from .fences import code_ranges
 
+# A heading is 0-3 space indented; a `#` indented 4+ spaces is code, not a
+# heading (that case is excluded via the shared code-range mask below).
 _HEADER_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
-# A fence: >=3 backticks or tildes at line start, optionally indented up to 3
-# spaces. Both delimiter styles are recognized so a `#` line inside a ~~~ block
-# is not mistaken for a heading.
-_CODE_FENCE_RE = re.compile(r"^ {0,3}([`~]{3,})", re.MULTILINE)
 
 
 class MarkdownChunker(Chunker):
@@ -45,11 +44,12 @@ class MarkdownChunker(Chunker):
         if not text.strip():
             return []
 
-        # Find header positions, respecting code fences (don't match # inside ```)
-        code_ranges = self._code_block_ranges(text)
+        # Find header positions, ignoring `#` lines inside code (fenced or
+        # indented) so a code sample isn't mistaken for a section heading.
+        masked = code_ranges(text)
         headers: list[tuple[int, int, str]] = []  # (start, level, title)
         for match in _HEADER_RE.finditer(text):
-            if not self._in_ranges(match.start(), code_ranges):
+            if not self._in_ranges(match.start(), masked):
                 level = len(match.group(1))
                 title = match.group(2).strip()
                 headers.append((match.start(), level, title))
@@ -140,29 +140,6 @@ class MarkdownChunker(Chunker):
                 )
             )
             sub_offset += self.chunk_size
-
-    @staticmethod
-    def _code_block_ranges(text: str) -> list[tuple[int, int]]:
-        """Find (start, end) ranges of fenced code blocks.
-
-        A fence closes only on a matching delimiter (same character, length ≥
-        the opener), so a ``~~~`` block containing an inner ``` line stays a
-        single block instead of pairing across mismatched fences.
-        """
-        ranges: list[tuple[int, int]] = []
-        open_start: int | None = None
-        open_fence = ""
-        for m in _CODE_FENCE_RE.finditer(text):
-            token = m.group(1)
-            if open_start is None:
-                open_start, open_fence = m.start(), token
-            elif token[0] == open_fence[0] and len(token) >= len(open_fence):
-                ranges.append((open_start, m.start()))
-                open_start, open_fence = None, ""
-        # An unterminated fence runs to EOF (CommonMark), so mask the rest.
-        if open_start is not None:
-            ranges.append((open_start, len(text)))
-        return ranges
 
     @staticmethod
     def _in_ranges(pos: int, ranges: list[tuple[int, int]]) -> bool:

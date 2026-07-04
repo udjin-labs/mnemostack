@@ -115,13 +115,23 @@ def collect_markdown(
     path; unresolved targets become dangling edges.
     """
     root = Path(root)
-    # Match ``.md`` case-insensitively so ``README.MD`` on a case-sensitive
-    # filesystem is indexed too (``rglob("*.md")`` would skip it).
+
+    def _md_files(d: Path) -> list[Path]:
+        # Match ``.md`` case-insensitively so ``README.MD`` on a case-sensitive
+        # filesystem is indexed too (``rglob("*.md")`` would skip it).
+        return sorted(f for f in d.rglob("*") if f.is_file() and f.suffix.lower() == ".md")
+
     if root.is_dir():
-        files = sorted(f for f in root.rglob("*") if f.is_file() and f.suffix.lower() == ".md")
+        base = root
+        files = _md_files(root)
+        resolution_files = files
     else:
+        # Single-file run: only ``root`` is chunked, but links resolve against
+        # the whole parent corpus so ``[b](b.md)`` / ``[[B]]`` still find a
+        # sibling and match the canonical node names a directory index makes.
+        base = root.parent
         files = [root]
-    base = root if root.is_dir() else root.parent
+        resolution_files = _md_files(base)
 
     # Resolution maps: note name (basename) and relative path (without .md)
     # both point at the canonical relative path. Keys are lower-cased so link
@@ -130,7 +140,7 @@ def collect_markdown(
     # form so same-directory resolution is case-insensitive too.
     key_to_rel: dict[str, str] = {}
     rels_lower: dict[str, str] = {}
-    for f in files:
+    for f in resolution_files:
         rel = _rel(f, base)
         rels_lower[rel.lower()] = rel
         rel_key = rel[:-3] if rel.lower().endswith(".md") else rel

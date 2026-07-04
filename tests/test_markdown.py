@@ -67,6 +67,38 @@ def test_empty_frontmatter_block_strips_fences():
     assert "---" not in body
 
 
+def test_empty_frontmatter_immediately_closed():
+    # No blank content line at all (---\n---): still a recognized (empty) block.
+    meta, body = parse_frontmatter("---\n---\n# Note\nbody")
+    assert meta == {}
+    assert body == "# Note\nbody"
+
+
+def test_extract_links_closing_fence_needs_bare_line():
+    # A line with the fence plus trailing text is code, not a closer, so the
+    # block stays open and its sample links are excluded.
+    text = "real [[Live]]\n\n```\n``` not a close [[Fenced]]\n[x](f.md)\n```\n"
+    targets = {link.target for link in extract_links(text)}
+    assert "Live" in targets
+    assert "Fenced" not in targets and "f" not in targets
+
+
+def test_extract_links_skips_indented_code_blocks():
+    # A 4-space indented code block after a blank line is code; its sample links
+    # must not become edges.
+    text = "real [[Live]]\n\n    [[Indented]] and [x](ind.md)\n\nplain [r](real.md)"
+    targets = {link.target for link in extract_links(text)}
+    assert "Live" in targets and "real" in targets
+    assert "Indented" not in targets and "ind" not in targets
+
+
+def test_extract_links_accepts_single_quote_and_paren_titles():
+    # CommonMark allows '...' and (...) link titles, not just "...".
+    links = extract_links("[a](x.md 'see also') [b](y.md (note)) [c](z.md \"t\")")
+    targets = {link.target for link in links}
+    assert targets == {"x", "y", "z"}
+
+
 # ---------- links ----------
 
 
@@ -252,6 +284,20 @@ def test_collect_relative_link_case_insensitive_sibling(tmp_path):
     edge = next(e for e in col.edges if e.source == "b/src.md")
     assert edge.target == "b/Note.md"
     assert edge.resolved is True
+
+
+def test_collect_single_file_resolves_sibling_links(tmp_path):
+    # index-markdown on ONE file must still resolve links to sibling notes in
+    # the parent dir (matching the canonical names a directory index makes),
+    # not leave them dangling.
+    (tmp_path / "a.md").write_text("# A\nlinks [[B]] and [c](b.md)")
+    (tmp_path / "b.md").write_text("# B\nbody")
+    col = collect_markdown(tmp_path / "a.md")
+    # only a.md is chunked
+    assert {c.payload["source"] for c in col.chunks} == {"a.md"}
+    # but its links resolve to the real sibling b.md
+    resolved = {(e.target, e.resolved) for e in col.edges if e.source == "a.md"}
+    assert ("b.md", True) in resolved
 
 
 def test_collect_indexes_uppercase_md_suffix(tmp_path):
@@ -830,6 +876,10 @@ def test_cmd_index_markdown_refreshes_payload_on_frontmatter_change(tmp_path, mo
     assert cli.cmd_index_markdown(_args()) == 0          # initial index
     assert any(pl.get("tag") == "old" for pl in _Store.points.values())
 
+    # simulate `mnemostack invalidate` on the stored chunk
+    for pl in _Store.points.values():
+        pl["invalidated_at"] = "2026-07-04T00:00:00Z"
+
     # change frontmatter (body/id unchanged) and re-index
     note.write_text("---\ntag: new\n---\n# N\nstable body text")
     assert cli.cmd_index_markdown(_args()) == 0
@@ -837,3 +887,93 @@ def test_cmd_index_markdown_refreshes_payload_on_frontmatter_change(tmp_path, mo
     payloads = list(_Store.points.values())
     assert any(pl.get("tag") == "new" for pl in payloads)
     assert all("drop_me" not in pl for pl in payloads)
+    # ...but the system-owned invalidation marker is preserved (re-indexing must
+    # not resurrect an intentionally-invalidated memory)
+    assert all(pl.get("invalidated_at") == "2026-07-04T00:00:00Z" for pl in payloads)
+
+
+def test_cmd_index_markdown_single_file_does_not_reconcile_siblings(tmp_path, monkeypatch):
+    import argparse
+
+    import mnemostack.cli as cli
+
+    (tmp_path / "a.md").write_text("# A\nbody a")
+    (tmp_path / "b.md").write_text("# B\nbody b")  # sibling, not indexed
+
+    class _FakeProvider:
+        dimension = 3
+
+        def embed(self, text):
+            return [0.1, 0.2, 0.3]
+
+    root = str(tmp_path.resolve())
+
+    class _Store:
+        def __init__(self, **_):
+            # a stored point for the sibling b.md under the same index_root
+            self._points = [("id-b", {"source": "b.md", "index_root": root})]
+            self.deleted = []
+
+        def collection_exists(self):
+            return True
+
+        def ensure_collection(self, recreate=False):
+            return True
+
+        def scroll(self, filters=None):
+            for pid, pl in self._points:
+                if not filters or all(pl.get(k) == v for k, v in filters.items()):
+                    yield _HitId(pid, pl)
+
+        def iter_ids(self, filters=None):
+            for pid, pl in self._points:
+                if not filters or all(pl.get(k) == v for k, v in filters.items()):
+                    yield pid
+
+        def upsert(self, cid, vec, payload):
+            pass
+
+        def set_payload(self, cid, payload):
+            pass
+
+        def delete_payload_keys(self, cid, keys):
+            pass
+
+        def delete_points(self, ids):
+            self.deleted.extend(ids)
+            return len(ids)
+
+    class _Graph:
+        called_file_link_sources = False
+
+        def __init__(self, **_):
+            self.synced = {}
+
+        def file_link_sources(self, *, index_root=None):
+            _Graph.called_file_link_sources = True
+            return ["b.md"]
+
+        def sync_file_links(self, source, targets, *, index_root=None):
+            self.synced[source] = list(targets)
+            return len(targets)
+
+        def close(self):
+            pass
+
+    store = _Store()
+    graph = _Graph()
+    monkeypatch.setattr(cli, "get_provider", lambda *_a, **_k: _FakeProvider())
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    monkeypatch.setattr("mnemostack.graph.GraphStore", lambda **_: graph)
+
+    args = argparse.Namespace(
+        path=str(tmp_path / "a.md"), provider="fake", embedding_model=None,
+        collection="c", qdrant="http://localhost:6333",
+        chunk_size=1200, memgraph_uri="bolt://localhost:7687",
+        graph_timeout=5.0, recreate=False, prune=True, yes=True,
+    )
+    assert cli.cmd_index_markdown(args) == 0
+    # single-file run must NOT prune the sibling's chunks or clear its links
+    assert "id-b" not in store.deleted
+    assert "b.md" not in graph.synced
+    assert _Graph.called_file_link_sources is False

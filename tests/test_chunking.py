@@ -152,6 +152,15 @@ def test_markdown_chunker_keeps_text_before_first_header():
     assert any(c.metadata["heading_path"] == ["Section"] for c in chunks)
 
 
+def test_markdown_chunker_ignores_headers_in_indented_code_blocks():
+    # A `#` line inside a 4-space indented code block is code, not a heading.
+    text = "# Real\n\n    # not a heading\n\n## Second\n\nbody"
+    chunks = MarkdownChunker(chunk_size=10000).chunk(text)
+    paths = [c.metadata["heading_path"] for c in chunks]
+    assert ["Real", "Second"] in paths
+    assert all("not a heading" not in "".join(p) for p in paths)
+
+
 def test_markdown_chunker_ignores_headers_in_tilde_code_blocks():
     # A `#` line inside a ~~~ fenced block is code, not a heading, so it must
     # not corrupt the heading_path of later real headings.

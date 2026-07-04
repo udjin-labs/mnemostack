@@ -799,14 +799,20 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
         inserted += 1
 
     # Refresh payloads of unchanged chunks so frontmatter edits (new/changed/
-    # removed keys) sync without re-embedding. The markdown payload is fully
-    # file-derived (no external enrichment), so delete keys the file no longer
-    # produces, then merge the current payload.
+    # removed keys) sync without re-embedding. Delete keys the file no longer
+    # produces, then merge the current payload — but never touch system-owned
+    # validity keys, or re-indexing a note would resurrect a memory that
+    # `mnemostack invalidate` intentionally marked stale.
+    _system_keys = {"invalidated_at", "valid_until", "valid_from"}
     refreshed = 0
     for cid, _text, payload in chunks:
         if cid not in existing_ids:
             continue
-        stale = [k for k in existing_payloads.get(cid, {}) if k not in payload]
+        stale = [
+            k
+            for k in existing_payloads.get(cid, {})
+            if k not in payload and k not in _system_keys
+        ]
         if stale:
             store.delete_payload_keys(cid, stale)
         store.set_payload(cid, payload)
@@ -823,13 +829,16 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
         for cid, _text, payload in chunks:
             fresh_by_source[payload["source"]].add(cid)
         # Reconcile deletions: a file removed from the folder is absent from
-        # col.sources. Seed each prior source already stored under this
-        # index_root (but no longer present) with an empty fresh set so its
-        # stale points are pruned instead of lingering searchable forever.
-        for hit in store.scroll(filters={"index_root": index_root}):
-            prior = (hit.payload or {}).get("source")
-            if prior and prior not in fresh_by_source:
-                fresh_by_source[prior] = set()
+        # col.sources. Seed each prior source under this index_root (but no
+        # longer present) with an empty fresh set so its stale points are pruned
+        # instead of lingering searchable. ONLY for a directory walk — a
+        # single-file run shares the parent's index_root, so reconciling here
+        # would wrongly prune the untouched siblings.
+        if target.is_dir():
+            for hit in store.scroll(filters={"index_root": index_root}):
+                prior = (hit.payload or {}).get("source")
+                if prior and prior not in fresh_by_source:
+                    fresh_by_source[prior] = set()
         for source in failed_sources:
             fresh_by_source.pop(source, None)
         if failed_sources:
@@ -866,10 +875,13 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
                 # Reconcile deletions: a file removed from the folder still has
                 # LINKS_TO edges in the graph. Seed each prior link-source no
                 # longer present with an empty target list so sync clears its
-                # stale edges.
-                for prior in graph.file_link_sources(index_root=index_root):
-                    if prior not in by_source and prior not in failed_sources:
-                        by_source[prior] = []
+                # stale edges. ONLY for a directory walk — a single-file run
+                # shares the parent's index_root, so this would wrongly clear
+                # the untouched siblings' edges.
+                if target.is_dir():
+                    for prior in graph.file_link_sources(index_root=index_root):
+                        if prior not in by_source and prior not in failed_sources:
+                            by_source[prior] = []
                 for source, targets in by_source.items():
                     edges_written += graph.sync_file_links(
                         source, targets, index_root=index_root
