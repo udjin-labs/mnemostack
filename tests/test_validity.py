@@ -352,3 +352,85 @@ def test_recall_pushes_as_of_only_to_accepting_retriever():
     recaller.recall("q", limit=5, as_of="2026-03-01")
     assert captured["graph_as_of"] == "2026-03-01"
     assert captured["vector_called"] is True
+
+
+# ---------- review round 2: over-fetch so stale don't starve the window ----------
+
+
+def test_over_fetch_recovers_valid_below_stale_window():
+    # First 20 hits (the default per-source window) are stale; the current one
+    # sits at rank 21. Over-fetching when a validity filter is active must
+    # still surface it instead of returning empty.
+    from mnemostack.recall.recaller import Recaller
+
+    class _FakeRetriever:
+        name = "vector"
+
+        def __init__(self):
+            self.last_limit = None
+
+        def search(self, query, limit, filters=None):
+            self.last_limit = limit
+            out = []
+            for i in range(min(limit, 25)):
+                payload = {"invalidated_at": "x"} if i < 20 else {}
+                out.append(RecallResult(id=str(i), text=f"t{i}", score=1.0 - i * 0.01,
+                                        payload=payload, sources=["vector"]))
+            return out
+
+    retr = _FakeRetriever()
+    recaller = Recaller(retrievers=[retr])
+    out = recaller.recall("q", limit=5)
+    assert retr.last_limit >= 60  # over-fetched past the 20-wide window
+    assert len(out) == 5
+    assert all(is_current(r.payload) for r in out)
+
+
+def test_no_over_fetch_when_validity_inactive():
+    from mnemostack.recall.recaller import Recaller
+
+    class _FakeRetriever:
+        name = "vector"
+
+        def __init__(self):
+            self.last_limit = None
+
+        def search(self, query, limit, filters=None):
+            self.last_limit = limit
+            return []
+
+    retr = _FakeRetriever()
+    recaller = Recaller(retrievers=[retr])
+    recaller.recall("q", limit=5, include_invalidated=True)
+    assert retr.last_limit == 20  # per_source_limit, no over-fetch
+
+
+# ---------- review round 2: pipeline as_of threading ----------
+
+
+def test_pipeline_apply_threads_as_of_into_context():
+    from mnemostack.recall.pipeline.base import Pipeline, Stage
+
+    captured = {}
+
+    class _Probe(Stage):
+        def apply(self, context, results):
+            captured["as_of"] = context.extras.get("as_of")
+            return results
+
+    Pipeline([_Probe()]).apply("q", [_r("a", {})], as_of="2026-03-01")
+    assert captured["as_of"] == "2026-03-01"
+
+
+def test_pipeline_apply_no_as_of_leaves_extras_empty():
+    from mnemostack.recall.pipeline.base import Pipeline, Stage
+
+    captured = {}
+
+    class _Probe(Stage):
+        def apply(self, context, results):
+            captured["as_of"] = context.extras.get("as_of", "MISSING")
+            return results
+
+    Pipeline([_Probe()]).apply("q", [_r("a", {})])
+    assert captured["as_of"] == "MISSING"

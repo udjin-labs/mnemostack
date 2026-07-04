@@ -364,7 +364,7 @@ def test_pipeline_appended_results_are_scoped_too(fused_recaller):
     caller's scope on the pipeline output as well."""
 
     class _ResurrectingPipeline:
-        def apply(self, query, results):
+        def apply(self, query, results, **_):
             ghost = type(
                 "R",
                 (),

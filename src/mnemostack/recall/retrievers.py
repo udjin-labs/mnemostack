@@ -417,6 +417,24 @@ class HyDERetriever(Retriever):
         ]
 
 
+def graph_valid_clause(var: str, as_of: str | None) -> str:
+    """Cypher validity predicate for a node/rel variable.
+
+    With no ``as_of``, "currently valid" (``valid_until`` = the ``'current'``
+    marker, or legacy NULL). With ``as_of``, the point-in-time predicate
+    ``GraphStore.query_triples(as_of=...)`` uses, referencing the bound
+    ``$as_of`` parameter. Shared by ``MemgraphRetriever`` and the pipeline's
+    graph-resurrection stage so both filter graph facts consistently.
+    """
+    if as_of is None:
+        return f"coalesce({var}.valid_until, 'current') = 'current'"
+    return (
+        f"({var}.valid_from IS NULL OR {var}.valid_from <= $as_of) AND "
+        f"({var}.valid_until = 'current' OR {var}.valid_until IS NULL "
+        f"OR {var}.valid_until > $as_of)"
+    )
+
+
 class MemgraphRetriever(Retriever):
     """Knowledge-graph retriever — exact/contains match on node names.
 
@@ -478,22 +496,7 @@ class MemgraphRetriever(Retriever):
                 pass
             self._driver = None
 
-    @staticmethod
-    def _valid_clause(var: str, as_of: str | None) -> str:
-        """Cypher validity predicate for a node/rel variable.
-
-        With no `as_of`, "currently valid" (`valid_until` = the `'current'`
-        marker, or legacy NULL). With `as_of`, the point-in-time predicate
-        `GraphStore.query_triples(as_of=...)` uses, referencing the bound
-        `$as_of` parameter.
-        """
-        if as_of is None:
-            return f"coalesce({var}.valid_until, 'current') = 'current'"
-        return (
-            f"({var}.valid_from IS NULL OR {var}.valid_from <= $as_of) AND "
-            f"({var}.valid_until = 'current' OR {var}.valid_until IS NULL "
-            f"OR {var}.valid_until > $as_of)"
-        )
+    _valid_clause = staticmethod(graph_valid_clause)
 
     def search(self, query, limit=20, filters=None, as_of=None):
         if filters:

@@ -372,14 +372,16 @@ def cmd_answer(args: argparse.Namespace) -> int:
             }
         )
     gen = AnswerGenerator(**answer_generator_kwargs)
-    # recall_filters keeps retry sub-recalls inside the same filtered scope;
-    # the token budget must reach the generator too, or its retry paths
-    # would prompt over fresh unbudgeted sub-recalls.
+    # recall_filters, the token budget, and the validity view must all reach
+    # the generator too, or its retry paths would run fresh sub-recalls that
+    # ignore them (an --as-of retry would answer from current facts).
     answer = gen.generate(
         args.query,
         results,
         recall_filters=_parse_filters(args),
         token_budget=_effective_token_budget(args),
+        include_invalidated=bool(getattr(args, "include_invalidated", False)),
+        as_of=getattr(args, "as_of", None),
     )
 
     # Tier caps how many sources we emit (answer text itself is model-sized).

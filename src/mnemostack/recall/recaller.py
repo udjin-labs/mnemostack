@@ -27,6 +27,24 @@ if TYPE_CHECKING:
     from .retrievers import Retriever
 
 
+def _validity_active(include_invalidated: bool, as_of: str | None) -> bool:
+    """Whether recall will drop hits for validity (default-hide or point-in-time)."""
+    return (not include_invalidated) or (as_of is not None)
+
+
+def _fetch_limit(base: int, include_invalidated: bool, as_of: str | None) -> int:
+    """Retriever search limit, over-fetched when a validity filter is active.
+
+    The filter drops stale/out-of-window hits *after* each retriever's bounded
+    search, so without over-fetching a top-N full of invalidated hits could
+    hide current ones just past the window (rank N+1). Fetch a wider pool so
+    enough valid candidates survive the filter.
+    """
+    if _validity_active(include_invalidated, as_of):
+        return max(base * 3, base + 40)
+    return base
+
+
 @dataclass
 class RecallResult:
     """Unified result from hybrid recall.
@@ -350,6 +368,10 @@ class Recaller:
         def _keep(payload: dict[str, Any] | None) -> bool:
             return keep_payload(payload, include_invalidated=include_invalidated, as_of=as_of)
 
+        # Over-fetch so validity filtering can't starve the fused pool.
+        vector_fetch = _fetch_limit(vector_limit, include_invalidated, as_of)
+        bm25_fetch = _fetch_limit(bm25_limit, include_invalidated, as_of)
+
         with histogram("mnemostack.recall.latency_ms"):
             # Vector search
             vector_hits: list[Hit] = []
@@ -357,7 +379,7 @@ class Recaller:
                 query_vec = self.embedding.embed(query)
             if query_vec:
                 with histogram("mnemostack.recall.vector_latency_ms"):
-                    vector_hits = self.vector.search(query_vec, limit=vector_limit, filters=filters)
+                    vector_hits = self.vector.search(query_vec, limit=vector_fetch, filters=filters)
                 vector_hits = [h for h in vector_hits if _keep(h.payload)]
                 counter("mnemostack.recall.vector_hits", len(vector_hits))
             raw_vector_candidates = self._vector_floor_candidates_from_hits(vector_hits)
@@ -376,7 +398,7 @@ class Recaller:
                         return payload_matches(d.payload, filters)
 
                 with histogram("mnemostack.recall.bm25_latency_ms"):
-                    bm25_hits = self.bm25.search(query, limit=bm25_limit, predicate=predicate)
+                    bm25_hits = self.bm25.search(query, limit=bm25_fetch, predicate=predicate)
                 bm25_hits = [(d, s) for d, s in bm25_hits if _keep(d.payload)]
                 counter("mnemostack.recall.bm25_hits", len(bm25_hits))
 
@@ -640,6 +662,10 @@ class Recaller:
         import concurrent.futures
         import time
 
+        # Over-fetch so validity filtering doesn't starve the result (a top-N
+        # of stale hits must not hide current ones just below the window).
+        fetch_limit = _fetch_limit(per_source_limit, include_invalidated, as_of)
+
         def _run(retr):
             start = time.monotonic()
             err: str | None = None
@@ -649,9 +675,9 @@ class Recaller:
                 # retriever that advertises it (MemgraphRetriever) so it filters
                 # at query time, matching GraphStore.query_triples(as_of=...).
                 if as_of is not None and getattr(retr, "accepts_as_of", False):
-                    hits = retr.search(query, limit=per_source_limit, filters=filters, as_of=as_of)
+                    hits = retr.search(query, limit=fetch_limit, filters=filters, as_of=as_of)
                 else:
-                    hits = retr.search(query, limit=per_source_limit, filters=filters)
+                    hits = retr.search(query, limit=fetch_limit, filters=filters)
                 # Drop stale hits before fusion/floor so invalidated facts
                 # neither crowd out current ones nor get re-appended by the
                 # vector floor. Graph hits (no bounds) already came filtered

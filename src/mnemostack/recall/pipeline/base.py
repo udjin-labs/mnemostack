@@ -60,8 +60,14 @@ class Pipeline:
         self,
         query: str,
         results: list[RecallResult],
+        *,
+        as_of: str | None = None,
     ) -> list[RecallResult]:
         context = PipelineContext(query=query)
+        if as_of is not None:
+            # Point-in-time context for stages that reach back to the graph
+            # (GraphResurrection) so they don't inject present-day facts.
+            context.extras["as_of"] = as_of
         for stage in self.stages:
             if self.stop_on_empty and not results:
                 break

@@ -89,7 +89,7 @@ class _FakePipeline:
     def __init__(self, stages=None):
         self.stages = list(stages or [])
 
-    def apply(self, query, results):
+    def apply(self, query, results, **_):
         return results
 
     def __iter__(self):

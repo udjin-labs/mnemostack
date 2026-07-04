@@ -657,3 +657,30 @@ def test_mcp_invalidate_works_without_embedding_provider(monkeypatch):
     assert payload["ok"] is True
     assert payload["invalidated"] == 1
     assert vec.called is True
+
+
+def test_mcp_invalidate_accepts_numeric_ids(monkeypatch):
+    import mnemostack.mcp.server as srv
+
+    class _RecordingVector:
+        def __init__(self, **_):
+            self.ids = None
+
+        def invalidate(self, ids, **_):
+            self.ids = list(ids)
+            return len(ids)
+
+    vec = _RecordingVector()
+
+    class _FakeEmbedding:
+        dimension = 3
+
+    monkeypatch.setattr(srv, "get_provider", lambda *_a, **_k: _FakeEmbedding())
+    monkeypatch.setattr(srv, "VectorStore", lambda **_: vec)
+    mcp = build_server(collection="test", embedding_provider="ollama")
+
+    # JSON integer ids must not be rejected by the tool schema, and reach
+    # invalidate as ints (matching numeric-id Qdrant collections).
+    result = asyncio.run(mcp.call_tool("mnemostack_invalidate", {"ids": [1, 2]}))
+    assert result.structured_content["ok"] is True
+    assert vec.ids == [1, 2]
