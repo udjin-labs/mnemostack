@@ -7,9 +7,10 @@ import re
 from .base import Chunk, Chunker
 from .fences import code_ranges
 
-# A heading is 0-3 space indented; a `#` indented 4+ spaces is code, not a
-# heading (that case is excluded via the shared code-range mask below).
-_HEADER_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
+# An ATX heading may be indented 0-3 spaces (CommonMark); a `#` indented 4+
+# spaces is code, not a heading (that case is excluded via the shared code-range
+# mask below).
+_HEADER_RE = re.compile(r"^ {0,3}(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
 
 
 class MarkdownChunker(Chunker):

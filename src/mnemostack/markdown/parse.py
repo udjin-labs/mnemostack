@@ -21,11 +21,12 @@ from ..chunking.fences import code_ranges
 logger = logging.getLogger(__name__)
 
 # A frontmatter block is a YAML document fenced by --- lines at the very top of
-# the file. The content between the fences may be empty (``---\n---``), so the
-# intermediate newline is optional; the closing fence is a line that is exactly
-# --- (or ...) and may be the last line of the file (no trailing newline).
+# the file. The content may be empty (``---\n---``). The closing fence must be
+# on its own line at column 0 (``re.MULTILINE`` anchors it), so a scalar value
+# ending in ``---`` inside the YAML isn't mistaken for the fence. It may be the
+# last line of the file (no trailing newline).
 _FRONTMATTER_RE = re.compile(
-    r"^---[ \t]*\r?\n(.*?)(?:\r?\n)?(?:---|\.\.\.)[ \t]*(?:\r?\n|\Z)", re.DOTALL
+    r"^---[ \t]*\r?\n(.*?)^(?:---|\.\.\.)[ \t]*(?:\r?\n|\Z)", re.DOTALL | re.MULTILINE
 )
 
 # ``[[Target]]`` / ``[[Target|alias]]`` / ``[[Target#heading]]`` — capture the
@@ -33,12 +34,12 @@ _FRONTMATTER_RE = re.compile(
 _WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]")
 
 # ``[text](target)`` inline links. The destination is either angle-bracketed
-# (``<My Note.md>`` — allows spaces) or a bare run of non-space chars; capture
-# both forms (groups 1 and 2). A leading ``!`` (image embed) is excluded. An
-# optional CommonMark title in any of the three forms — ``"..."``, ``'...'``,
-# ``(...)`` — is allowed after the destination.
+# (``<My Note.md>`` — allows spaces) or an unquoted run that may contain one
+# level of balanced parentheses (``foo(1).md``); capture both forms (groups 1
+# and 2). A leading ``!`` (image embed) is excluded. An optional CommonMark
+# title in any of the three forms — ``"..."``, ``'...'``, ``(...)`` — follows.
 _MDLINK_RE = re.compile(
-    r"(?<!\!)\[[^\]]*\]\(\s*(?:<([^>]*)>|([^)\s]+))"
+    r"(?<!\!)\[[^\]]*\]\(\s*(?:<([^>]*)>|((?:[^()\s]|\([^()]*\))+))"
     r"""(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)"""
 )
 
@@ -119,9 +120,10 @@ def _is_note_target(raw: str) -> bool:
     A target whose final path segment ends with a known asset extension (image,
     pdf, archive, ...) is not a note, so it never becomes a graph edge. Bare
     targets, ``.md`` targets, and note names that merely contain dots
-    (``2026.07.04``) are all notes.
+    (``2026.07.04``) are all notes. A ``?query`` (and ``#anchor``) is stripped
+    first so ``paper.pdf?download=1`` is still recognized as an asset.
     """
-    anchorless = raw.split("#", 1)[0].split("|", 1)[0]
+    anchorless = raw.split("#", 1)[0].split("?", 1)[0].split("|", 1)[0]
     last = anchorless.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].lower()
     dot = last.rfind(".")
     return dot < 0 or last[dot:] not in _ASSET_EXTS
@@ -172,7 +174,8 @@ def extract_links(text: str) -> list[Link]:
             continue
         raw = m.group(1) if m.group(1) is not None else m.group(2)
         low = raw.lower()
-        if low.startswith(("http://", "https://", "mailto:", "#")) or "://" in low:
+        # External (incl. protocol-relative ``//host/...``) and pure anchors.
+        if low.startswith(("http://", "https://", "mailto:", "//", "#")) or "://" in low:
             continue
         if not _is_note_target(raw):
             continue

@@ -74,6 +74,14 @@ def test_empty_frontmatter_immediately_closed():
     assert body == "# Note\nbody"
 
 
+def test_frontmatter_scalar_ending_in_dashes():
+    # A YAML value ending in --- must NOT be mistaken for the closing fence:
+    # the closer is only a --- on its own line at column 0.
+    meta, body = parse_frontmatter("---\ntitle: ---\ntag: x\n---\n# N\nbody")
+    assert meta == {"title": "---", "tag": "x"}
+    assert body == "# N\nbody"
+
+
 def test_extract_links_closing_fence_needs_bare_line():
     # A line with the fence plus trailing text is code, not a closer, so the
     # block stays open and its sample links are excluded.
@@ -97,6 +105,24 @@ def test_extract_links_accepts_single_quote_and_paren_titles():
     links = extract_links("[a](x.md 'see also') [b](y.md (note)) [c](z.md \"t\")")
     targets = {link.target for link in links}
     assert targets == {"x", "y", "z"}
+
+
+def test_extract_links_balanced_parens_in_destination():
+    # An unquoted destination may contain one level of balanced parens.
+    links = extract_links("see [x](foo(1).md) and [y](bar.md)")
+    assert {link.target for link in links} == {"foo(1)", "bar"}
+
+
+def test_extract_links_strips_query_before_asset_check():
+    # A ?query on an asset link must not make it look like a note.
+    links = extract_links("[p](paper.pdf?download=1) [i](diagram.png?raw=1) [r](real.md)")
+    assert {link.target for link in links} == {"real"}
+
+
+def test_extract_links_skips_protocol_relative_urls():
+    # //host/path is an external URL (no scheme), not an intra-corpus note.
+    links = extract_links("[cdn](//cdn.example.com/docs) [r](real.md)")
+    assert {link.target for link in links} == {"real"}
 
 
 # ---------- links ----------
@@ -284,6 +310,15 @@ def test_collect_relative_link_case_insensitive_sibling(tmp_path):
     edge = next(e for e in col.edges if e.source == "b/src.md")
     assert edge.target == "b/Note.md"
     assert edge.resolved is True
+
+
+def test_collect_single_file_non_markdown_yields_no_files(tmp_path):
+    # A non-.md single-file target produces zero files, so the CLI errors out
+    # before a --recreate could drop the collection for a typo'd path.
+    (tmp_path / "note.txt").write_text("# not markdown\nbody")
+    col = collect_markdown(tmp_path / "note.txt")
+    assert col.files == 0
+    assert col.chunks == []
 
 
 def test_collect_single_file_resolves_sibling_links(tmp_path):

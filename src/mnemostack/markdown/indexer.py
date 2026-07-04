@@ -129,8 +129,10 @@ def collect_markdown(
         # Single-file run: only ``root`` is chunked, but links resolve against
         # the whole parent corpus so ``[b](b.md)`` / ``[[B]]`` still find a
         # sibling and match the canonical node names a directory index makes.
+        # A non-``.md`` target yields no files (``files == 0``), so the CLI
+        # errors out before a ``--recreate`` could drop the collection.
         base = root.parent
-        files = [root]
+        files = [root] if root.suffix.lower() == ".md" else []
         resolution_files = _md_files(base)
 
     # Resolution maps: note name (basename) and relative path (without .md)
