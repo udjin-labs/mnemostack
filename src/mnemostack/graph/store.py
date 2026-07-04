@@ -128,6 +128,26 @@ class GraphStore:
         with self.driver.session(database=self.database) as session:
             session.run(query, subject=subject, obj=obj, props=props)
 
+    def sync_file_links(self, source: str, targets: list[str]) -> int:
+        """Replace a file's outgoing ``LINKS_TO`` edges with ``targets``.
+
+        Deletes the file's existing ``LINKS_TO`` relationships first, then
+        re-creates one per target — so a re-index accurately reflects the
+        current links (links removed from the file are dropped, not left
+        dangling). Nodes are ``:File`` labelled and keyed by relative path /
+        note name. Returns the number of edges written.
+        """
+        with self.driver.session(database=self.database) as session:
+            session.run(
+                "MATCH (:File {name: $src})-[r:LINKS_TO]->() DELETE r",
+                src=source,
+            )
+        for target in targets:
+            self.add_triple(
+                source, "LINKS_TO", target, subject_label="File", obj_label="File"
+            )
+        return len(targets)
+
     def invalidate(
         self,
         subject: str,

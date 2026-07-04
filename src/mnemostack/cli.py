@@ -723,6 +723,119 @@ def cmd_index(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_index_markdown(args: argparse.Namespace) -> int:
+    """Index a markdown folder: frontmatter -> payload, links -> graph edges."""
+    from collections import defaultdict
+
+    from .markdown import collect_markdown
+
+    target = Path(args.path)
+    if not target.exists():
+        print(f"error: path does not exist: {target}", file=sys.stderr)
+        return 2
+
+    provider = get_provider(args.provider, **model_kwargs(_embedding_model(args)))
+    store = VectorStore(
+        collection=args.collection,
+        dimension=provider.dimension,
+        host=args.qdrant,
+    )
+    if args.recreate and not args.yes:
+        if not sys.stdin.isatty():
+            print(
+                "error: --recreate drops the collection; pass --yes to confirm "
+                "in non-interactive mode",
+                file=sys.stderr,
+            )
+            return 2
+        points = store.count() if store.collection_exists() else 0
+        reply = input(f"Drop collection '{args.collection}' ({points} points) and recreate? [y/N] ")
+        if reply.strip().lower() not in {"y", "yes"}:
+            print("aborted")
+            return 1
+    store.ensure_collection(recreate=args.recreate)
+
+    index_root = str((target if target.is_dir() else target.parent).resolve())
+    col = collect_markdown(target, chunk_size=args.chunk_size, index_root=index_root)
+    if col.files == 0:
+        print(f"error: no .md files found under {target}", file=sys.stderr)
+        return 2
+
+    chunks = [(c.id, c.text, c.payload) for c in col.chunks]
+    existing_ids: set[str] = set()
+    if not args.recreate and store.collection_exists():
+        existing_ids = {str(pid) for pid in store.iter_ids()}
+    to_embed = [c for c in chunks if c[0] not in existing_ids]
+    skipped = len(chunks) - len(to_embed)
+    print(
+        f"Indexing {len(chunks)} markdown chunks from {col.files} file(s)"
+        f" — {len(to_embed)} new, {skipped} already indexed (skipped)."
+    )
+
+    inserted = 0
+    failed = 0
+    failed_sources: set[str] = set()
+    for cid, text, payload in to_embed:
+        vec = provider.embed(text)
+        if not vec:
+            failed += 1
+            failed_sources.add(payload["source"])
+            continue
+        store.upsert(cid, vec, payload)
+        inserted += 1
+
+    pruned = 0
+    if args.prune and not args.recreate:
+        from .ingest import prune_stale_chunks
+
+        visited_sources = {payload["source"] for _cid, _text, payload in chunks}
+        fresh_by_source: dict[str, set[str]] = {source: set() for source in visited_sources}
+        for cid, _text, payload in chunks:
+            fresh_by_source[payload["source"]].add(cid)
+        for source in failed_sources:
+            fresh_by_source.pop(source, None)
+        if failed_sources:
+            print(
+                f"warning: prune skipped for {len(failed_sources)} source(s) "
+                "with failed embeddings; re-run after the provider recovers",
+                file=sys.stderr,
+            )
+        pruned = prune_stale_chunks(store, fresh_by_source, index_root=index_root)
+
+    # Links -> graph edges. Only when a graph is configured; sources whose
+    # embeddings failed are skipped so a partial index doesn't rewrite links.
+    edges_written = 0
+    graph_uri = getattr(args, "memgraph_uri", None) or None
+    if graph_uri and col.edges:
+        from .graph import GraphStore
+
+        by_source: dict[str, list[str]] = defaultdict(list)
+        for edge in col.edges:
+            if edge.source in failed_sources:
+                continue
+            if edge.target not in by_source[edge.source]:
+                by_source[edge.source].append(edge.target)
+        try:
+            graph = GraphStore(uri=graph_uri, timeout=getattr(args, "graph_timeout", 5.0))
+        except Exception as exc:  # noqa: BLE001 — graph optional; indexing already succeeded
+            print(f"warning: graph unavailable, links not written ({exc})", file=sys.stderr)
+        else:
+            try:
+                for source, targets in by_source.items():
+                    edges_written += graph.sync_file_links(source, targets)
+            finally:
+                graph.close()
+
+    print(
+        f"Done: inserted/updated {inserted}, skipped {skipped},"
+        f" failed-embedding {failed}, total chunks {len(chunks)}"
+        + (f", pruned {pruned} stale" if args.prune else "")
+        + (f", {edges_written} link edges" if graph_uri else "")
+        + f" in collection '{args.collection}'."
+    )
+    return 0
+
+
 def cmd_feedback(args: argparse.Namespace) -> int:
     """Record explicit feedback into the pipeline state store."""
     from .feedback import apply_feedback
@@ -1080,6 +1193,43 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip the confirmation prompt for --recreate",
     )
     p_index.set_defaults(func=cmd_index)
+
+    p_index_md = sub.add_parser(
+        "index-markdown",
+        parents=[common],
+        help="Index a markdown folder: frontmatter -> filters, links -> graph edges",
+    )
+    p_index_md.add_argument("path", help="Markdown file or directory to index")
+    p_index_md.add_argument(
+        "--chunk-size",
+        type=int,
+        default=1200,
+        help="Target chars per chunk; the markdown chunker splits on headers (default 1200)",
+    )
+    p_index_md.add_argument(
+        "--memgraph-uri",
+        default=cfg.graph.uri,
+        help=(
+            "Memgraph/Neo4j bolt URI to write wikilink/markdown-link edges "
+            "(File -[LINKS_TO]-> File); omit to index chunks + frontmatter only"
+        ),
+    )
+    p_index_md.add_argument(
+        "--graph-timeout",
+        type=float,
+        default=cfg.graph.timeout,
+        help="Graph connection timeout in seconds (default 5.0)",
+    )
+    p_index_md.add_argument("--recreate", action="store_true", help="Drop existing collection")
+    p_index_md.add_argument(
+        "--prune",
+        action="store_true",
+        help="After indexing, delete stale chunks the files no longer produce (per index root)",
+    )
+    p_index_md.add_argument(
+        "--yes", "-y", action="store_true", help="Skip the confirmation prompt for --recreate"
+    )
+    p_index_md.set_defaults(func=cmd_index_markdown)
 
     p_feedback = sub.add_parser(
         "feedback",
