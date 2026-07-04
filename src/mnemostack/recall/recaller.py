@@ -380,7 +380,10 @@ class Recaller:
             if query_vec:
                 with histogram("mnemostack.recall.vector_latency_ms"):
                     vector_hits = self.vector.search(query_vec, limit=vector_fetch, filters=filters)
-                vector_hits = [h for h in vector_hits if _keep(h.payload)]
+                # Filter, then trim back to the original window: the over-fetch
+                # only backfills dropped hits, so a clean index keeps exactly
+                # its pre-invalidation candidate set (no ranking drift).
+                vector_hits = [h for h in vector_hits if _keep(h.payload)][:vector_limit]
                 counter("mnemostack.recall.vector_hits", len(vector_hits))
             raw_vector_candidates = self._vector_floor_candidates_from_hits(vector_hits)
             if vector_floor_candidates is not None:
@@ -399,7 +402,7 @@ class Recaller:
 
                 with histogram("mnemostack.recall.bm25_latency_ms"):
                     bm25_hits = self.bm25.search(query, limit=bm25_fetch, predicate=predicate)
-                bm25_hits = [(d, s) for d, s in bm25_hits if _keep(d.payload)]
+                bm25_hits = [(d, s) for d, s in bm25_hits if _keep(d.payload)][:bm25_limit]
                 counter("mnemostack.recall.bm25_hits", len(bm25_hits))
 
             # Build id→source map and per-list tuples for RRF
@@ -420,9 +423,9 @@ class Recaller:
                         )
                     )
             mca_hits = (
-                self._mca_hits(query, bm25_limit, filters) if self.mca_prefilter_enabled else []
+                self._mca_hits(query, bm25_fetch, filters) if self.mca_prefilter_enabled else []
             )
-            mca_hits = [h for h in mca_hits if _keep(h.payload)]
+            mca_hits = [h for h in mca_hits if _keep(h.payload)][:bm25_limit]
             mca_by_id = {hit.id: hit for hit in mca_hits}
             ranked_lists: list[list[tuple[Any, float]]] = [vector_list, bm25_list]
             if mca_hits:
@@ -689,14 +692,17 @@ class Recaller:
                 # Drop stale hits before fusion/floor so invalidated facts
                 # neither crowd out current ones nor get re-appended by the
                 # vector floor. Graph hits (no bounds) already came filtered
-                # from the `as_of` push-down above.
+                # from the `as_of` push-down above. Trim back to the original
+                # window so the over-fetch only backfills dropped hits — a
+                # clean index keeps exactly the pre-invalidation candidate set
+                # (no ranking drift from the wider fetch).
                 hits = [
                     h
                     for h in hits
                     if keep_payload(
                         h.payload, include_invalidated=include_invalidated, as_of=as_of
                     )
-                ]
+                ][:per_source_limit]
             except Exception as exc:  # noqa: BLE001 — fail-open: one broken retriever must not kill recall
                 hits = []
                 err = f"{type(exc).__name__}: {exc}"
@@ -728,7 +734,7 @@ class Recaller:
                     if keep_payload(
                         h.payload, include_invalidated=include_invalidated, as_of=as_of
                     )
-                ]
+                ][:per_source_limit]
                 if mca_hits:
                     all_lists.append([(hit, hit.score) for hit in mca_hits])
                     per_list_weights.append(self._weight_for("mca", query))

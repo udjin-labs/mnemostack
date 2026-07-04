@@ -525,6 +525,7 @@ class MemgraphRetriever(Retriever):
         as_of = to_utc_iso(as_of)
         node_valid = self._valid_clause("n", as_of, include_invalidated)
         rel_valid = self._valid_clause("r", as_of, include_invalidated)
+        target_valid = self._valid_clause("m", as_of, include_invalidated)
         # Only bind $as_of when the predicate references it.
         extra = {"as_of": as_of} if as_of is not None else {}
         counts: dict[str, dict[str, Any]] = defaultdict(lambda: {"count": 0, "type": "", "mc": ""})
@@ -594,7 +595,9 @@ class MemgraphRetriever(Retriever):
                 for name, info in ranked:
                     rel_rows = session.run(
                         "MATCH (n {name: $name})-[r]->(m) "
-                        f"WHERE {node_valid} AND {rel_valid} "
+                        # Filter the target node `m` too, or a stale/future
+                        # neighbor would still be serialized into rel_text.
+                        f"WHERE {node_valid} AND {rel_valid} AND {target_valid} "
                         "RETURN n.name AS from_n, type(r) AS rel, m.name AS to_n "
                         "LIMIT $lim",
                         name=name,
