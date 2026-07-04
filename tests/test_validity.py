@@ -725,3 +725,16 @@ def test_graph_rel_probe_is_undirected_and_overfetches_nodes():
     assert "-[r]-(m)" in src and "-[r]->(m)" not in src   # undirected
     assert "startNode(r).name" in src and "endNode(r).name" in src
     assert "self.max_nodes * 3" in src                     # node over-fetch
+
+
+def test_to_utc_iso_normalizes_non_T_separators():
+    from mnemostack.recall.validity import to_utc_iso
+
+    # datetime.fromisoformat accepts a space (and lowercase t on 3.11+) — a
+    # space-separated offset instant must still be UTC-normalized, not returned
+    # raw, or the graph string comparison misclassifies exact boundaries.
+    assert to_utc_iso("2026-07-04 00:00:00+02:00") == "2026-07-03T22:00:00Z"
+    # calendar-date-only stays as-is (not churned to an instant)
+    assert to_utc_iso("2024-01-15") == "2024-01-15"
+    # non-instant marker passes through
+    assert to_utc_iso("current") == "current"

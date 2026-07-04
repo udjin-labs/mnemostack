@@ -16,8 +16,13 @@ and reconstructs the world-time window instead, matching
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
+
+# A value that is only a calendar date (no time-of-day / offset) — left as-is
+# by ``to_utc_iso`` so date-only graph bounds aren't churned into instants.
+_DATE_ONLY_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 if TYPE_CHECKING:
     from .recaller import RecallResult
@@ -59,15 +64,17 @@ def to_utc_iso(value: Any) -> Any:
     normalized to UTC on both the write and the query side for the comparison
     to be correct. Bare dates (``2024-01-15``), the ``current`` marker, and
     ``None`` are returned unchanged — only genuinely zoned datetimes are
-    rewritten, so date-only graph data keeps its format.
+    rewritten, so date-only graph data keeps its format. Any separator
+    ``datetime.fromisoformat`` accepts (``T``, lowercase ``t``, or a space) is
+    recognized, not just an uppercase ``T``.
     """
     if value is None:
         return None
     text = str(value)
-    if "T" not in text:  # bare date or marker like "current" — leave as-is
+    if _DATE_ONLY_RE.fullmatch(text):  # calendar date only — leave as-is
         return text
     dt = _to_instant(text)
-    if dt is None:
+    if dt is None:  # marker like "current", or not a parseable instant
         return text
     # Emit the ``Z`` suffix, not ``+00:00``: graph predicates compare these as
     # raw strings in Cypher, and ``Z`` is the common form of existing UTC rows,
