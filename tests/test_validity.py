@@ -730,6 +730,8 @@ def test_graph_rel_probe_is_undirected_and_overfetches_nodes():
 
 
 def test_to_utc_iso_normalizes_non_T_separators():
+    import sys
+
     from mnemostack.recall.validity import to_utc_iso
 
     # Every separator datetime.fromisoformat accepts marks a real datetime that
@@ -748,7 +750,12 @@ def test_to_utc_iso_normalizes_non_T_separators():
     assert to_utc_iso("2024-01-15+02:00") == "2024-01-15T02:00:00Z"
     assert to_utc_iso("2024-01-15+02") == "2024-01-15T02:00:00Z"
     assert to_utc_iso("2024-01-15+10:20:00") == "2024-01-15T10:20:00Z"
-    assert to_utc_iso("2024-01-15+02:30:15,5") == "2024-01-15T02:30:15.500000Z"
+    # comma-decimal fractions are 3.11+ in fromisoformat; on 3.10 the value is
+    # unparseable and passes through untouched (consistent on both sides).
+    if sys.version_info >= (3, 11):
+        assert to_utc_iso("2024-01-15+02:30:15,5") == "2024-01-15T02:30:15.500000Z"
+    else:
+        assert to_utc_iso("2024-01-15+02:30:15,5") == "2024-01-15+02:30:15,5"
     # non-instant marker passes through
     assert to_utc_iso("current") == "current"
 
