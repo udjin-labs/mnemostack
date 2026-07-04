@@ -744,6 +744,16 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
         dimension=provider.dimension,
         host=args.qdrant,
     )
+
+    # Collect and validate the file set BEFORE any destructive collection call:
+    # --recreate on a mistyped/empty path must not drop the existing collection
+    # when there is nothing to index.
+    index_root = str((target if target.is_dir() else target.parent).resolve())
+    col = collect_markdown(target, chunk_size=args.chunk_size, index_root=index_root)
+    if col.files == 0:
+        print(f"error: no .md files found under {target}", file=sys.stderr)
+        return 2
+
     if args.recreate and not args.yes:
         if not sys.stdin.isatty():
             print(
@@ -758,12 +768,6 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
             print("aborted")
             return 1
     store.ensure_collection(recreate=args.recreate)
-
-    index_root = str((target if target.is_dir() else target.parent).resolve())
-    col = collect_markdown(target, chunk_size=args.chunk_size, index_root=index_root)
-    if col.files == 0:
-        print(f"error: no .md files found under {target}", file=sys.stderr)
-        return 2
 
     chunks = [(c.id, c.text, c.payload) for c in col.chunks]
     existing_ids: set[str] = set()

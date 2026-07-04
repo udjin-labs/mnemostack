@@ -143,6 +143,9 @@ def collect_markdown(
         rel = _rel(f, base)
         text = f.read_text(encoding="utf-8", errors="ignore")
         meta, body = parse_frontmatter(text)
+        # Qdrant payload field names must be strings; a YAML key like ``2026:``
+        # parses to an int and would abort the upsert, so coerce keys to str.
+        meta = {str(k): v for k, v in meta.items()}
         out.sources.append(rel)
 
         for link in extract_links(body):

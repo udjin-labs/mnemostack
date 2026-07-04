@@ -7,7 +7,10 @@ import re
 from .base import Chunk, Chunker
 
 _HEADER_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
-_CODE_FENCE_RE = re.compile(r"^```", re.MULTILINE)
+# A fence: >=3 backticks or tildes at line start, optionally indented up to 3
+# spaces. Both delimiter styles are recognized so a `#` line inside a ~~~ block
+# is not mistaken for a heading.
+_CODE_FENCE_RE = re.compile(r"^ {0,3}([`~]{3,})", re.MULTILINE)
 
 
 class MarkdownChunker(Chunker):
@@ -140,13 +143,22 @@ class MarkdownChunker(Chunker):
 
     @staticmethod
     def _code_block_ranges(text: str) -> list[tuple[int, int]]:
-        """Find (start, end) ranges of fenced code blocks."""
-        fences = [m.start() for m in _CODE_FENCE_RE.finditer(text)]
-        ranges = []
-        i = 0
-        while i + 1 < len(fences):
-            ranges.append((fences[i], fences[i + 1]))
-            i += 2
+        """Find (start, end) ranges of fenced code blocks.
+
+        A fence closes only on a matching delimiter (same character, length ≥
+        the opener), so a ``~~~`` block containing an inner ``` line stays a
+        single block instead of pairing across mismatched fences.
+        """
+        ranges: list[tuple[int, int]] = []
+        open_start: int | None = None
+        open_fence = ""
+        for m in _CODE_FENCE_RE.finditer(text):
+            token = m.group(1)
+            if open_start is None:
+                open_start, open_fence = m.start(), token
+            elif token[0] == open_fence[0] and len(token) >= len(open_fence):
+                ranges.append((open_start, m.start()))
+                open_start, open_fence = None, ""
         return ranges
 
     @staticmethod

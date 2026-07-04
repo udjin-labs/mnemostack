@@ -37,9 +37,14 @@ _MDLINK_RE = re.compile(
     r"(?<!\!)\[[^\]]*\]\(\s*(?:<([^>]*)>|([^)\s]+))(?:\s+\"[^\"]*\")?\s*\)"
 )
 
-# Fenced code block delimiter: a run of >=3 backticks or tildes at line start.
-# Link-like syntax inside a fence is a code sample, not a real reference.
-_CODE_FENCE_RE = re.compile(r"^([`~]{3,})", re.MULTILINE)
+# Fenced code block delimiter: a run of >=3 backticks or tildes at line start,
+# optionally indented up to 3 spaces (still a valid CommonMark fence). Link-like
+# syntax inside a fence is a code sample, not a real reference.
+_CODE_FENCE_RE = re.compile(r"^ {0,3}([`~]{3,})", re.MULTILINE)
+
+# An inline code span: a backtick run, content, matching backtick run, on one
+# line. README notes often show link syntax inline (``Use `[[Example]]` here``).
+_INLINE_CODE_RE = re.compile(r"`+[^`\n]*`+")
 
 
 def _code_fence_ranges(text: str) -> list[tuple[int, int]]:
@@ -63,6 +68,17 @@ def _code_fence_ranges(text: str) -> list[tuple[int, int]]:
     return ranges
 
 
+def _masked_ranges(text: str) -> list[tuple[int, int]]:
+    """Ranges whose link syntax is code, not a reference: fences + inline spans.
+
+    Inline-span matches inside a fenced block are redundant but harmless (both
+    mask the same region), so the two range sets are simply unioned.
+    """
+    ranges = _code_fence_ranges(text)
+    ranges.extend((m.start(), m.end()) for m in _INLINE_CODE_RE.finditer(text))
+    return ranges
+
+
 def _in_ranges(pos: int, ranges: list[tuple[int, int]]) -> bool:
     return any(start <= pos < end for start, end in ranges)
 
@@ -70,21 +86,22 @@ def _in_ranges(pos: int, ranges: list[tuple[int, int]]) -> bool:
 def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     """Split leading YAML frontmatter from the markdown body.
 
-    Returns ``(metadata, body)``. When there is no frontmatter, or it is
-    malformed, or it does not parse to a mapping, returns ``({}, text)`` — the
-    body is always the text that should be chunked and indexed.
+    Returns ``(metadata, body)``. When there is no frontmatter at all, returns
+    ``({}, text)``. When a frontmatter fence *is* present but its YAML is
+    malformed or not a mapping (including an empty block), returns ``({}, body)``
+    — the recognized fence is stripped so it is never embedded as chunk text.
     """
     match = _FRONTMATTER_RE.match(text)
     if not match:
         return {}, text
+    body = text[match.end() :]
     try:
         loaded = yaml.safe_load(match.group(1))
     except yaml.YAMLError as exc:
         logger.warning("skipping malformed frontmatter: %s", exc)
-        return {}, text
+        return {}, body
     if not isinstance(loaded, dict):
-        return {}, text
-    body = text[match.end() :]
+        return {}, body
     return loaded, body
 
 
@@ -147,13 +164,15 @@ def extract_links(text: str) -> list[Link]:
     (``#section``) are skipped — only intra-corpus references become edges.
     Image embeds (``![...](...)`` and ``![[...]]``) and non-note file targets
     (``.png``, ``.pdf``, ...) are ignored for both link styles. Link syntax
-    inside a fenced code block is a code sample, not a reference, so it too is
-    skipped.
+    inside a fenced code block or an inline code span is a code sample, not a
+    reference, so it too is skipped. De-duplication is keyed by ``(style,
+    target)`` so a wikilink and an inline link to the same name both survive —
+    they resolve differently (corpus-wide vs. relative to the source file).
     """
-    fences = _code_fence_ranges(text)
-    seen: dict[str, Link] = {}
+    masked = _masked_ranges(text)
+    seen: dict[tuple[bool, str], Link] = {}
     for m in _WIKILINK_RE.finditer(text):
-        if _in_ranges(m.start(), fences):
+        if _in_ranges(m.start(), masked):
             continue
         # Skip Obsidian embeds ``![[...]]`` and non-note targets (``[[img.png]]``).
         if m.start() > 0 and text[m.start() - 1] == "!":
@@ -163,9 +182,9 @@ def extract_links(text: str) -> list[Link]:
             continue
         key = _strip_target(raw)
         if key:
-            seen.setdefault(key, Link(target=key, is_wikilink=True))
+            seen.setdefault((True, key), Link(target=key, is_wikilink=True))
     for m in _MDLINK_RE.finditer(text):
-        if _in_ranges(m.start(), fences):
+        if _in_ranges(m.start(), masked):
             continue
         raw = m.group(1) if m.group(1) is not None else m.group(2)
         low = raw.lower()
@@ -175,5 +194,5 @@ def extract_links(text: str) -> list[Link]:
             continue
         key = _strip_target(raw)
         if key:
-            seen.setdefault(key, Link(target=key, is_wikilink=False))
+            seen.setdefault((False, key), Link(target=key, is_wikilink=False))
     return list(seen.values())

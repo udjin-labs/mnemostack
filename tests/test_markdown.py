@@ -41,6 +41,15 @@ def test_frontmatter_closing_fence_at_eof():
     assert body == ""
 
 
+def test_empty_frontmatter_block_strips_fences():
+    # An empty frontmatter block (YAML loads to None) must still strip the
+    # recognized fence, not embed the --- lines as body text.
+    meta, body = parse_frontmatter("---\n\n---\n# Note\nbody")
+    assert meta == {}
+    assert body == "# Note\nbody"
+    assert "---" not in body
+
+
 # ---------- links ----------
 
 
@@ -64,10 +73,12 @@ def test_extract_markdown_links_notes_only():
     ]
 
 
-def test_links_deduped_first_seen_order():
-    # First-seen wins: the wikilink [[A]] comes before the inline [b](A.md).
+def test_links_deduped_per_style():
+    # Same style + target dedupes ([[A]] [[A]] -> one), but a wikilink and an
+    # inline link to the same name both survive: they resolve differently
+    # (corpus-wide vs. relative to the source file).
     links = extract_links("[[A]] [[A]] [b](A.md)")
-    assert [(link.target, link.is_wikilink) for link in links] == [("A", True)]
+    assert [(link.target, link.is_wikilink) for link in links] == [("A", True), ("A", False)]
 
 
 def test_extract_links_skips_embeds_and_non_note_wikilinks():
@@ -101,6 +112,22 @@ def test_extract_links_mixed_fence_delimiters_stay_excluded():
     targets = {link.target for link in extract_links(text)}
     assert "Live" in targets
     assert "Fenced" not in targets and "fenced" not in targets
+
+
+def test_extract_links_skips_indented_code_fences():
+    # A fence indented up to 3 spaces is still a valid code block.
+    text = "real [[Live]]\n\n   ```\n   [[Indented]] and [x](ind.md)\n   ```\n"
+    targets = {link.target for link in extract_links(text)}
+    assert "Live" in targets
+    assert "Indented" not in targets and "ind" not in targets
+
+
+def test_extract_links_skips_inline_code_spans():
+    # Link syntax shown in an inline code span is documentation, not a link.
+    text = "Use `[[Example]]` or `[x](sample.md)` in a note; but [[Real]] links."
+    targets = {link.target for link in extract_links(text)}
+    assert "Real" in targets
+    assert "Example" not in targets and "sample" not in targets
 
 
 def test_extract_links_keeps_dotted_note_names():
@@ -219,6 +246,16 @@ def test_collect_indexes_uppercase_md_suffix(tmp_path):
     assert "README.MD" in col.sources
     edge = next(e for e in col.edges if e.source == "a.md")
     assert edge.resolved is True and edge.target == "README.MD"
+
+
+def test_collect_stringifies_non_string_frontmatter_keys(tmp_path):
+    # A YAML key like `2026:` parses to an int; Qdrant payload fields must be
+    # strings, so the key is coerced before it reaches the payload.
+    (tmp_path / "n.md").write_text("---\n2026: release\n---\n# N\nbody text")
+    col = collect_markdown(tmp_path)
+    p = col.chunks[0].payload
+    assert p.get("2026") == "release"
+    assert all(isinstance(k, str) for k in p)
 
 
 def test_collect_relative_link_escaping_corpus_is_not_resolved(tmp_path):
@@ -654,3 +691,54 @@ def test_cmd_index_markdown_clears_graph_links_for_deleted_file(tmp_path, monkey
     assert cli.cmd_index_markdown(args) == 0
     # gone.md is no longer on disk -> its LINKS_TO edges are cleared (synced [])
     assert graph.synced.get("gone.md") == []
+
+
+def test_cmd_index_markdown_recreate_validates_before_dropping(tmp_path, monkeypatch, capsys):
+    import argparse
+
+    import mnemostack.cli as cli
+
+    empty = tmp_path / "empty"
+    empty.mkdir()  # no .md files
+
+    class _FakeProvider:
+        dimension = 3
+
+        def embed(self, text):
+            return [0.1, 0.2, 0.3]
+
+    class _Store:
+        def __init__(self, **_):
+            self.recreated = False
+
+        def collection_exists(self):
+            return True
+
+        def count(self):
+            return 5
+
+        def ensure_collection(self, recreate=False):
+            if recreate:
+                self.recreated = True
+            return True
+
+        def iter_ids(self, filters=None):
+            return []
+
+        def upsert(self, cid, vec, payload):
+            pass
+
+    store = _Store()
+    monkeypatch.setattr(cli, "get_provider", lambda *_a, **_k: _FakeProvider())
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+
+    args = argparse.Namespace(
+        path=str(empty), provider="fake", embedding_model=None,
+        collection="c", qdrant="http://localhost:6333",
+        chunk_size=1200, memgraph_uri=None,
+        graph_timeout=5.0, recreate=True, prune=False, yes=True,
+    )
+    # no .md files -> exit 2 and the existing collection is NOT dropped
+    assert cli.cmd_index_markdown(args) == 2
+    assert store.recreated is False
+    assert "no .md files" in capsys.readouterr().err
