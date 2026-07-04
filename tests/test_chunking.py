@@ -116,6 +116,90 @@ def test_markdown_chunker_no_headers_returns_whole_text():
     assert chunks[0].metadata["heading_path"] == []
 
 
+def test_markdown_chunker_splits_large_headingless_body():
+    # A big headingless note (e.g. a plain README) must still respect
+    # chunk_size, not overrun the embedding provider as one giant chunk.
+    text = "word " * 200  # 1000 chars, no headers
+    chunker = MarkdownChunker(chunk_size=100)
+    chunks = chunker.chunk(text)
+    assert len(chunks) > 1
+    assert all(len(c.text) <= 100 for c in chunks)
+    assert all(c.metadata["heading_path"] == [] for c in chunks)
+    # offsets advance so pieces are distinct and cover the body
+    assert [c.offset for c in chunks] == sorted(c.offset for c in chunks)
+
+
+def test_markdown_chunker_rejects_non_positive_chunk_size():
+    # A non-positive size would wedge the split loop (offset never advances) —
+    # fail fast instead of hanging.
+    import pytest
+
+    for bad in (0, -5):
+        with pytest.raises(ValueError, match="chunk_size must be positive"):
+            MarkdownChunker(chunk_size=bad).chunk("# H\n" + "x" * 50)
+
+
+def test_markdown_chunker_keeps_text_before_first_header():
+    # Lead-in text before the first `#` is real content and must be indexed,
+    # not dropped because sections only start at detected headers.
+    text = "Intro lead-in paragraph.\n\n# Section\n\nSection body."
+    chunks = MarkdownChunker(chunk_size=10000).chunk(text)
+    assert any(
+        c.metadata["heading_path"] == [] and "Intro lead-in paragraph" in c.text
+        for c in chunks
+    )
+    # the section content is still present too
+    assert any(c.metadata["heading_path"] == ["Section"] for c in chunks)
+
+
+def test_markdown_chunker_ignores_headings_in_containers():
+    # A heading inside a block quote (or list) is not a document-flow section,
+    # so following content must not inherit it in heading_path.
+    text = "# Real\n\n> ## Quoted\n\nBack to real text"
+    chunks = MarkdownChunker(chunk_size=10000).chunk(text)
+    paths = [c.metadata["heading_path"] for c in chunks]
+    assert all("Quoted" not in p for p in paths)
+    assert ["Real"] in paths
+
+
+def test_markdown_chunker_recognizes_setext_headings():
+    # Setext headings (Title\n==== / Section\n----) are valid markdown and must
+    # carry into heading_path just like ATX headings.
+    text = "Title\n=====\n\nintro\n\nSection\n-------\n\nbody"
+    chunks = MarkdownChunker(chunk_size=10000).chunk(text)
+    paths = [c.metadata["heading_path"] for c in chunks]
+    assert ["Title"] in paths
+    assert ["Title", "Section"] in paths
+
+
+def test_markdown_chunker_accepts_indented_atx_headings():
+    # A heading indented 1-3 spaces is valid CommonMark and must be recognized.
+    text = "  # Project\n\nintro\n\n## Sub\n\nbody"
+    chunks = MarkdownChunker(chunk_size=10000).chunk(text)
+    paths = [c.metadata["heading_path"] for c in chunks]
+    assert ["Project"] in paths
+    assert ["Project", "Sub"] in paths
+
+
+def test_markdown_chunker_ignores_headers_in_indented_code_blocks():
+    # A `#` line inside a 4-space indented code block is code, not a heading.
+    text = "# Real\n\n    # not a heading\n\n## Second\n\nbody"
+    chunks = MarkdownChunker(chunk_size=10000).chunk(text)
+    paths = [c.metadata["heading_path"] for c in chunks]
+    assert ["Real", "Second"] in paths
+    assert all("not a heading" not in "".join(p) for p in paths)
+
+
+def test_markdown_chunker_ignores_headers_in_tilde_code_blocks():
+    # A `#` line inside a ~~~ fenced block is code, not a heading, so it must
+    # not corrupt the heading_path of later real headings.
+    text = "# Real\n\n~~~\n# not a header\n~~~\n\n## Second\n\nbody"
+    chunks = MarkdownChunker(chunk_size=10000).chunk(text)
+    paths = [c.metadata["heading_path"] for c in chunks]
+    assert ["Real", "Second"] in paths
+    assert all("not a header" not in "".join(p) for p in paths)
+
+
 def test_markdown_chunker_ignores_headers_in_code_blocks():
     text = """# Real Header
 

@@ -723,6 +723,215 @@ def cmd_index(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_index_markdown(args: argparse.Namespace) -> int:
+    """Index a markdown folder: frontmatter -> payload, links -> graph edges."""
+    from .markdown import collect_markdown
+
+    # Resolve to an absolute path so it's comparable with a resolved --index-root
+    # when computing corpus-relative sources (relative_to needs both same-form).
+    target = Path(args.path).resolve()
+    if not target.exists():
+        print(f"error: path does not exist: {args.path}", file=sys.stderr)
+        return 2
+    if args.chunk_size <= 0:
+        print(
+            f"error: --chunk-size must be a positive integer, got {args.chunk_size}",
+            file=sys.stderr,
+        )
+        return 2
+
+    provider = get_provider(args.provider, **model_kwargs(_embedding_model(args)))
+    store = VectorStore(
+        collection=args.collection,
+        dimension=provider.dimension,
+        host=args.qdrant,
+    )
+
+    # Collect and validate the file set BEFORE any destructive collection call:
+    # --recreate on a mistyped/empty path must not drop the existing collection
+    # when there is nothing to index. An explicit --index-root pins the corpus
+    # root so a nested single-file refresh (`index-markdown notes/sub/a.md
+    # --index-root notes`) updates the same chunks/graph nodes as the parent
+    # directory index, instead of inserting a second copy under a narrower root.
+    root_dir = None
+    if getattr(args, "index_root", None):
+        root_path = Path(args.index_root).resolve()
+        if not root_path.is_dir():
+            print(f"error: --index-root is not a directory: {args.index_root}", file=sys.stderr)
+            return 2
+        if not target.is_relative_to(root_path):
+            print(
+                f"error: {args.path} is not under --index-root {args.index_root}",
+                file=sys.stderr,
+            )
+            return 2
+        root_dir = str(root_path)
+        index_root = root_dir
+    else:
+        index_root = str((target if target.is_dir() else target.parent).resolve())
+    # A "full root walk" is a directory index whose target IS the index_root, so
+    # col.sources covers every file under the root. Only then is it safe to
+    # reconcile missing sources globally (prune / clear graph links); a nested
+    # subtree or single file covers only part of the root and must not.
+    full_root_walk = target.is_dir() and str(target) == index_root
+    col = collect_markdown(
+        target, chunk_size=args.chunk_size, index_root=index_root, root_dir=root_dir
+    )
+    if col.files == 0:
+        print(f"error: no .md files found under {target}", file=sys.stderr)
+        return 2
+
+    if args.recreate and not args.yes:
+        if not sys.stdin.isatty():
+            print(
+                "error: --recreate drops the collection; pass --yes to confirm "
+                "in non-interactive mode",
+                file=sys.stderr,
+            )
+            return 2
+        points = store.count() if store.collection_exists() else 0
+        reply = input(f"Drop collection '{args.collection}' ({points} points) and recreate? [y/N] ")
+        if reply.strip().lower() not in {"y", "yes"}:
+            print("aborted")
+            return 1
+    store.ensure_collection(recreate=args.recreate)
+
+    chunks = [(c.id, c.text, c.payload) for c in col.chunks]
+    # Fetch existing points (with payloads) for this root so a chunk whose id is
+    # unchanged but whose frontmatter changed still has its payload refreshed —
+    # the id is derived from (index_root, source, offset, text), not the
+    # metadata, so a tag/date edit would otherwise leave stale filters in Qdrant.
+    existing_payloads: dict[str, dict] = {}
+    if not args.recreate and store.collection_exists():
+        for hit in store.scroll(filters={"index_root": index_root}):
+            existing_payloads[str(hit.id)] = hit.payload or {}
+    existing_ids = set(existing_payloads)
+    to_embed = [c for c in chunks if c[0] not in existing_ids]
+    skipped = len(chunks) - len(to_embed)
+    print(
+        f"Indexing {len(chunks)} markdown chunks from {col.files} file(s)"
+        f" — {len(to_embed)} new, {skipped} already indexed (skipped)."
+    )
+
+    inserted = 0
+    failed = 0
+    failed_sources: set[str] = set()
+    for cid, text, payload in to_embed:
+        vec = provider.embed(text)
+        if not vec:
+            failed += 1
+            failed_sources.add(payload["source"])
+            continue
+        store.upsert(cid, vec, payload)
+        inserted += 1
+
+    # Refresh payloads of unchanged chunks so frontmatter edits sync without
+    # re-embedding. Delete only keys THIS indexer owned on the previous run (the
+    # `_md_keys` record) that the file no longer produces — so removed
+    # frontmatter keys are dropped, while foreign payload fields (external
+    # enrichment, `invalidated_at`/`valid_until` validity markers) are preserved.
+    refreshed = 0
+    for cid, _text, payload in chunks:
+        if cid not in existing_ids:
+            continue
+        old = existing_payloads.get(cid, {})
+        owned = old.get("_md_keys") or []
+        stale = [k for k in owned if k not in payload]
+        if stale:
+            store.delete_payload_keys(cid, stale)
+        store.set_payload(cid, payload)
+        refreshed += 1
+
+    pruned = 0
+    if args.prune and not args.recreate:
+        from .ingest import prune_stale_chunks
+
+        # Seed from EVERY visited file, not just files that produced chunks: a
+        # file edited to empty / frontmatter-only yields no chunks but must
+        # still have its old points pruned.
+        fresh_by_source: dict[str, set[str]] = {source: set() for source in col.sources}
+        for cid, _text, payload in chunks:
+            fresh_by_source[payload["source"]].add(cid)
+        # Reconcile deletions: a file removed from the folder is absent from
+        # col.sources. Seed each prior source under this index_root (but no
+        # longer present) with an empty fresh set so its stale points are pruned
+        # instead of lingering searchable. ONLY for a full-root directory walk —
+        # a single file or a nested subtree covers only part of the index_root,
+        # so reconciling here would wrongly prune untouched siblings.
+        if full_root_walk:
+            for hit in store.scroll(filters={"index_root": index_root}):
+                prior = (hit.payload or {}).get("source")
+                if prior and prior not in fresh_by_source:
+                    fresh_by_source[prior] = set()
+        for source in failed_sources:
+            fresh_by_source.pop(source, None)
+        if failed_sources:
+            print(
+                f"warning: prune skipped for {len(failed_sources)} source(s) "
+                "with failed embeddings; re-run after the provider recovers",
+                file=sys.stderr,
+            )
+        pruned = prune_stale_chunks(store, fresh_by_source, index_root=index_root)
+
+    # Links -> graph edges. Only when a graph is configured; sources whose
+    # embeddings failed are skipped so a partial index doesn't rewrite links.
+    edges_written = 0
+    graph_uri = getattr(args, "memgraph_uri", None) or None
+    if graph_uri:
+        from .graph import GraphStore
+
+        # Seed with every indexed source so a file whose links were all removed
+        # is still synced (sync_file_links deletes its stale LINKS_TO edges).
+        by_source: dict[str, list[str]] = {
+            s: [] for s in col.sources if s not in failed_sources
+        }
+        for edge in col.edges:
+            if edge.source in failed_sources:
+                continue
+            if edge.target not in by_source[edge.source]:
+                by_source[edge.source].append(edge.target)
+        try:
+            graph = GraphStore(uri=graph_uri, timeout=getattr(args, "graph_timeout", 5.0))
+        except Exception as exc:  # noqa: BLE001 — graph optional; indexing already succeeded
+            print(f"warning: graph unavailable, links not written ({exc})", file=sys.stderr)
+        else:
+            try:
+                # Reconcile deletions: a file removed from the folder still has
+                # LINKS_TO edges in the graph. Seed each prior link-source no
+                # longer present with an empty target list so sync clears its
+                # stale edges. ONLY for a full-root directory walk — a single
+                # file or nested subtree covers only part of the index_root, so
+                # this would wrongly clear untouched siblings' edges.
+                if full_root_walk:
+                    for prior in graph.file_link_sources(index_root=index_root):
+                        if prior not in by_source and prior not in failed_sources:
+                            by_source[prior] = []
+                for source, targets in by_source.items():
+                    edges_written += graph.sync_file_links(
+                        source, targets, index_root=index_root
+                    )
+            except Exception as exc:  # noqa: BLE001 — graph optional; vectors already upserted
+                # A mid-run graph outage (e.g. Memgraph disconnects while
+                # writing) must not fail the whole index: the vector upserts
+                # already succeeded, so warn and keep the partial link sync.
+                print(
+                    f"warning: graph write failed, links partially written ({exc})",
+                    file=sys.stderr,
+                )
+            finally:
+                graph.close()
+
+    print(
+        f"Done: inserted/updated {inserted}, skipped {skipped},"
+        f" failed-embedding {failed}, total chunks {len(chunks)}"
+        + (f", refreshed {refreshed} payloads" if refreshed else "")
+        + (f", pruned {pruned} stale" if args.prune else "")
+        + (f", {edges_written} link edges" if graph_uri else "")
+        + f" in collection '{args.collection}'."
+    )
+    return 0
+
+
 def cmd_feedback(args: argparse.Namespace) -> int:
     """Record explicit feedback into the pipeline state store."""
     from .feedback import apply_feedback
@@ -1080,6 +1289,53 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip the confirmation prompt for --recreate",
     )
     p_index.set_defaults(func=cmd_index)
+
+    p_index_md = sub.add_parser(
+        "index-markdown",
+        parents=[common],
+        help="Index a markdown folder: frontmatter -> filters, links -> graph edges",
+    )
+    p_index_md.add_argument("path", help="Markdown file or directory to index")
+    p_index_md.add_argument(
+        "--index-root",
+        default=None,
+        metavar="DIR",
+        help=(
+            "Corpus root for a single-file refresh; source paths become relative "
+            "to it so `index-markdown vault/sub/a.md --index-root vault` updates "
+            "the same chunks as the directory index (default: the file's parent)"
+        ),
+    )
+    p_index_md.add_argument(
+        "--chunk-size",
+        type=int,
+        default=1200,
+        help="Target chars per chunk; the markdown chunker splits on headers (default 1200)",
+    )
+    p_index_md.add_argument(
+        "--memgraph-uri",
+        default=cfg.graph.uri,
+        help=(
+            "Memgraph/Neo4j bolt URI to write wikilink/markdown-link edges "
+            "(File -[LINKS_TO]-> File); omit to index chunks + frontmatter only"
+        ),
+    )
+    p_index_md.add_argument(
+        "--graph-timeout",
+        type=float,
+        default=cfg.graph.timeout,
+        help="Graph connection timeout in seconds (default 5.0)",
+    )
+    p_index_md.add_argument("--recreate", action="store_true", help="Drop existing collection")
+    p_index_md.add_argument(
+        "--prune",
+        action="store_true",
+        help="After indexing, delete stale chunks the files no longer produce (per index root)",
+    )
+    p_index_md.add_argument(
+        "--yes", "-y", action="store_true", help="Skip the confirmation prompt for --recreate"
+    )
+    p_index_md.set_defaults(func=cmd_index_markdown)
 
     p_feedback = sub.add_parser(
         "feedback",

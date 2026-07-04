@@ -2,12 +2,31 @@
 
 from __future__ import annotations
 
-import re
+from markdown_it import MarkdownIt
 
 from .base import Chunk, Chunker
 
-_HEADER_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
-_CODE_FENCE_RE = re.compile(r"^```", re.MULTILINE)
+# A CommonMark parser finds headings to spec — ATX (incl. 0-3 space indent) and
+# Setext (``Title``/``====``) — and never mistakes a ``#`` inside code (fenced,
+# indented, inline) for a heading.
+_MD = MarkdownIt("commonmark")
+
+# Block containers whose headings are nested, not document-flow sections.
+_CONTAINER_OPEN = frozenset(
+    {"blockquote_open", "bullet_list_open", "ordered_list_open", "list_item_open"}
+)
+_CONTAINER_CLOSE = frozenset(
+    {"blockquote_close", "bullet_list_close", "ordered_list_close", "list_item_close"}
+)
+
+
+def _line_start_offsets(text: str) -> list[int]:
+    """Char offset of the start of each line (index = 0-based line number)."""
+    offsets = [0]
+    for i, ch in enumerate(text):
+        if ch == "\n":
+            offsets.append(i + 1)
+    return offsets
 
 
 class MarkdownChunker(Chunker):
@@ -35,25 +54,51 @@ class MarkdownChunker(Chunker):
         self.include_heading_in_text = include_heading_in_text
 
     def chunk(self, text: str) -> list[Chunk]:
+        if self.chunk_size <= 0:
+            # A non-positive size would wedge the large-section split loop
+            # (sub_offset never advances) — fail fast instead of hanging.
+            raise ValueError(f"chunk_size must be positive, got {self.chunk_size}")
         if not text.strip():
             return []
 
-        # Find header positions, respecting code fences (don't match # inside ```)
-        code_ranges = self._code_block_ranges(text)
+        # Find headings via the CommonMark parser (ATX + Setext; code excluded).
+        # Only top-level headings define document sections — a heading nested in
+        # a block quote or list item is not in the document flow and must not
+        # own the content that follows it, so track container depth.
+        tokens = _MD.parse(text)
+        line_starts = _line_start_offsets(text)
         headers: list[tuple[int, int, str]] = []  # (start, level, title)
-        for match in _HEADER_RE.finditer(text):
-            if not self._in_ranges(match.start(), code_ranges):
-                level = len(match.group(1))
-                title = match.group(2).strip()
-                headers.append((match.start(), level, title))
+        container_depth = 0
+        for k, tok in enumerate(tokens):
+            if tok.type in _CONTAINER_OPEN:
+                container_depth += 1
+                continue
+            if tok.type in _CONTAINER_CLOSE:
+                container_depth -= 1
+                continue
+            if tok.type != "heading_open" or not tok.map or container_depth > 0:
+                continue
+            level = int(tok.tag[1:])  # "h2" -> 2
+            inline = tokens[k + 1] if k + 1 < len(tokens) else None
+            title = inline.content.strip() if inline and inline.type == "inline" else ""
+            start = line_starts[tok.map[0]] if tok.map[0] < len(line_starts) else 0
+            headers.append((start, level, title))
 
         if not headers:
-            # No headers — return the whole text (or split by size)
-            return [Chunk(text=text.strip(), offset=0, metadata={"heading_path": []})]
+            # No headers — split by size so a large headingless note (e.g. a
+            # plain README) still respects chunk_size and never overruns the
+            # embedding provider's input limit.
+            pieces: list[Chunk] = []
+            self._emit_plain_windows(text.strip(), pieces)
+            return pieces
 
         # Build sections: each section spans from one header to the next
         chunks: list[Chunk] = []
         heading_stack: list[tuple[int, str]] = []  # (level, title)
+
+        # Lead-in text before the first header is real content — emit it (with an
+        # empty heading path) so it is not silently dropped from the index.
+        self._emit_plain_windows(text[: headers[0][0]].strip(), chunks)
 
         for i, (start, level, title) in enumerate(headers):
             # Maintain heading hierarchy
@@ -102,17 +147,26 @@ class MarkdownChunker(Chunker):
 
         return chunks
 
-    @staticmethod
-    def _code_block_ranges(text: str) -> list[tuple[int, int]]:
-        """Find (start, end) ranges of fenced code blocks."""
-        fences = [m.start() for m in _CODE_FENCE_RE.finditer(text)]
-        ranges = []
-        i = 0
-        while i + 1 < len(fences):
-            ranges.append((fences[i], fences[i + 1]))
-            i += 2
-        return ranges
+    def _emit_plain_windows(self, body: str, chunks: list[Chunk]) -> None:
+        """Append ``body`` as headingless chunks, windowed to ``chunk_size``.
 
-    @staticmethod
-    def _in_ranges(pos: int, ranges: list[tuple[int, int]]) -> bool:
-        return any(start <= pos < end for start, end in ranges)
+        Used for a headingless note and for the lead-in text before the first
+        header. Empty ``body`` appends nothing. Offsets are body-relative, which
+        is enough for stable ids and ordering and never collides with the
+        header-anchored section offsets that follow.
+        """
+        if not body:
+            return
+        if len(body) <= self.chunk_size:
+            chunks.append(Chunk(text=body, offset=0, metadata={"heading_path": []}))
+            return
+        sub_offset = 0
+        while sub_offset < len(body):
+            chunks.append(
+                Chunk(
+                    text=body[sub_offset : sub_offset + self.chunk_size],
+                    offset=sub_offset,
+                    metadata={"heading_path": []},
+                )
+            )
+            sub_offset += self.chunk_size

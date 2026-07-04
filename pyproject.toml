@@ -30,6 +30,7 @@ dependencies = [
     "pyyaml>=6.0,<7",
     "requests>=2.31,<3",
     "httpx>=0.24,<1",
+    "markdown-it-py>=3.0,<5",
 ]
 
 [project.optional-dependencies]
