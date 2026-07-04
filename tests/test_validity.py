@@ -1,0 +1,243 @@
+"""Validity model: predicates, the recall-level filter, and store.invalidate."""
+
+from __future__ import annotations
+
+import pytest
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance
+
+from mnemostack.recall import filter_by_validity, is_current, valid_at
+from mnemostack.recall.recaller import RecallResult
+from mnemostack.vector import VectorStore
+
+
+def _r(id: str, payload: dict) -> RecallResult:
+    return RecallResult(id=id, text=f"t{id}", score=0.5, payload=payload, sources=["v"])
+
+
+# ---------- predicates ----------
+
+
+def test_is_current_absent_key_is_current():
+    assert is_current({}) is True
+    assert is_current({"text": "x"}) is True
+    assert is_current(None) is True
+
+
+def test_is_current_present_key_is_stale():
+    assert is_current({"invalidated_at": "2026-07-04T00:00:00Z"}) is False
+
+
+def test_is_current_empty_string_marker_is_current():
+    # a falsy value is treated as no marker
+    assert is_current({"invalidated_at": ""}) is True
+
+
+def test_valid_at_within_window():
+    p = {"valid_from": "2026-01-01", "valid_until": "2026-06-01"}
+    assert valid_at(p, "2026-03-01") is True
+
+
+def test_valid_at_before_start_excluded():
+    assert valid_at({"valid_from": "2026-05-01"}, "2026-01-01") is False
+
+
+def test_valid_at_after_end_excluded():
+    assert valid_at({"valid_until": "2026-06-01"}, "2026-07-01") is False
+
+
+def test_valid_at_open_bounds_are_indefinite():
+    assert valid_at({}, "2026-03-01") is True
+    assert valid_at({"valid_from": "2020-01-01"}, "2026-03-01") is True
+
+
+def test_valid_at_end_is_exclusive():
+    # valid_until is the successor's start: at exactly valid_until it's no longer true
+    assert valid_at({"valid_until": "2026-06-01"}, "2026-06-01") is False
+
+
+# ---------- filter_by_validity ----------
+
+
+def test_filter_default_drops_invalidated():
+    results = [_r("a", {}), _r("b", {"invalidated_at": "2026-07-04"}), _r("c", {})]
+    kept = filter_by_validity(results)
+    assert [r.id for r in kept] == ["a", "c"]
+
+
+def test_filter_include_invalidated_keeps_all():
+    results = [_r("a", {}), _r("b", {"invalidated_at": "2026-07-04"})]
+    kept = filter_by_validity(results, include_invalidated=True)
+    assert [r.id for r in kept] == ["a", "b"]
+
+
+def test_filter_as_of_uses_world_time_ignoring_invalidation():
+    # invalidated_at present but as_of asks what was true then → still returned
+    results = [
+        _r("a", {"valid_from": "2026-01-01", "valid_until": "2026-06-01",
+                 "invalidated_at": "2026-07-04"}),
+        _r("b", {"valid_from": "2026-07-01"}),
+    ]
+    kept = filter_by_validity(results, as_of="2026-03-01")
+    assert [r.id for r in kept] == ["a"]  # a was valid in March; b not yet
+
+
+# ---------- VectorStore.invalidate ----------
+
+
+@pytest.fixture
+def store():
+    s = VectorStore.__new__(VectorStore)
+    s.collection = "test_inv"
+    s.dimension = 4
+    s.distance = Distance.COSINE
+    s.client = QdrantClient(":memory:")
+    s.ensure_collection()
+    return s
+
+
+def _seed(store, id, payload):
+    # Qdrant point ids must be unsigned ints or UUIDs — use ints in tests.
+    store.upsert(id, [0.1, 0.2, 0.3, 0.4], payload)
+
+
+def _hit(store, id):
+    return next(h for h in store.scroll() if str(h.id) == str(id))
+
+
+def test_invalidate_sets_marker(store):
+    _seed(store, 1, {"text": "fact"})
+    n = store.invalidate(1, invalidated_at="2026-07-04T00:00:00Z")
+    assert n == 1
+    hit = _hit(store, 1)
+    assert hit.payload["invalidated_at"] == "2026-07-04T00:00:00Z"
+    assert hit.payload["text"] == "fact"  # merge, not overwrite
+
+
+def test_invalidate_defaults_stamp_to_now(store):
+    _seed(store, 1, {"text": "fact"})
+    n = store.invalidate(1)
+    assert n == 1
+    assert _hit(store, 1).payload.get("invalidated_at")  # a stamp was written
+
+
+def test_invalidate_sets_valid_until(store):
+    _seed(store, 1, {"text": "fact"})
+    store.invalidate(1, valid_until="2026-06-01")
+    assert _hit(store, 1).payload["valid_until"] == "2026-06-01"
+
+
+def test_invalidate_skips_missing_points(store):
+    _seed(store, 1, {"text": "fact"})
+    n = store.invalidate([1, 999])
+    assert n == 1  # only the existing point counted
+
+
+def test_invalidate_owner_guard_skips_foreign_root(store):
+    _seed(store, 1, {"text": "a", "index_root": "/root/A"})
+    _seed(store, 2, {"text": "b", "index_root": "/root/B"})
+    n = store.invalidate([1, 2], index_root="/root/A")
+    assert n == 1
+    assert "invalidated_at" in _hit(store, 1).payload
+    assert "invalidated_at" not in _hit(store, 2).payload
+
+
+def test_invalidate_empty_ids_is_noop(store):
+    assert store.invalidate([]) == 0
+
+
+# ---------- recall_flow exclusion ----------
+
+
+class _StubRecaller:
+    def __init__(self, results):
+        self._results = results
+
+    def recall(self, query, limit=10, filters=None, include_invalidated=False,
+               as_of=None, **_):
+        from mnemostack.recall import filter_by_validity
+
+        # A real Recaller applies the validity filter internally; mirror that
+        # so recall_flow's threading is what's under test here.
+        out = filter_by_validity(
+            self._results, include_invalidated=include_invalidated, as_of=as_of
+        )
+        return out[:limit]
+
+    def apply_vector_floor_after_rerank(self, results, recalled_results):
+        return results
+
+
+def test_recall_flow_hides_invalidated_by_default():
+    from mnemostack.recall import recall_flow
+
+    results = [_r("a", {}), _r("b", {"invalidated_at": "2026-07-04"}), _r("c", {})]
+    out = recall_flow(_StubRecaller(results), "q", limit=10)
+    assert [r.id for r in out] == ["a", "c"]
+
+
+def test_recall_flow_include_invalidated_passthrough():
+    from mnemostack.recall import recall_flow
+
+    results = [_r("a", {}), _r("b", {"invalidated_at": "2026-07-04"})]
+    out = recall_flow(_StubRecaller(results), "q", limit=10, include_invalidated=True)
+    assert [r.id for r in out] == ["a", "b"]
+
+
+def test_recall_flow_as_of_passthrough():
+    from mnemostack.recall import recall_flow
+
+    results = [
+        _r("a", {"valid_until": "2026-06-01"}),
+        _r("b", {"valid_from": "2026-07-01"}),
+    ]
+    out = recall_flow(_StubRecaller(results), "q", limit=10, as_of="2026-03-01")
+    assert [r.id for r in out] == ["a"]
+
+
+def test_recaller_recall_excludes_invalidated_end_to_end():
+    # Real Recaller over a fake retriever: the exclusion happens inside recall().
+    from mnemostack.recall.recaller import Recaller
+
+    class _FakeRetriever:
+        name = "fake"
+
+        def search(self, query, limit, filters=None):
+            return [
+                RecallResult(id="a", text="a", score=0.9, payload={}, sources=["fake"]),
+                RecallResult(id="b", text="b", score=0.8,
+                             payload={"invalidated_at": "2026-07-04"}, sources=["fake"]),
+            ]
+
+    recaller = Recaller(retrievers=[_FakeRetriever()])
+    default = recaller.recall("q", limit=10)
+    assert [r.id for r in default] == ["a"]
+    with_stale = recaller.recall("q", limit=10, include_invalidated=True)
+    assert {r.id for r in with_stale} == {"a", "b"}
+
+
+# ---------- async mirror ----------
+
+
+@pytest.mark.asyncio
+async def test_async_invalidate_mirrors_sync():
+    from qdrant_client import AsyncQdrantClient
+
+    from mnemostack.vector import AsyncVectorStore
+
+    s = AsyncVectorStore.__new__(AsyncVectorStore)
+    s.collection = "test_async_inv"
+    s.dimension = 4
+    s.distance = Distance.COSINE
+    s.client = AsyncQdrantClient(":memory:")
+    await s.ensure_collection()
+    try:
+        await s.upsert(1, [0.1, 0.2, 0.3, 0.4], {"text": "fact"})
+        n = await s.invalidate(1, invalidated_at="2026-07-04T00:00:00Z")
+        assert n == 1
+        retrieved = await s.client.retrieve(collection_name=s.collection, ids=[1],
+                                            with_payload=True)
+        assert retrieved[0].payload["invalidated_at"] == "2026-07-04T00:00:00Z"
+        assert retrieved[0].payload["text"] == "fact"
+    finally:
+        await s.close()

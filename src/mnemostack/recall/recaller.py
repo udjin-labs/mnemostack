@@ -18,6 +18,7 @@ from .mca_prefilter import mca_prefilter as run_mca_prefilter
 from .query_expansion import expand_query
 from .tokens import TokenCounter, apply_token_budget
 from .trace import RecallTrace, RetrieverTrace
+from .validity import filter_by_validity
 
 logger = logging.getLogger(__name__)
 
@@ -215,6 +216,8 @@ class Recaller:
         trace: RecallTrace | None = None,
         token_budget: int | None = None,
         token_counter: TokenCounter | None = None,
+        include_invalidated: bool = False,
+        as_of: str | None = None,
     ) -> list[RecallResult]:
         """Async wrapper around `recall`.
 
@@ -236,6 +239,8 @@ class Recaller:
             trace=trace,
             token_budget=token_budget,
             token_counter=token_counter,
+            include_invalidated=include_invalidated,
+            as_of=as_of,
         )
 
     def recall(
@@ -249,6 +254,8 @@ class Recaller:
         trace: RecallTrace | None = None,
         token_budget: int | None = None,
         token_counter: TokenCounter | None = None,
+        include_invalidated: bool = False,
+        as_of: str | None = None,
     ) -> list[RecallResult]:
         """Run hybrid recall and return fused top-K results.
 
@@ -261,6 +268,15 @@ class Recaller:
         overrides the default dependency-free estimator. When post-processing
         reorders results afterwards (pipeline/reranker), pass the budget to
         `recall_flow` instead so it trims the final order, not this one.
+
+        `include_invalidated` / `as_of` control validity: by default recall
+        drops invalidated facts (those with an `invalidated_at` payload key).
+        `include_invalidated=True` keeps them; `as_of="<iso>"` instead returns
+        facts valid at that world-time instant (see `filter_by_validity`). The
+        filter runs before `token_budget`, so the budget applies to the facts
+        that actually survive. Because it drops hits after the fused top-K cut,
+        heavy invalidation can shrink the result below `limit`; `recall_flow`'s
+        3x candidate pool absorbs this in practice.
         """
         counter("mnemostack.recall.calls", 1)
         if self.query_expansion:
@@ -276,6 +292,9 @@ class Recaller:
             results = self._recall_once(
                 query, limit, vector_limit, bm25_limit, filters, trace=trace
             )
+        results = filter_by_validity(
+            results, include_invalidated=include_invalidated, as_of=as_of
+        )
         if token_budget is not None:
             results, _ = apply_token_budget(results, token_budget, token_counter)
         return results
