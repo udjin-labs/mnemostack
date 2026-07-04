@@ -127,20 +127,24 @@ def collect_markdown(
         # filesystem is indexed too (``rglob("*.md")`` would skip it).
         return sorted(f for f in d.rglob("*") if f.is_file() and f.suffix.lower() == ".md")
 
+    # Files to chunk = everything under the target (dir) or the target itself
+    # (a single ``.md`` file; a non-``.md`` target yields none, so the CLI errors
+    # out before a ``--recreate`` could drop the collection).
     if root.is_dir():
-        base = root
         files = _md_files(root)
-        resolution_files = files
     else:
-        # Single-file run: only ``root`` is chunked, but links resolve against
-        # the whole corpus (``root_dir`` if given, else the parent) so
-        # ``[b](b.md)`` / ``[[B]]`` still find a sibling and match the canonical
-        # node names a directory index makes. A non-``.md`` target yields no
-        # files (``files == 0``), so the CLI errors out before a ``--recreate``
-        # could drop the collection.
-        base = Path(root_dir) if root_dir is not None else root.parent
         files = [root] if root.suffix.lower() == ".md" else []
-        resolution_files = _md_files(base)
+
+    # ``base`` = the corpus root that source paths are relative to. An explicit
+    # ``root_dir`` (from --index-root) pins it so a nested target — file OR
+    # directory — keeps the parent index's source paths (``sub/a.md``) and its
+    # index_root-scoped ids / graph nodes. Links resolve against the whole
+    # corpus so a sibling reference matches the canonical directory-index node.
+    if root_dir is not None:
+        base = Path(root_dir)
+    else:
+        base = root if root.is_dir() else root.parent
+    resolution_files = files if base == root else _md_files(base)
 
     # Resolution maps: note name (basename) and relative path (without .md)
     # both point at the canonical relative path. Keys are lower-cased so link

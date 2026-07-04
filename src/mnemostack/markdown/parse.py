@@ -137,95 +137,53 @@ def _is_external(dest: str) -> bool:
     return dest.startswith(("//", "#")) or bool(_URI_SCHEME_RE.match(dest))
 
 
-def _is_escaped(text: str, pos: int) -> bool:
-    """True when the char at ``pos`` is backslash-escaped (odd run of ``\\``)."""
-    n = 0
-    i = pos - 1
-    while i >= 0 and text[i] == "\\":
-        n += 1
-        i -= 1
-    return n % 2 == 1
+def _mask_escaped_brackets(text: str) -> str:
+    """Replace a backslash-escaped ``[`` with a private-use sentinel.
 
-
-# Raw-source regions whose ``[[...]]`` is not a real wikilink occurrence: fenced
-# code blocks, inline code spans (matching backtick runs), and HTML comments.
-# Used only to narrow the escaped-wikilink whitelist below.
-_FENCE_RE = re.compile(r"^ {0,3}([`~]{3,})[^\n]*$", re.MULTILINE)
-_BACKTICKS_RE = re.compile(r"`+")
-_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
-
-
-def _ignored_ranges(text: str) -> list[tuple[int, int]]:
-    ranges: list[tuple[int, int]] = []
-    # Fenced blocks: pair a fence with the next matching bare fence (else EOF).
-    open_start: int | None = None
-    open_fence = ""
-    for m in _FENCE_RE.finditer(text):
-        token = m.group(1)
-        if open_start is None:
-            open_start, open_fence = m.start(), token
-        elif token[0] == open_fence[0] and len(token) >= len(open_fence):
-            ranges.append((open_start, m.end()))
-            open_start, open_fence = None, ""
-    if open_start is not None:
-        ranges.append((open_start, len(text)))
-    # Inline code spans: pair backtick runs of equal length.
-    runs = [(m.start(), m.end()) for m in _BACKTICKS_RE.finditer(text)]
-    i = 0
-    while i < len(runs):
-        length = runs[i][1] - runs[i][0]
-        j = i + 1
-        while j < len(runs) and (runs[j][1] - runs[j][0]) != length:
-            j += 1
-        if j < len(runs):
-            ranges.append((runs[i][0], runs[j][1]))
-            i = j + 1
-        else:
-            i += 1
-    ranges.extend((m.start(), m.end()) for m in _COMMENT_RE.finditer(text))
-    return ranges
-
-
-def _unescaped_wikilink_targets(text: str) -> set[str]:
-    """Raw ``[[target]]`` strings that appear as a *real* wikilink in the source.
-
-    markdown-it unescapes ``\\[`` inside a text token (dropping the backslash),
-    so a rendered ``\\[[Draft]]`` looks identical to a real wikilink there. This
-    set — computed on the raw source, where the escape and code/comment context
-    are still visible — gates the text-token scan so an escaped example doesn't
-    become an edge. An occurrence is only counted when it is un-escaped, not an
-    embed (``![[...]]``), and not inside a code span/block or HTML comment.
+    An escaped ``\\[`` is literal text in CommonMark, and markdown-it drops the
+    backslash — so a rendered ``\\[[Draft]]`` or ``\\[x](note.md)`` looks like a
+    real wikilink/link in the parsed text tokens. Neutralizing the escaped ``[``
+    *before* parsing (on a scan-copy only, never the chunked body) means an
+    escaped opener can't match — no code/comment/label region-detection needed,
+    since the parser already excludes those. An escaped backslash ``\\\\`` is
+    preserved so a genuine following ``[`` still forms a link.
     """
-    ignored = _ignored_ranges(text)
-    out: set[str] = set()
-    for m in _WIKILINK_RE.finditer(text):
-        s = m.start()
-        if _is_escaped(text, s) or (s > 0 and text[s - 1] == "!"):
-            continue
-        if any(a <= s < b for a, b in ignored):
-            continue
-        out.add(m.group(1))
-    return out
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "\\" and i + 1 < n:
+            nxt = text[i + 1]
+            if nxt == "[":
+                out.append("")  # escaped [ → sentinel (won't match [[ )
+            else:
+                out.append(c)  # keep the escape for markdown-it
+                out.append(nxt)
+            i += 2
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
 
 
 def extract_links(text: str) -> list[Link]:
     """Extract outgoing link targets (inline markdown links + ``[[wikilinks]]``).
 
     Uses a CommonMark parser, so link syntax inside code (fenced, indented, or
-    inline spans) and inside HTML comments is not a reference and is skipped;
-    escapes, balanced brackets/parens, titles, and angle-bracketed/percent-
-    encoded destinations are handled to spec. Inline links come from ``link_open``
-    hrefs; ``[[wikilinks]]`` are matched only on the parser's plain-text tokens
-    (so a ``[[B]]`` inside another link's label is not a separate edge). Any URI
-    scheme (``http(s):``, ``mailto:``, ``tel:``, ...), protocol-relative ``//``,
-    pure anchors, image embeds (``![[...]]``), and non-note file targets are
-    dropped. De-dup is keyed by ``(style, target)`` so a wikilink and an inline
-    link to the same name both survive — they resolve differently.
+    inline spans) and inside HTML comments/blocks is not a reference and is
+    skipped; balanced brackets/parens, titles, and angle-bracketed/percent-
+    encoded destinations are handled to spec. Backslash-escaped openers
+    (``\\[x](...)``, ``\\[[...]]``) are neutralized before parsing so they can't
+    become edges. Inline links come from ``link_open`` hrefs; ``[[wikilinks]]``
+    are matched only on the parser's plain-text tokens (so a ``[[B]]`` inside
+    another link's label is not a separate edge). Any URI scheme, protocol-
+    relative ``//``, pure anchors, image embeds (``![[...]]``), and non-note file
+    targets are dropped. De-dup is keyed by ``(style, target)`` so a wikilink
+    and an inline link to the same name both survive — they resolve differently.
     """
     seen: dict[tuple[bool, str], Link] = {}
-    unescaped = _unescaped_wikilink_targets(text)
     link_depth = 0
-    for tok in _iter_inline_tokens(text):
+    for tok in _iter_inline_tokens(_mask_escaped_brackets(text)):
         if tok.type == "link_open":
             if link_depth == 0:
                 dest = tok.attrGet("href") or ""
@@ -238,8 +196,6 @@ def extract_links(text: str) -> list[Link]:
             link_depth = max(0, link_depth - 1)
         elif tok.type == "text" and link_depth == 0:
             for m in _WIKILINK_RE.finditer(tok.content):
-                if m.group(1) not in unescaped:
-                    continue  # only escaped in the source — not a real wikilink
                 if m.start() > 0 and tok.content[m.start() - 1] == "!":
                     continue  # ![[...]] embed, not a wikilink
                 if not _is_note_target(m.group(1)):

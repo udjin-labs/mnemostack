@@ -727,9 +727,11 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
     """Index a markdown folder: frontmatter -> payload, links -> graph edges."""
     from .markdown import collect_markdown
 
-    target = Path(args.path)
+    # Resolve to an absolute path so it's comparable with a resolved --index-root
+    # when computing corpus-relative sources (relative_to needs both same-form).
+    target = Path(args.path).resolve()
     if not target.exists():
-        print(f"error: path does not exist: {target}", file=sys.stderr)
+        print(f"error: path does not exist: {args.path}", file=sys.stderr)
         return 2
     if args.chunk_size <= 0:
         print(
@@ -751,8 +753,19 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
     # root so a nested single-file refresh (`index-markdown notes/sub/a.md
     # --index-root notes`) updates the same chunks/graph nodes as the parent
     # directory index, instead of inserting a second copy under a narrower root.
-    root_dir = str(Path(args.index_root).resolve()) if getattr(args, "index_root", None) else None
-    if root_dir is not None:
+    root_dir = None
+    if getattr(args, "index_root", None):
+        root_path = Path(args.index_root).resolve()
+        if not root_path.is_dir():
+            print(f"error: --index-root is not a directory: {args.index_root}", file=sys.stderr)
+            return 2
+        if not target.is_relative_to(root_path):
+            print(
+                f"error: {args.path} is not under --index-root {args.index_root}",
+                file=sys.stderr,
+            )
+            return 2
+        root_dir = str(root_path)
         index_root = root_dir
     else:
         index_root = str((target if target.is_dir() else target.parent).resolve())

@@ -177,11 +177,20 @@ def test_extract_links_skips_escaped_wikilink():
     assert [(link.target, link.is_wikilink) for link in links] == [("Real", True)]
 
 
-def test_extract_links_escaped_wikilink_not_whitelisted_by_code_occurrence():
-    # [[Draft]] appears unescaped only inside a code span; the escaped \[[Draft]]
-    # in prose must NOT be whitelisted by that ignored occurrence.
-    text = "code `[[Draft]]` and escaped \\[[Draft]] and real [[Real]]"
-    assert {link.target for link in extract_links(text)} == {"Real"}
+def test_extract_links_escaped_wikilink_never_matches():
+    # An escaped opener is neutralized before parsing, so a `\[[Draft]]` in prose
+    # is never an edge — regardless of an unescaped `[[Draft]]` appearing in an
+    # ignored region (code span/block, indented code, link label, or raw HTML).
+    for ignored in (
+        "code `[[Draft]]`",
+        "    [[Draft]]\n",          # indented code
+        "[see [[Draft]]](x.md)",    # link label
+        "<div>[[Draft]]</div>",     # raw HTML
+    ):
+        text = f"{ignored}\n\nescaped \\[[Draft]] and real [[Real]]"
+        assert {link.target for link in extract_links(text)} == {"Real"} | (
+            {"x"} if "x.md" in ignored else set()
+        ), text
 
 
 def test_extract_links_percent_encoded_extension_is_asset():
@@ -394,6 +403,15 @@ def test_collect_single_file_root_dir_keeps_nested_source(tmp_path):
     (tmp_path / "sub" / "a.md").write_text("# A\nbody a")
     col = collect_markdown(tmp_path / "sub" / "a.md", root_dir=tmp_path)
     assert [c.payload["source"] for c in col.chunks] == ["sub/a.md"]
+
+
+def test_collect_dir_root_dir_keeps_nested_sources(tmp_path):
+    # A nested DIRECTORY refresh with root_dir keeps parent-relative sources too.
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "a.md").write_text("# A\nbody a")
+    (tmp_path / "sub" / "b.md").write_text("# B\nbody b")
+    col = collect_markdown(tmp_path / "sub", root_dir=tmp_path)
+    assert sorted(c.payload["source"] for c in col.chunks) == ["sub/a.md", "sub/b.md"]
 
 
 def test_collect_reserves_heading_path_over_frontmatter(tmp_path):
