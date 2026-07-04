@@ -649,3 +649,65 @@ def test_search_many_filters_per_vector_before_fusion():
     recaller.rrf_k = 60
     out = recaller.search_many([[0.1], [0.2]], limit=5)
     assert {r.id for r in out} == {"fresh"}  # stale filtered per vector
+
+
+# ---------- review round 7 ----------
+
+
+def test_graph_bare_node_skipped_when_no_valid_edge():
+    # Under a validity view (default current-only, or as_of), a node whose
+    # rel query returns nothing must not surface as a bare entity.
+    from mnemostack.recall.retrievers import MemgraphRetriever
+
+    class _FakeSession:
+        def run(self, cypher, **params):
+            class _R:
+                def data(self_inner):
+                    if "labels(n)[0]" in cypher:      # node probe
+                        return [{"name": "Alice", "type": "Person", "mc": ""}]
+                    return []                          # rel query: no valid edges
+            return _R()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class _FakeDriver:
+        def session(self):
+            return _FakeSession()
+
+    r = MemgraphRetriever.__new__(MemgraphRetriever)
+    r.min_word = 3
+    r.contains_min = 5
+    r.max_nodes = 10
+    r.max_rels = 5
+    r._driver = _FakeDriver()
+    r._own_driver = False
+
+    # default (current-only) view: bare node with no valid edge -> dropped
+    assert r.search("alice person") == []
+    # include_invalidated=True (no as_of): bare node allowed (legacy behavior)
+    out = r.search("alice person", include_invalidated=True)
+    assert any(res.id == "graph:Alice" for res in out)
+
+
+def test_fallback_filters_validity_before_truncate():
+    from mnemostack.recall.recaller import Recaller
+
+    recaller = Recaller.__new__(Recaller)
+    recaller.embedding = None
+    recaller.vector = None
+
+    # stub the fallback hit source: stale hit first, valid one below
+    stale = RecallResult(id="stale", text="s", score=0.9,
+                         payload={"invalidated_at": "2026-07-04"}, sources=["vector"])
+    fresh = RecallResult(id="fresh", text="f", score=0.5, payload={}, sources=["vector"])
+    recaller._vector_fallback_hits = lambda query, limit, filters: [stale, fresh]
+
+    out = recaller._maybe_apply_fallback(
+        "q", [], limit=1, vector_limit=1, filters=None
+    )
+    assert "stale" not in {r.id for r in out}
+    assert "fresh" in {r.id for r in out}

@@ -483,7 +483,13 @@ class Recaller:
                         results.append(mca_result)
             if not vector_hits:
                 results = self._maybe_apply_fallback(
-                    query, results, limit=limit, vector_limit=vector_limit, filters=filters
+                    query,
+                    results,
+                    limit=limit,
+                    vector_limit=vector_limit,
+                    filters=filters,
+                    include_invalidated=include_invalidated,
+                    as_of=as_of,
                 )
             if apply_vector_floor:
                 results = self._apply_vector_floor(results, raw_vector_candidates)
@@ -822,7 +828,13 @@ class Recaller:
                 results.append(r)
             if not has_vector_results:
                 results = self._maybe_apply_fallback(
-                    query, results, limit=limit, vector_limit=per_source_limit, filters=filters
+                    query,
+                    results,
+                    limit=limit,
+                    vector_limit=per_source_limit,
+                    filters=filters,
+                    include_invalidated=include_invalidated,
+                    as_of=as_of,
                 )
             if apply_vector_floor:
                 results = self._apply_vector_floor(
@@ -1030,10 +1042,19 @@ class Recaller:
         limit: int,
         vector_limit: int,
         filters: dict[str, Any] | None,
+        include_invalidated: bool = False,
+        as_of: str | None = None,
     ) -> list[RecallResult]:
-        fallback_hits = self._vector_fallback_hits(
-            query, limit=max(limit, vector_limit), filters=filters
-        )
+        # Over-fetch + filter under the caller's validity view before the
+        # merge/truncate below, so stale/out-of-window fallback hits can't
+        # crowd out a valid one just past the limit.
+        fetch = _fetch_limit(max(limit, vector_limit), include_invalidated, as_of)
+        fallback_hits = self._vector_fallback_hits(query, limit=fetch, filters=filters)
+        fallback_hits = [
+            h
+            for h in fallback_hits
+            if keep_payload(h.payload, include_invalidated=include_invalidated, as_of=as_of)
+        ][: max(limit, vector_limit)]
         if not fallback_hits:
             return results
 
