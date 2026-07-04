@@ -736,5 +736,9 @@ def test_to_utc_iso_normalizes_non_T_separators():
     assert to_utc_iso("2026-07-04 00:00:00+02:00") == "2026-07-03T22:00:00Z"
     # calendar-date-only stays as-is (not churned to an instant)
     assert to_utc_iso("2024-01-15") == "2024-01-15"
+    # a date with only a zone suffix and no time-of-day is NOT a datetime —
+    # leave it untouched rather than mangling it into a spurious instant
+    assert to_utc_iso("2024-01-15+02:00") == "2024-01-15+02:00"
+    assert to_utc_iso("2024-01-15Z") == "2024-01-15Z"
     # non-instant marker passes through
     assert to_utc_iso("current") == "current"

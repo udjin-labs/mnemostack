@@ -20,9 +20,12 @@ import re
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
-# A value that is only a calendar date (no time-of-day / offset) — left as-is
-# by ``to_utc_iso`` so date-only graph bounds aren't churned into instants.
-_DATE_ONLY_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+# Matches an ISO value that carries a time-of-day: a date, then a T/t/space
+# separator, then a digit. Only such values are normalized by ``to_utc_iso`` —
+# a bare date (``2024-01-15``) or a date with only a zone suffix and no time
+# (``2024-01-15+02:00``) has no time component and is left as-is, so it is not
+# mangled into a spurious instant.
+_HAS_TIME_RE = re.compile(r"\d{4}-\d{2}-\d{2}[Tt ]\d")
 
 if TYPE_CHECKING:
     from .recaller import RecallResult
@@ -62,19 +65,20 @@ def to_utc_iso(value: Any) -> Any:
     Graph validity predicates compare timestamps as raw strings in Cypher (no
     instant parsing available there), so an offset-bearing value must be
     normalized to UTC on both the write and the query side for the comparison
-    to be correct. Bare dates (``2024-01-15``), the ``current`` marker, and
-    ``None`` are returned unchanged — only genuinely zoned datetimes are
-    rewritten, so date-only graph data keeps its format. Any separator
+    to be correct. Bare dates (``2024-01-15``), a date with only a zone suffix
+    (``2024-01-15+02:00``), the ``current`` marker, and ``None`` are returned
+    unchanged — only values with an actual time-of-day are rewritten, so
+    date-only graph data keeps its format. Any time separator
     ``datetime.fromisoformat`` accepts (``T``, lowercase ``t``, or a space) is
     recognized, not just an uppercase ``T``.
     """
     if value is None:
         return None
     text = str(value)
-    if _DATE_ONLY_RE.fullmatch(text):  # calendar date only — leave as-is
+    if not _HAS_TIME_RE.match(text):  # no time-of-day component — leave as-is
         return text
     dt = _to_instant(text)
-    if dt is None:  # marker like "current", or not a parseable instant
+    if dt is None:  # not a parseable instant
         return text
     # Emit the ``Z`` suffix, not ``+00:00``: graph predicates compare these as
     # raw strings in Cypher, and ``Z`` is the common form of existing UTC rows,
