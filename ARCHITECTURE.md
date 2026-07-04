@@ -160,7 +160,7 @@ services:
 ## Design principles
 
 - **Hybrid over pure vector.** BM25 finds exact tokens (IPs, versions, error strings) that vector search misses.
-- **Temporal validity.** Facts have `valid_from`/`valid_until` — memory is not just what happened but when it was true.
+- **Temporal validity.** Facts have `valid_from`/`valid_until` — memory is not just what happened but when it was true. On both sides now: the graph closes a fact via `GraphStore.invalidate` (`valid_until`), and the vector store mirrors it via `VectorStore.invalidate` (bi-temporal `invalidated_at` system-time + `valid_until` world-time). Recall hides invalidated facts by default; `include_invalidated` / `as_of` opt back in or reconstruct a past instant.
 - **Pluggable embeddings.** No vendor lock-in. User picks provider; system validates dimension consistency.
 - **Same provider for write and read.** Indexing and querying must use identical embedding model.
 - **Graceful degradation.** If Memgraph is down, retrieval still works with BM25+vector only.

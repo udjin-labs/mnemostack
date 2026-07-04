@@ -89,7 +89,7 @@ class _FakePipeline:
     def __init__(self, stages=None):
         self.stages = list(stages or [])
 
-    def apply(self, query, results):
+    def apply(self, query, results, **_):
         return results
 
     def __iter__(self):
@@ -620,6 +620,8 @@ def test_answer_endpoint_threads_filters_to_recall_and_generator(monkeypatch):
     assert srv.AnswerGenerator.last_generate_kwargs == {
         "recall_filters": {"tenant": "b"},
         "token_budget": None,
+        "include_invalidated": False,
+        "as_of": None,
     }
 
 
@@ -707,3 +709,25 @@ def test_answer_endpoint_token_budget_trims_memories_and_reports_tokens(monkeypa
     import mnemostack.server as srv
 
     assert srv.AnswerGenerator.last_generate_kwargs["token_budget"] == 2
+
+
+def test_recall_endpoint_include_invalidated_and_as_of_threaded(monkeypatch):
+    app, recaller = _patched_app(monkeypatch, with_answer=False)
+    client = TestClient(app)
+
+    captured = {}
+    orig = recaller.recall
+
+    def _spy(query, limit=10, filters=None, **kwargs):
+        captured.update(kwargs)
+        return orig(query, limit=limit, filters=filters)
+
+    recaller.recall = _spy
+    resp = client.post(
+        "/recall",
+        json={"query": "q", "full_pipeline": False,
+              "include_invalidated": True, "as_of": "2026-03-01"},
+    )
+    assert resp.status_code == 200
+    assert captured.get("include_invalidated") is True
+    assert captured.get("as_of") == "2026-03-01"

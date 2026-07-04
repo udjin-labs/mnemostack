@@ -12,6 +12,7 @@ import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+from functools import partial
 from typing import TYPE_CHECKING
 
 from ..llm.base import LLMProvider
@@ -499,6 +500,8 @@ class AnswerGenerator:
         *,
         token_budget: int | None = None,
         token_counter: TokenCounter | None = None,
+        include_invalidated: bool = False,
+        as_of: str | None = None,
     ) -> Answer:
         """Synthesize answer from retrieved memories.
 
@@ -514,6 +517,12 @@ class AnswerGenerator:
         expansion/inference retry paths, which would otherwise bypass a
         budget the caller applied to `memories` up front (see
         `apply_token_budget` for the trimming contract).
+
+        `include_invalidated` / `as_of` must match the validity view the
+        caller used to fetch `memories`: the expansion/inference retry paths
+        run fresh sub-recalls, so without threading these a point-in-time
+        (`as_of`) retry would answer from default-current memories instead of
+        the requested historical view.
         """
         counter("mnemostack.answer.calls", 1)
         memories = self._cap_memories(memories, token_budget, token_counter)
@@ -581,6 +590,8 @@ class AnswerGenerator:
                 recall_filters=recall_filters,
                 token_budget=token_budget,
                 token_counter=token_counter,
+                include_invalidated=include_invalidated,
+                as_of=as_of,
             )
         elif (
             self.category_aware_prompts
@@ -597,6 +608,8 @@ class AnswerGenerator:
                 recall_filters=recall_filters,
                 token_budget=token_budget,
                 token_counter=token_counter,
+                include_invalidated=include_invalidated,
+                as_of=as_of,
             )
         answer = self._apply_specificity_resolver(query, answer, specificity_memories, category)
         # Report the context that actually produced the answer: after an
@@ -619,6 +632,8 @@ class AnswerGenerator:
         *,
         token_budget: int | None = None,
         token_counter: TokenCounter | None = None,
+        include_invalidated: bool = False,
+        as_of: str | None = None,
     ) -> Answer:
         """Async wrapper around `generate`.
 
@@ -629,13 +644,17 @@ class AnswerGenerator:
         import asyncio
 
         return await asyncio.to_thread(
-            self.generate,
-            query,
-            memories,
-            recall_filters,
-            category,
-            token_budget=token_budget,
-            token_counter=token_counter,
+            partial(
+                self.generate,
+                query,
+                memories,
+                recall_filters,
+                category,
+                token_budget=token_budget,
+                token_counter=token_counter,
+                include_invalidated=include_invalidated,
+                as_of=as_of,
+            )
         )
 
     def _retry_with_expansion_answer(
@@ -647,12 +666,15 @@ class AnswerGenerator:
         recall_filters: dict[str, object] | None = None,
         token_budget: int | None = None,
         token_counter: TokenCounter | None = None,
+        include_invalidated: bool = False,
+        as_of: str | None = None,
     ) -> tuple[Answer, list[RecallResult]]:
         """Retry low-confidence answers with expansion + HyDE vector RRF.
 
         *recall_filters* keeps the retry inside the same filtered scope as
         the primary recall — without it, a low-confidence first answer would
         let this path pull unfiltered hits from outside the scope.
+        *include_invalidated* / *as_of* keep it inside the same validity view.
         """
         if self.expansion_llm is None or self.recaller is None or self.recaller.embedding is None:
             return draft, memories
@@ -676,10 +698,15 @@ class AnswerGenerator:
         if not vectors:
             return draft, memories
 
+        # search_many filters each vector's list for validity and trims before
+        # RRF, so a stale hit recurring across expanded vectors can't be boosted
+        # into the merged context ahead of a valid single-vector hit.
         merged_memories = self.recaller.search_many(
             vectors,
             limit=self.max_memories,
             filters=dict(recall_filters) if recall_filters is not None else None,
+            include_invalidated=include_invalidated,
+            as_of=as_of,
         )
         # The fresh sub-recall bypassed any budget the caller applied to the
         # primary memories; re-cap before this pool reaches another prompt.
@@ -727,6 +754,8 @@ class AnswerGenerator:
         recall_filters: dict[str, object] | None,
         token_budget: int | None = None,
         token_counter: TokenCounter | None = None,
+        include_invalidated: bool = False,
+        as_of: str | None = None,
     ) -> tuple[Answer, list[RecallResult]]:
         """Retry low-confidence inference answers with decomposed evidence queries."""
         if self.recaller is None:
@@ -738,16 +767,17 @@ class AnswerGenerator:
         sub_results: list[list[RecallResult]] = []
         for sub_query in sub_queries:
             try:
-                if recall_filters is None:
-                    sub_results.append(self.recaller.recall(sub_query, limit=10))
-                else:
-                    sub_results.append(
-                        self.recaller.recall(
-                            sub_query,
-                            limit=10,
-                            filters=dict(recall_filters),
-                        )
+                # Keep sub-recalls inside the same filtered scope AND validity
+                # view the caller used, so an as_of retry stays point-in-time.
+                sub_results.append(
+                    self.recaller.recall(
+                        sub_query,
+                        limit=10,
+                        filters=dict(recall_filters) if recall_filters is not None else None,
+                        include_invalidated=include_invalidated,
+                        as_of=as_of,
                     )
+                )
             except Exception:
                 sub_results.append([])
 

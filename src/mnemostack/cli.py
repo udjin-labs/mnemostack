@@ -143,6 +143,21 @@ def _effective_token_budget(args: argparse.Namespace) -> int | None:
     return budget if budget is not None and budget > 0 else None
 
 
+def _add_validity_recall_flags(parser: argparse.ArgumentParser) -> None:
+    """Shared --include-invalidated / --as-of flags for search and answer."""
+    parser.add_argument(
+        "--include-invalidated",
+        action="store_true",
+        help="Include facts marked stale (default: invalidated facts are hidden)",
+    )
+    parser.add_argument(
+        "--as-of",
+        default=None,
+        metavar="ISO",
+        help="Point-in-time recall: return facts valid at this world-time instant",
+    )
+
+
 def _recall_for_cli(args: argparse.Namespace, recaller, query: str, limit: int):
     """Run the same recall flow as the HTTP and MCP servers.
 
@@ -153,8 +168,17 @@ def _recall_for_cli(args: argparse.Namespace, recaller, query: str, limit: int):
     """
     filters = _parse_filters(args)
     token_budget = _effective_token_budget(args)
+    include_invalidated = bool(getattr(args, "include_invalidated", False))
+    as_of = getattr(args, "as_of", None)
     if getattr(args, "raw", False):
-        return recaller.recall(query, limit=limit, filters=filters, token_budget=token_budget)
+        return recaller.recall(
+            query,
+            limit=limit,
+            filters=filters,
+            token_budget=token_budget,
+            include_invalidated=include_invalidated,
+            as_of=as_of,
+        )
     pipeline = build_full_pipeline(
         state_store=FileStateStore(default_state_path()),
         graph_uri=getattr(args, "memgraph_uri", None) or None,
@@ -176,7 +200,38 @@ def _recall_for_cli(args: argparse.Namespace, recaller, query: str, limit: int):
         reranker=reranker,
         filters=filters,
         token_budget=token_budget,
+        include_invalidated=include_invalidated,
+        as_of=as_of,
     )
+
+
+def cmd_invalidate(args: argparse.Namespace) -> int:
+    """Mark memories stale by id (non-destructive; no re-embedding)."""
+    # Invalidation is a payload write — no embeddings needed, so skip provider
+    # construction (which for some providers loads a model). The dimension is
+    # unused by set_payload/retrieve.
+    store = VectorStore(collection=args.collection, dimension=1, host=args.qdrant)
+    if not store.collection_exists():
+        print(
+            f"error: collection '{args.collection}' does not exist.",
+            file=sys.stderr,
+        )
+        return 2
+    # argparse hands every id in as a string, but Qdrant integer point ids are
+    # distinct from string ids — coerce digit-only args so numeric-id
+    # collections can be invalidated (UUIDs contain hyphens, so stay strings).
+    ids = [int(x) if x.isdigit() else x for x in args.ids]
+    updated = store.invalidate(
+        ids,
+        invalidated_at=args.invalidated_at,
+        valid_until=args.valid_until,
+        index_root=args.index_root,
+    )
+    if args.json:
+        print(json.dumps({"invalidated": updated, "requested": len(args.ids)}))
+    else:
+        print(f"invalidated {updated}/{len(args.ids)} point(s)")
+    return 0
 
 
 def cmd_search(args: argparse.Namespace) -> int:
@@ -317,14 +372,16 @@ def cmd_answer(args: argparse.Namespace) -> int:
             }
         )
     gen = AnswerGenerator(**answer_generator_kwargs)
-    # recall_filters keeps retry sub-recalls inside the same filtered scope;
-    # the token budget must reach the generator too, or its retry paths
-    # would prompt over fresh unbudgeted sub-recalls.
+    # recall_filters, the token budget, and the validity view must all reach
+    # the generator too, or its retry paths would run fresh sub-recalls that
+    # ignore them (an --as-of retry would answer from current facts).
     answer = gen.generate(
         args.query,
         results,
         recall_filters=_parse_filters(args),
         token_budget=_effective_token_budget(args),
+        include_invalidated=bool(getattr(args, "include_invalidated", False)),
+        as_of=getattr(args, "as_of", None),
     )
 
     # Tier caps how many sources we emit (answer text itself is model-sized).
@@ -804,7 +861,32 @@ def build_parser() -> argparse.ArgumentParser:
             "results: the final ranking is cut to the prefix that fits"
         ),
     )
+    _add_validity_recall_flags(p_search)
     p_search.set_defaults(func=cmd_search)
+
+    p_invalidate = sub.add_parser(
+        "invalidate",
+        parents=[common],
+        help="Mark memories stale by id (non-destructive, no re-embedding)",
+    )
+    p_invalidate.add_argument("ids", nargs="+", help="Point id(s) to invalidate")
+    p_invalidate.add_argument(
+        "--invalidated-at",
+        default=None,
+        help="System-time stamp (ISO-8601); default: now (UTC)",
+    )
+    p_invalidate.add_argument(
+        "--valid-until",
+        default=None,
+        help="World-time the fact stopped being true (ISO-8601); optional",
+    )
+    p_invalidate.add_argument(
+        "--index-root",
+        default=None,
+        help="Owner guard: skip points owned by a different index_root",
+    )
+    p_invalidate.add_argument("--json", action="store_true", help="JSON output")
+    p_invalidate.set_defaults(func=cmd_invalidate)
 
     p_synthesize = sub.add_parser(
         "synthesize",
@@ -946,6 +1028,7 @@ def build_parser() -> argparse.ArgumentParser:
             "fed to the answer LLM"
         ),
     )
+    _add_validity_recall_flags(p_answer)
     p_answer.add_argument("--json", action="store_true", help="JSON output")
     p_answer.set_defaults(func=cmd_answer)
 

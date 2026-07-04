@@ -37,6 +37,7 @@ except ImportError:  # pragma: no cover - qdrant-client is a runtime dependency
 from .bm25 import BM25, BM25Doc, Tokenizer, tokenize
 from .filters import payload_matches
 from .recaller import RecallResult
+from .validity import to_utc_instant
 
 logger = logging.getLogger(__name__)
 
@@ -417,6 +418,32 @@ class HyDERetriever(Retriever):
         ]
 
 
+def graph_valid_clause(var: str, as_of: str | None, include_invalidated: bool = False) -> str:
+    """Cypher validity predicate for a node/rel variable.
+
+    - ``include_invalidated`` and no ``as_of``: no filter (``true``) — the
+      caller asked for stale facts too, so don't suppress closed graph edges.
+    - No ``as_of`` (default): "currently valid" (``valid_until`` = the
+      ``'current'`` marker, or legacy NULL).
+    - ``as_of`` set: the point-in-time predicate ``GraphStore.query_triples``
+      uses, referencing the bound ``$as_of`` parameter (``as_of`` wins over
+      ``include_invalidated`` — point-in-time reconstruction is explicit).
+
+    Shared by ``MemgraphRetriever`` and the pipeline's graph-resurrection stage
+    so both filter graph facts consistently. Timestamps are compared as strings
+    in Cypher, so bind a UTC-normalized ``$as_of`` (see ``to_utc_iso``).
+    """
+    if as_of is None:
+        if include_invalidated:
+            return "true"
+        return f"coalesce({var}.valid_until, 'current') = 'current'"
+    return (
+        f"({var}.valid_from IS NULL OR {var}.valid_from <= $as_of) AND "
+        f"({var}.valid_until = 'current' OR {var}.valid_until IS NULL "
+        f"OR {var}.valid_until > $as_of)"
+    )
+
+
 class MemgraphRetriever(Retriever):
     """Knowledge-graph retriever — exact/contains match on node names.
 
@@ -426,6 +453,12 @@ class MemgraphRetriever(Retriever):
     """
 
     name = "memgraph"
+    #: The recall path passes each validity kwarg only to retrievers that
+    #: advertise it, so a custom retriever that accepts only `as_of` (or
+    #: neither) is never handed an argument its `search` doesn't take. Graph
+    #: facts carry no validity payload, so both are filtered at query time.
+    accepts_as_of = True
+    accepts_include_invalidated = True
 
     def __init__(
         self,
@@ -474,7 +507,9 @@ class MemgraphRetriever(Retriever):
                 pass
             self._driver = None
 
-    def search(self, query, limit=20, filters=None):
+    _valid_clause = staticmethod(graph_valid_clause)
+
+    def search(self, query, limit=20, filters=None, as_of=None, include_invalidated=False):
         if filters:
             # Graph nodes carry no chunk payload, so a result here cannot be
             # proven to belong to the filtered scope (tenant, source, time
@@ -487,6 +522,15 @@ class MemgraphRetriever(Retriever):
         words = [w.lower() for w in query.split() if len(w) >= self.min_word]
         if not words:
             return []
+        # Normalize `as_of` to a full UTC instant (expanding a bare date to
+        # midnight-Z) so the raw-string Cypher comparison is correct against
+        # full-instant bounds written via GraphStore.
+        as_of = to_utc_instant(as_of)
+        node_valid = self._valid_clause("n", as_of, include_invalidated)
+        rel_valid = self._valid_clause("r", as_of, include_invalidated)
+        target_valid = self._valid_clause("m", as_of, include_invalidated)
+        # Only bind $as_of when the predicate references it.
+        extra = {"as_of": as_of} if as_of is not None else {}
         counts: dict[str, dict[str, Any]] = defaultdict(lambda: {"count": 0, "type": "", "mc": ""})
         try:
             with driver.session() as session:
@@ -499,10 +543,11 @@ class MemgraphRetriever(Retriever):
                     if w.isdigit() and len(w) >= 6:
                         rows = session.run(
                             "MATCH (n) WHERE (n.telegram_id = $w OR n.contact_id = $w) "
-                            "AND coalesce(n.valid_until, 'current') = 'current' "
+                            f"AND {node_valid} "
                             "RETURN n.name AS name, labels(n)[0] AS type, "
                             "n.memory_class AS mc LIMIT 5",
                             w=w,
+                            **extra,
                         ).data()
 
                     # Probe 2: exact name match.
@@ -514,28 +559,31 @@ class MemgraphRetriever(Retriever):
                     if not rows:
                         rows = session.run(
                             "MATCH (n) WHERE coalesce(n.name_lower, toLower(n.name)) = $w "
-                            "AND coalesce(n.valid_until, 'current') = 'current' "
+                            f"AND {node_valid} "
                             "RETURN n.name AS name, labels(n)[0] AS type, "
                             "n.memory_class AS mc LIMIT 5",
                             w=w,
+                            **extra,
                         ).data()
                     # Probe 3: also match by handle/username (e.g. @alice)
                     if not rows and len(w) >= 3:
                         rows = session.run(
                             "MATCH (n) WHERE toLower(coalesce(n.telegram_username, '')) = $w "
-                            "AND coalesce(n.valid_until, 'current') = 'current' "
+                            f"AND {node_valid} "
                             "RETURN n.name AS name, labels(n)[0] AS type, "
                             "n.memory_class AS mc LIMIT 5",
                             w=w,
+                            **extra,
                         ).data()
                     # Probe 4: substring fallback for longer tokens.
                     if not rows and len(w) >= self.contains_min:
                         rows = session.run(
                             "MATCH (n) WHERE coalesce(n.name_lower, toLower(n.name)) CONTAINS $w "
-                            "AND coalesce(n.valid_until, 'current') = 'current' "
+                            f"AND {node_valid} "
                             "RETURN n.name AS name, labels(n)[0] AS type, "
                             "n.memory_class AS mc LIMIT 5",
                             w=w,
+                            **extra,
                         ).data()
                     for n in rows:
                         name = n.get("name")
@@ -544,19 +592,37 @@ class MemgraphRetriever(Retriever):
                         counts[name]["count"] += 1
                         counts[name]["type"] = n.get("type", "") or ""
                         counts[name]["mc"] = n.get("mc", "") or ""
-                # Fetch relationships for top-N
-                ranked = sorted(counts.items(), key=lambda kv: -kv[1]["count"])[: self.max_nodes]
+                # Over-fetch node candidates so a window of stale-only nodes
+                # doesn't hide valid ones below it before the bare-node skip.
+                validity_active = as_of is not None or not include_invalidated
+                node_budget = self.max_nodes * 3 if validity_active else self.max_nodes
+                ranked = sorted(counts.items(), key=lambda kv: -kv[1]["count"])[:node_budget]
                 results: list[RecallResult] = []
                 for name, info in ranked:
+                    if len(results) >= self.max_nodes:
+                        break
                     rel_rows = session.run(
-                        "MATCH (n {name: $name})-[r]->(m) "
-                        "WHERE coalesce(n.valid_until, 'current') = 'current' "
-                        "AND coalesce(r.valid_until, 'current') = 'current' "
-                        "RETURN n.name AS from_n, type(r) AS rel, m.name AS to_n "
-                        "LIMIT $lim",
+                        # Undirected: a target-only node (e.g. `Team A` in
+                        # `Alice -[MEMBER_OF]-> Team A`) has a valid incoming
+                        # edge but no outgoing one, so only checking `->` would
+                        # wrongly drop it under the bare-node skip. startNode/
+                        # endNode render the true direction. Filter the other
+                        # endpoint `m` too so a stale/future neighbor isn't
+                        # serialized into rel_text.
+                        "MATCH (n {name: $name})-[r]-(m) "
+                        f"WHERE {node_valid} AND {rel_valid} AND {target_valid} "
+                        "RETURN startNode(r).name AS from_n, type(r) AS rel, "
+                        "endNode(r).name AS to_n LIMIT $lim",
                         name=name,
                         lim=self.max_rels,
+                        **extra,
                     ).data()
+                    # Nodes carry no valid_from and invalidate() closes edges,
+                    # not nodes — so under a validity view a node can pass its
+                    # own probe while all its incident facts are out of window.
+                    # Don't emit a bare entity with no valid incident fact then.
+                    if not rel_rows and validity_active:
+                        continue
                     rel_text = "; ".join(
                         f"{r['from_n']}-[{r['rel']}]->{r['to_n']}" for r in rel_rows
                     )
