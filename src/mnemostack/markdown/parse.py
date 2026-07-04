@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 from typing import Any
 
 import yaml
@@ -57,19 +58,33 @@ def _strip_target(raw: str) -> str:
     return target
 
 
-def extract_links(text: str) -> list[str]:
+@dataclass(frozen=True)
+class Link:
+    """An outgoing link target and how it should be resolved.
+
+    ``target`` is normalized (no anchor/alias/``.md``). ``is_wikilink`` is True
+    for ``[[...]]`` links (resolved by note name, corpus-wide) and False for
+    inline ``[text](path)`` links (resolved relative to the source file first).
+    """
+
+    target: str
+    is_wikilink: bool
+
+
+def extract_links(text: str) -> list[Link]:
     """Extract outgoing link targets (wikilinks + inline markdown links).
 
-    Returns normalized, de-duplicated target keys in first-seen order.
+    Returns normalized, de-duplicated ``Link`` records in first-seen order.
     External links (``http://``, ``https://``, ``mailto:``) and pure anchors
     (``#section``) are skipped — only intra-corpus references become edges.
-    Image embeds (``![...](...)``) are ignored.
+    Image embeds (``![...](...)``) and non-note file targets (``.png``, ...)
+    are ignored.
     """
-    seen: dict[str, None] = {}
+    seen: dict[str, Link] = {}
     for raw in _WIKILINK_RE.findall(text):
         key = _strip_target(raw)
         if key:
-            seen.setdefault(key, None)
+            seen.setdefault(key, Link(target=key, is_wikilink=True))
     for raw in _MDLINK_RE.findall(text):
         low = raw.lower()
         if low.startswith(("http://", "https://", "mailto:", "#")) or "://" in low:
@@ -83,5 +98,5 @@ def extract_links(text: str) -> list[str]:
             continue
         key = _strip_target(raw)
         if key:
-            seen.setdefault(key, None)
-    return list(seen)
+            seen.setdefault(key, Link(target=key, is_wikilink=False))
+    return list(seen.values())

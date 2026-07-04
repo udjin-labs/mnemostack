@@ -725,8 +725,6 @@ def cmd_index(args: argparse.Namespace) -> int:
 
 def cmd_index_markdown(args: argparse.Namespace) -> int:
     """Index a markdown folder: frontmatter -> payload, links -> graph edges."""
-    from collections import defaultdict
-
     from .markdown import collect_markdown
 
     target = Path(args.path)
@@ -788,8 +786,10 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
     if args.prune and not args.recreate:
         from .ingest import prune_stale_chunks
 
-        visited_sources = {payload["source"] for _cid, _text, payload in chunks}
-        fresh_by_source: dict[str, set[str]] = {source: set() for source in visited_sources}
+        # Seed from EVERY visited file, not just files that produced chunks: a
+        # file edited to empty / frontmatter-only yields no chunks but must
+        # still have its old points pruned.
+        fresh_by_source: dict[str, set[str]] = {source: set() for source in col.sources}
         for cid, _text, payload in chunks:
             fresh_by_source[payload["source"]].add(cid)
         for source in failed_sources:
@@ -806,10 +806,14 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
     # embeddings failed are skipped so a partial index doesn't rewrite links.
     edges_written = 0
     graph_uri = getattr(args, "memgraph_uri", None) or None
-    if graph_uri and col.edges:
+    if graph_uri:
         from .graph import GraphStore
 
-        by_source: dict[str, list[str]] = defaultdict(list)
+        # Seed with every indexed source so a file whose links were all removed
+        # is still synced (sync_file_links deletes its stale LINKS_TO edges).
+        by_source: dict[str, list[str]] = {
+            s: [] for s in col.sources if s not in failed_sources
+        }
         for edge in col.edges:
             if edge.source in failed_sources:
                 continue
@@ -822,7 +826,9 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
         else:
             try:
                 for source, targets in by_source.items():
-                    edges_written += graph.sync_file_links(source, targets)
+                    edges_written += graph.sync_file_links(
+                        source, targets, index_root=index_root
+                    )
             finally:
                 graph.close()
 

@@ -10,7 +10,7 @@ plumbing). Built for arbitrary markdown folders; an Obsidian vault is just one.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ..chunking import MarkdownChunker
@@ -45,7 +45,14 @@ class LinkEdge:
 class MarkdownCollection:
     chunks: list[MarkdownChunk] = field(default_factory=list)
     edges: list[LinkEdge] = field(default_factory=list)
-    files: int = 0
+    #: Corpus-relative paths of every file visited, including ones that
+    #: produced no chunks (empty / frontmatter-only) — the caller needs these
+    #: to prune their old chunks and re-sync their (now absent) links.
+    sources: list[str] = field(default_factory=list)
+
+    @property
+    def files(self) -> int:
+        return len(self.sources)
 
 
 def _rel(path: Path, base: Path) -> str:
@@ -59,6 +66,29 @@ def _norm_target(raw: str) -> str:
     while key.startswith("./"):
         key = key[2:]
     return key
+
+
+def _resolve_relative(source_rel: str, target: str, all_rels: set[str]) -> str | None:
+    """Resolve an inline link relative to its source file's directory.
+
+    ``[c](../index.md)`` from ``sub/page.md`` resolves to ``index.md`` — so
+    normal markdown relative links (and same-directory links in folders with
+    duplicate basenames) point at the right note. Returns the matched
+    corpus-relative path, or None if nothing resolves.
+    """
+    combined = PurePosixPath(source_rel).parent / _norm_target(target)
+    parts: list[str] = []
+    for part in combined.parts:
+        if part == "..":
+            if parts:
+                parts.pop()
+        elif part not in (".", ""):
+            parts.append(part)
+    normalized = "/".join(parts)
+    for candidate in (f"{normalized}.md", normalized):
+        if candidate in all_rels:
+            return candidate
+    return None
 
 
 def collect_markdown(
@@ -80,13 +110,15 @@ def collect_markdown(
     files = sorted(root.rglob("*.md")) if root.is_dir() else [root]
     base = root if root.is_dir() else root.parent
 
-    # Resolution map: note name (basename) and relative path (without .md) both
-    # point at the canonical relative path. Keys are lower-cased so link
+    # Resolution maps: note name (basename) and relative path (without .md)
+    # both point at the canonical relative path. Keys are lower-cased so link
     # resolution is case-insensitive (Obsidian-style); path keys win over
-    # bare names.
+    # bare names. `all_rels` is the set of real files for relative resolution.
     key_to_rel: dict[str, str] = {}
+    all_rels: set[str] = set()
     for f in files:
         rel = _rel(f, base)
+        all_rels.add(rel)
         rel_key = rel[:-3] if rel.lower().endswith(".md") else rel
         key_to_rel.setdefault(f.stem.lower(), rel)
         key_to_rel[rel_key.lower()] = rel
@@ -97,11 +129,17 @@ def collect_markdown(
         rel = _rel(f, base)
         text = f.read_text(encoding="utf-8", errors="ignore")
         meta, body = parse_frontmatter(text)
-        out.files += 1
+        out.sources.append(rel)
 
-        for target in extract_links(body):
-            norm = _norm_target(target)
-            resolved = key_to_rel.get(target.lower()) or key_to_rel.get(norm.lower())
+        for link in extract_links(body):
+            norm = _norm_target(link.target)
+            resolved: str | None = None
+            if not link.is_wikilink:
+                # Inline markdown link: resolve relative to the source file
+                # first (handles ../ and same-dir links, and duplicate
+                # basenames), then fall back to a corpus-wide name/path match.
+                resolved = _resolve_relative(rel, link.target, all_rels)
+            resolved = resolved or key_to_rel.get(link.target.lower()) or key_to_rel.get(norm.lower())
             out.edges.append(
                 LinkEdge(
                     source=rel,

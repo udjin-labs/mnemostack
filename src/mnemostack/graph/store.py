@@ -128,24 +128,38 @@ class GraphStore:
         with self.driver.session(database=self.database) as session:
             session.run(query, subject=subject, obj=obj, props=props)
 
-    def sync_file_links(self, source: str, targets: list[str]) -> int:
+    def sync_file_links(
+        self, source: str, targets: list[str], *, index_root: str | None = None
+    ) -> int:
         """Replace a file's outgoing ``LINKS_TO`` edges with ``targets``.
 
         Deletes the file's existing ``LINKS_TO`` relationships first, then
         re-creates one per target — so a re-index accurately reflects the
         current links (links removed from the file are dropped, not left
-        dangling). Nodes are ``:File`` labelled and keyed by relative path /
-        note name. Returns the number of edges written.
+        dangling). ``:File`` nodes are keyed by ``(name, index_root)`` so two
+        corpora that share a relative filename (both have ``index.md``) don't
+        collide: re-indexing one root never touches the other's edges. Returns
+        the number of edges written.
         """
+        root = index_root or ""
         with self.driver.session(database=self.database) as session:
             session.run(
-                "MATCH (:File {name: $src})-[r:LINKS_TO]->() DELETE r",
+                "MATCH (:File {name: $src, index_root: $root})-[r:LINKS_TO]->() DELETE r",
                 src=source,
+                root=root,
             )
-        for target in targets:
-            self.add_triple(
-                source, "LINKS_TO", target, subject_label="File", obj_label="File"
-            )
+            for target in targets:
+                session.run(
+                    "MERGE (s:File {name: $src, index_root: $root}) "
+                    "MERGE (o:File {name: $dst, index_root: $root}) "
+                    "SET s.valid_until = coalesce(s.valid_until, 'current'), "
+                    "    o.valid_until = coalesce(o.valid_until, 'current') "
+                    "MERGE (s)-[r:LINKS_TO]->(o) "
+                    "SET r.valid_until = coalesce(r.valid_until, 'current')",
+                    src=source,
+                    dst=target,
+                    root=root,
+                )
         return len(targets)
 
     def invalidate(
