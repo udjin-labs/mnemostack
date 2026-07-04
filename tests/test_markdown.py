@@ -78,6 +78,19 @@ def test_extract_links_skips_embeds_and_non_note_wikilinks():
     assert [(link.target, link.is_wikilink) for link in links] == [("Real Note", True)]
 
 
+def test_extract_links_skips_fenced_code_blocks():
+    # Link syntax shown inside a fenced code block is a sample, not a real
+    # reference — it must not become a LINKS_TO edge.
+    text = (
+        "real [[Live Note]] and [r](real.md)\n\n"
+        "```\nsample [[Fenced Note]] and [x](fenced.md)\n```\n"
+    )
+    links = extract_links(text)
+    targets = {link.target for link in links}
+    assert "Live Note" in targets and "real" in targets
+    assert "Fenced Note" not in targets and "fenced" not in targets
+
+
 def test_extract_links_spaced_and_escaped_inline_targets():
     # Angle-bracketed (<My Note.md>) and %20-escaped inline destinations are
     # valid intra-corpus note references; both normalize to the same key.
@@ -249,6 +262,21 @@ def test_sync_file_links_scopes_file_nodes_by_index_root():
     for call in session.run.call_args_list:
         assert "index_root" in call.args[0]
         assert call.kwargs.get("root") == "/vault-a"
+
+
+def test_sync_file_links_sets_python_lowercased_name():
+    # File nodes carry a Python-lowercased name_lower so MemgraphRetriever can
+    # find non-ASCII names (Memgraph's toLower folds ASCII only).
+    store, session = _graph_with_fake_session()
+
+    store.sync_file_links("Ünïcöde.md", ["Tïtle.md"], index_root="/v")
+    merge = next(
+        c for c in session.run.call_args_list
+        if "MERGE (s)-[r:LINKS_TO]->(o)" in c.args[0]
+    )
+    assert "name_lower" in merge.args[0]
+    assert merge.kwargs["src_lower"] == "ünïcöde.md"
+    assert merge.kwargs["dst_lower"] == "tïtle.md"
 
 
 # ---------- CLI ----------

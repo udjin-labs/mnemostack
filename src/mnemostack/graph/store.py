@@ -140,6 +140,11 @@ class GraphStore:
         corpora that share a relative filename (both have ``index.md``) don't
         collide: re-indexing one root never touches the other's edges. Returns
         the number of edges written.
+
+        Each node also gets a Python-lowercased ``name_lower`` so
+        ``MemgraphRetriever.search`` (which probes
+        ``coalesce(n.name_lower, toLower(n.name))``) can find files with
+        non-ASCII names — Memgraph's ``toLower`` only folds ASCII.
         """
         root = index_root or ""
         with self.driver.session(database=self.database) as session:
@@ -153,12 +158,15 @@ class GraphStore:
                     "MERGE (s:File {name: $src, index_root: $root}) "
                     "MERGE (o:File {name: $dst, index_root: $root}) "
                     "SET s.valid_until = coalesce(s.valid_until, 'current'), "
-                    "    o.valid_until = coalesce(o.valid_until, 'current') "
+                    "    o.valid_until = coalesce(o.valid_until, 'current'), "
+                    "    s.name_lower = $src_lower, o.name_lower = $dst_lower "
                     "MERGE (s)-[r:LINKS_TO]->(o) "
                     "SET r.valid_until = coalesce(r.valid_until, 'current')",
                     src=source,
                     dst=target,
                     root=root,
+                    src_lower=source.lower(),
+                    dst_lower=target.lower(),
                 )
         return len(targets)
 

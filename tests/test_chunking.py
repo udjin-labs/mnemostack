@@ -139,6 +139,19 @@ def test_markdown_chunker_rejects_non_positive_chunk_size():
             MarkdownChunker(chunk_size=bad).chunk("# H\n" + "x" * 50)
 
 
+def test_markdown_chunker_keeps_text_before_first_header():
+    # Lead-in text before the first `#` is real content and must be indexed,
+    # not dropped because sections only start at detected headers.
+    text = "Intro lead-in paragraph.\n\n# Section\n\nSection body."
+    chunks = MarkdownChunker(chunk_size=10000).chunk(text)
+    assert any(
+        c.metadata["heading_path"] == [] and "Intro lead-in paragraph" in c.text
+        for c in chunks
+    )
+    # the section content is still present too
+    assert any(c.metadata["heading_path"] == ["Section"] for c in chunks)
+
+
 def test_markdown_chunker_ignores_headers_in_code_blocks():
     text = """# Real Header
 

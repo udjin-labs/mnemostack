@@ -52,28 +52,20 @@ class MarkdownChunker(Chunker):
                 headers.append((match.start(), level, title))
 
         if not headers:
-            # No headers — one chunk if it fits, else split by size so a large
-            # headingless note (e.g. a plain README) still respects chunk_size
-            # and never overruns the embedding provider's input limit.
-            body = text.strip()
-            if len(body) <= self.chunk_size:
-                return [Chunk(text=body, offset=0, metadata={"heading_path": []})]
+            # No headers — split by size so a large headingless note (e.g. a
+            # plain README) still respects chunk_size and never overruns the
+            # embedding provider's input limit.
             pieces: list[Chunk] = []
-            sub_offset = 0
-            while sub_offset < len(body):
-                pieces.append(
-                    Chunk(
-                        text=body[sub_offset : sub_offset + self.chunk_size],
-                        offset=sub_offset,
-                        metadata={"heading_path": []},
-                    )
-                )
-                sub_offset += self.chunk_size
+            self._emit_plain_windows(text.strip(), pieces)
             return pieces
 
         # Build sections: each section spans from one header to the next
         chunks: list[Chunk] = []
         heading_stack: list[tuple[int, str]] = []  # (level, title)
+
+        # Lead-in text before the first header is real content — emit it (with an
+        # empty heading path) so it is not silently dropped from the index.
+        self._emit_plain_windows(text[: headers[0][0]].strip(), chunks)
 
         for i, (start, level, title) in enumerate(headers):
             # Maintain heading hierarchy
@@ -121,6 +113,30 @@ class MarkdownChunker(Chunker):
                     sub_offset += self.chunk_size
 
         return chunks
+
+    def _emit_plain_windows(self, body: str, chunks: list[Chunk]) -> None:
+        """Append ``body`` as headingless chunks, windowed to ``chunk_size``.
+
+        Used for a headingless note and for the lead-in text before the first
+        header. Empty ``body`` appends nothing. Offsets are body-relative, which
+        is enough for stable ids and ordering and never collides with the
+        header-anchored section offsets that follow.
+        """
+        if not body:
+            return
+        if len(body) <= self.chunk_size:
+            chunks.append(Chunk(text=body, offset=0, metadata={"heading_path": []}))
+            return
+        sub_offset = 0
+        while sub_offset < len(body):
+            chunks.append(
+                Chunk(
+                    text=body[sub_offset : sub_offset + self.chunk_size],
+                    offset=sub_offset,
+                    metadata={"heading_path": []},
+                )
+            )
+            sub_offset += self.chunk_size
 
     @staticmethod
     def _code_block_ranges(text: str) -> list[tuple[int, int]]:

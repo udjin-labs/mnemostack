@@ -37,6 +37,23 @@ _MDLINK_RE = re.compile(
     r"(?<!\!)\[[^\]]*\]\(\s*(?:<([^>]*)>|([^)\s]+))(?:\s+\"[^\"]*\")?\s*\)"
 )
 
+# Fenced code block delimiter (``` or ~~~ at line start) — link-like syntax
+# inside a fence is a code sample, not a real reference, so it is excluded.
+_CODE_FENCE_RE = re.compile(r"^(?:```|~~~)", re.MULTILINE)
+
+
+def _code_fence_ranges(text: str) -> list[tuple[int, int]]:
+    """(start, end) spans of fenced code blocks, pairing opening/closing fences."""
+    fences = [m.start() for m in _CODE_FENCE_RE.finditer(text)]
+    ranges = []
+    for i in range(0, len(fences) - 1, 2):
+        ranges.append((fences[i], fences[i + 1]))
+    return ranges
+
+
+def _in_ranges(pos: int, ranges: list[tuple[int, int]]) -> bool:
+    return any(start <= pos < end for start, end in ranges)
+
 
 def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     """Split leading YAML frontmatter from the markdown body.
@@ -101,10 +118,15 @@ def extract_links(text: str) -> list[Link]:
     External links (``http://``, ``https://``, ``mailto:``) and pure anchors
     (``#section``) are skipped — only intra-corpus references become edges.
     Image embeds (``![...](...)`` and ``![[...]]``) and non-note file targets
-    (``.png``, ``.pdf``, ...) are ignored for both link styles.
+    (``.png``, ``.pdf``, ...) are ignored for both link styles. Link syntax
+    inside a fenced code block is a code sample, not a reference, so it too is
+    skipped.
     """
+    fences = _code_fence_ranges(text)
     seen: dict[str, Link] = {}
     for m in _WIKILINK_RE.finditer(text):
+        if _in_ranges(m.start(), fences):
+            continue
         # Skip Obsidian embeds ``![[...]]`` and non-note targets (``[[img.png]]``).
         if m.start() > 0 and text[m.start() - 1] == "!":
             continue
@@ -115,6 +137,8 @@ def extract_links(text: str) -> list[Link]:
         if key:
             seen.setdefault(key, Link(target=key, is_wikilink=True))
     for m in _MDLINK_RE.finditer(text):
+        if _in_ranges(m.start(), fences):
+            continue
         raw = m.group(1) if m.group(1) is not None else m.group(2)
         low = raw.lower()
         if low.startswith(("http://", "https://", "mailto:", "#")) or "://" in low:
