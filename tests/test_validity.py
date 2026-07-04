@@ -447,9 +447,9 @@ def test_to_utc_iso_normalizes_offsets():
     assert to_utc_iso("2026-07-04T00:00:00+02:00") == "2026-07-03T22:00:00Z"
     # Z suffix -> UTC
     assert to_utc_iso("2026-06-01T00:00:00Z") == "2026-06-01T00:00:00Z"
-    # a bare date is canonicalized to a midnight-UTC instant (one comparable
-    # form for every value); the marker and None pass through unchanged
-    assert to_utc_iso("2024-01-15") == "2024-01-15T00:00:00Z"
+    # a bare calendar date stays a date (not expanded to an instant), keeping
+    # date-only graph bounds in their long-standing form; marker/None unchanged
+    assert to_utc_iso("2024-01-15") == "2024-01-15"
     assert to_utc_iso("current") == "current"
     assert to_utc_iso(None) is None
 
@@ -508,7 +508,7 @@ def test_graph_store_to_iso_normalizes_to_utc():
     from mnemostack.graph.store import _to_iso
 
     assert _to_iso("2026-07-04T00:00:00+02:00") == "2026-07-03T22:00:00Z"
-    assert _to_iso("2024-01-15") == "2024-01-15T00:00:00Z"  # bare date canonicalized
+    assert _to_iso("2024-01-15") == "2024-01-15"  # bare date stays a date
     assert _to_iso("current") == "current"
 
 
@@ -740,8 +740,8 @@ def test_to_utc_iso_normalizes_non_T_separators():
     assert to_utc_iso("2026-07-04 00:00:00+02:00") == "2026-07-03T22:00:00Z"
     # an arbitrary separator (datetime.isoformat(sep="_")) is recognized too
     assert to_utc_iso("2024-01-15_10:00:00") == "2024-01-15T10:00:00Z"
-    # a bare date canonicalizes to a midnight-UTC instant
-    assert to_utc_iso("2024-01-15") == "2024-01-15T00:00:00Z"
+    # a bare calendar date stays a date (see the dedicated bare-date tests)
+    assert to_utc_iso("2024-01-15") == "2024-01-15"
     # fromisoformat parses date+separator forms as naive datetimes (the "+" from
     # isoformat(sep="+") is a separator, not an offset) — all canonicalized to
     # the same UTC form, so a value can't be preserved in one shape and compared
@@ -790,9 +790,9 @@ def test_to_utc_iso_normalizes_basic_and_week_datetimes():
         assert to_utc_iso("2026-W27-6T00:00:00+02:00") == "2026-07-03T22:00:00Z"
         # separatorless basic datetime (no T/space) is still recognized
         assert to_utc_iso("20260704000000+0200") == "2026-07-03T22:00:00Z"
-        # a basic-format bare date is canonicalized to the extended instant, so
-        # it compares correctly against an extended-form as_of
-        assert to_utc_iso("20260704") == "2026-07-04T00:00:00Z"
+        # a basic-format bare date is canonicalized to the extended date form
+        # (still a date, not an instant), so it compares against extended bounds
+        assert to_utc_iso("20260704") == "2026-07-04"
     else:
         # 3.10's fromisoformat can't parse these, so they pass through untouched
         assert to_utc_iso("20260704T000000+0200") == "20260704T000000+0200"
@@ -805,6 +805,6 @@ def test_to_utc_iso_normalizes_naive_datetime_with_separator():
     from mnemostack.recall.validity import to_utc_iso
 
     # A naive datetime (no offset) is assumed UTC and emitted in the Z form so
-    # it sorts against normalized bounds. A bare date canonicalizes to midnight.
+    # it sorts against normalized bounds. A bare date stays a date.
     assert to_utc_iso("2024-01-15T10:00:00") == "2024-01-15T10:00:00Z"
-    assert to_utc_iso("2024-01-15") == "2024-01-15T00:00:00Z"
+    assert to_utc_iso("2024-01-15") == "2024-01-15"
