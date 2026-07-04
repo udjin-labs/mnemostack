@@ -745,9 +745,11 @@ def test_to_utc_iso_normalizes_non_T_separators():
     assert to_utc_iso("2024-01-15Z") == "2024-01-15Z"
     assert to_utc_iso("2024-01-15+02:00") == "2024-01-15+02:00"
     # every offset form fromisoformat accepts on a date-only value is preserved,
-    # including the hour-only ±HH form and the compact basic date
+    # including the hour-only ±HH form, the compact basic date, and the rare
+    # minute/second offset variants
     assert to_utc_iso("2024-01-15+02") == "2024-01-15+02"
     assert to_utc_iso("20240115+02") == "20240115+02"
+    assert to_utc_iso("2024-01-15+02:30:15") == "2024-01-15+02:30:15"
     # non-instant marker passes through
     assert to_utc_iso("current") == "current"
 

@@ -24,11 +24,12 @@ if TYPE_CHECKING:
     from .recaller import RecallResult
 
 # A trailing ISO timezone suffix: ``Z`` or an offset in any form
-# ``datetime.fromisoformat`` accepts — ``±HH``, ``±HHMM``, ``±HH:MM``. Stripped
-# only to test whether the remainder is a bare calendar date (a date carrying a
-# zone but no time); the strip is applied solely when the value is not already a
-# bare date, so a plain date's trailing ``-15`` never reaches this matcher.
-_ZONE_SUFFIX_RE = re.compile(r"([Zz]|[+-]\d{2}(?::?\d{2})?)$")
+# ``datetime.fromisoformat`` accepts — ``±HH``, ``±HHMM``, ``±HH:MM``, and the
+# rare minute/second/fractional variants (``±HH:MM:SS``, ``±HH:MM:SS.ffffff``).
+# Stripped only to test whether the remainder is a bare calendar date (a date
+# carrying a zone but no time); the strip is applied solely when the value is not
+# already a bare date, so a plain date's trailing ``-15`` never reaches it.
+_ZONE_SUFFIX_RE = re.compile(r"([Zz]|[+-]\d{2}(?::?\d{2}){0,2}(?:\.\d+)?)$")
 
 VALID_FROM = "valid_from"
 VALID_UNTIL = "valid_until"
