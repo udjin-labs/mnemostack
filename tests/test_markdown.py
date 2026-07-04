@@ -33,6 +33,14 @@ def test_non_mapping_frontmatter_ignored():
     assert meta == {}
 
 
+def test_frontmatter_closing_fence_at_eof():
+    # A frontmatter-only note ending right after the closing fence (no trailing
+    # newline) must still parse its metadata, not embed the raw YAML fences.
+    meta, body = parse_frontmatter("---\ntitle: Only Meta\ntags: [x]\n---")
+    assert meta == {"title": "Only Meta", "tags": ["x"]}
+    assert body == ""
+
+
 # ---------- links ----------
 
 
@@ -60,6 +68,25 @@ def test_links_deduped_first_seen_order():
     # First-seen wins: the wikilink [[A]] comes before the inline [b](A.md).
     links = extract_links("[[A]] [[A]] [b](A.md)")
     assert [(link.target, link.is_wikilink) for link in links] == [("A", True)]
+
+
+def test_extract_links_skips_embeds_and_non_note_wikilinks():
+    # Obsidian embeds (![[...]]) and non-note wikilink targets (.png/.pdf) are
+    # not notes, so they must not become File -[LINKS_TO]-> File edges.
+    text = "note [[Real Note]], embed ![[diagram.png]], asset [[paper.pdf]]"
+    links = extract_links(text)
+    assert [(link.target, link.is_wikilink) for link in links] == [("Real Note", True)]
+
+
+def test_extract_links_spaced_and_escaped_inline_targets():
+    # Angle-bracketed (<My Note.md>) and %20-escaped inline destinations are
+    # valid intra-corpus note references; both normalize to the same key.
+    links = extract_links("[a](<My Note.md>) and [b](My%20Note.md) and [c](Plain.md)")
+    targets = [(link.target, link.is_wikilink) for link in links]
+    assert ("My Note", False) in targets
+    assert ("Plain", False) in targets
+    # the two spellings of the same note dedupe to one edge
+    assert sum(1 for t, _ in targets if t == "My Note") == 1
 
 
 # ---------- collect_markdown ----------
@@ -132,6 +159,34 @@ def test_collect_relative_link_prefers_own_directory(tmp_path):
     col = collect_markdown(tmp_path)
     edge = next(e for e in col.edges if e.source == "one/src.md")
     assert edge.target == "one/note.md"
+
+
+def test_collect_relative_link_escaping_corpus_is_not_resolved(tmp_path):
+    # A root-level note links to ../foo.md. Even though foo.md exists inside the
+    # root, the target points outside the corpus, so it must stay dangling —
+    # not be mistaken for an internal edge.
+    (tmp_path / "foo.md").write_text("# Foo")
+    (tmp_path / "page.md").write_text("escape [x](../foo.md)")
+    col = collect_markdown(tmp_path)
+    edge = next(e for e in col.edges if e.source == "page.md")
+    assert edge.resolved is False
+    assert edge.target == "../foo"  # kept as a dangling out-of-corpus reference
+
+
+def test_collect_ids_scoped_by_index_root(tmp_path):
+    # Two roots with the same relative path and identical body (differing only
+    # in frontmatter) must get distinct ids, or the collection-wide skip check
+    # would drop the second corpus's chunk and its index_root/metadata.
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    root_a.mkdir()
+    root_b.mkdir()
+    (root_a / "note.md").write_text("---\nvault: A\n---\nsame body text here")
+    (root_b / "note.md").write_text("---\nvault: B\n---\nsame body text here")
+    ids_a = {c.id for c in collect_markdown(root_a, index_root=str(root_a)).chunks}
+    ids_b = {c.id for c in collect_markdown(root_b, index_root=str(root_b)).chunks}
+    assert ids_a and ids_b
+    assert ids_a.isdisjoint(ids_b)
 
 
 def test_collect_sources_include_empty_files(tmp_path):
@@ -305,3 +360,75 @@ def test_cmd_index_markdown_without_graph_skips_edges(tmp_path, monkeypatch):
         graph_timeout=5.0, recreate=False, prune=False, yes=True,
     )
     assert cli.cmd_index_markdown(args) == 0
+
+
+def test_cmd_index_markdown_rejects_non_positive_chunk_size(tmp_path, capsys):
+    import argparse
+
+    import mnemostack.cli as cli
+
+    args = argparse.Namespace(
+        path=str(_vault(tmp_path)), provider="fake", embedding_model=None,
+        collection="c", qdrant="http://localhost:6333",
+        chunk_size=0, memgraph_uri=None,
+        graph_timeout=5.0, recreate=False, prune=False, yes=True,
+    )
+    # bad --chunk-size fails fast (exit 2) before touching the provider/store
+    assert cli.cmd_index_markdown(args) == 2
+    assert "chunk-size" in capsys.readouterr().err
+
+
+def test_cmd_index_markdown_graph_write_failure_does_not_fail_run(
+    tmp_path, monkeypatch, capsys
+):
+    import argparse
+
+    import mnemostack.cli as cli
+
+    class _FakeProvider:
+        dimension = 3
+
+        def embed(self, text):
+            return [0.1, 0.2, 0.3]
+
+    class _FakeStore:
+        def __init__(self, **_):
+            self.upserts = []
+
+        def collection_exists(self):
+            return False
+
+        def ensure_collection(self, recreate=False):
+            return True
+
+        def iter_ids(self):
+            return []
+
+        def upsert(self, cid, vec, payload):
+            self.upserts.append(cid)
+
+    class _FlakyGraph:
+        def __init__(self, **_):
+            pass
+
+        def sync_file_links(self, source, targets, *, index_root=None):
+            raise RuntimeError("Memgraph disconnected mid-write")
+
+        def close(self):
+            pass
+
+    store = _FakeStore()
+    monkeypatch.setattr(cli, "get_provider", lambda *_a, **_k: _FakeProvider())
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    monkeypatch.setattr("mnemostack.graph.GraphStore", _FlakyGraph)
+
+    args = argparse.Namespace(
+        path=str(_vault(tmp_path)), provider="fake", embedding_model=None,
+        collection="c", qdrant="http://localhost:6333",
+        chunk_size=1200, memgraph_uri="bolt://localhost:7687",
+        graph_timeout=5.0, recreate=False, prune=False, yes=True,
+    )
+    # vectors already upserted, so a graph outage must warn, not fail the run
+    assert cli.cmd_index_markdown(args) == 0
+    assert store.upserts                      # vectors were written
+    assert "graph write failed" in capsys.readouterr().err

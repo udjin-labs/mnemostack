@@ -116,6 +116,29 @@ def test_markdown_chunker_no_headers_returns_whole_text():
     assert chunks[0].metadata["heading_path"] == []
 
 
+def test_markdown_chunker_splits_large_headingless_body():
+    # A big headingless note (e.g. a plain README) must still respect
+    # chunk_size, not overrun the embedding provider as one giant chunk.
+    text = "word " * 200  # 1000 chars, no headers
+    chunker = MarkdownChunker(chunk_size=100)
+    chunks = chunker.chunk(text)
+    assert len(chunks) > 1
+    assert all(len(c.text) <= 100 for c in chunks)
+    assert all(c.metadata["heading_path"] == [] for c in chunks)
+    # offsets advance so pieces are distinct and cover the body
+    assert [c.offset for c in chunks] == sorted(c.offset for c in chunks)
+
+
+def test_markdown_chunker_rejects_non_positive_chunk_size():
+    # A non-positive size would wedge the split loop (offset never advances) —
+    # fail fast instead of hanging.
+    import pytest
+
+    for bad in (0, -5):
+        with pytest.raises(ValueError, match="chunk_size must be positive"):
+            MarkdownChunker(chunk_size=bad).chunk("# H\n" + "x" * 50)
+
+
 def test_markdown_chunker_ignores_headers_in_code_blocks():
     text = """# Real Header
 

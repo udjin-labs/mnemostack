@@ -731,6 +731,12 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
     if not target.exists():
         print(f"error: path does not exist: {target}", file=sys.stderr)
         return 2
+    if args.chunk_size <= 0:
+        print(
+            f"error: --chunk-size must be a positive integer, got {args.chunk_size}",
+            file=sys.stderr,
+        )
+        return 2
 
     provider = get_provider(args.provider, **model_kwargs(_embedding_model(args)))
     store = VectorStore(
@@ -829,6 +835,14 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
                     edges_written += graph.sync_file_links(
                         source, targets, index_root=index_root
                     )
+            except Exception as exc:  # noqa: BLE001 — graph optional; vectors already upserted
+                # A mid-run graph outage (e.g. Memgraph disconnects while
+                # writing) must not fail the whole index: the vector upserts
+                # already succeeded, so warn and keep the partial link sync.
+                print(
+                    f"warning: graph write failed, links partially written ({exc})",
+                    file=sys.stderr,
+                )
             finally:
                 graph.close()
 

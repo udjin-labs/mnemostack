@@ -35,6 +35,10 @@ class MarkdownChunker(Chunker):
         self.include_heading_in_text = include_heading_in_text
 
     def chunk(self, text: str) -> list[Chunk]:
+        if self.chunk_size <= 0:
+            # A non-positive size would wedge the large-section split loop
+            # (sub_offset never advances) — fail fast instead of hanging.
+            raise ValueError(f"chunk_size must be positive, got {self.chunk_size}")
         if not text.strip():
             return []
 
@@ -48,8 +52,24 @@ class MarkdownChunker(Chunker):
                 headers.append((match.start(), level, title))
 
         if not headers:
-            # No headers — return the whole text (or split by size)
-            return [Chunk(text=text.strip(), offset=0, metadata={"heading_path": []})]
+            # No headers — one chunk if it fits, else split by size so a large
+            # headingless note (e.g. a plain README) still respects chunk_size
+            # and never overruns the embedding provider's input limit.
+            body = text.strip()
+            if len(body) <= self.chunk_size:
+                return [Chunk(text=body, offset=0, metadata={"heading_path": []})]
+            pieces: list[Chunk] = []
+            sub_offset = 0
+            while sub_offset < len(body):
+                pieces.append(
+                    Chunk(
+                        text=body[sub_offset : sub_offset + self.chunk_size],
+                        offset=sub_offset,
+                        metadata={"heading_path": []},
+                    )
+                )
+                sub_offset += self.chunk_size
+            return pieces
 
         # Build sections: each section spans from one header to the next
         chunks: list[Chunk] = []

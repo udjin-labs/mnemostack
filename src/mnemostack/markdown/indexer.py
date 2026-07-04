@@ -73,7 +73,10 @@ def _resolve_relative(source_rel: str, target: str, all_rels: set[str]) -> str |
 
     ``[c](../index.md)`` from ``sub/page.md`` resolves to ``index.md`` — so
     normal markdown relative links (and same-directory links in folders with
-    duplicate basenames) point at the right note. Returns the matched
+    duplicate basenames) point at the right note. A link that walks *above* the
+    corpus root (``../outside.md`` from a top-level note) escapes the corpus and
+    returns None, so it is never mistaken for an in-vault edge even if a
+    same-named file happens to exist inside the root. Returns the matched
     corpus-relative path, or None if nothing resolves.
     """
     combined = PurePosixPath(source_rel).parent / _norm_target(target)
@@ -82,6 +85,8 @@ def _resolve_relative(source_rel: str, target: str, all_rels: set[str]) -> str |
         if part == "..":
             if parts:
                 parts.pop()
+            else:
+                return None  # traversal escapes the corpus root
         elif part not in (".", ""):
             parts.append(part)
     normalized = "/".join(parts)
@@ -160,9 +165,14 @@ def collect_markdown(
             heading_path = chunk.metadata.get("heading_path")
             if heading_path:
                 payload["heading_path"] = heading_path
+            # Scope the id by index_root so two corpora sharing a relative path
+            # and identical body (differing only in frontmatter) don't collapse
+            # to one id — the collection-wide skip-unchanged check would
+            # otherwise drop the second corpus's chunk and its root/metadata.
+            id_source = f"{index_root}\x00{rel}" if index_root is not None else rel
             out.chunks.append(
                 MarkdownChunk(
-                    id=stable_chunk_id(rel, chunk.offset, chunk.text),
+                    id=stable_chunk_id(id_source, chunk.offset, chunk.text),
                     text=chunk.text,
                     payload=payload,
                 )
