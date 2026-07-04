@@ -607,6 +607,12 @@ class MemgraphRetriever(Retriever):
                         lim=self.max_rels,
                         **extra,
                     ).data()
+                    # Nodes carry no valid_from and invalidate() closes edges,
+                    # not nodes — so under a validity view a node can pass its
+                    # own probe while all its facts are out of window. Don't
+                    # emit a bare entity with no valid incident fact then.
+                    if not rel_rows and (as_of is not None or not include_invalidated):
+                        continue
                     rel_text = "; ".join(
                         f"{r['from_n']}-[{r['rel']}]->{r['to_n']}" for r in rel_rows
                     )
