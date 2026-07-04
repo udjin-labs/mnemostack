@@ -171,6 +171,12 @@ def test_extract_links_skips_all_uri_schemes():
     assert {link.target for link in extract_links(text)} == {"real"}
 
 
+def test_extract_links_skips_escaped_wikilink():
+    # \[[Draft]] renders literally in CommonMark, so it's not a real wikilink.
+    links = extract_links(r"escaped \[[Draft]] but real [[Real]]")
+    assert [(link.target, link.is_wikilink) for link in links] == [("Real", True)]
+
+
 def test_extract_links_wikilink_inside_link_label_not_double_counted():
     # [[B]] inside a normal link's label is part of the label text, not its own
     # edge — only the outer a.md link (and the standalone [[C]]) count.
@@ -366,6 +372,14 @@ def test_collect_relative_link_case_insensitive_sibling(tmp_path):
     edge = next(e for e in col.edges if e.source == "b/src.md")
     assert edge.target == "b/Note.md"
     assert edge.resolved is True
+
+
+def test_collect_reserves_heading_path_over_frontmatter(tmp_path):
+    # A frontmatter `heading_path` must not inject bogus section hierarchy —
+    # the parser-derived value (here [] for a headingless note) always wins.
+    (tmp_path / "n.md").write_text("---\nheading_path: [Fake]\n---\nplain body, no headers")
+    col = collect_markdown(tmp_path)
+    assert col.chunks[0].payload["heading_path"] == []
 
 
 def test_collect_single_file_non_markdown_yields_no_files(tmp_path):
@@ -967,9 +981,11 @@ def test_cmd_index_markdown_refreshes_payload_on_frontmatter_change(tmp_path, mo
     assert cli.cmd_index_markdown(_args()) == 0          # initial index
     assert any(pl.get("tag") == "old" for pl in _Store.points.values())
 
-    # simulate `mnemostack invalidate` on the stored chunk
+    # simulate `mnemostack invalidate` + an external enrichment step adding a
+    # foreign field on the stored chunk
     for pl in _Store.points.values():
         pl["invalidated_at"] = "2026-07-04T00:00:00Z"
+        pl["amount"] = 42
 
     # change frontmatter (body/id unchanged) and re-index
     note.write_text("---\ntag: new\n---\n# N\nstable body text")
@@ -978,9 +994,10 @@ def test_cmd_index_markdown_refreshes_payload_on_frontmatter_change(tmp_path, mo
     payloads = list(_Store.points.values())
     assert any(pl.get("tag") == "new" for pl in payloads)
     assert all("drop_me" not in pl for pl in payloads)
-    # ...but the system-owned invalidation marker is preserved (re-indexing must
-    # not resurrect an intentionally-invalidated memory)
+    # ...but keys this indexer doesn't own are preserved (re-indexing must not
+    # resurrect an invalidated memory or clobber external enrichment)
     assert all(pl.get("invalidated_at") == "2026-07-04T00:00:00Z" for pl in payloads)
+    assert all(pl.get("amount") == 42 for pl in payloads)
 
 
 def test_cmd_index_markdown_single_file_does_not_reconcile_siblings(tmp_path, monkeypatch):

@@ -798,21 +798,18 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
         store.upsert(cid, vec, payload)
         inserted += 1
 
-    # Refresh payloads of unchanged chunks so frontmatter edits (new/changed/
-    # removed keys) sync without re-embedding. Delete keys the file no longer
-    # produces, then merge the current payload — but never touch system-owned
-    # validity keys, or re-indexing a note would resurrect a memory that
-    # `mnemostack invalidate` intentionally marked stale.
-    _system_keys = {"invalidated_at", "valid_until", "valid_from"}
+    # Refresh payloads of unchanged chunks so frontmatter edits sync without
+    # re-embedding. Delete only keys THIS indexer owned on the previous run (the
+    # `_md_keys` record) that the file no longer produces — so removed
+    # frontmatter keys are dropped, while foreign payload fields (external
+    # enrichment, `invalidated_at`/`valid_until` validity markers) are preserved.
     refreshed = 0
     for cid, _text, payload in chunks:
         if cid not in existing_ids:
             continue
-        stale = [
-            k
-            for k in existing_payloads.get(cid, {})
-            if k not in payload and k not in _system_keys
-        ]
+        old = existing_payloads.get(cid, {})
+        owned = old.get("_md_keys") or []
+        stale = [k for k in owned if k not in payload]
         if stale:
             store.delete_payload_keys(cid, stale)
         store.set_payload(cid, payload)

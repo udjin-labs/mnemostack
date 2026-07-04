@@ -136,6 +136,31 @@ def _is_external(dest: str) -> bool:
     return dest.startswith(("//", "#")) or bool(_URI_SCHEME_RE.match(dest))
 
 
+def _is_escaped(text: str, pos: int) -> bool:
+    """True when the char at ``pos`` is backslash-escaped (odd run of ``\\``)."""
+    n = 0
+    i = pos - 1
+    while i >= 0 and text[i] == "\\":
+        n += 1
+        i -= 1
+    return n % 2 == 1
+
+
+def _unescaped_wikilink_targets(text: str) -> set[str]:
+    """Raw ``[[target]]`` strings that appear un-escaped in the source.
+
+    markdown-it unescapes ``\\[`` inside a text token (dropping the backslash),
+    so a rendered ``\\[[Draft]]`` looks identical to a real wikilink there. This
+    set — computed on the raw source, where the escape is still visible — gates
+    the text-token scan so an escaped example doesn't become an edge.
+    """
+    return {
+        m.group(1)
+        for m in _WIKILINK_RE.finditer(text)
+        if not _is_escaped(text, m.start())
+    }
+
+
 def extract_links(text: str) -> list[Link]:
     """Extract outgoing link targets (inline markdown links + ``[[wikilinks]]``).
 
@@ -151,6 +176,7 @@ def extract_links(text: str) -> list[Link]:
     link to the same name both survive — they resolve differently.
     """
     seen: dict[tuple[bool, str], Link] = {}
+    unescaped = _unescaped_wikilink_targets(text)
     link_depth = 0
     for tok in _iter_inline_tokens(text):
         if tok.type == "link_open":
@@ -165,6 +191,8 @@ def extract_links(text: str) -> list[Link]:
             link_depth = max(0, link_depth - 1)
         elif tok.type == "text" and link_depth == 0:
             for m in _WIKILINK_RE.finditer(tok.content):
+                if m.group(1) not in unescaped:
+                    continue  # only escaped in the source — not a real wikilink
                 if m.start() > 0 and tok.content[m.start() - 1] == "!":
                     continue  # ![[...]] embed, not a wikilink
                 if not _is_note_target(m.group(1)):

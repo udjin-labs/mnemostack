@@ -177,18 +177,27 @@ def collect_markdown(
                 )
             )
 
+        # Ownership record: which payload keys this markdown run wrote from the
+        # file, so a re-index refresh deletes only removed frontmatter keys and
+        # leaves foreign keys (external enrichment, validity markers) untouched.
+        md_keys = sorted({*meta, "text", "source", "offset", "heading_path", "_md_keys"})
+        if index_root is not None:
+            md_keys = sorted({*md_keys, "index_root"})
+
         for chunk in chunker.chunk(body):
             payload: dict[str, Any] = {
                 **meta,
                 "text": chunk.text,
                 "source": rel,
                 "offset": chunk.offset,
+                # ``heading_path`` is parser-derived and reserved — always set it
+                # (even to []) so a frontmatter key of the same name can't inject
+                # bogus section hierarchy on a headingless chunk.
+                "heading_path": chunk.metadata.get("heading_path") or [],
+                "_md_keys": md_keys,
             }
             if index_root is not None:
                 payload["index_root"] = index_root
-            heading_path = chunk.metadata.get("heading_path")
-            if heading_path:
-                payload["heading_path"] = heading_path
             # Scope the id by index_root so two corpora sharing a relative path
             # and identical body (differing only in frontmatter) don't collapse
             # to one id — the collection-wide skip-unchanged check would
