@@ -17,6 +17,7 @@ from typing import Any
 
 from ..recaller import RecallResult
 from ..retrievers import graph_valid_clause
+from ..validity import to_utc_iso
 from .base import PipelineContext, Stage
 from .stages import STOPWORDS
 
@@ -107,13 +108,15 @@ class GraphResurrection(Stage):
         if driver is None:
             return results
 
-        # Point-in-time recall: resurrect graph neighbors valid at `as_of`, not
-        # current ones — otherwise a historical search re-injects present-day
-        # facts through the pipeline. `as_of` rides in via PipelineContext.extras.
-        as_of = context.extras.get("as_of")
-        n_valid = graph_valid_clause("n", as_of)
-        m_valid = graph_valid_clause("m", as_of)
-        r_valid = graph_valid_clause("r1", as_of)
+        # Match the recall's validity view: resurrect graph neighbors valid at
+        # `as_of` (point-in-time), and don't suppress closed edges when the
+        # caller asked to include invalidated facts. Both ride in via
+        # PipelineContext.extras; `as_of` is UTC-normalized for string compare.
+        as_of = to_utc_iso(context.extras.get("as_of"))
+        include_invalidated = bool(context.extras.get("include_invalidated", False))
+        n_valid = graph_valid_clause("n", as_of, include_invalidated)
+        m_valid = graph_valid_clause("m", as_of, include_invalidated)
+        r_valid = graph_valid_clause("r1", as_of, include_invalidated)
         extra_params = {"as_of": as_of} if as_of is not None else {}
 
         existing = " ".join(

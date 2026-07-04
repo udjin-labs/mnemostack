@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
 
+from ..recall.validity import to_utc_iso
+
 try:
     from neo4j import GraphDatabase
     from neo4j.exceptions import ServiceUnavailable
@@ -34,11 +36,18 @@ class Triple:
 
 
 def _to_iso(value: str | date | datetime | None) -> str | None:
+    """ISO-8601 string for a validity bound, UTC-normalized.
+
+    Validity predicates compare these as raw strings in Cypher, so a
+    timezone-bearing instant is canonicalized to UTC (via ``to_utc_iso``) on
+    write; bare dates and the ``current`` marker pass through unchanged. This
+    keeps stored bounds comparable with a UTC-normalized ``as_of`` at query
+    time. Pre-existing offset-bearing data would need the same normalization.
+    """
     if value is None:
         return None
-    if isinstance(value, (date, datetime)):
-        return value.isoformat()
-    return str(value)
+    text = value.isoformat() if isinstance(value, (date, datetime)) else str(value)
+    return to_utc_iso(text)
 
 
 class GraphStore:

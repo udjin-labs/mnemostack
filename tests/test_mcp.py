@@ -684,3 +684,29 @@ def test_mcp_invalidate_accepts_numeric_ids(monkeypatch):
     result = asyncio.run(mcp.call_tool("mnemostack_invalidate", {"ids": [1, 2]}))
     assert result.structured_content["ok"] is True
     assert vec.ids == [1, 2]
+
+
+def test_mcp_invalidate_passes_index_root(monkeypatch):
+    import mnemostack.mcp.server as srv
+
+    class _RecordingVector:
+        def __init__(self, **_):
+            self.kwargs = None
+
+        def invalidate(self, ids, **kwargs):
+            self.kwargs = kwargs
+            return len(ids)
+
+    vec = _RecordingVector()
+
+    class _FakeEmbedding:
+        dimension = 3
+
+    monkeypatch.setattr(srv, "get_provider", lambda *_a, **_k: _FakeEmbedding())
+    monkeypatch.setattr(srv, "VectorStore", lambda **_: vec)
+    mcp = build_server(collection="test", embedding_provider="ollama")
+
+    asyncio.run(mcp.call_tool(
+        "mnemostack_invalidate", {"ids": ["a"], "index_root": "/root/A"}
+    ))
+    assert vec.kwargs["index_root"] == "/root/A"
