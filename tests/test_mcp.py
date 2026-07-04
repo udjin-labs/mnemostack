@@ -559,3 +559,154 @@ def test_mcp_answer_prefers_generator_context_estimate(monkeypatch):
 
     result = asyncio.run(mcp.call_tool("mnemostack_answer", {"query": "q", "limit": 3}))
     assert result.structured_content["tokens_estimate"] == 77
+
+
+def test_mcp_invalidate_tool_marks_ids(monkeypatch):
+    import mnemostack.mcp.server as srv
+
+    class _RecordingVector:
+        def __init__(self, **_):
+            self.calls = []
+
+        def invalidate(self, ids, *, invalidated_at=None, valid_until=None, index_root=None):
+            self.calls.append((list(ids), invalidated_at, valid_until))
+            return len(ids)
+
+    vec = _RecordingVector()
+
+    class _FakeEmbedding:
+        dimension = 3
+
+    monkeypatch.setattr(srv, "get_provider", lambda *_a, **_k: _FakeEmbedding())
+    monkeypatch.setattr(srv, "VectorStore", lambda **_: vec)
+    mcp = build_server(collection="test", embedding_provider="ollama")
+
+    result = asyncio.run(
+        mcp.call_tool(
+            "mnemostack_invalidate",
+            {"ids": ["a", "b"], "valid_until": "2026-06-01"},
+        )
+    )
+    payload = result.structured_content
+    assert payload["ok"] is True
+    assert payload["requested"] == 2
+    assert payload["invalidated"] == 2
+    assert vec.calls == [(["a", "b"], None, "2026-06-01")]
+
+
+def test_mcp_invalidate_tool_registered():
+    mcp = build_server(collection="test", embedding_provider="ollama")
+    names = _list_tool_names(mcp)
+    assert "mnemostack_invalidate" in names
+
+
+def test_mcp_search_threads_validity_params(monkeypatch):
+    import mnemostack.mcp.server as srv
+
+    captured = {}
+
+    class _CapturingRecaller:
+        def __init__(self, **_):
+            pass
+
+        def recall(self, query, limit=10, filters=None, include_invalidated=False,
+                   as_of=None, **_):
+            captured["include_invalidated"] = include_invalidated
+            captured["as_of"] = as_of
+            return [SimpleNamespace(id="a", text="t", score=0.9, sources=["v"], payload={})]
+
+        def apply_vector_floor_after_rerank(self, results, recalled):
+            return results
+
+    _patch_minimal(monkeypatch, srv, _CapturingRecaller)
+    mcp = build_server(collection="test", embedding_provider="ollama")
+
+    asyncio.run(
+        mcp.call_tool(
+            "mnemostack_search",
+            {"query": "q", "include_invalidated": True, "as_of": "2026-03-01"},
+        )
+    )
+    assert captured == {"include_invalidated": True, "as_of": "2026-03-01"}
+
+
+def test_mcp_invalidate_works_without_embedding_provider(monkeypatch):
+    import mnemostack.mcp.server as srv
+
+    class _RecordingVector:
+        def __init__(self, **_):
+            self.called = False
+
+        def invalidate(self, ids, **_):
+            self.called = True
+            return len(ids)
+
+    vec = _RecordingVector()
+
+    def _no_provider(*_a, **_k):
+        raise RuntimeError("GEMINI_API_KEY not set")
+
+    # Embedding provider is unavailable — invalidation is payload-only and must
+    # still work (it builds a dimension-only store, no embeddings).
+    monkeypatch.setattr(srv, "get_provider", _no_provider)
+    monkeypatch.setattr(srv, "VectorStore", lambda **_: vec)
+    mcp = build_server(collection="test", embedding_provider="ollama")
+
+    result = asyncio.run(mcp.call_tool("mnemostack_invalidate", {"ids": ["7"]}))
+    payload = result.structured_content
+    assert payload["ok"] is True
+    assert payload["invalidated"] == 1
+    assert vec.called is True
+
+
+def test_mcp_invalidate_accepts_numeric_ids(monkeypatch):
+    import mnemostack.mcp.server as srv
+
+    class _RecordingVector:
+        def __init__(self, **_):
+            self.ids = None
+
+        def invalidate(self, ids, **_):
+            self.ids = list(ids)
+            return len(ids)
+
+    vec = _RecordingVector()
+
+    class _FakeEmbedding:
+        dimension = 3
+
+    monkeypatch.setattr(srv, "get_provider", lambda *_a, **_k: _FakeEmbedding())
+    monkeypatch.setattr(srv, "VectorStore", lambda **_: vec)
+    mcp = build_server(collection="test", embedding_provider="ollama")
+
+    # JSON integer ids must not be rejected by the tool schema, and reach
+    # invalidate as ints (matching numeric-id Qdrant collections).
+    result = asyncio.run(mcp.call_tool("mnemostack_invalidate", {"ids": [1, 2]}))
+    assert result.structured_content["ok"] is True
+    assert vec.ids == [1, 2]
+
+
+def test_mcp_invalidate_passes_index_root(monkeypatch):
+    import mnemostack.mcp.server as srv
+
+    class _RecordingVector:
+        def __init__(self, **_):
+            self.kwargs = None
+
+        def invalidate(self, ids, **kwargs):
+            self.kwargs = kwargs
+            return len(ids)
+
+    vec = _RecordingVector()
+
+    class _FakeEmbedding:
+        dimension = 3
+
+    monkeypatch.setattr(srv, "get_provider", lambda *_a, **_k: _FakeEmbedding())
+    monkeypatch.setattr(srv, "VectorStore", lambda **_: vec)
+    mcp = build_server(collection="test", embedding_provider="ollama")
+
+    asyncio.run(mcp.call_tool(
+        "mnemostack_invalidate", {"ids": ["a"], "index_root": "/root/A"}
+    ))
+    assert vec.kwargs["index_root"] == "/root/A"

@@ -16,6 +16,8 @@ from __future__ import annotations
 from typing import Any
 
 from ..recaller import RecallResult
+from ..retrievers import graph_valid_clause
+from ..validity import to_utc_instant
 from .base import PipelineContext, Stage
 from .stages import STOPWORDS
 
@@ -106,6 +108,17 @@ class GraphResurrection(Stage):
         if driver is None:
             return results
 
+        # Match the recall's validity view: resurrect graph neighbors valid at
+        # `as_of` (point-in-time), and don't suppress closed edges when the
+        # caller asked to include invalidated facts. Both ride in via
+        # PipelineContext.extras; `as_of` is UTC-normalized for string compare.
+        as_of = to_utc_instant(context.extras.get("as_of"))
+        include_invalidated = bool(context.extras.get("include_invalidated", False))
+        n_valid = graph_valid_clause("n", as_of, include_invalidated)
+        m_valid = graph_valid_clause("m", as_of, include_invalidated)
+        r_valid = graph_valid_clause("r1", as_of, include_invalidated)
+        extra_params = {"as_of": as_of} if as_of is not None else {}
+
         existing = " ".join(
             (r.text or "") + " " + (r.payload.get("text", "") if r.payload else "") for r in results
         ).lower()
@@ -115,18 +128,19 @@ class GraphResurrection(Stage):
             with driver.session() as session:
                 for seed in list(seeds)[: self.max_seeds]:
                     rows = session.run(
-                        """
+                        f"""
                         MATCH (n)-[r1]-(m)
                         WHERE toLower(n.name) = $seed
-                          AND coalesce(n.valid_until, 'current') = 'current'
-                          AND coalesce(m.valid_until, 'current') = 'current'
-                          AND coalesce(r1.valid_until, 'current') = 'current'
+                          AND {n_valid}
+                          AND {m_valid}
+                          AND {r_valid}
                         RETURN DISTINCT m.name AS name, labels(m)[0] AS type,
                                m.memory_class AS mc, type(r1) AS rel
                         LIMIT $lim
                         """,
                         seed=seed,
                         lim=self.max_per_seed,
+                        **extra_params,
                     ).data()
                     for nb in rows:
                         name = nb.get("name") or ""

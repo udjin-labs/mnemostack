@@ -343,7 +343,7 @@ def test_default_search_runs_full_flow():
     mock_recaller.recall.return_value = FAKE_RESULTS[:6]
     mock_recaller.apply_vector_floor_after_rerank.side_effect = lambda res, recalled: res
     fake_pipeline = MagicMock()
-    fake_pipeline.apply.side_effect = lambda q, res: res
+    fake_pipeline.apply.side_effect = lambda q, res, **_: res
 
     buf = StringIO()
     with (
@@ -391,7 +391,7 @@ def test_search_passes_rerank_mode_to_reranker():
     mock_recaller.recall.return_value = FAKE_RESULTS[:6]
     mock_recaller.apply_vector_floor_after_rerank.side_effect = lambda res, recalled: res
     fake_pipeline = MagicMock()
-    fake_pipeline.apply.side_effect = lambda q, res: res
+    fake_pipeline.apply.side_effect = lambda q, res, **_: res
     fake_reranker = MagicMock()
     fake_reranker.rerank.side_effect = lambda q, res: res
 
@@ -543,3 +543,96 @@ def test_serve_passes_token_budget_to_server_config(monkeypatch):
 
     assert rc == 0
     assert captured["cfg"].token_budget == 1234
+
+
+def test_cmd_invalidate_calls_store(monkeypatch, capsys):
+    import mnemostack.cli as cli
+
+    class _FakeStore:
+        def __init__(self, **_):
+            self.calls = []
+
+        def collection_exists(self):
+            return True
+
+        def invalidate(self, ids, *, invalidated_at=None, valid_until=None, index_root=None):
+            self.calls.append((list(ids), invalidated_at, valid_until, index_root))
+            return len(ids)
+
+    store = _FakeStore()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+
+    args = argparse.Namespace(
+        collection="test",
+        qdrant="http://localhost:6333",
+        ids=["a", "b"],
+        invalidated_at=None,
+        valid_until="2026-06-01",
+        index_root="/root/A",
+        json=True,
+    )
+    rc = cli.cmd_invalidate(args)
+    assert rc == 0
+    assert store.calls == [(["a", "b"], None, "2026-06-01", "/root/A")]
+    out = json.loads(capsys.readouterr().out)
+    assert out == {"invalidated": 2, "requested": 2}
+
+
+def test_cmd_invalidate_missing_collection_exits_2(monkeypatch):
+    import mnemostack.cli as cli
+
+    class _FakeStore:
+        def __init__(self, **_):
+            pass
+
+        def collection_exists(self):
+            return False
+
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: _FakeStore())
+    args = argparse.Namespace(
+        collection="missing", qdrant="http://localhost:6333", ids=["a"],
+        invalidated_at=None, valid_until=None, index_root=None, json=False,
+    )
+    assert cli.cmd_invalidate(args) == 2
+
+
+def test_validity_flags_parse_on_search_and_answer(monkeypatch):
+    for key in list(os.environ):
+        if key.startswith("MNEMOSTACK_"):
+            monkeypatch.delenv(key)
+    parser = build_parser()
+    s = parser.parse_args(["search", "q", "--include-invalidated", "--as-of", "2026-03-01"])
+    assert s.include_invalidated is True
+    assert s.as_of == "2026-03-01"
+    a = parser.parse_args(["answer", "q"])
+    assert a.include_invalidated is False
+    assert a.as_of is None
+    inv = parser.parse_args(["invalidate", "id1", "id2", "--valid-until", "2026-06-01"])
+    assert inv.ids == ["id1", "id2"]
+    assert inv.valid_until == "2026-06-01"
+
+
+def test_cmd_invalidate_coerces_digit_ids(monkeypatch):
+    import mnemostack.cli as cli
+
+    class _FakeStore:
+        def __init__(self, **_):
+            self.ids = None
+
+        def collection_exists(self):
+            return True
+
+        def invalidate(self, ids, **_):
+            self.ids = list(ids)
+            return len(ids)
+
+    store = _FakeStore()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    args = argparse.Namespace(
+        collection="t", qdrant="http://localhost:6333",
+        ids=["1", "abc", "a1b2"], invalidated_at=None, valid_until=None,
+        index_root=None, json=False,
+    )
+    assert cli.cmd_invalidate(args) == 0
+    # digit-only -> int; anything with non-digits stays a string
+    assert store.ids == [1, "abc", "a1b2"]

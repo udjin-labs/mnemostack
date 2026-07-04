@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
@@ -238,6 +239,67 @@ class VectorStore:
             )
             total += len(chunk)
         return total
+
+    def invalidate(
+        self,
+        ids: str | int | list[str | int],
+        *,
+        invalidated_at: str | None = None,
+        valid_until: str | None = None,
+        index_root: str | None = None,
+    ) -> int:
+        """Mark chunks stale without deleting or re-embedding them.
+
+        Sets ``invalidated_at`` (system-time; defaults to now, UTC ISO-8601)
+        and optionally ``valid_until`` (world-time end) on each point's payload
+        via a merge write — the vector is untouched and the chunk stays
+        searchable via ``include_invalidated=True`` / point-in-time ``as_of``.
+        Points that do not exist are skipped. When ``index_root`` is given, a
+        point owned by a *different* root is left untouched (the same owner
+        guard ``index --refresh-payloads`` uses), so one indexing root cannot
+        invalidate another's chunks. Returns the number of points updated.
+
+        Scope: this writes the Qdrant vector payload, so recall's vector and
+        temporal retrievers (which read Qdrant live) honor it immediately. A
+        BM25 retriever is an in-memory index built at startup — it reflects an
+        invalidation only after its corpus is rebuilt, and only when that
+        corpus was built from Qdrant payloads (``BM25Retriever.from_qdrant``).
+        A file-backed BM25 corpus (``bm25_paths``) carries no validity keys and
+        is not filtered; build BM25 from Qdrant if lexical search must respect
+        invalidation.
+        """
+        if isinstance(ids, (str, int)):
+            ids = [ids]
+        ids = list(ids)
+        if not ids:
+            return 0
+        payload: dict[str, Any] = {
+            "invalidated_at": invalidated_at or datetime.now(timezone.utc).isoformat()
+        }
+        if valid_until is not None:
+            payload["valid_until"] = valid_until
+        existing = {
+            str(pt.id): (pt.payload or {})
+            for pt in self.client.retrieve(
+                collection_name=self.collection, ids=ids, with_payload=True
+            )
+        }
+        target: list[Any] = []
+        for pid in ids:
+            current = existing.get(str(pid))
+            if current is None:
+                continue  # point does not exist — nothing to invalidate
+            if index_root is not None:
+                owner = current.get("index_root")
+                if owner is not None and owner != index_root:
+                    continue  # foreign root — never touch another root's chunks
+            target.append(pid)
+        if not target:
+            return 0
+        self.client.set_payload(
+            collection_name=self.collection, payload=payload, points=target
+        )
+        return len(target)
 
     # ---------- search ----------
 

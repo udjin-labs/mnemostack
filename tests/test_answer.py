@@ -447,7 +447,7 @@ def test_expansion_retry_recall_honors_token_budget(sample_memories):
     class _StubRecaller:
         embedding = _StubEmbedding()
 
-        def search_many(self, vectors, limit, filters=None):
+        def search_many(self, vectors, limit, filters=None, **_):
             return [big, *sample_memories]
 
     # call order: draft answer -> expansion rephrase -> retry answer
@@ -562,3 +562,82 @@ def test_retry_answer_reports_context_of_merged_pool(monkeypatch, sample_memorie
     # the accepted retry prompted over the budget-capped merged pool
     # (1 memory x 1 token), not the caller's 2 primary memories
     assert answer.context_tokens_estimate == 1
+
+
+def test_inference_retry_threads_validity_into_sub_recall(monkeypatch, sample_memories):
+    import mnemostack.recall.answer as answer_mod
+
+    captured = {}
+
+    class _StubRecaller:
+        def recall(self, query, limit=10, filters=None, include_invalidated=False,
+                   as_of=None, **_):
+            captured["include_invalidated"] = include_invalidated
+            captured["as_of"] = as_of
+            return [
+                RecallResult(id=5, text="fresh evidence", score=0.9,
+                             payload={"source": "s.md"}, sources=["vector"]),
+            ]
+
+    llm = _PromptCapturingLLM(["draft\nCONFIDENCE: 0.1", "final\nCONFIDENCE: 0.9"])
+    gen = AnswerGenerator(
+        llm=llm,
+        recaller=_StubRecaller(),
+        specificity_resolver=False,
+        inference_retry=True,
+        retry_with_expansion=False,
+    )
+    monkeypatch.setattr(answer_mod, "decompose_query", lambda q, llm: ["sub question"])
+
+    gen.generate(
+        "why did it change",
+        sample_memories,
+        category="inference",
+        as_of="2026-03-01",
+    )
+
+    # the retry sub-recall must run inside the same point-in-time view, not
+    # default-current
+    assert captured["as_of"] == "2026-03-01"
+    assert captured["include_invalidated"] is False
+
+
+def test_expansion_retry_filters_sub_recall_by_validity(sample_memories):
+    stale = RecallResult(id=9, text="stale", score=0.99,
+                         payload={"source": "x", "invalidated_at": "2026-07-04"})
+    fresh = RecallResult(id=8, text="fresh", score=0.5, payload={"source": "y"})
+
+    class _StubEmbedding:
+        def embed_batch(self, texts):
+            return [[0.1, 0.2]] * len(texts)
+
+    class _StubRecaller:
+        embedding = _StubEmbedding()
+
+        def search_many(self, vectors, limit, filters=None, *,
+                        include_invalidated=False, as_of=None):
+            # search_many now filters for validity itself (per vector, before
+            # RRF); mirror that so the retry pool matches the real behavior.
+            from mnemostack.recall import filter_by_validity
+
+            return filter_by_validity(
+                [stale, fresh], include_invalidated=include_invalidated, as_of=as_of
+            )
+
+    llm = _PromptCapturingLLM(
+        ["draft\nCONFIDENCE: 0.1", "r1\nr2\nhypothetical", "final\nCONFIDENCE: 0.9"]
+    )
+    gen = AnswerGenerator(
+        llm=llm,
+        recaller=_StubRecaller(),
+        expansion_llm=llm,
+        retry_with_expansion=True,
+        specificity_resolver=False,
+        inference_retry=False,
+    )
+
+    # default view: the invalidated hit must be filtered out of the retry pool
+    gen.generate("what happened", sample_memories)
+    retry_prompt = llm.prompts[-1]
+    assert "fresh" in retry_prompt
+    assert "stale" not in retry_prompt

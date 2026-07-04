@@ -131,6 +131,16 @@ def build_server(
             ),
         )
 
+    def _get_vector_payload_only():
+        # Invalidation is a payload write (retrieve + set_payload) that never
+        # touches vectors, so it must not require the embedding provider —
+        # otherwise a missing/unconfigured provider would break a pure payload
+        # op. The dimension is unused by those calls.
+        return _component(
+            "vector_payload_only",
+            lambda: VectorStore(collection=collection, dimension=1, host=qdrant_host),
+        )
+
     def _build_recaller():
         emb = _get_embedding()
         vec = _get_vector()
@@ -185,6 +195,8 @@ def build_server(
         limit: int,
         filters: dict[str, Any] | None = None,
         token_budget_override: int | None = None,
+        include_invalidated: bool = False,
+        as_of: str | None = None,
     ) -> tuple[list[Any], RecallTrace]:
         trace = RecallTrace()
         recaller = _get_recaller()
@@ -207,6 +219,8 @@ def build_server(
                 if token_budget_override is not None
                 else default_token_budget
             ),
+            include_invalidated=include_invalidated,
+            as_of=as_of,
         )
         return results, trace
 
@@ -317,6 +331,24 @@ def build_server(
                 ge=1,
             ),
         ] = None,
+        include_invalidated: Annotated[
+            bool,
+            Field(
+                description=(
+                    "Include facts marked stale. Default false: memories with "
+                    "an invalidated_at marker are hidden from recall."
+                )
+            ),
+        ] = False,
+        as_of: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Point-in-time recall (ISO-8601): return facts valid at "
+                    "this world-time instant, ignoring later invalidation."
+                )
+            ),
+        ] = None,
     ) -> dict:
         """Search indexed memories with hybrid recall.
 
@@ -327,10 +359,13 @@ def build_server(
         components fell back while serving the call; empty when healthy).
         Results are ranked by reciprocal rank fusion of BM25, semantic, graph,
         and temporal retrievers when configured; each result includes id, text,
-        score, sources, and payload.
+        score, sources, and payload. Stale facts (invalidated_at set) are
+        hidden by default; use include_invalidated or as_of to see them.
         """
         try:
-            results, trace = _run_recall(query, limit, filters, token_budget)
+            results, trace = _run_recall(
+                query, limit, filters, token_budget, include_invalidated, as_of
+            )
             response = {
                 "ok": True,
                 "query": query,
@@ -385,6 +420,18 @@ def build_server(
                 ge=1,
             ),
         ] = None,
+        include_invalidated: Annotated[
+            bool,
+            Field(
+                description="Include facts marked stale (default false; same as mnemostack_search)."
+            ),
+        ] = False,
+        as_of: Annotated[
+            str | None,
+            Field(
+                description="Point-in-time recall (ISO-8601); same contract as mnemostack_search."
+            ),
+        ] = None,
     ) -> dict:
         """Answer a question using retrieved memories.
 
@@ -395,11 +442,14 @@ def build_server(
         degraded (components that fell back while serving the call),
         fallback_recommended, tokens_estimate (estimated text tokens of the
         context memories), tokens_used (LLM-provider-reported usage for the
-        answer call; null when unreported), and error.
+        answer call; null when unreported), and error. Stale facts are hidden
+        by default; use include_invalidated or as_of to see them.
         """
         effective_budget = token_budget if token_budget is not None else default_token_budget
         try:
-            memories, trace = _run_recall(query, limit, filters, effective_budget)
+            memories, trace = _run_recall(
+                query, limit, filters, effective_budget, include_invalidated, as_of
+            )
             gen = _get_answer_gen()
             # recall_filters keeps the generator's retry sub-recalls inside
             # the same filtered scope; the budget must reach the generator
@@ -409,6 +459,8 @@ def build_server(
                 memories,
                 recall_filters=filters,
                 token_budget=effective_budget,
+                include_invalidated=include_invalidated,
+                as_of=as_of,
             )
             # Prefer the generator's own estimate: its retry paths can swap
             # in a freshly recalled context pool. getattr: custom/duck-typed
@@ -430,6 +482,64 @@ def build_server(
             }
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": str(e), "query": query}
+
+    @mcp.tool()
+    def mnemostack_invalidate(
+        ids: Annotated[
+            list[str | int],
+            Field(description="Point id(s) to mark stale (string or integer)"),
+        ],
+        valid_until: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "World-time the fact stopped being true (ISO-8601); "
+                    "optional, separate from the system-time invalidation stamp."
+                )
+            ),
+        ] = None,
+        invalidated_at: Annotated[
+            str | None,
+            Field(description="System-time stamp (ISO-8601); default: now (UTC)"),
+        ] = None,
+        index_root: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Owner guard: when set, points owned by a different "
+                    "index_root are skipped, so one root cannot invalidate "
+                    "another's chunks in a shared collection."
+                )
+            ),
+        ] = None,
+    ) -> dict:
+        """Mark memories stale by id, non-destructively.
+
+        A write tool (parallel to mnemostack_graph_add_triple). Sets
+        invalidated_at (and optionally valid_until) on each point's payload
+        without deleting or re-embedding it; invalidated facts drop out of
+        default recall but stay reachable via include_invalidated / as_of.
+        Points that do not exist are skipped. Pass index_root in multi-root
+        collections to avoid marking another root's chunks stale. Returns ok,
+        requested, and invalidated (the number of points actually updated).
+        """
+        try:
+            # Coerce digit-only ids to int so numeric-id Qdrant collections can
+            # be invalidated (UUID strings contain hyphens, so stay strings).
+            coerced = [int(x) if isinstance(x, str) and x.isdigit() else x for x in ids]
+            updated = _get_vector_payload_only().invalidate(
+                coerced,
+                invalidated_at=invalidated_at,
+                valid_until=valid_until,
+                index_root=index_root,
+            )
+            return {
+                "ok": True,
+                "requested": len(ids),
+                "invalidated": updated,
+            }
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e), "requested": len(ids)}
 
     @mcp.tool()
     def mnemostack_feedback(

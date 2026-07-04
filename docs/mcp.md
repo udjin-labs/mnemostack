@@ -234,6 +234,8 @@ On failure, a component contains `{"ok": false, "error": "..."}` and top-level `
 | `include_trace` | `boolean` | `false` | Also return the recall `trace` (per-retriever ranked lists, fused and post-rerank order). Verbose; debugging only. |
 | `filters` | `object` | `null` | Payload filters applied inside every retriever: exact match (`{"tenant": "a"}`) or `gte`/`lte` ranges (`{"timestamp": {"gte": "2026-01-01"}}`). Results never include points outside the filtered scope — the isolation contract for multi-tenant memory. Note: filters are caller-supplied, not an authorization boundary; in multi-tenant deployments inject them in your proxy. |
 | `token_budget` | `integer` | `null` | Hard cap on the total (estimated) text tokens of the returned results: the final ranking is cut to the prefix that fits (never overshot). Unset falls back to the server-wide default (`--token-budget` / `MNEMOSTACK_TOKEN_BUDGET`), if any. |
+| `include_invalidated` | `boolean` | `false` | Include facts marked stale. By default, memories with an `invalidated_at` payload marker are hidden from recall. |
+| `as_of` | `string` | `null` | Point-in-time recall (ISO-8601): return facts valid at this world-time instant (`valid_from <= as_of < valid_until`), ignoring later invalidation. |
 
 **Return shape:**
 
@@ -286,6 +288,8 @@ On failure:
 | `limit` | `integer` | `10` | Number of memories to retrieve before answer synthesis. |
 | `filters` | `object` | `null` | Same semantics as in `mnemostack_search`; the answer is generated only from in-scope memories, including the generator's retry sub-recalls. |
 | `token_budget` | `integer` | `null` | Hard cap on the total (estimated) text tokens of the memories fed to the answer LLM; same contract as in `mnemostack_search`. Unset falls back to the server-wide default. |
+| `include_invalidated` | `boolean` | `false` | Include facts marked stale; same contract as in `mnemostack_search`. |
+| `as_of` | `string` | `null` | Point-in-time recall (ISO-8601); same contract as in `mnemostack_search`. |
 
 **Return shape:**
 
@@ -360,6 +364,32 @@ Validation failures return structured errors:
 ```
 
 **Example usage scenario:** After the agent uses a result from `mnemostack_search`, call feedback with the hit id, `signal: "useful"`, the original query, and the result's `sources` array; subsequent searches in the same deployment pick the signal up through the stateful pipeline stages.
+
+### `mnemostack_invalidate`
+
+**Purpose:** Mark memories stale by id, non-destructively. A write tool (parallel to `mnemostack_graph_add_triple`): it sets an `invalidated_at` marker (and optionally `valid_until`) on each point's payload without deleting or re-embedding it. Invalidated facts drop out of default recall but stay reachable via `include_invalidated` / `as_of`.
+
+**Input parameters:**
+
+| Name | Type | Default | Description |
+| --- | --- | --- | --- |
+| `ids` | `array<string>` | Required | Point id(s) to mark stale. |
+| `valid_until` | `string` | `null` | World-time the fact stopped being true (ISO-8601); optional, separate from the system-time invalidation stamp. |
+| `invalidated_at` | `string` | `null` | System-time stamp (ISO-8601); default: now (UTC). |
+
+**Return shape:**
+
+```json
+{
+  "ok": true,
+  "requested": 2,
+  "invalidated": 2
+}
+```
+
+`invalidated` is the number of points actually updated — points that do not exist are skipped, so it may be less than `requested`.
+
+**Example usage scenario:** When the agent learns a stored fact is superseded (a preference changed, a project moved), call `mnemostack_invalidate` with the stale result's id; later searches stop returning it, but an `as_of` query can still reconstruct what was believed before.
 
 ### `mnemostack_graph_query`
 

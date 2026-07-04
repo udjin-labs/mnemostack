@@ -37,6 +37,7 @@ class FakeRecaller:
         query: str,
         limit: int = 10,
         filters: dict[str, object] | None = None,
+        **_,
     ):
         self.calls.append((query, limit, filters))
         return self.by_query.get(query, [])
