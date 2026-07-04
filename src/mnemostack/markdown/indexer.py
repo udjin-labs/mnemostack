@@ -1,0 +1,232 @@
+"""Collect chunks and link edges from a folder of markdown files.
+
+Pure and I/O-light: reads the files, but does not embed, upsert, or touch the
+graph — it returns the chunks (with frontmatter folded into the payload) and
+the resolved wikilink/markdown-link edges, so the caller owns embedding,
+upserting, and graph writes (and can reuse the existing skip-unchanged / prune
+plumbing). Built for arbitrary markdown folders; an Obsidian vault is just one.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path, PurePosixPath
+from typing import Any
+
+from ..chunking import MarkdownChunker
+from ..ingest import stable_chunk_id
+from .parse import extract_links, parse_frontmatter
+
+
+@dataclass
+class MarkdownChunk:
+    """One indexed chunk: a stable id, its text, and the payload to store."""
+
+    id: str
+    text: str
+    payload: dict[str, Any]
+
+
+@dataclass
+class LinkEdge:
+    """A resolved outgoing link: ``source`` file → ``target`` note.
+
+    ``source`` is always a corpus-relative path. ``target`` is the relative
+    path of the linked note when it resolves within the corpus, or the raw
+    link key when it does not (a dangling link — still a useful edge).
+    """
+
+    source: str
+    target: str
+    resolved: bool = True
+
+
+@dataclass
+class MarkdownCollection:
+    chunks: list[MarkdownChunk] = field(default_factory=list)
+    edges: list[LinkEdge] = field(default_factory=list)
+    #: Corpus-relative paths of every file visited, including ones that
+    #: produced no chunks (empty / frontmatter-only) — the caller needs these
+    #: to prune their old chunks and re-sync their (now absent) links.
+    sources: list[str] = field(default_factory=list)
+
+    @property
+    def files(self) -> int:
+        return len(self.sources)
+
+
+def _rel(path: Path, base: Path) -> str:
+    """Corpus-relative path with forward slashes (stable across platforms)."""
+    return path.relative_to(base).as_posix()
+
+
+def _norm_target(raw: str) -> str:
+    """Normalize a link key for lookup: forward slashes, no leading ``./``."""
+    key = raw.replace("\\", "/")
+    while key.startswith("./"):
+        key = key[2:]
+    return key
+
+
+def _resolve_relative(source_rel: str, target: str, rels_lower: dict[str, str]) -> str | None:
+    """Resolve an inline link relative to its source file's directory.
+
+    ``[c](../index.md)`` from ``sub/page.md`` resolves to ``index.md`` — so
+    normal markdown relative links (and same-directory links in folders with
+    duplicate basenames) point at the right note. Matching is case-insensitive
+    (``[x](note.md)`` finds a sibling ``Note.md``) via ``rels_lower`` (lower-cased
+    relative path → canonical). A link that walks *above* the corpus root
+    (``../outside.md`` from a top-level note) escapes the corpus and returns
+    None, so it is never mistaken for an in-vault edge even if a same-named file
+    happens to exist inside the root. Returns the canonical corpus-relative
+    path, or None if nothing resolves.
+
+    A root-relative target (``/index.md``) resolves from the corpus root, not
+    the source directory.
+    """
+    norm = _norm_target(target)
+    if norm.startswith("/"):
+        # Root-relative: resolve from the corpus root, dropping the leading slash.
+        combined = PurePosixPath(norm.lstrip("/"))
+    else:
+        combined = PurePosixPath(source_rel).parent / norm
+    parts: list[str] = []
+    for part in combined.parts:
+        if part == "..":
+            if parts:
+                parts.pop()
+            else:
+                return None  # traversal escapes the corpus root
+        elif part not in (".", ""):
+            parts.append(part)
+    normalized = "/".join(parts)
+    for candidate in (f"{normalized}.md", normalized):
+        match = rels_lower.get(candidate.lower())
+        if match is not None:
+            return match
+    return None
+
+
+def collect_markdown(
+    root: str | Path,
+    *,
+    chunk_size: int = 1200,
+    index_root: str | None = None,
+    root_dir: str | Path | None = None,
+) -> MarkdownCollection:
+    """Walk ``root`` for ``*.md`` files and return their chunks + link edges.
+
+    Frontmatter maps to payload fields (usable as recall filters); protected
+    keys (``text``/``source``/``offset``/``index_root``) always win over a
+    frontmatter key of the same name. The markdown-aware chunker carries the
+    heading path into each chunk's payload. Links (``[[wikilinks]]`` and inline
+    ``[text](target.md)``) resolve against the corpus by note name or relative
+    path; unresolved targets become dangling edges.
+
+    ``root_dir`` pins the corpus root when ``root`` is a single file: source
+    paths become relative to it (``sub/a.md`` rather than ``a.md``) so a nested
+    single-file refresh updates the same chunk/graph nodes as the parent
+    directory index. Defaults to the file's parent.
+    """
+    root = Path(root)
+
+    def _md_files(d: Path) -> list[Path]:
+        # Match ``.md`` case-insensitively so ``README.MD`` on a case-sensitive
+        # filesystem is indexed too (``rglob("*.md")`` would skip it).
+        return sorted(f for f in d.rglob("*") if f.is_file() and f.suffix.lower() == ".md")
+
+    # Files to chunk = everything under the target (dir) or the target itself
+    # (a single ``.md`` file; a non-``.md`` target yields none, so the CLI errors
+    # out before a ``--recreate`` could drop the collection).
+    if root.is_dir():
+        files = _md_files(root)
+    else:
+        files = [root] if root.suffix.lower() == ".md" else []
+
+    # ``base`` = the corpus root that source paths are relative to. An explicit
+    # ``root_dir`` (from --index-root) pins it so a nested target — file OR
+    # directory — keeps the parent index's source paths (``sub/a.md``) and its
+    # index_root-scoped ids / graph nodes. Links resolve against the whole
+    # corpus so a sibling reference matches the canonical directory-index node.
+    if root_dir is not None:
+        base = Path(root_dir)
+    else:
+        base = root if root.is_dir() else root.parent
+    resolution_files = files if base == root else _md_files(base)
+
+    # Resolution maps: note name (basename) and relative path (without .md)
+    # both point at the canonical relative path. Keys are lower-cased so link
+    # resolution is case-insensitive (Obsidian-style); path keys win over
+    # bare names. `rels_lower` maps a lower-cased relative path to its canonical
+    # form so same-directory resolution is case-insensitive too.
+    key_to_rel: dict[str, str] = {}
+    rels_lower: dict[str, str] = {}
+    for f in resolution_files:
+        rel = _rel(f, base)
+        rels_lower[rel.lower()] = rel
+        rel_key = rel[:-3] if rel.lower().endswith(".md") else rel
+        key_to_rel.setdefault(f.stem.lower(), rel)
+        key_to_rel[rel_key.lower()] = rel
+
+    chunker = MarkdownChunker(chunk_size=chunk_size)
+    out = MarkdownCollection()
+    for f in files:
+        rel = _rel(f, base)
+        text = f.read_text(encoding="utf-8", errors="ignore")
+        meta, body = parse_frontmatter(text)
+        # Qdrant payload field names must be strings; a YAML key like ``2026:``
+        # parses to an int and would abort the upsert, so coerce keys to str.
+        meta = {str(k): v for k, v in meta.items()}
+        out.sources.append(rel)
+
+        for link in extract_links(body):
+            norm = _norm_target(link.target)
+            resolved: str | None = None
+            if not link.is_wikilink:
+                # Inline markdown link: resolve relative to the source file
+                # first (handles ../ and same-dir links, and duplicate
+                # basenames), then fall back to a corpus-wide name/path match.
+                resolved = _resolve_relative(rel, link.target, rels_lower)
+            resolved = resolved or key_to_rel.get(link.target.lower()) or key_to_rel.get(norm.lower())
+            out.edges.append(
+                LinkEdge(
+                    source=rel,
+                    target=resolved or norm,
+                    resolved=resolved is not None,
+                )
+            )
+
+        # Ownership record: which payload keys this markdown run wrote from the
+        # file, so a re-index refresh deletes only removed frontmatter keys and
+        # leaves foreign keys (external enrichment, validity markers) untouched.
+        md_keys = sorted({*meta, "text", "source", "offset", "heading_path", "_md_keys"})
+        if index_root is not None:
+            md_keys = sorted({*md_keys, "index_root"})
+
+        for chunk in chunker.chunk(body):
+            payload: dict[str, Any] = {
+                **meta,
+                "text": chunk.text,
+                "source": rel,
+                "offset": chunk.offset,
+                # ``heading_path`` is parser-derived and reserved — always set it
+                # (even to []) so a frontmatter key of the same name can't inject
+                # bogus section hierarchy on a headingless chunk.
+                "heading_path": chunk.metadata.get("heading_path") or [],
+                "_md_keys": md_keys,
+            }
+            if index_root is not None:
+                payload["index_root"] = index_root
+            # Scope the id by index_root so two corpora sharing a relative path
+            # and identical body (differing only in frontmatter) don't collapse
+            # to one id — the collection-wide skip-unchanged check would
+            # otherwise drop the second corpus's chunk and its root/metadata.
+            id_source = f"{index_root}\x00{rel}" if index_root is not None else rel
+            out.chunks.append(
+                MarkdownChunk(
+                    id=stable_chunk_id(id_source, chunk.offset, chunk.text),
+                    text=chunk.text,
+                    payload=payload,
+                )
+            )
+    return out
