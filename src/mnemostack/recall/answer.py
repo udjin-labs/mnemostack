@@ -699,17 +699,22 @@ class AnswerGenerator:
         if not vectors:
             return draft, memories
 
+        # Over-fetch: search_many is a raw vector RRF with no validity
+        # awareness, so a top-N of stale/out-of-window hits could fill the
+        # window and be dropped by the filter below, forcing the retry back to
+        # the draft even though valid hits exist just past max_memories. Fetch
+        # wider, filter, then trim to max_memories.
+        validity_active = (not include_invalidated) or (as_of is not None)
+        fetch = max(self.max_memories * 3, self.max_memories + 20) if validity_active \
+            else self.max_memories
         merged_memories = self.recaller.search_many(
             vectors,
-            limit=self.max_memories,
+            limit=fetch,
             filters=dict(recall_filters) if recall_filters is not None else None,
         )
-        # search_many is a raw vector RRF with no validity awareness, so apply
-        # the caller's validity view to its output — otherwise an as_of retry
-        # would answer from current facts.
         merged_memories = filter_by_validity(
             merged_memories, include_invalidated=include_invalidated, as_of=as_of
-        )
+        )[: self.max_memories]
         # The fresh sub-recall bypassed any budget the caller applied to the
         # primary memories; re-cap before this pool reaches another prompt.
         merged_memories = self._cap_memories(merged_memories, token_budget, token_counter)

@@ -508,3 +508,45 @@ def test_graph_store_to_iso_normalizes_to_utc():
     assert _to_iso("2026-07-04T00:00:00+02:00") == "2026-07-03T22:00:00+00:00"
     assert _to_iso("2024-01-15") == "2024-01-15"  # bare date unchanged
     assert _to_iso("current") == "current"
+
+
+# ---------- review round 4: over-fetch trims back to the window ----------
+
+
+def test_over_fetch_trims_back_to_per_source_limit_on_clean_index():
+    # A clean index (nothing invalidated) must keep exactly the original
+    # per-source window, not the wider over-fetch — no ranking drift.
+    from mnemostack.recall.recaller import Recaller
+
+    class _FakeRetriever:
+        name = "vector"
+
+        def __init__(self):
+            self.last_limit = None
+
+        def search(self, query, limit, filters=None):
+            self.last_limit = limit
+            # return `limit` current hits (nothing stale)
+            return [
+                RecallResult(id=str(i), text=f"t{i}", score=1.0 - i * 0.001,
+                             payload={}, sources=["vector"])
+                for i in range(limit)
+            ]
+
+    retr = _FakeRetriever()
+    recaller = Recaller(retrievers=[retr])
+    # recall with a large limit so fusion doesn't cut below the window
+    out = recaller.recall("q", limit=100, vector_limit=20)
+    assert retr.last_limit >= 60          # over-fetched
+    assert len(out) == 20                 # but trimmed back to the 20-wide window
+
+
+def test_graph_valid_clause_used_for_target_node():
+    # The rel query must filter the target node m, not just n and r.
+    import inspect
+
+    from mnemostack.recall.retrievers import MemgraphRetriever
+
+    src = inspect.getsource(MemgraphRetriever.search)
+    assert 'target_valid = self._valid_clause("m"' in src
+    assert "AND {target_valid}" in src
