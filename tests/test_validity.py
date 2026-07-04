@@ -241,3 +241,114 @@ async def test_async_invalidate_mirrors_sync():
         assert retrieved[0].payload["text"] == "fact"
     finally:
         await s.close()
+
+
+# ---------- review round: ISO instant comparison ----------
+
+
+def test_valid_at_timezone_offset_compared_as_instant():
+    # valid_from 2026-07-04T00:00+02:00 == 2026-07-03T22:00Z. A naive string
+    # compare would reject as_of=2026-07-03T23:00Z (text starts with the prior
+    # day); instant comparison correctly accepts it.
+    p = {"valid_from": "2026-07-04T00:00:00+02:00"}
+    assert valid_at(p, "2026-07-03T23:00:00Z") is True   # after real start
+    assert valid_at(p, "2026-07-03T21:00:00Z") is False  # before real start
+
+
+def test_valid_at_z_suffix_parsed():
+    p = {"valid_until": "2026-06-01T00:00:00Z"}
+    assert valid_at(p, "2026-05-01T00:00:00Z") is True
+    assert valid_at(p, "2026-07-01T00:00:00Z") is False
+
+
+def test_valid_at_bare_dates_fall_back_to_string_compare():
+    p = {"valid_from": "2026-01-01", "valid_until": "2026-06-01"}
+    assert valid_at(p, "2026-03-01") is True
+    assert valid_at(p, "2026-12-01") is False
+
+
+# ---------- review round: filter before top-K cut (crowd-out) ----------
+
+
+def test_recall_stale_top_hit_does_not_starve_limit():
+    # limit=1 with a stale top hit and a current second hit must return the
+    # current one, not empty — the filter runs before fusion's top-K cut.
+    from mnemostack.recall.recaller import Recaller
+
+    class _FakeRetriever:
+        name = "vector"
+
+        def search(self, query, limit, filters=None):
+            return [
+                RecallResult(id="stale", text="s", score=0.9,
+                             payload={"invalidated_at": "2026-07-04"}, sources=["vector"]),
+                RecallResult(id="fresh", text="f", score=0.8, payload={}, sources=["vector"]),
+            ]
+
+    recaller = Recaller(retrievers=[_FakeRetriever()])
+    out = recaller.recall("q", limit=1)
+    assert [r.id for r in out] == ["fresh"]
+
+
+def test_vector_floor_does_not_reinject_stale():
+    # A stale hit with a high raw vector score would be re-appended by the
+    # vector floor if it survived into the floor candidates; filtering before
+    # candidate collection prevents that.
+    from mnemostack.recall.recaller import Recaller
+
+    class _FakeRetriever:
+        name = "vector"
+
+        def search(self, query, limit, filters=None):
+            return [
+                RecallResult(id="fresh", text="f", score=0.5,
+                             payload={"raw_vector_score": 0.5}, sources=["vector"]),
+                RecallResult(id="stale", text="s", score=0.99,
+                             payload={"invalidated_at": "x", "raw_vector_score": 0.99},
+                             sources=["vector"]),
+            ]
+
+    recaller = Recaller(retrievers=[_FakeRetriever()], vector_floor=1)
+    out = recaller.recall("q", limit=1)
+    assert "stale" not in {r.id for r in out}
+
+
+# ---------- review round: graph as_of push-down ----------
+
+
+def test_memgraph_valid_clause_current_and_as_of():
+    from mnemostack.recall.retrievers import MemgraphRetriever
+
+    current = MemgraphRetriever._valid_clause("n", None)
+    assert current == "coalesce(n.valid_until, 'current') = 'current'"
+
+    at = MemgraphRetriever._valid_clause("r", "2026-03-01")
+    assert "$as_of" in at
+    assert "r.valid_from" in at and "r.valid_until" in at
+
+
+def test_recall_pushes_as_of_only_to_accepting_retriever():
+    from mnemostack.recall.recaller import Recaller
+
+    captured = {}
+
+    class _GraphRetriever:
+        name = "memgraph"
+        accepts_as_of = True
+
+        def search(self, query, limit, filters=None, as_of=None):
+            captured["graph_as_of"] = as_of
+            return []
+
+    class _VectorRetriever:
+        name = "vector"
+
+        # no as_of param — must NOT be called with as_of (would TypeError)
+        def search(self, query, limit, filters=None):
+            captured["vector_called"] = True
+            return []
+
+    recaller = Recaller(retrievers=[_GraphRetriever(), _VectorRetriever()])
+    recaller.recall("q", limit=5, as_of="2026-03-01")
+    assert captured["graph_as_of"] == "2026-03-01"
+    assert captured["vector_called"] is True

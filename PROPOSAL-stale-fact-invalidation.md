@@ -114,13 +114,32 @@ recall_flow(recaller, query, ...,
   as_of AND (valid_until absent OR valid_until > as_of)` — the same predicate
   `query_triples(as_of=...)` already uses on the graph.
 
-### Filter primitive — add negation
+### Where the filter runs
 
-The exclusion needs `must_not` on the Qdrant side, which does not exist today
-(`_build_filter` is AND-only, `must=[...]`). Add an `IsEmpty`/`must_not`
-condition for "`invalidated_at` is absent". This is the one genuinely new
-low-level primitive; it is also independently useful (any future "exclude
-tag X" filter wants it).
+The exclusion is applied **per retriever hit, before RRF cuts to top-K** (in
+`Recaller._recall_once` / `_recall_via_retrievers`), not as a post-fusion pass.
+That ordering matters: a stale high-scoring hit must not crowd a current one
+out of a small `limit`, and the vector-floor candidates must be built from
+already-filtered hits so the floor cannot re-append an invalidated point.
+`keep_payload` is the per-hit predicate; a final `filter_by_validity` in
+`recall()` is a cheap idempotent safety net.
+
+Two comparison subtleties, both handled:
+
+- **Timezone-aware `as_of`.** ISO instants are parsed and compared as instants
+  (not lexicographically), so `valid_from='...T00:00+02:00'` vs.
+  `as_of='...T23:00Z'` classifies correctly; bare ISO dates fall back to string
+  compare.
+- **Graph facts carry no validity bounds in their payload.** `filter_by_validity`
+  cannot enforce `as_of` on them, so `as_of` is pushed into
+  `MemgraphRetriever.search`, which swaps its current-only Cypher for the same
+  point-in-time predicate `GraphStore.query_triples(as_of=...)` uses (the
+  retriever advertises this via an `accepts_as_of` marker).
+
+A Qdrant `must_not` push-down (filtering invalidated points inside the vector
+search itself, rather than dropping them from the returned candidate list)
+would be a further efficiency optimization but is not needed for correctness in
+stage 1; deferred.
 
 ### Surfaces (thin pass-throughs, mirroring the token-budget rollout)
 
@@ -182,5 +201,6 @@ This is deliberately the vector-side twin of `GraphStore.invalidate`: same
 `valid_from`/`valid_until` vocabulary, same non-destructive close, same
 "current-by-default" recall, plus the system-time `invalidated_at` axis that Zep
 validated. It reuses the `--refresh-payloads` write path (`set_payload` merge +
-`index_root` guard) wholesale. The only new low-level capability is `must_not`
-negation in the Qdrant filter builder.
+`index_root` guard) wholesale. No new low-level Qdrant primitive is required in
+stage 1 — the exclusion is applied to retriever candidate lists before fusion,
+and `as_of` is pushed into the graph retriever's existing Cypher.

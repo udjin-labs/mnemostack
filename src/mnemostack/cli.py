@@ -217,8 +217,12 @@ def cmd_invalidate(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    # argparse hands every id in as a string, but Qdrant integer point ids are
+    # distinct from string ids — coerce digit-only args so numeric-id
+    # collections can be invalidated (UUIDs contain hyphens, so stay strings).
+    ids = [int(x) if x.isdigit() else x for x in args.ids]
     updated = store.invalidate(
-        list(args.ids),
+        ids,
         invalidated_at=args.invalidated_at,
         valid_until=args.valid_until,
         index_root=args.index_root,

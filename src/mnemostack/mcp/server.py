@@ -131,6 +131,16 @@ def build_server(
             ),
         )
 
+    def _get_vector_payload_only():
+        # Invalidation is a payload write (retrieve + set_payload) that never
+        # touches vectors, so it must not require the embedding provider —
+        # otherwise a missing/unconfigured provider would break a pure payload
+        # op. The dimension is unused by those calls.
+        return _component(
+            "vector_payload_only",
+            lambda: VectorStore(collection=collection, dimension=1, host=qdrant_host),
+        )
+
     def _build_recaller():
         emb = _get_embedding()
         vec = _get_vector()
@@ -501,8 +511,11 @@ def build_server(
         invalidated (the number of points actually updated).
         """
         try:
-            updated = _get_vector().invalidate(
-                list(ids), invalidated_at=invalidated_at, valid_until=valid_until
+            # Coerce digit-only ids to int so numeric-id Qdrant collections can
+            # be invalidated (UUID strings contain hyphens, so stay strings).
+            coerced = [int(x) if isinstance(x, str) and x.isdigit() else x for x in ids]
+            updated = _get_vector_payload_only().invalidate(
+                coerced, invalidated_at=invalidated_at, valid_until=valid_until
             )
             return {
                 "ok": True,

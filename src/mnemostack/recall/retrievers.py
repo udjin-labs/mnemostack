@@ -426,6 +426,10 @@ class MemgraphRetriever(Retriever):
     """
 
     name = "memgraph"
+    #: The recall path passes `as_of` to retrievers that advertise this, so
+    #: graph facts are filtered point-in-time at query time (their payloads
+    #: carry no validity bounds for post-filtering to use).
+    accepts_as_of = True
 
     def __init__(
         self,
@@ -474,7 +478,24 @@ class MemgraphRetriever(Retriever):
                 pass
             self._driver = None
 
-    def search(self, query, limit=20, filters=None):
+    @staticmethod
+    def _valid_clause(var: str, as_of: str | None) -> str:
+        """Cypher validity predicate for a node/rel variable.
+
+        With no `as_of`, "currently valid" (`valid_until` = the `'current'`
+        marker, or legacy NULL). With `as_of`, the point-in-time predicate
+        `GraphStore.query_triples(as_of=...)` uses, referencing the bound
+        `$as_of` parameter.
+        """
+        if as_of is None:
+            return f"coalesce({var}.valid_until, 'current') = 'current'"
+        return (
+            f"({var}.valid_from IS NULL OR {var}.valid_from <= $as_of) AND "
+            f"({var}.valid_until = 'current' OR {var}.valid_until IS NULL "
+            f"OR {var}.valid_until > $as_of)"
+        )
+
+    def search(self, query, limit=20, filters=None, as_of=None):
         if filters:
             # Graph nodes carry no chunk payload, so a result here cannot be
             # proven to belong to the filtered scope (tenant, source, time
@@ -487,6 +508,10 @@ class MemgraphRetriever(Retriever):
         words = [w.lower() for w in query.split() if len(w) >= self.min_word]
         if not words:
             return []
+        node_valid = self._valid_clause("n", as_of)
+        rel_valid = self._valid_clause("r", as_of)
+        # Only bind $as_of when the predicate references it.
+        extra = {"as_of": as_of} if as_of is not None else {}
         counts: dict[str, dict[str, Any]] = defaultdict(lambda: {"count": 0, "type": "", "mc": ""})
         try:
             with driver.session() as session:
@@ -499,10 +524,11 @@ class MemgraphRetriever(Retriever):
                     if w.isdigit() and len(w) >= 6:
                         rows = session.run(
                             "MATCH (n) WHERE (n.telegram_id = $w OR n.contact_id = $w) "
-                            "AND coalesce(n.valid_until, 'current') = 'current' "
+                            f"AND {node_valid} "
                             "RETURN n.name AS name, labels(n)[0] AS type, "
                             "n.memory_class AS mc LIMIT 5",
                             w=w,
+                            **extra,
                         ).data()
 
                     # Probe 2: exact name match.
@@ -514,28 +540,31 @@ class MemgraphRetriever(Retriever):
                     if not rows:
                         rows = session.run(
                             "MATCH (n) WHERE coalesce(n.name_lower, toLower(n.name)) = $w "
-                            "AND coalesce(n.valid_until, 'current') = 'current' "
+                            f"AND {node_valid} "
                             "RETURN n.name AS name, labels(n)[0] AS type, "
                             "n.memory_class AS mc LIMIT 5",
                             w=w,
+                            **extra,
                         ).data()
                     # Probe 3: also match by handle/username (e.g. @alice)
                     if not rows and len(w) >= 3:
                         rows = session.run(
                             "MATCH (n) WHERE toLower(coalesce(n.telegram_username, '')) = $w "
-                            "AND coalesce(n.valid_until, 'current') = 'current' "
+                            f"AND {node_valid} "
                             "RETURN n.name AS name, labels(n)[0] AS type, "
                             "n.memory_class AS mc LIMIT 5",
                             w=w,
+                            **extra,
                         ).data()
                     # Probe 4: substring fallback for longer tokens.
                     if not rows and len(w) >= self.contains_min:
                         rows = session.run(
                             "MATCH (n) WHERE coalesce(n.name_lower, toLower(n.name)) CONTAINS $w "
-                            "AND coalesce(n.valid_until, 'current') = 'current' "
+                            f"AND {node_valid} "
                             "RETURN n.name AS name, labels(n)[0] AS type, "
                             "n.memory_class AS mc LIMIT 5",
                             w=w,
+                            **extra,
                         ).data()
                     for n in rows:
                         name = n.get("name")
@@ -550,12 +579,12 @@ class MemgraphRetriever(Retriever):
                 for name, info in ranked:
                     rel_rows = session.run(
                         "MATCH (n {name: $name})-[r]->(m) "
-                        "WHERE coalesce(n.valid_until, 'current') = 'current' "
-                        "AND coalesce(r.valid_until, 'current') = 'current' "
+                        f"WHERE {node_valid} AND {rel_valid} "
                         "RETURN n.name AS from_n, type(r) AS rel, m.name AS to_n "
                         "LIMIT $lim",
                         name=name,
                         lim=self.max_rels,
+                        **extra,
                     ).data()
                     rel_text = "; ".join(
                         f"{r['from_n']}-[{r['rel']}]->{r['to_n']}" for r in rel_rows
