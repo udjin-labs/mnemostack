@@ -65,6 +65,9 @@ def _code_fence_ranges(text: str) -> list[tuple[int, int]]:
         elif token[0] == open_fence[0] and len(token) >= len(open_fence):
             ranges.append((open_start, m.start()))
             open_start, open_fence = None, ""
+    # An unterminated fence runs to EOF (CommonMark), so mask the rest.
+    if open_start is not None:
+        ranges.append((open_start, len(text)))
     return ranges
 
 
@@ -91,6 +94,10 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     malformed or not a mapping (including an empty block), returns ``({}, body)``
     — the recognized fence is stripped so it is never embedded as chunk text.
     """
+    # Files saved with a UTF-8 BOM start with U+FEFF, which would defeat the
+    # anchored ^--- match; drop a leading BOM before looking for frontmatter.
+    if text.startswith("\ufeff"):
+        text = text[1:]
     match = _FRONTMATTER_RE.match(text)
     if not match:
         return {}, text

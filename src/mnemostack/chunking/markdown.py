@@ -159,6 +159,9 @@ class MarkdownChunker(Chunker):
             elif token[0] == open_fence[0] and len(token) >= len(open_fence):
                 ranges.append((open_start, m.start()))
                 open_start, open_fence = None, ""
+        # An unterminated fence runs to EOF (CommonMark), so mask the rest.
+        if open_start is not None:
+            ranges.append((open_start, len(text)))
         return ranges
 
     @staticmethod

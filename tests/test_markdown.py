@@ -41,6 +41,23 @@ def test_frontmatter_closing_fence_at_eof():
     assert body == ""
 
 
+def test_frontmatter_with_utf8_bom():
+    # A file saved with a UTF-8 BOM starts with U+FEFF; frontmatter must still
+    # be recognized rather than embedded as body.
+    meta, body = parse_frontmatter("\ufeff---\ntitle: Bom\n---\n# Note\nbody")
+    assert meta == {"title": "Bom"}
+    assert body == "# Note\nbody"
+
+
+def test_extract_links_skips_unterminated_code_fence():
+    # An opening fence with no closing fence runs to EOF (CommonMark); links
+    # after it are still code samples, not references.
+    text = "real [[Live]]\n\n```\n[[Fenced]] and [x](f.md)\nno closing fence"
+    targets = {link.target for link in extract_links(text)}
+    assert "Live" in targets
+    assert "Fenced" not in targets and "f" not in targets
+
+
 def test_empty_frontmatter_block_strips_fences():
     # An empty frontmatter block (YAML loads to None) must still strip the
     # recognized fence, not embed the --- lines as body text.
@@ -570,8 +587,9 @@ def test_cmd_index_markdown_graph_write_failure_does_not_fail_run(
     assert "graph write failed" in capsys.readouterr().err
 
 
-class _Hit:
-    def __init__(self, payload):
+class _HitId:
+    def __init__(self, id, payload):
+        self.id = id
         self.payload = payload
 
 
@@ -610,9 +628,15 @@ def test_cmd_index_markdown_prune_removes_deleted_file_chunks(tmp_path, monkeypa
                     yield pid
 
         def scroll(self, filters=None):
-            for _pid, pl in self._prior:
+            for pid, pl in self._prior:
                 if not filters or all(pl.get(k) == val for k, val in filters.items()):
-                    yield _Hit(pl)
+                    yield _HitId(pid, pl)
+
+        def set_payload(self, cid, payload):
+            pass
+
+        def delete_payload_keys(self, cid, keys):
+            pass
 
         def delete_points(self, ids):
             self.deleted.extend(ids)
@@ -742,3 +766,74 @@ def test_cmd_index_markdown_recreate_validates_before_dropping(tmp_path, monkeyp
     assert cli.cmd_index_markdown(args) == 2
     assert store.recreated is False
     assert "no .md files" in capsys.readouterr().err
+
+
+def test_cmd_index_markdown_refreshes_payload_on_frontmatter_change(tmp_path, monkeypatch):
+    import argparse
+
+    import mnemostack.cli as cli
+
+    note = tmp_path / "n.md"
+    note.write_text("---\ntag: old\ndrop_me: 1\n---\n# N\nstable body text")
+
+    class _FakeProvider:
+        dimension = 3
+
+        def embed(self, text):
+            return [0.1, 0.2, 0.3]
+
+    # class-level state so the two VectorStore() instances (one per cmd run)
+    # share the same simulated collection.
+    class _Store:
+        points: dict = {}
+
+        def __init__(self, **_):
+            pass
+
+        def collection_exists(self):
+            return bool(_Store.points)
+
+        def ensure_collection(self, recreate=False):
+            if recreate:
+                _Store.points = {}
+            return True
+
+        def scroll(self, filters=None):
+            for pid, pl in _Store.points.items():
+                if not filters or all(pl.get(k) == v for k, v in filters.items()):
+                    yield _HitId(pid, pl)
+
+        def iter_ids(self, filters=None):
+            return list(_Store.points)
+
+        def upsert(self, cid, vec, payload):
+            _Store.points[cid] = dict(payload)
+
+        def set_payload(self, cid, payload):
+            _Store.points.setdefault(cid, {}).update(payload)
+
+        def delete_payload_keys(self, cid, keys):
+            for k in keys:
+                _Store.points.get(cid, {}).pop(k, None)
+
+    monkeypatch.setattr(cli, "get_provider", lambda *_a, **_k: _FakeProvider())
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: _Store())
+
+    def _args():
+        return argparse.Namespace(
+            path=str(tmp_path), provider="fake", embedding_model=None,
+            collection="c", qdrant="http://localhost:6333",
+            chunk_size=1200, memgraph_uri=None,
+            graph_timeout=5.0, recreate=False, prune=False, yes=True,
+        )
+
+    assert cli.cmd_index_markdown(_args()) == 0          # initial index
+    assert any(pl.get("tag") == "old" for pl in _Store.points.values())
+
+    # change frontmatter (body/id unchanged) and re-index
+    note.write_text("---\ntag: new\n---\n# N\nstable body text")
+    assert cli.cmd_index_markdown(_args()) == 0
+    # payload is refreshed in place: new value applied, removed key dropped
+    payloads = list(_Store.points.values())
+    assert any(pl.get("tag") == "new" for pl in payloads)
+    assert all("drop_me" not in pl for pl in payloads)

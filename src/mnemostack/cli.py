@@ -770,9 +770,15 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
     store.ensure_collection(recreate=args.recreate)
 
     chunks = [(c.id, c.text, c.payload) for c in col.chunks]
-    existing_ids: set[str] = set()
+    # Fetch existing points (with payloads) for this root so a chunk whose id is
+    # unchanged but whose frontmatter changed still has its payload refreshed —
+    # the id is derived from (index_root, source, offset, text), not the
+    # metadata, so a tag/date edit would otherwise leave stale filters in Qdrant.
+    existing_payloads: dict[str, dict] = {}
     if not args.recreate and store.collection_exists():
-        existing_ids = {str(pid) for pid in store.iter_ids()}
+        for hit in store.scroll(filters={"index_root": index_root}):
+            existing_payloads[str(hit.id)] = hit.payload or {}
+    existing_ids = set(existing_payloads)
     to_embed = [c for c in chunks if c[0] not in existing_ids]
     skipped = len(chunks) - len(to_embed)
     print(
@@ -791,6 +797,20 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
             continue
         store.upsert(cid, vec, payload)
         inserted += 1
+
+    # Refresh payloads of unchanged chunks so frontmatter edits (new/changed/
+    # removed keys) sync without re-embedding. The markdown payload is fully
+    # file-derived (no external enrichment), so delete keys the file no longer
+    # produces, then merge the current payload.
+    refreshed = 0
+    for cid, _text, payload in chunks:
+        if cid not in existing_ids:
+            continue
+        stale = [k for k in existing_payloads.get(cid, {}) if k not in payload]
+        if stale:
+            store.delete_payload_keys(cid, stale)
+        store.set_payload(cid, payload)
+        refreshed += 1
 
     pruned = 0
     if args.prune and not args.recreate:
@@ -868,6 +888,7 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
     print(
         f"Done: inserted/updated {inserted}, skipped {skipped},"
         f" failed-embedding {failed}, total chunks {len(chunks)}"
+        + (f", refreshed {refreshed} payloads" if refreshed else "")
         + (f", pruned {pruned} stale" if args.prune else "")
         + (f", {edges_written} link edges" if graph_uri else "")
         + f" in collection '{args.collection}'."
