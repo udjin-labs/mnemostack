@@ -152,6 +152,16 @@ def test_markdown_chunker_keeps_text_before_first_header():
     assert any(c.metadata["heading_path"] == ["Section"] for c in chunks)
 
 
+def test_markdown_chunker_recognizes_setext_headings():
+    # Setext headings (Title\n==== / Section\n----) are valid markdown and must
+    # carry into heading_path just like ATX headings.
+    text = "Title\n=====\n\nintro\n\nSection\n-------\n\nbody"
+    chunks = MarkdownChunker(chunk_size=10000).chunk(text)
+    paths = [c.metadata["heading_path"] for c in chunks]
+    assert ["Title"] in paths
+    assert ["Title", "Section"] in paths
+
+
 def test_markdown_chunker_accepts_indented_atx_headings():
     # A heading indented 1-3 spaces is valid CommonMark and must be recognized.
     text = "  # Project\n\nintro\n\n## Sub\n\nbody"

@@ -1,9 +1,12 @@
 """Parsing helpers for the markdown indexer: frontmatter + links.
 
-Kept dependency-light — YAML frontmatter uses ``pyyaml`` (already a core
-dependency); link extraction is plain regex. Both are fail-open: malformed
-frontmatter yields no metadata (the body is still indexed), and link
-extraction never raises.
+Frontmatter is split with ``pyyaml`` (a core dependency). Links are extracted by
+a real CommonMark parser (``markdown-it-py``) rather than hand-rolled regex, so
+code spans/blocks, HTML comments, escapes, balanced brackets/parens, titles, and
+the like are handled to spec. ``[[wikilinks]]`` (not CommonMark) are recognized
+by a small inline plugin, so they too are correctly excluded from code/comments.
+Both helpers are fail-open: malformed frontmatter yields no metadata (the body
+is still indexed).
 """
 
 from __future__ import annotations
@@ -15,8 +18,8 @@ from typing import Any
 from urllib.parse import unquote
 
 import yaml
-
-from ..chunking.fences import code_ranges
+from markdown_it import MarkdownIt
+from markdown_it.rules_inline import StateInline
 
 logger = logging.getLogger(__name__)
 
@@ -29,39 +32,43 @@ _FRONTMATTER_RE = re.compile(
     r"^---[ \t]*\r?\n(.*?)^(?:---|\.\.\.)[ \t]*(?:\r?\n|\Z)", re.DOTALL | re.MULTILINE
 )
 
-# ``[[Target]]`` / ``[[Target|alias]]`` / ``[[Target#heading]]`` — capture the
-# target. Matched with finditer so we can see a leading ``!`` (embed) and skip it.
-_WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]")
 
-# ``[text](target)`` inline links. The destination is either angle-bracketed
-# (``<My Note.md>`` — allows spaces) or an unquoted run that may contain one
-# level of balanced parentheses (``foo(1).md``); capture both forms (groups 1
-# and 2). A leading ``!`` (image embed) is excluded. An optional CommonMark
-# title in any of the three forms — ``"..."``, ``'...'``, ``(...)`` — follows.
-_MDLINK_RE = re.compile(
-    r"(?<!\!)\[[^\]]*\]\(\s*(?:<([^>]*)>|((?:[^()\s]|\([^()]*\))+))"
-    r"""(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)"""
-)
+def _wikilink_rule(state: StateInline, silent: bool) -> bool:
+    """Inline rule: ``[[Target]]`` → a ``wikilink`` token (content = raw inside).
 
-# An inline code span: a backtick run, content, matching backtick run, on one
-# line. README notes often show link syntax inline (``Use `[[Example]]` here``).
-_INLINE_CODE_RE = re.compile(r"`+[^`\n]*`+")
-
-
-def _masked_ranges(text: str) -> list[tuple[int, int]]:
-    """Ranges whose link syntax is code, not a reference.
-
-    Fenced blocks and indented code blocks (shared with the chunker via
-    ``chunking.fences``) plus inline code spans. Overlapping ranges are harmless
-    — they all mask the same regions — so the sets are simply unioned.
+    Runs before the CommonMark ``link`` rule but *after* code-span parsing, so a
+    ``[[...]]`` inside inline code (or a fenced/indented block, or an HTML
+    comment) is never seen here — code exclusion comes for free from the parser.
+    An Obsidian embed ``![[...]]`` (leading ``!``) is left to fall through to
+    normal parsing (it becomes literal text, i.e. no edge).
     """
-    ranges = code_ranges(text)
-    ranges.extend((m.start(), m.end()) for m in _INLINE_CODE_RE.finditer(text))
-    return ranges
+    pos = state.pos
+    src = state.src
+    if src[pos : pos + 2] != "[[":
+        return False
+    if pos > 0 and src[pos - 1] == "!":  # ![[...]] embed → not a wikilink
+        return False
+    end = src.find("]]", pos + 2)
+    if end < 0:
+        return False
+    content = src[pos + 2 : end]
+    if "[" in content or "]" in content:  # malformed / nested — not a wikilink
+        return False
+    if not silent:
+        token = state.push("wikilink", "", 0)
+        token.content = content
+        token.markup = "[["
+    state.pos = end + 2
+    return True
 
 
-def _in_ranges(pos: int, ranges: list[tuple[int, int]]) -> bool:
-    return any(start <= pos < end for start, end in ranges)
+def _make_md() -> MarkdownIt:
+    md = MarkdownIt("commonmark")
+    md.inline.ruler.before("link", "wikilink", _wikilink_rule)
+    return md
+
+
+_MD = _make_md()
 
 
 def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
@@ -91,8 +98,8 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
 
 
 def _strip_target(raw: str) -> str:
-    """Normalize a link target to a note key: drop anchor, alias, and .md."""
-    target = raw.split("#", 1)[0].split("|", 1)[0].strip()
+    """Normalize a link target to a note key: drop query/anchor/alias and .md."""
+    target = raw.split("#", 1)[0].split("?", 1)[0].split("|", 1)[0].strip()
     target = unquote(target)  # decode %20 etc. so "My%20Note" == "My Note"
     target = target.rstrip("/")
     if target.lower().endswith(".md"):
@@ -142,44 +149,44 @@ class Link:
     is_wikilink: bool
 
 
-def extract_links(text: str) -> list[Link]:
-    """Extract outgoing link targets (wikilinks + inline markdown links).
+def _iter_inline_tokens(text: str):
+    """Yield the inline child tokens of every block in ``text``."""
+    for block in _MD.parse(text):
+        if block.type == "inline" and block.children:
+            yield from block.children
 
-    Returns normalized, de-duplicated ``Link`` records in first-seen order.
-    External links (``http://``, ``https://``, ``mailto:``) and pure anchors
-    (``#section``) are skipped — only intra-corpus references become edges.
-    Image embeds (``![...](...)`` and ``![[...]]``) and non-note file targets
-    (``.png``, ``.pdf``, ...) are ignored for both link styles. Link syntax
-    inside a fenced code block or an inline code span is a code sample, not a
-    reference, so it too is skipped. De-duplication is keyed by ``(style,
-    target)`` so a wikilink and an inline link to the same name both survive —
-    they resolve differently (corpus-wide vs. relative to the source file).
+
+def _is_external(dest: str) -> bool:
+    low = dest.lower()
+    return low.startswith(("http://", "https://", "mailto:", "//", "#")) or "://" in low
+
+
+def extract_links(text: str) -> list[Link]:
+    """Extract outgoing link targets (inline markdown links + ``[[wikilinks]]``).
+
+    Uses a CommonMark parser, so link syntax inside code (fenced, indented, or
+    inline spans) and inside HTML comments is not a reference and is skipped;
+    escapes, balanced brackets/parens, titles, and angle-bracketed/percent-
+    encoded destinations are handled to spec. External links (``http(s)://``,
+    ``mailto:``, protocol-relative ``//``) and pure anchors are dropped, as are
+    image embeds and non-note file targets (``.png``, ``.pdf``, ...). De-dup is
+    keyed by ``(style, target)`` so a wikilink and an inline link to the same
+    name both survive — they resolve differently (corpus-wide vs. relative).
     """
-    masked = _masked_ranges(text)
     seen: dict[tuple[bool, str], Link] = {}
-    for m in _WIKILINK_RE.finditer(text):
-        if _in_ranges(m.start(), masked):
-            continue
-        # Skip Obsidian embeds ``![[...]]`` and non-note targets (``[[img.png]]``).
-        if m.start() > 0 and text[m.start() - 1] == "!":
-            continue
-        raw = m.group(1)
-        if not _is_note_target(raw):
-            continue
-        key = _strip_target(raw)
-        if key:
-            seen.setdefault((True, key), Link(target=key, is_wikilink=True))
-    for m in _MDLINK_RE.finditer(text):
-        if _in_ranges(m.start(), masked):
-            continue
-        raw = m.group(1) if m.group(1) is not None else m.group(2)
-        low = raw.lower()
-        # External (incl. protocol-relative ``//host/...``) and pure anchors.
-        if low.startswith(("http://", "https://", "mailto:", "//", "#")) or "://" in low:
-            continue
-        if not _is_note_target(raw):
-            continue
-        key = _strip_target(raw)
-        if key:
-            seen.setdefault((False, key), Link(target=key, is_wikilink=False))
+    for tok in _iter_inline_tokens(text):
+        if tok.type == "link_open":
+            dest = tok.attrGet("href") or ""
+            if _is_external(dest) or not _is_note_target(dest):
+                continue
+            key = _strip_target(dest)
+            if key:
+                seen.setdefault((False, key), Link(target=key, is_wikilink=False))
+        elif tok.type == "wikilink":
+            raw = tok.content
+            if not _is_note_target(raw):
+                continue
+            key = _strip_target(raw)
+            if key:
+                seen.setdefault((True, key), Link(target=key, is_wikilink=True))
     return list(seen.values())

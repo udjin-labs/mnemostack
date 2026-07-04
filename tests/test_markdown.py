@@ -125,6 +125,46 @@ def test_extract_links_skips_protocol_relative_urls():
     assert {link.target for link in links} == {"real"}
 
 
+def test_extract_links_skips_html_comments():
+    # Links inside an HTML comment are commented out, not references.
+    text = "<!-- [[Draft]] [x](draft.md) -->\n\nreal [[Real]] and [r](real.md)"
+    targets = {link.target for link in extract_links(text)}
+    assert "Real" in targets and "real" in targets
+    assert "Draft" not in targets and "draft" not in targets
+
+
+def test_extract_links_skips_escaped_opener():
+    # An escaped \[ is literal text, not a link.
+    links = extract_links(r"\[x](note.md) but [y](real.md)")
+    assert {link.target for link in links} == {"real"}
+
+
+def test_extract_links_double_backtick_code_span():
+    # A span written with double backticks (to show literal backticks) is code;
+    # its [[Example]] must not leak as a link.
+    links = extract_links("text ``[[Example]]`` and [[Real]]")
+    assert {link.target for link in links} == {"Real"}
+
+
+def test_extract_links_indented_code_after_heading():
+    # An indented code block right after a heading (no blank line needed after a
+    # non-paragraph block) is code, so its sample links aren't edges.
+    text = "# Usage\n\n    [[Example]] and [x](sample.md)\n"
+    assert extract_links(text) == []
+
+
+def test_extract_links_nested_bracket_label():
+    # A link label may contain balanced brackets: [see [API]](note.md).
+    links = extract_links("[see [API]](note.md)")
+    assert {link.target for link in links} == {"note"}
+
+
+def test_extract_links_strips_query_from_note_target():
+    # note.md?raw=1 resolves to the note "note" (the query is dropped).
+    links = extract_links("[n](note.md?raw=1)")
+    assert [(link.target, link.is_wikilink) for link in links] == [("note", False)]
+
+
 # ---------- links ----------
 
 

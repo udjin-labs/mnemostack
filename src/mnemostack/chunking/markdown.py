@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
-import re
+from markdown_it import MarkdownIt
 
 from .base import Chunk, Chunker
-from .fences import code_ranges
 
-# An ATX heading may be indented 0-3 spaces (CommonMark); a `#` indented 4+
-# spaces is code, not a heading (that case is excluded via the shared code-range
-# mask below).
-_HEADER_RE = re.compile(r"^ {0,3}(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
+# A CommonMark parser finds headings to spec — ATX (incl. 0-3 space indent) and
+# Setext (``Title``/``====``) — and never mistakes a ``#`` inside code (fenced,
+# indented, inline) for a heading.
+_MD = MarkdownIt("commonmark")
+
+
+def _line_start_offsets(text: str) -> list[int]:
+    """Char offset of the start of each line (index = 0-based line number)."""
+    offsets = [0]
+    for i, ch in enumerate(text):
+        if ch == "\n":
+            offsets.append(i + 1)
+    return offsets
 
 
 class MarkdownChunker(Chunker):
@@ -45,15 +53,18 @@ class MarkdownChunker(Chunker):
         if not text.strip():
             return []
 
-        # Find header positions, ignoring `#` lines inside code (fenced or
-        # indented) so a code sample isn't mistaken for a section heading.
-        masked = code_ranges(text)
+        # Find headings via the CommonMark parser (ATX + Setext; code excluded).
+        tokens = _MD.parse(text)
+        line_starts = _line_start_offsets(text)
         headers: list[tuple[int, int, str]] = []  # (start, level, title)
-        for match in _HEADER_RE.finditer(text):
-            if not self._in_ranges(match.start(), masked):
-                level = len(match.group(1))
-                title = match.group(2).strip()
-                headers.append((match.start(), level, title))
+        for k, tok in enumerate(tokens):
+            if tok.type != "heading_open" or not tok.map:
+                continue
+            level = int(tok.tag[1:])  # "h2" -> 2
+            inline = tokens[k + 1] if k + 1 < len(tokens) else None
+            title = inline.content.strip() if inline and inline.type == "inline" else ""
+            start = line_starts[tok.map[0]] if tok.map[0] < len(line_starts) else 0
+            headers.append((start, level, title))
 
         if not headers:
             # No headers — split by size so a large headingless note (e.g. a
@@ -141,7 +152,3 @@ class MarkdownChunker(Chunker):
                 )
             )
             sub_offset += self.chunk_size
-
-    @staticmethod
-    def _in_ranges(pos: int, ranges: list[tuple[int, int]]) -> bool:
-        return any(start <= pos < end for start, end in ranges)
