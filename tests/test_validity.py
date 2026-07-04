@@ -443,10 +443,10 @@ def test_pipeline_apply_no_as_of_leaves_extras_empty():
 def test_to_utc_iso_normalizes_offsets():
     from mnemostack.recall.validity import to_utc_iso
 
-    # offset-bearing instant -> UTC
-    assert to_utc_iso("2026-07-04T00:00:00+02:00") == "2026-07-03T22:00:00Z"
+    # offset-bearing instant -> UTC (fixed-microsecond canonical form)
+    assert to_utc_iso("2026-07-04T00:00:00+02:00") == "2026-07-03T22:00:00.000000Z"
     # Z suffix -> UTC
-    assert to_utc_iso("2026-06-01T00:00:00Z") == "2026-06-01T00:00:00Z"  # Z stays Z (canonical)
+    assert to_utc_iso("2026-06-01T00:00:00Z") == "2026-06-01T00:00:00.000000Z"
     # bare date and marker pass through unchanged
     assert to_utc_iso("2024-01-15") == "2024-01-15"
     assert to_utc_iso("current") == "current"
@@ -506,7 +506,7 @@ def test_mca_hits_filtered_by_validity_before_fusion():
 def test_graph_store_to_iso_normalizes_to_utc():
     from mnemostack.graph.store import _to_iso
 
-    assert _to_iso("2026-07-04T00:00:00+02:00") == "2026-07-03T22:00:00Z"
+    assert _to_iso("2026-07-04T00:00:00+02:00") == "2026-07-03T22:00:00.000000Z"
     assert _to_iso("2024-01-15") == "2024-01-15"  # bare date unchanged
     assert _to_iso("current") == "current"
 
@@ -564,8 +564,9 @@ def test_to_utc_iso_emits_z_for_cypher_string_compat():
     out = to_utc_iso("2026-06-01T00:00:00+02:00")
     assert out.endswith("Z")
     assert "+00:00" not in out
-    # exact-boundary lexical order holds against a stored Z row
-    stored = "2026-05-31T22:00:00Z"
+    # exact-boundary lexical order holds against a bound written by the same
+    # normalizer (the canonical fixed-microsecond Z form on both sides).
+    stored = to_utc_iso("2026-05-31T22:00:00Z")
     assert stored <= out and out <= stored  # equal -> boundary compares correctly
 
 
@@ -616,8 +617,8 @@ def test_to_utc_instant_expands_bare_date():
 
     # bare date -> full midnight-UTC instant with Z (so it compares against
     # full-instant graph bounds, not shorter than valid_from='...T00:00:00Z')
-    assert to_utc_instant("2026-03-01") == "2026-03-01T00:00:00Z"
-    assert to_utc_instant("2026-03-01T00:00:00+02:00") == "2026-02-28T22:00:00Z"
+    assert to_utc_instant("2026-03-01") == "2026-03-01T00:00:00.000000Z"
+    assert to_utc_instant("2026-03-01T00:00:00+02:00") == "2026-02-28T22:00:00.000000Z"
     assert to_utc_instant("current") == "current"
     assert to_utc_instant(None) is None
 
@@ -625,11 +626,11 @@ def test_to_utc_instant_expands_bare_date():
 def test_bare_date_as_of_matches_full_instant_bound_lexically():
     # The exact-boundary case the fix targets: a fact starting at midnight is
     # valid at a bare-date as_of once as_of is expanded to the full instant.
-    from mnemostack.recall.validity import to_utc_instant
+    from mnemostack.recall.validity import to_utc_instant, to_utc_iso
 
-    as_of = to_utc_instant("2026-03-01")           # "2026-03-01T00:00:00Z"
-    valid_from = "2026-03-01T00:00:00Z"            # stored full instant
-    assert valid_from <= as_of                     # was False without expansion
+    as_of = to_utc_instant("2026-03-01")               # 2026-03-01T00:00:00.000000Z
+    valid_from = to_utc_iso("2026-03-01T00:00:00Z")    # stored bound, same canonical form
+    assert valid_from <= as_of                         # was False without expansion
 
 
 def test_search_many_filters_per_vector_before_fusion():
@@ -730,18 +731,32 @@ def test_graph_rel_probe_is_undirected_and_overfetches_nodes():
 def test_to_utc_iso_normalizes_non_T_separators():
     from mnemostack.recall.validity import to_utc_iso
 
-    # datetime.fromisoformat accepts a space (and lowercase t on 3.11+) — a
-    # space-separated offset instant must still be UTC-normalized, not returned
-    # raw, or the graph string comparison misclassifies exact boundaries.
-    assert to_utc_iso("2026-07-04 00:00:00+02:00") == "2026-07-03T22:00:00Z"
+    # Any separator datetime.fromisoformat accepts marks a real datetime that
+    # must be UTC-normalized (fixed-microsecond Z), not returned raw, or the
+    # graph string comparison misclassifies exact boundaries.
+    assert to_utc_iso("2026-07-04 00:00:00+02:00") == "2026-07-03T22:00:00.000000Z"
+    # an arbitrary separator (e.g. datetime.isoformat(sep="_")) is recognized too
+    assert to_utc_iso("2024-01-15_10:00:00") == "2024-01-15T10:00:00.000000Z"
     # calendar-date-only stays as-is (not churned to an instant)
     assert to_utc_iso("2024-01-15") == "2024-01-15"
-    # a date with only a zone suffix and no time-of-day is NOT a datetime —
-    # leave it untouched rather than mangling it into a spurious instant
-    assert to_utc_iso("2024-01-15+02:00") == "2024-01-15+02:00"
-    assert to_utc_iso("2024-01-15Z") == "2024-01-15Z"
+    # a value that carries a zone (Z / offset) is a datetime, so it IS normalized
+    assert to_utc_iso("2024-01-15Z") == "2024-01-15T00:00:00.000000Z"
+    out = to_utc_iso("2024-01-15+02:00")
+    assert out.endswith("Z") and "T" in out  # treated as a zoned instant
     # non-instant marker passes through
     assert to_utc_iso("current") == "current"
+
+
+def test_to_utc_iso_normalizes_fractional_seconds_lexically():
+    from mnemostack.recall.validity import to_utc_instant, to_utc_iso
+
+    # Fixed-microsecond width keeps raw-string order chronological: a fact whose
+    # validity ends half a second after a whole-second as_of must sort AFTER it.
+    valid_until = to_utc_iso("2026-01-01t00:00:00.500000+00:00")
+    as_of = to_utc_instant("2026-01-01T00:00:00Z")
+    assert valid_until == "2026-01-01T00:00:00.500000Z"
+    assert as_of == "2026-01-01T00:00:00.000000Z"
+    assert valid_until > as_of  # was False when precision differed (. < Z)
 
 
 def test_to_utc_iso_normalizes_basic_and_week_datetimes():
@@ -751,16 +766,13 @@ def test_to_utc_iso_normalizes_basic_and_week_datetimes():
 
     # datetime.fromisoformat only parses basic-format and ISO-week datetimes on
     # 3.11+. Where it parses, these carry a real time-of-day + offset and MUST
-    # be UTC-normalized too — the time-separator check keys off the T/space, not
-    # the (extended-only) date shape, so they're no longer skipped. On 3.10 the
-    # value is unparseable, so to_utc_iso safely leaves it untouched rather than
-    # inventing a wrong instant.
+    # be UTC-normalized too. On 3.10 the value is unparseable, so to_utc_iso
+    # safely leaves it untouched rather than inventing a wrong instant.
     if sys.version_info >= (3, 11):
-        assert to_utc_iso("20260704T000000+0200") == "2026-07-03T22:00:00Z"
-        assert to_utc_iso("2026-W27-6T00:00:00+02:00") == "2026-07-03T22:00:00Z"
-        # separatorless basic datetime (no T/space): recognized by its offset,
-        # not a separator — the offset-aware parse is the primary normalize signal
-        assert to_utc_iso("20260704000000+0200") == "2026-07-03T22:00:00Z"
+        assert to_utc_iso("20260704T000000+0200") == "2026-07-03T22:00:00.000000Z"
+        assert to_utc_iso("2026-W27-6T00:00:00+02:00") == "2026-07-03T22:00:00.000000Z"
+        # separatorless basic datetime (no T/space) is still recognized
+        assert to_utc_iso("20260704000000+0200") == "2026-07-03T22:00:00.000000Z"
     else:
         assert to_utc_iso("20260704T000000+0200") == "20260704T000000+0200"
         assert to_utc_iso("2026-W27-6T00:00:00+02:00") == "2026-W27-6T00:00:00+02:00"
@@ -772,8 +784,8 @@ def test_to_utc_iso_normalizes_basic_and_week_datetimes():
 def test_to_utc_iso_normalizes_naive_datetime_with_separator():
     from mnemostack.recall.validity import to_utc_iso
 
-    # A naive datetime (no offset) but with a real time separator is still a
-    # datetime: assume UTC and emit the Z form so it sorts against normalized
-    # bounds. A date with a bogus zone suffix but no time stays untouched.
-    assert to_utc_iso("2024-01-15T10:00:00") == "2024-01-15T10:00:00Z"
-    assert to_utc_iso("2024-01-15+02:00") == "2024-01-15+02:00"
+    # A naive datetime (no offset) but with a real time is still a datetime:
+    # assume UTC and emit the fixed-microsecond Z form so it sorts against
+    # normalized bounds. A pure calendar date stays untouched.
+    assert to_utc_iso("2024-01-15T10:00:00") == "2024-01-15T10:00:00.000000Z"
+    assert to_utc_iso("2024-01-15") == "2024-01-15"
