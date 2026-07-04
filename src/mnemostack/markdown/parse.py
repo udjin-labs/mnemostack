@@ -19,7 +19,6 @@ from urllib.parse import unquote
 
 import yaml
 from markdown_it import MarkdownIt
-from markdown_it.rules_inline import StateInline
 
 logger = logging.getLogger(__name__)
 
@@ -33,42 +32,12 @@ _FRONTMATTER_RE = re.compile(
 )
 
 
-def _wikilink_rule(state: StateInline, silent: bool) -> bool:
-    """Inline rule: ``[[Target]]`` → a ``wikilink`` token (content = raw inside).
+_MD = MarkdownIt("commonmark")
 
-    Runs before the CommonMark ``link`` rule but *after* code-span parsing, so a
-    ``[[...]]`` inside inline code (or a fenced/indented block, or an HTML
-    comment) is never seen here — code exclusion comes for free from the parser.
-    An Obsidian embed ``![[...]]`` (leading ``!``) is left to fall through to
-    normal parsing (it becomes literal text, i.e. no edge).
-    """
-    pos = state.pos
-    src = state.src
-    if src[pos : pos + 2] != "[[":
-        return False
-    if pos > 0 and src[pos - 1] == "!":  # ![[...]] embed → not a wikilink
-        return False
-    end = src.find("]]", pos + 2)
-    if end < 0:
-        return False
-    content = src[pos + 2 : end]
-    if "[" in content or "]" in content:  # malformed / nested — not a wikilink
-        return False
-    if not silent:
-        token = state.push("wikilink", "", 0)
-        token.content = content
-        token.markup = "[["
-    state.pos = end + 2
-    return True
-
-
-def _make_md() -> MarkdownIt:
-    md = MarkdownIt("commonmark")
-    md.inline.ruler.before("link", "wikilink", _wikilink_rule)
-    return md
-
-
-_MD = _make_md()
+# ``[[Target]]`` / ``[[Target|alias]]`` / ``[[Target#anchor]]`` — captures the
+# target. Applied only to the parser's plain-text tokens (never code, comments,
+# or the label of a real markdown link), so it inherits correct exclusion.
+_WIKILINK_RE = re.compile(r"\[\[([^\]|#\n]+)(?:[|#][^\]\n]*)?\]\]")
 
 
 def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
@@ -156,9 +125,15 @@ def _iter_inline_tokens(text: str):
             yield from block.children
 
 
+# A URI scheme per RFC 3986: a letter, then letters/digits/+/-/. then a colon.
+# Any such prefix (``http:``, ``mailto:``, ``tel:``, ``data:``, ...) marks an
+# external link, not an intra-corpus note.
+_URI_SCHEME_RE = re.compile(r"[a-z][a-z0-9+.\-]*:", re.IGNORECASE)
+
+
 def _is_external(dest: str) -> bool:
-    low = dest.lower()
-    return low.startswith(("http://", "https://", "mailto:", "//", "#")) or "://" in low
+    # Protocol-relative (``//host``), pure anchor (``#x``), or any URI scheme.
+    return dest.startswith(("//", "#")) or bool(_URI_SCHEME_RE.match(dest))
 
 
 def extract_links(text: str) -> list[Link]:
@@ -167,26 +142,34 @@ def extract_links(text: str) -> list[Link]:
     Uses a CommonMark parser, so link syntax inside code (fenced, indented, or
     inline spans) and inside HTML comments is not a reference and is skipped;
     escapes, balanced brackets/parens, titles, and angle-bracketed/percent-
-    encoded destinations are handled to spec. External links (``http(s)://``,
-    ``mailto:``, protocol-relative ``//``) and pure anchors are dropped, as are
-    image embeds and non-note file targets (``.png``, ``.pdf``, ...). De-dup is
-    keyed by ``(style, target)`` so a wikilink and an inline link to the same
-    name both survive — they resolve differently (corpus-wide vs. relative).
+    encoded destinations are handled to spec. Inline links come from ``link_open``
+    hrefs; ``[[wikilinks]]`` are matched only on the parser's plain-text tokens
+    (so a ``[[B]]`` inside another link's label is not a separate edge). Any URI
+    scheme (``http(s):``, ``mailto:``, ``tel:``, ...), protocol-relative ``//``,
+    pure anchors, image embeds (``![[...]]``), and non-note file targets are
+    dropped. De-dup is keyed by ``(style, target)`` so a wikilink and an inline
+    link to the same name both survive — they resolve differently.
     """
     seen: dict[tuple[bool, str], Link] = {}
+    link_depth = 0
     for tok in _iter_inline_tokens(text):
         if tok.type == "link_open":
-            dest = tok.attrGet("href") or ""
-            if _is_external(dest) or not _is_note_target(dest):
-                continue
-            key = _strip_target(dest)
-            if key:
-                seen.setdefault((False, key), Link(target=key, is_wikilink=False))
-        elif tok.type == "wikilink":
-            raw = tok.content
-            if not _is_note_target(raw):
-                continue
-            key = _strip_target(raw)
-            if key:
-                seen.setdefault((True, key), Link(target=key, is_wikilink=True))
+            if link_depth == 0:
+                dest = tok.attrGet("href") or ""
+                if not _is_external(dest) and _is_note_target(dest):
+                    key = _strip_target(dest)
+                    if key:
+                        seen.setdefault((False, key), Link(target=key, is_wikilink=False))
+            link_depth += 1
+        elif tok.type == "link_close":
+            link_depth = max(0, link_depth - 1)
+        elif tok.type == "text" and link_depth == 0:
+            for m in _WIKILINK_RE.finditer(tok.content):
+                if m.start() > 0 and tok.content[m.start() - 1] == "!":
+                    continue  # ![[...]] embed, not a wikilink
+                if not _is_note_target(m.group(1)):
+                    continue
+                key = _strip_target(m.group(1))
+                if key:
+                    seen.setdefault((True, key), Link(target=key, is_wikilink=True))
     return list(seen.values())

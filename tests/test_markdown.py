@@ -165,6 +165,22 @@ def test_extract_links_strips_query_from_note_target():
     assert [(link.target, link.is_wikilink) for link in links] == [("note", False)]
 
 
+def test_extract_links_skips_all_uri_schemes():
+    # Any URI scheme (tel:, data:, ftp:, ...) is external, not a note.
+    text = "[call](tel:+15551212) [d](data:text/plain,x) [f](ftp://h/x) [n](real.md)"
+    assert {link.target for link in extract_links(text)} == {"real"}
+
+
+def test_extract_links_wikilink_inside_link_label_not_double_counted():
+    # [[B]] inside a normal link's label is part of the label text, not its own
+    # edge — only the outer a.md link (and the standalone [[C]]) count.
+    links = extract_links("[see [[B]]](a.md) and [[C]]")
+    assert sorted((link.target, link.is_wikilink) for link in links) == [
+        ("C", True),
+        ("a", False),
+    ]
+
+
 # ---------- links ----------
 
 
