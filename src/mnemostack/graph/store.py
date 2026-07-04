@@ -128,6 +128,64 @@ class GraphStore:
         with self.driver.session(database=self.database) as session:
             session.run(query, subject=subject, obj=obj, props=props)
 
+    def sync_file_links(
+        self, source: str, targets: list[str], *, index_root: str | None = None
+    ) -> int:
+        """Replace a file's outgoing ``LINKS_TO`` edges with ``targets``.
+
+        Deletes the file's existing ``LINKS_TO`` relationships first, then
+        re-creates one per target — so a re-index accurately reflects the
+        current links (links removed from the file are dropped, not left
+        dangling). ``:File`` nodes are keyed by ``(name, index_root)`` so two
+        corpora that share a relative filename (both have ``index.md``) don't
+        collide: re-indexing one root never touches the other's edges. Returns
+        the number of edges written.
+
+        Each node also gets a Python-lowercased ``name_lower`` so
+        ``MemgraphRetriever.search`` (which probes
+        ``coalesce(n.name_lower, toLower(n.name))``) can find files with
+        non-ASCII names — Memgraph's ``toLower`` only folds ASCII.
+        """
+        root = index_root or ""
+        with self.driver.session(database=self.database) as session:
+            session.run(
+                "MATCH (:File {name: $src, index_root: $root})-[r:LINKS_TO]->() DELETE r",
+                src=source,
+                root=root,
+            )
+            for target in targets:
+                session.run(
+                    "MERGE (s:File {name: $src, index_root: $root}) "
+                    "MERGE (o:File {name: $dst, index_root: $root}) "
+                    "SET s.valid_until = coalesce(s.valid_until, 'current'), "
+                    "    o.valid_until = coalesce(o.valid_until, 'current'), "
+                    "    s.name_lower = $src_lower, o.name_lower = $dst_lower "
+                    "MERGE (s)-[r:LINKS_TO]->(o) "
+                    "SET r.valid_until = coalesce(r.valid_until, 'current')",
+                    src=source,
+                    dst=target,
+                    root=root,
+                    src_lower=source.lower(),
+                    dst_lower=target.lower(),
+                )
+        return len(targets)
+
+    def file_link_sources(self, *, index_root: str | None = None) -> list[str]:
+        """Names of ``:File`` nodes with outgoing ``LINKS_TO`` edges in a root.
+
+        Lets a re-index discover files it linked from previously: any source no
+        longer present on disk can then have its stale edges cleared via
+        ``sync_file_links(name, [])``.
+        """
+        root = index_root or ""
+        with self.driver.session(database=self.database) as session:
+            result = session.run(
+                "MATCH (f:File {index_root: $root})-[:LINKS_TO]->() "
+                "RETURN DISTINCT f.name AS name",
+                root=root,
+            )
+            return [rec["name"] for rec in result if rec["name"] is not None]
+
     def invalidate(
         self,
         subject: str,
