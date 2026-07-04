@@ -674,21 +674,19 @@ class Recaller:
             err: str | None = None
             try:
                 # Graph facts carry no validity payload, so filter_by_validity
-                # can't enforce validity on them — push the whole validity view
-                # into the retriever that advertises it (MemgraphRetriever) so
-                # it filters at query time: `as_of` (point-in-time, matching
-                # GraphStore.query_triples) and `include_invalidated` (whether
-                # to suppress closed graph edges at all).
+                # can't enforce validity on them — push the validity view into
+                # the retriever that advertises it (MemgraphRetriever) so it
+                # filters at query time. Each kwarg is passed only when the
+                # retriever advertises the matching capability marker, so a
+                # custom retriever whose `search` takes only `as_of` (or
+                # neither) is never handed an unexpected argument that the
+                # broad `except` below would silently turn into no hits.
+                search_kwargs: dict[str, Any] = {"filters": filters}
                 if getattr(retr, "accepts_as_of", False):
-                    hits = retr.search(
-                        query,
-                        limit=fetch_limit,
-                        filters=filters,
-                        as_of=as_of,
-                        include_invalidated=include_invalidated,
-                    )
-                else:
-                    hits = retr.search(query, limit=fetch_limit, filters=filters)
+                    search_kwargs["as_of"] = as_of
+                if getattr(retr, "accepts_include_invalidated", False):
+                    search_kwargs["include_invalidated"] = include_invalidated
+                hits = retr.search(query, limit=fetch_limit, **search_kwargs)
                 # Drop stale hits before fusion/floor so invalidated facts
                 # neither crowd out current ones nor get re-appended by the
                 # vector floor. Graph hits (no bounds) already came filtered

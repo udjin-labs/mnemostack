@@ -69,7 +69,11 @@ def to_utc_iso(value: Any) -> Any:
     dt = _to_instant(text)
     if dt is None:
         return text
-    return dt.astimezone(timezone.utc).isoformat()
+    # Emit the ``Z`` suffix, not ``+00:00``: graph predicates compare these as
+    # raw strings in Cypher, and ``Z`` is the common form of existing UTC rows,
+    # so ``Z`` keeps exact-boundary instants lexically comparable with them
+    # (``'...Z' <= '...+00:00'`` is false — the two forms don't sort equal).
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _le(a: Any, b: Any) -> bool:
