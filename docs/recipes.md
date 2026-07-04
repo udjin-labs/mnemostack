@@ -55,18 +55,40 @@ order. Reranking is fail-open — if the model errors or returns the wrong numbe
 of scores, the original order is preserved (see the `ScoringReranker`
 docstring for the identity contract that keeps this thread-safe).
 
-Wire it into the shared flow like any other reranker:
+Wire it into the shared flow like any other reranker — but feed it a **wider
+pool than you return**, or the reranker only reorders the handful you asked for.
+`recall_flow` widens its internal pool (to `3 × limit`) only when a `pipeline=`
+is passed; with no pipeline it recalls exactly `limit`. So either recall the
+wide pool yourself and slice after reranking:
+
+```python
+pool = recaller.recall(query, limit=100)      # candidates for the reranker
+reranked = reranker.rerank(query, pool)[:10]  # rerank the 100, keep the top 10
+```
+
+or let `recall_flow` widen the pool by giving it the ranking pipeline (which
+also applies reranking internally, so you don't pass `reranker=` twice):
 
 ```python
 from mnemostack.recall import recall_flow
+from mnemostack.recall.pipeline import build_full_pipeline
 
-results = recall_flow(recaller, query, limit=10, reranker=reranker)
+pipeline = build_full_pipeline(state_store=..., graph_uri=None)
+results = recall_flow(recaller, query, limit=10, pipeline=pipeline, reranker=reranker)
+# recall_flow fetches ~30 candidates, reranks, then cuts to limit=10
 ```
 
 ### Faster CPU / GPU inference
 
 `sentence-transformers` can run the model through an OpenVINO (CPU) or ONNX
-(GPU) backend instead of plain PyTorch:
+(GPU) backend instead of plain PyTorch. Each backend needs its own extras
+(they pull in Optimum + the OpenVINO / ONNX Runtime):
+
+```bash
+pip install "sentence-transformers[openvino]"   # CPU
+pip install "sentence-transformers[onnx]"        # ONNX Runtime (CPU)
+pip install "sentence-transformers[onnx-gpu]"    # ONNX Runtime (GPU)
+```
 
 ```python
 CrossEncoder("BAAI/bge-reranker-v2-m3", backend="openvino")  # CPU
