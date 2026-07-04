@@ -199,6 +199,23 @@ def test_extract_links_percent_encoded_extension_is_asset():
     assert {link.target for link in links} == {"real"}
 
 
+def test_extract_links_wikilink_alias_with_spaces_asset_filtered():
+    # "[[paper.pdf | preview]]" — the target (before the alias) is trimmed before
+    # the asset-extension check, so the .pdf asset is filtered, and a real note
+    # with a spaced alias still resolves.
+    assert extract_links("[[paper.pdf | preview]]") == []
+    links = extract_links("[[My Note | alias]]")
+    assert [(link.target, link.is_wikilink) for link in links] == [("My Note", True)]
+
+
+def test_extract_links_entity_escaped_wikilink():
+    # &#91; / &#x5B; / &lbrack; all decode to '[' — an entity-escaped opener is
+    # literal text, not a wikilink.
+    for enc in ("&#91;&#91;Draft]]", "&#x5B;&#x5B;Draft]]", "&lbrack;&lbrack;Draft]]"):
+        text = f"{enc} and real [[Real]]"
+        assert {link.target for link in extract_links(text)} == {"Real"}, text
+
+
 def test_extract_links_escaped_bracket_in_destination():
     # A destination may contain an escaped bracket; the target restores it.
     links = extract_links(r"[x](foo\[bar\].md)")

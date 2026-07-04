@@ -103,7 +103,7 @@ def _is_note_target(raw: str) -> bool:
     and the path is percent-decoded first, so ``paper.pdf?download=1`` and
     ``paper%2Epdf`` are both recognized as assets.
     """
-    anchorless = unquote(raw.split("#", 1)[0].split("?", 1)[0].split("|", 1)[0])
+    anchorless = unquote(raw.split("#", 1)[0].split("?", 1)[0].split("|", 1)[0]).strip()
     last = anchorless.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].lower()
     dot = last.rfind(".")
     return dot < 0 or last[dot:] not in _ASSET_EXTS
@@ -145,6 +145,10 @@ def _is_external(dest: str) -> bool:
 # to a literal ``[`` when a real destination/target is read back.
 _ESC_BRACKET = "\ue000"
 
+# HTML character references that markdown-it decodes to a literal ``[`` — the
+# other way (besides ``\\[``) to display bracket syntax without opening a link.
+_BRACKET_ENTITY_RE = re.compile(r"&(?:#0*91|#[xX]0*5[bB]|lbrack);")
+
 
 def _mask_escaped_brackets(text: str) -> str:
     """Replace a backslash-escaped ``[`` with a private-use sentinel.
@@ -157,6 +161,7 @@ def _mask_escaped_brackets(text: str) -> str:
     since the parser already excludes those. An escaped backslash ``\\\\`` is
     preserved so a genuine following ``[`` still forms a link.
     """
+    text = _BRACKET_ENTITY_RE.sub(_ESC_BRACKET, text)
     out: list[str] = []
     i, n = 0, len(text)
     while i < n:
