@@ -742,3 +742,16 @@ def test_to_utc_iso_normalizes_non_T_separators():
     assert to_utc_iso("2024-01-15Z") == "2024-01-15Z"
     # non-instant marker passes through
     assert to_utc_iso("current") == "current"
+
+
+def test_to_utc_iso_normalizes_basic_and_week_datetimes():
+    from mnemostack.recall.validity import to_utc_iso
+
+    # datetime.fromisoformat (3.11+) also parses basic-format and ISO-week
+    # datetimes. These carry a real time-of-day + offset, so they MUST be
+    # UTC-normalized too — the time-separator check keys off the T/space, not
+    # the (extended-only) date shape, so they're no longer skipped.
+    assert to_utc_iso("20260704T000000+0200") == "2026-07-03T22:00:00Z"
+    assert to_utc_iso("2026-W27-6T00:00:00+02:00") == "2026-07-03T22:00:00Z"
+    # basic-format calendar date with no time-of-day stays as-is
+    assert to_utc_iso("20260704") == "20260704"
