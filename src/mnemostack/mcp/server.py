@@ -502,6 +502,16 @@ def build_server(
             str | None,
             Field(description="System-time stamp (ISO-8601); default: now (UTC)"),
         ] = None,
+        index_root: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Owner guard: when set, points owned by a different "
+                    "index_root are skipped, so one root cannot invalidate "
+                    "another's chunks in a shared collection."
+                )
+            ),
+        ] = None,
     ) -> dict:
         """Mark memories stale by id, non-destructively.
 
@@ -509,15 +519,19 @@ def build_server(
         invalidated_at (and optionally valid_until) on each point's payload
         without deleting or re-embedding it; invalidated facts drop out of
         default recall but stay reachable via include_invalidated / as_of.
-        Points that do not exist are skipped. Returns ok, requested, and
-        invalidated (the number of points actually updated).
+        Points that do not exist are skipped. Pass index_root in multi-root
+        collections to avoid marking another root's chunks stale. Returns ok,
+        requested, and invalidated (the number of points actually updated).
         """
         try:
             # Coerce digit-only ids to int so numeric-id Qdrant collections can
             # be invalidated (UUID strings contain hyphens, so stay strings).
             coerced = [int(x) if isinstance(x, str) and x.isdigit() else x for x in ids]
             updated = _get_vector_payload_only().invalidate(
-                coerced, invalidated_at=invalidated_at, valid_until=valid_until
+                coerced,
+                invalidated_at=invalidated_at,
+                valid_until=valid_until,
+                index_root=index_root,
             )
             return {
                 "ok": True,

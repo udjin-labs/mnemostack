@@ -37,6 +37,7 @@ except ImportError:  # pragma: no cover - qdrant-client is a runtime dependency
 from .bm25 import BM25, BM25Doc, Tokenizer, tokenize
 from .filters import payload_matches
 from .recaller import RecallResult
+from .validity import to_utc_iso
 
 logger = logging.getLogger(__name__)
 
@@ -417,16 +418,24 @@ class HyDERetriever(Retriever):
         ]
 
 
-def graph_valid_clause(var: str, as_of: str | None) -> str:
+def graph_valid_clause(var: str, as_of: str | None, include_invalidated: bool = False) -> str:
     """Cypher validity predicate for a node/rel variable.
 
-    With no ``as_of``, "currently valid" (``valid_until`` = the ``'current'``
-    marker, or legacy NULL). With ``as_of``, the point-in-time predicate
-    ``GraphStore.query_triples(as_of=...)`` uses, referencing the bound
-    ``$as_of`` parameter. Shared by ``MemgraphRetriever`` and the pipeline's
-    graph-resurrection stage so both filter graph facts consistently.
+    - ``include_invalidated`` and no ``as_of``: no filter (``true``) — the
+      caller asked for stale facts too, so don't suppress closed graph edges.
+    - No ``as_of`` (default): "currently valid" (``valid_until`` = the
+      ``'current'`` marker, or legacy NULL).
+    - ``as_of`` set: the point-in-time predicate ``GraphStore.query_triples``
+      uses, referencing the bound ``$as_of`` parameter (``as_of`` wins over
+      ``include_invalidated`` — point-in-time reconstruction is explicit).
+
+    Shared by ``MemgraphRetriever`` and the pipeline's graph-resurrection stage
+    so both filter graph facts consistently. Timestamps are compared as strings
+    in Cypher, so bind a UTC-normalized ``$as_of`` (see ``to_utc_iso``).
     """
     if as_of is None:
+        if include_invalidated:
+            return "true"
         return f"coalesce({var}.valid_until, 'current') = 'current'"
     return (
         f"({var}.valid_from IS NULL OR {var}.valid_from <= $as_of) AND "
@@ -498,7 +507,7 @@ class MemgraphRetriever(Retriever):
 
     _valid_clause = staticmethod(graph_valid_clause)
 
-    def search(self, query, limit=20, filters=None, as_of=None):
+    def search(self, query, limit=20, filters=None, as_of=None, include_invalidated=False):
         if filters:
             # Graph nodes carry no chunk payload, so a result here cannot be
             # proven to belong to the filtered scope (tenant, source, time
@@ -511,8 +520,11 @@ class MemgraphRetriever(Retriever):
         words = [w.lower() for w in query.split() if len(w) >= self.min_word]
         if not words:
             return []
-        node_valid = self._valid_clause("n", as_of)
-        rel_valid = self._valid_clause("r", as_of)
+        # Compare instants, not raw strings: normalize `as_of` to UTC (graph
+        # facts written via GraphStore are UTC-normalized too).
+        as_of = to_utc_iso(as_of)
+        node_valid = self._valid_clause("n", as_of, include_invalidated)
+        rel_valid = self._valid_clause("r", as_of, include_invalidated)
         # Only bind $as_of when the predicate references it.
         extra = {"as_of": as_of} if as_of is not None else {}
         counts: dict[str, dict[str, Any]] = defaultdict(lambda: {"count": 0, "type": "", "mc": ""})

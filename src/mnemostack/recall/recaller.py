@@ -671,11 +671,19 @@ class Recaller:
             err: str | None = None
             try:
                 # Graph facts carry no validity payload, so filter_by_validity
-                # can't enforce point-in-time on them — push `as_of` into the
-                # retriever that advertises it (MemgraphRetriever) so it filters
-                # at query time, matching GraphStore.query_triples(as_of=...).
-                if as_of is not None and getattr(retr, "accepts_as_of", False):
-                    hits = retr.search(query, limit=fetch_limit, filters=filters, as_of=as_of)
+                # can't enforce validity on them — push the whole validity view
+                # into the retriever that advertises it (MemgraphRetriever) so
+                # it filters at query time: `as_of` (point-in-time, matching
+                # GraphStore.query_triples) and `include_invalidated` (whether
+                # to suppress closed graph edges at all).
+                if getattr(retr, "accepts_as_of", False):
+                    hits = retr.search(
+                        query,
+                        limit=fetch_limit,
+                        filters=filters,
+                        as_of=as_of,
+                        include_invalidated=include_invalidated,
+                    )
                 else:
                     hits = retr.search(query, limit=fetch_limit, filters=filters)
                 # Drop stale hits before fusion/floor so invalidated facts
@@ -709,7 +717,18 @@ class Recaller:
             id_to_result: dict[Any, RecallResult] = {}
             has_vector_results = False
             if self.mca_prefilter_enabled:
-                mca_hits = self._mca_hits(query, per_source_limit, filters)
+                # MCA runs outside the per-retriever _run path, so apply the
+                # same over-fetch + validity filter here — otherwise a stale
+                # exact-token MCA hit could win RRF and only be dropped by the
+                # final safety filter, starving the top-K of current memories.
+                mca_hits = self._mca_hits(query, fetch_limit, filters)
+                mca_hits = [
+                    h
+                    for h in mca_hits
+                    if keep_payload(
+                        h.payload, include_invalidated=include_invalidated, as_of=as_of
+                    )
+                ]
                 if mca_hits:
                     all_lists.append([(hit, hit.score) for hit in mca_hits])
                     per_list_weights.append(self._weight_for("mca", query))

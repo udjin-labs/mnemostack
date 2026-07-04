@@ -51,6 +51,27 @@ def _to_instant(value: Any) -> datetime | None:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
+def to_utc_iso(value: Any) -> Any:
+    """Canonicalize a timezone-bearing ISO instant to UTC ISO; pass others through.
+
+    Graph validity predicates compare timestamps as raw strings in Cypher (no
+    instant parsing available there), so an offset-bearing value must be
+    normalized to UTC on both the write and the query side for the comparison
+    to be correct. Bare dates (``2024-01-15``), the ``current`` marker, and
+    ``None`` are returned unchanged — only genuinely zoned datetimes are
+    rewritten, so date-only graph data keeps its format.
+    """
+    if value is None:
+        return None
+    text = str(value)
+    if "T" not in text:  # bare date or marker like "current" — leave as-is
+        return text
+    dt = _to_instant(text)
+    if dt is None:
+        return text
+    return dt.astimezone(timezone.utc).isoformat()
+
+
 def _le(a: Any, b: Any) -> bool:
     """``a <= b`` comparing ISO instants when both parse, else lexicographically.
 

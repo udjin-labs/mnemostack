@@ -336,8 +336,9 @@ def test_recall_pushes_as_of_only_to_accepting_retriever():
         name = "memgraph"
         accepts_as_of = True
 
-        def search(self, query, limit, filters=None, as_of=None):
+        def search(self, query, limit, filters=None, as_of=None, include_invalidated=False):
             captured["graph_as_of"] = as_of
+            captured["graph_include_invalidated"] = include_invalidated
             return []
 
     class _VectorRetriever:
@@ -434,3 +435,76 @@ def test_pipeline_apply_no_as_of_leaves_extras_empty():
 
     Pipeline([_Probe()]).apply("q", [_r("a", {})])
     assert captured["as_of"] == "MISSING"
+
+
+# ---------- review round 3 ----------
+
+
+def test_to_utc_iso_normalizes_offsets():
+    from mnemostack.recall.validity import to_utc_iso
+
+    # offset-bearing instant -> UTC
+    assert to_utc_iso("2026-07-04T00:00:00+02:00") == "2026-07-03T22:00:00+00:00"
+    # Z suffix -> UTC
+    assert to_utc_iso("2026-06-01T00:00:00Z") == "2026-06-01T00:00:00+00:00"
+    # bare date and marker pass through unchanged
+    assert to_utc_iso("2024-01-15") == "2024-01-15"
+    assert to_utc_iso("current") == "current"
+    assert to_utc_iso(None) is None
+
+
+def test_graph_valid_clause_include_invalidated_is_permissive():
+    from mnemostack.recall.retrievers import graph_valid_clause
+
+    # include_invalidated + no as_of -> no filter
+    assert graph_valid_clause("n", None, include_invalidated=True) == "true"
+    # default -> current-only
+    assert "= 'current'" in graph_valid_clause("n", None)
+    # as_of wins over include_invalidated
+    assert "$as_of" in graph_valid_clause("n", "2026-03-01", include_invalidated=True)
+
+
+def test_recall_pushes_include_invalidated_to_graph():
+    from mnemostack.recall.recaller import Recaller
+
+    captured = {}
+
+    class _GraphRetriever:
+        name = "memgraph"
+        accepts_as_of = True
+
+        def search(self, query, limit, filters=None, as_of=None, include_invalidated=False):
+            captured["include_invalidated"] = include_invalidated
+            return []
+
+    recaller = Recaller(retrievers=[_GraphRetriever()])
+    recaller.recall("q", limit=5, include_invalidated=True)
+    assert captured["include_invalidated"] is True
+
+
+def test_mca_hits_filtered_by_validity_before_fusion():
+    # A stale MCA exact-token hit must not survive to fusion and win limit=1.
+    from mnemostack.recall.recaller import Recaller
+
+    class _FakeRetriever:
+        name = "vector"
+
+        def search(self, query, limit, filters=None):
+            return [RecallResult(id="fresh", text="f", score=0.5, payload={},
+                                 sources=["vector"])]
+
+    recaller = Recaller(retrievers=[_FakeRetriever()], mca_prefilter=True)
+    recaller._mca_hits = lambda q, limit, filters: [
+        RecallResult(id="stale", text="s", score=0.99,
+                     payload={"invalidated_at": "2026-07-04"}, sources=["mca"])
+    ]
+    out = recaller.recall("q", limit=1)
+    assert "stale" not in {r.id for r in out}
+
+
+def test_graph_store_to_iso_normalizes_to_utc():
+    from mnemostack.graph.store import _to_iso
+
+    assert _to_iso("2026-07-04T00:00:00+02:00") == "2026-07-03T22:00:00+00:00"
+    assert _to_iso("2024-01-15") == "2024-01-15"  # bare date unchanged
+    assert _to_iso("current") == "current"
