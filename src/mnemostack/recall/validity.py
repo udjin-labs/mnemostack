@@ -20,14 +20,11 @@ import re
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
-# Matches an ISO value that carries a time-of-day: a digit, then a T/t/space
-# separator, then a digit. The date shape is left unconstrained on purpose so
-# that every datetime ``datetime.fromisoformat`` accepts is caught — extended
-# (``2024-01-15T…``), basic (``20240115T…``), and ISO week (``2024-W03-1T…``)
-# forms alike. Only such values are normalized by ``to_utc_iso``; a bare date
-# (``2024-01-15``) or a date with only a zone suffix and no time separator
-# (``2024-01-15+02:00``) has no time-of-day and is left as-is, so it is not
-# mangled into a spurious instant.
+# A T/t/space time separator (digit, separator, digit) — the secondary signal
+# that a value carries a time-of-day even when the parse is naive (no offset).
+# It catches a naive datetime like ``2024-01-15T10:00:00``; the primary signal
+# is an offset-bearing parse (see ``to_utc_iso``), which covers separatorless
+# basic datetimes (``20260704000000+0200``) that this regex cannot.
 _HAS_TIME_RE = re.compile(r"\d[Tt ]\d")
 
 if TYPE_CHECKING:
@@ -45,6 +42,23 @@ def is_current(payload: dict[str, Any] | None) -> bool:
     return not payload.get(INVALIDATED_AT)
 
 
+def _parse_iso(value: Any) -> datetime | None:
+    """Parse an ISO-8601 value with ``datetime.fromisoformat``, preserving tz.
+
+    Returns the datetime exactly as parsed — **naive stays naive, aware stays
+    aware** — or None if unparseable. A trailing ``Z``/``z`` is accepted. The
+    preserved tzinfo is what lets ``to_utc_iso`` tell an offset-bearing datetime
+    (which must be UTC-normalized) from a naive one, without a second parse.
+    """
+    try:
+        text = str(value)
+        if text.endswith(("Z", "z")):
+            text = text[:-1] + "+00:00"
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
 def _to_instant(value: Any) -> datetime | None:
     """Parse an ISO-8601 value to an aware UTC datetime, or None if unparseable.
 
@@ -52,12 +66,8 @@ def _to_instant(value: Any) -> datetime | None:
     None lets callers fall back to a lexicographic compare for values that are
     not full ISO instants (e.g. a bare ``2026-03-01`` date).
     """
-    try:
-        text = str(value)
-        if text.endswith(("Z", "z")):
-            text = text[:-1] + "+00:00"
-        dt = datetime.fromisoformat(text)
-    except ValueError:
+    dt = _parse_iso(value)
+    if dt is None:
         return None
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
@@ -68,28 +78,32 @@ def to_utc_iso(value: Any) -> Any:
     Graph validity predicates compare timestamps as raw strings in Cypher (no
     instant parsing available there), so an offset-bearing value must be
     normalized to UTC on both the write and the query side for the comparison
-    to be correct. Bare dates (``2024-01-15``), a date with only a zone suffix
-    (``2024-01-15+02:00``), the ``current`` marker, and ``None`` are returned
-    unchanged — only values with an actual time-of-day are rewritten, so
-    date-only graph data keeps its format. Any datetime
-    ``datetime.fromisoformat`` accepts is recognized by its time separator
-    (``T``, lowercase ``t``, or a space) regardless of the date's shape —
-    extended, basic (``20240115T…``), and ISO week forms all normalize, not
-    just an uppercase-``T`` extended datetime.
+    to be correct. A value is normalized when it is a genuine datetime — either
+    the parse is timezone-aware (an explicit offset, the primary signal, which
+    also catches separatorless basic forms like ``20260704000000+0200``) or the
+    source has a ``T``/``t``/space time separator (a naive datetime such as
+    ``2024-01-15T10:00:00``). Bare dates (``2024-01-15``), a date with only a
+    zone suffix and no time (``2024-01-15+02:00``, which ``fromisoformat``
+    parses as a *naive* value), the ``current`` marker, and ``None`` are
+    returned unchanged, so date-only graph data keeps its format.
     """
     if value is None:
         return None
     text = str(value)
-    if not _HAS_TIME_RE.search(text):  # no time-of-day component — leave as-is
+    raw = _parse_iso(text)
+    if raw is None:  # not a parseable instant (e.g. "current")
         return text
-    dt = _to_instant(text)
-    if dt is None:  # not a parseable instant
+    # Leave a value that parsed naive AND has no time separator: a bare date or
+    # a date with a bogus zone suffix but no time-of-day. Everything else is a
+    # real datetime and must be canonicalized to UTC.
+    if raw.tzinfo is None and not _HAS_TIME_RE.search(text):
         return text
+    instant = raw if raw.tzinfo is not None else raw.replace(tzinfo=timezone.utc)
     # Emit the ``Z`` suffix, not ``+00:00``: graph predicates compare these as
     # raw strings in Cypher, and ``Z`` is the common form of existing UTC rows,
     # so ``Z`` keeps exact-boundary instants lexically comparable with them
     # (``'...Z' <= '...+00:00'`` is false — the two forms don't sort equal).
-    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return instant.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def to_utc_instant(value: Any) -> Any:

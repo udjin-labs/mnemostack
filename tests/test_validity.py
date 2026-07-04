@@ -758,8 +758,22 @@ def test_to_utc_iso_normalizes_basic_and_week_datetimes():
     if sys.version_info >= (3, 11):
         assert to_utc_iso("20260704T000000+0200") == "2026-07-03T22:00:00Z"
         assert to_utc_iso("2026-W27-6T00:00:00+02:00") == "2026-07-03T22:00:00Z"
+        # separatorless basic datetime (no T/space): recognized by its offset,
+        # not a separator — the offset-aware parse is the primary normalize signal
+        assert to_utc_iso("20260704000000+0200") == "2026-07-03T22:00:00Z"
     else:
         assert to_utc_iso("20260704T000000+0200") == "20260704T000000+0200"
         assert to_utc_iso("2026-W27-6T00:00:00+02:00") == "2026-W27-6T00:00:00+02:00"
+        assert to_utc_iso("20260704000000+0200") == "20260704000000+0200"
     # basic-format calendar date with no time-of-day stays as-is on every version
     assert to_utc_iso("20260704") == "20260704"
+
+
+def test_to_utc_iso_normalizes_naive_datetime_with_separator():
+    from mnemostack.recall.validity import to_utc_iso
+
+    # A naive datetime (no offset) but with a real time separator is still a
+    # datetime: assume UTC and emit the Z form so it sorts against normalized
+    # bounds. A date with a bogus zone suffix but no time stays untouched.
+    assert to_utc_iso("2024-01-15T10:00:00") == "2024-01-15T10:00:00Z"
+    assert to_utc_iso("2024-01-15+02:00") == "2024-01-15+02:00"
