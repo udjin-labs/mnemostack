@@ -70,6 +70,9 @@ def _strip_target(raw: str) -> str:
     """Normalize a link target to a note key: drop query/anchor/alias and .md."""
     target = raw.split("#", 1)[0].split("?", 1)[0].split("|", 1)[0].strip()
     target = unquote(target)  # decode %20 etc. so "My%20Note" == "My Note"
+    # A masked escaped bracket (possibly percent-encoded in an href, decoded by
+    # unquote above) becomes a literal ``[`` — its CommonMark meaning.
+    target = target.replace(_ESC_BRACKET, "[")
     target = target.rstrip("/")
     if target.lower().endswith(".md"):
         target = target[:-3]
@@ -137,6 +140,12 @@ def _is_external(dest: str) -> bool:
     return dest.startswith(("//", "#")) or bool(_URI_SCHEME_RE.match(dest))
 
 
+# Private-use sentinel that a backslash-escaped ``[`` is swapped to before
+# parsing, so an escaped opener can never match ``[[`` or start a link. Restored
+# to a literal ``[`` when a real destination/target is read back.
+_ESC_BRACKET = "\ue000"
+
+
 def _mask_escaped_brackets(text: str) -> str:
     """Replace a backslash-escaped ``[`` with a private-use sentinel.
 
@@ -155,7 +164,7 @@ def _mask_escaped_brackets(text: str) -> str:
         if c == "\\" and i + 1 < n:
             nxt = text[i + 1]
             if nxt == "[":
-                out.append("")  # escaped [ → sentinel (won't match [[ )
+                out.append(_ESC_BRACKET)  # escaped [ → sentinel (won't match [[ )
             else:
                 out.append(c)  # keep the escape for markdown-it
                 out.append(nxt)
@@ -186,6 +195,9 @@ def extract_links(text: str) -> list[Link]:
     for tok in _iter_inline_tokens(_mask_escaped_brackets(text)):
         if tok.type == "link_open":
             if link_depth == 0:
+                # An escaped bracket in the destination (``foo\[bar\].md``) was
+                # masked to the sentinel; ``_strip_target`` restores it after
+                # decoding, so the real sibling resolves.
                 dest = tok.attrGet("href") or ""
                 if not _is_external(dest) and _is_note_target(dest):
                     key = _strip_target(dest)

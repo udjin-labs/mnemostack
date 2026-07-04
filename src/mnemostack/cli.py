@@ -769,6 +769,11 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
         index_root = root_dir
     else:
         index_root = str((target if target.is_dir() else target.parent).resolve())
+    # A "full root walk" is a directory index whose target IS the index_root, so
+    # col.sources covers every file under the root. Only then is it safe to
+    # reconcile missing sources globally (prune / clear graph links); a nested
+    # subtree or single file covers only part of the root and must not.
+    full_root_walk = target.is_dir() and str(target) == index_root
     col = collect_markdown(
         target, chunk_size=args.chunk_size, index_root=index_root, root_dir=root_dir
     )
@@ -850,10 +855,10 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
         # Reconcile deletions: a file removed from the folder is absent from
         # col.sources. Seed each prior source under this index_root (but no
         # longer present) with an empty fresh set so its stale points are pruned
-        # instead of lingering searchable. ONLY for a directory walk — a
-        # single-file run shares the parent's index_root, so reconciling here
-        # would wrongly prune the untouched siblings.
-        if target.is_dir():
+        # instead of lingering searchable. ONLY for a full-root directory walk —
+        # a single file or a nested subtree covers only part of the index_root,
+        # so reconciling here would wrongly prune untouched siblings.
+        if full_root_walk:
             for hit in store.scroll(filters={"index_root": index_root}):
                 prior = (hit.payload or {}).get("source")
                 if prior and prior not in fresh_by_source:
@@ -894,10 +899,10 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
                 # Reconcile deletions: a file removed from the folder still has
                 # LINKS_TO edges in the graph. Seed each prior link-source no
                 # longer present with an empty target list so sync clears its
-                # stale edges. ONLY for a directory walk — a single-file run
-                # shares the parent's index_root, so this would wrongly clear
-                # the untouched siblings' edges.
-                if target.is_dir():
+                # stale edges. ONLY for a full-root directory walk — a single
+                # file or nested subtree covers only part of the index_root, so
+                # this would wrongly clear untouched siblings' edges.
+                if full_root_walk:
                     for prior in graph.file_link_sources(index_root=index_root):
                         if prior not in by_source and prior not in failed_sources:
                             by_source[prior] = []

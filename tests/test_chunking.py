@@ -152,6 +152,16 @@ def test_markdown_chunker_keeps_text_before_first_header():
     assert any(c.metadata["heading_path"] == ["Section"] for c in chunks)
 
 
+def test_markdown_chunker_ignores_headings_in_containers():
+    # A heading inside a block quote (or list) is not a document-flow section,
+    # so following content must not inherit it in heading_path.
+    text = "# Real\n\n> ## Quoted\n\nBack to real text"
+    chunks = MarkdownChunker(chunk_size=10000).chunk(text)
+    paths = [c.metadata["heading_path"] for c in chunks]
+    assert all("Quoted" not in p for p in paths)
+    assert ["Real"] in paths
+
+
 def test_markdown_chunker_recognizes_setext_headings():
     # Setext headings (Title\n==== / Section\n----) are valid markdown and must
     # carry into heading_path just like ATX headings.

@@ -80,8 +80,16 @@ def _resolve_relative(source_rel: str, target: str, rels_lower: dict[str, str]) 
     None, so it is never mistaken for an in-vault edge even if a same-named file
     happens to exist inside the root. Returns the canonical corpus-relative
     path, or None if nothing resolves.
+
+    A root-relative target (``/index.md``) resolves from the corpus root, not
+    the source directory.
     """
-    combined = PurePosixPath(source_rel).parent / _norm_target(target)
+    norm = _norm_target(target)
+    if norm.startswith("/"):
+        # Root-relative: resolve from the corpus root, dropping the leading slash.
+        combined = PurePosixPath(norm.lstrip("/"))
+    else:
+        combined = PurePosixPath(source_rel).parent / norm
     parts: list[str] = []
     for part in combined.parts:
         if part == "..":

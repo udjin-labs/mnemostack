@@ -11,6 +11,14 @@ from .base import Chunk, Chunker
 # indented, inline) for a heading.
 _MD = MarkdownIt("commonmark")
 
+# Block containers whose headings are nested, not document-flow sections.
+_CONTAINER_OPEN = frozenset(
+    {"blockquote_open", "bullet_list_open", "ordered_list_open", "list_item_open"}
+)
+_CONTAINER_CLOSE = frozenset(
+    {"blockquote_close", "bullet_list_close", "ordered_list_close", "list_item_close"}
+)
+
 
 def _line_start_offsets(text: str) -> list[int]:
     """Char offset of the start of each line (index = 0-based line number)."""
@@ -54,11 +62,21 @@ class MarkdownChunker(Chunker):
             return []
 
         # Find headings via the CommonMark parser (ATX + Setext; code excluded).
+        # Only top-level headings define document sections — a heading nested in
+        # a block quote or list item is not in the document flow and must not
+        # own the content that follows it, so track container depth.
         tokens = _MD.parse(text)
         line_starts = _line_start_offsets(text)
         headers: list[tuple[int, int, str]] = []  # (start, level, title)
+        container_depth = 0
         for k, tok in enumerate(tokens):
-            if tok.type != "heading_open" or not tok.map:
+            if tok.type in _CONTAINER_OPEN:
+                container_depth += 1
+                continue
+            if tok.type in _CONTAINER_CLOSE:
+                container_depth -= 1
+                continue
+            if tok.type != "heading_open" or not tok.map or container_depth > 0:
                 continue
             level = int(tok.tag[1:])  # "h2" -> 2
             inline = tokens[k + 1] if k + 1 < len(tokens) else None

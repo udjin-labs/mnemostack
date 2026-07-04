@@ -199,6 +199,22 @@ def test_extract_links_percent_encoded_extension_is_asset():
     assert {link.target for link in links} == {"real"}
 
 
+def test_extract_links_escaped_bracket_in_destination():
+    # A destination may contain an escaped bracket; the target restores it.
+    links = extract_links(r"[x](foo\[bar\].md)")
+    assert [(link.target, link.is_wikilink) for link in links] == [("foo[bar]", False)]
+
+
+def test_collect_resolves_root_relative_link(tmp_path):
+    # [home](/index.md) resolves from the corpus root, not the source dir.
+    (tmp_path / "index.md").write_text("# Index")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "page.md").write_text("back [home](/index.md)")
+    col = collect_markdown(tmp_path)
+    edge = next(e for e in col.edges if e.source == "sub/page.md")
+    assert edge.target == "index.md" and edge.resolved is True
+
+
 def test_extract_links_wikilink_inside_link_label_not_double_counted():
     # [[B]] inside a normal link's label is part of the label text, not its own
     # edge — only the outer a.md link (and the standalone [[C]]) count.
@@ -1125,3 +1141,72 @@ def test_cmd_index_markdown_single_file_does_not_reconcile_siblings(tmp_path, mo
     assert "id-b" not in store.deleted
     assert "b.md" not in graph.synced
     assert _Graph.called_file_link_sources is False
+
+
+def test_cmd_index_markdown_nested_dir_index_root_does_not_reconcile_siblings(
+    tmp_path, monkeypatch
+):
+    # A nested DIRECTORY refresh with --index-root (target != index_root) covers
+    # only a subtree, so it must not prune/clear sibling sources under the root.
+    import argparse
+
+    import mnemostack.cli as cli
+
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "a.md").write_text("# A\nbody a")
+    (tmp_path / "other.md").write_text("# Other\nbody")  # sibling under root, untouched
+    root = str(tmp_path.resolve())
+
+    class _FakeProvider:
+        dimension = 3
+
+        def embed(self, text):
+            return [0.1, 0.2, 0.3]
+
+    class _Store:
+        def __init__(self, **_):
+            self._points = [("id-other", {"source": "other.md", "index_root": root})]
+            self.deleted = []
+
+        def collection_exists(self):
+            return True
+
+        def ensure_collection(self, recreate=False):
+            return True
+
+        def scroll(self, filters=None):
+            for pid, pl in self._points:
+                if not filters or all(pl.get(k) == v for k, v in filters.items()):
+                    yield _HitId(pid, pl)
+
+        def iter_ids(self, filters=None):
+            for pid, pl in self._points:
+                if not filters or all(pl.get(k) == v for k, v in filters.items()):
+                    yield pid
+
+        def upsert(self, cid, vec, payload):
+            pass
+
+        def set_payload(self, cid, payload):
+            pass
+
+        def delete_payload_keys(self, cid, keys):
+            pass
+
+        def delete_points(self, ids):
+            self.deleted.extend(ids)
+            return len(ids)
+
+    store = _Store()
+    monkeypatch.setattr(cli, "get_provider", lambda *_a, **_k: _FakeProvider())
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+
+    args = argparse.Namespace(
+        path=str(tmp_path / "sub"), index_root=root, provider="fake",
+        embedding_model=None, collection="c", qdrant="http://localhost:6333",
+        chunk_size=1200, memgraph_uri=None,
+        graph_timeout=5.0, recreate=False, prune=True, yes=True,
+    )
+    assert cli.cmd_index_markdown(args) == 0
+    # the sibling under the root but outside the refreshed subtree is untouched
+    assert "id-other" not in store.deleted
