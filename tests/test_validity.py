@@ -444,9 +444,9 @@ def test_to_utc_iso_normalizes_offsets():
     from mnemostack.recall.validity import to_utc_iso
 
     # offset-bearing instant -> UTC
-    assert to_utc_iso("2026-07-04T00:00:00+02:00") == "2026-07-03T22:00:00+00:00"
+    assert to_utc_iso("2026-07-04T00:00:00+02:00") == "2026-07-03T22:00:00Z"
     # Z suffix -> UTC
-    assert to_utc_iso("2026-06-01T00:00:00Z") == "2026-06-01T00:00:00+00:00"
+    assert to_utc_iso("2026-06-01T00:00:00Z") == "2026-06-01T00:00:00Z"  # Z stays Z (canonical)
     # bare date and marker pass through unchanged
     assert to_utc_iso("2024-01-15") == "2024-01-15"
     assert to_utc_iso("current") == "current"
@@ -472,6 +472,7 @@ def test_recall_pushes_include_invalidated_to_graph():
     class _GraphRetriever:
         name = "memgraph"
         accepts_as_of = True
+        accepts_include_invalidated = True
 
         def search(self, query, limit, filters=None, as_of=None, include_invalidated=False):
             captured["include_invalidated"] = include_invalidated
@@ -505,7 +506,7 @@ def test_mca_hits_filtered_by_validity_before_fusion():
 def test_graph_store_to_iso_normalizes_to_utc():
     from mnemostack.graph.store import _to_iso
 
-    assert _to_iso("2026-07-04T00:00:00+02:00") == "2026-07-03T22:00:00+00:00"
+    assert _to_iso("2026-07-04T00:00:00+02:00") == "2026-07-03T22:00:00Z"
     assert _to_iso("2024-01-15") == "2024-01-15"  # bare date unchanged
     assert _to_iso("current") == "current"
 
@@ -550,3 +551,58 @@ def test_graph_valid_clause_used_for_target_node():
     src = inspect.getsource(MemgraphRetriever.search)
     assert 'target_valid = self._valid_clause("m"' in src
     assert "AND {target_valid}" in src
+
+
+# ---------- review round 5 ----------
+
+
+def test_to_utc_iso_emits_z_for_cypher_string_compat():
+    from mnemostack.recall.validity import to_utc_iso
+
+    # Z form (not +00:00) so graph Cypher string comparison stays compatible
+    # with existing UTC rows written with a Z suffix.
+    out = to_utc_iso("2026-06-01T00:00:00+02:00")
+    assert out.endswith("Z")
+    assert "+00:00" not in out
+    # exact-boundary lexical order holds against a stored Z row
+    stored = "2026-05-31T22:00:00Z"
+    assert stored <= out and out <= stored  # equal -> boundary compares correctly
+
+
+def test_include_invalidated_only_sent_to_advertising_retriever():
+    # A custom retriever that accepts only as_of (not include_invalidated) must
+    # not be handed include_invalidated (which the broad except would swallow,
+    # silently dropping the retriever). It also must still receive as_of.
+    from mnemostack.recall.recaller import Recaller
+
+    captured = {}
+
+    class _AsOfOnlyRetriever:
+        name = "custom"
+        accepts_as_of = True  # but NOT accepts_include_invalidated
+
+        def search(self, query, limit, filters=None, as_of=None):
+            captured["as_of"] = as_of
+            captured["called"] = True
+            return [RecallResult(id="x", text="t", score=0.5, payload={}, sources=["custom"])]
+
+    recaller = Recaller(retrievers=[_AsOfOnlyRetriever()])
+    out = recaller.recall("q", limit=5, as_of="2026-03-01")
+    assert captured["called"] is True          # not silently dropped
+    assert captured["as_of"] == "2026-03-01"
+    assert [r.id for r in out] == ["x"]
+
+
+def test_neither_marker_retriever_gets_no_validity_kwargs():
+    from mnemostack.recall.recaller import Recaller
+
+    class _PlainRetriever:
+        name = "plain"
+
+        # no markers, no as_of/include_invalidated params
+        def search(self, query, limit, filters=None):
+            return [RecallResult(id="p", text="t", score=0.5, payload={}, sources=["plain"])]
+
+    recaller = Recaller(retrievers=[_PlainRetriever()])
+    out = recaller.recall("q", limit=5, as_of="2026-03-01", include_invalidated=True)
+    assert [r.id for r in out] == ["p"]  # works, no TypeError

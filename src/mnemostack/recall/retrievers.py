@@ -453,10 +453,12 @@ class MemgraphRetriever(Retriever):
     """
 
     name = "memgraph"
-    #: The recall path passes `as_of` to retrievers that advertise this, so
-    #: graph facts are filtered point-in-time at query time (their payloads
-    #: carry no validity bounds for post-filtering to use).
+    #: The recall path passes each validity kwarg only to retrievers that
+    #: advertise it, so a custom retriever that accepts only `as_of` (or
+    #: neither) is never handed an argument its `search` doesn't take. Graph
+    #: facts carry no validity payload, so both are filtered at query time.
     accepts_as_of = True
+    accepts_include_invalidated = True
 
     def __init__(
         self,
