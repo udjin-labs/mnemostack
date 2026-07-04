@@ -195,6 +195,20 @@ non-destructive close, and the two sides should agree.
    (matching `GraphStore.invalidate`, which is library-only today). The HTTP
    server stays read+feedback; the write endpoint can be added later if asked.
 
+## Known limitation: file-backed BM25
+
+Invalidation writes the Qdrant vector payload, so vector, temporal, and
+point-in-time graph recall honor it (the graph via the `as_of` Cypher push-down
+in `MemgraphRetriever` and `GraphResurrection`). BM25 is different: it is an
+in-memory index built at startup, so it reflects an invalidation only after its
+corpus is rebuilt — and only when the corpus was built from Qdrant payloads
+(`BM25Retriever.from_qdrant`), which carry the validity keys. A file-backed BM25
+corpus (`bm25_paths`) is built from files whose docs carry only `source`/`offset`
+(no validity keys), so those hits are never filtered and an exact-token query
+can still surface an invalidated fact. Stage-1 stance: document it and recommend
+building BM25 from Qdrant when lexical search must respect invalidation; live
+BM25 invalidation (index deletion) is out of scope.
+
 ## Relationship to existing prior art
 
 This is deliberately the vector-side twin of `GraphStore.invalidate`: same

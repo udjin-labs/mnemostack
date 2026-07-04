@@ -258,6 +258,15 @@ class VectorStore:
         point owned by a *different* root is left untouched (the same owner
         guard ``index --refresh-payloads`` uses), so one indexing root cannot
         invalidate another's chunks. Returns the number of points updated.
+
+        Scope: this writes the Qdrant vector payload, so recall's vector and
+        temporal retrievers (which read Qdrant live) honor it immediately. A
+        BM25 retriever is an in-memory index built at startup — it reflects an
+        invalidation only after its corpus is rebuilt, and only when that
+        corpus was built from Qdrant payloads (``BM25Retriever.from_qdrant``).
+        A file-backed BM25 corpus (``bm25_paths``) carries no validity keys and
+        is not filtered; build BM25 from Qdrant if lexical search must respect
+        invalidation.
         """
         if isinstance(ids, (str, int)):
             ids = [ids]

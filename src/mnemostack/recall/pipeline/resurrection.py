@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..recaller import RecallResult
+from ..retrievers import graph_valid_clause
 from .base import PipelineContext, Stage
 from .stages import STOPWORDS
 
@@ -106,6 +107,15 @@ class GraphResurrection(Stage):
         if driver is None:
             return results
 
+        # Point-in-time recall: resurrect graph neighbors valid at `as_of`, not
+        # current ones — otherwise a historical search re-injects present-day
+        # facts through the pipeline. `as_of` rides in via PipelineContext.extras.
+        as_of = context.extras.get("as_of")
+        n_valid = graph_valid_clause("n", as_of)
+        m_valid = graph_valid_clause("m", as_of)
+        r_valid = graph_valid_clause("r1", as_of)
+        extra_params = {"as_of": as_of} if as_of is not None else {}
+
         existing = " ".join(
             (r.text or "") + " " + (r.payload.get("text", "") if r.payload else "") for r in results
         ).lower()
@@ -115,18 +125,19 @@ class GraphResurrection(Stage):
             with driver.session() as session:
                 for seed in list(seeds)[: self.max_seeds]:
                     rows = session.run(
-                        """
+                        f"""
                         MATCH (n)-[r1]-(m)
                         WHERE toLower(n.name) = $seed
-                          AND coalesce(n.valid_until, 'current') = 'current'
-                          AND coalesce(m.valid_until, 'current') = 'current'
-                          AND coalesce(r1.valid_until, 'current') = 'current'
+                          AND {n_valid}
+                          AND {m_valid}
+                          AND {r_valid}
                         RETURN DISTINCT m.name AS name, labels(m)[0] AS type,
                                m.memory_class AS mc, type(r1) AS rel
                         LIMIT $lim
                         """,
                         seed=seed,
                         lim=self.max_per_seed,
+                        **extra_params,
                     ).data()
                     for nb in rows:
                         name = nb.get("name") or ""

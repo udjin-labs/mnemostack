@@ -459,6 +459,8 @@ def build_server(
                 memories,
                 recall_filters=filters,
                 token_budget=effective_budget,
+                include_invalidated=include_invalidated,
+                as_of=as_of,
             )
             # Prefer the generator's own estimate: its retry paths can swap
             # in a freshly recalled context pool. getattr: custom/duck-typed
@@ -484,8 +486,8 @@ def build_server(
     @mcp.tool()
     def mnemostack_invalidate(
         ids: Annotated[
-            list[str],
-            Field(description="Point id(s) to mark stale"),
+            list[str | int],
+            Field(description="Point id(s) to mark stale (string or integer)"),
         ],
         valid_until: Annotated[
             str | None,

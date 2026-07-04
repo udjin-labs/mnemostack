@@ -343,7 +343,7 @@ def test_default_search_runs_full_flow():
     mock_recaller.recall.return_value = FAKE_RESULTS[:6]
     mock_recaller.apply_vector_floor_after_rerank.side_effect = lambda res, recalled: res
     fake_pipeline = MagicMock()
-    fake_pipeline.apply.side_effect = lambda q, res: res
+    fake_pipeline.apply.side_effect = lambda q, res, **_: res
 
     buf = StringIO()
     with (
@@ -391,7 +391,7 @@ def test_search_passes_rerank_mode_to_reranker():
     mock_recaller.recall.return_value = FAKE_RESULTS[:6]
     mock_recaller.apply_vector_floor_after_rerank.side_effect = lambda res, recalled: res
     fake_pipeline = MagicMock()
-    fake_pipeline.apply.side_effect = lambda q, res: res
+    fake_pipeline.apply.side_effect = lambda q, res, **_: res
     fake_reranker = MagicMock()
     fake_reranker.rerank.side_effect = lambda q, res: res
 
