@@ -76,6 +76,25 @@ def to_utc_iso(value: Any) -> Any:
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def to_utc_instant(value: Any) -> Any:
+    """Normalize an ``as_of`` query value to a full UTC instant string.
+
+    Like ``to_utc_iso`` but also expands a **date-only** value (``2026-03-01``)
+    to a full midnight-UTC instant (``2026-03-01T00:00:00Z``). Used for the
+    ``as_of`` bound in graph Cypher, where bounds written from datetimes are
+    stored as full instants: a bare-date ``as_of`` would otherwise be shorter
+    than (and sort before) ``valid_from = '...T00:00:00Z'`` at the exact start,
+    dropping a fact the vector-side ``valid_at`` treats as valid at midnight.
+    Non-instant markers (``current``) and ``None`` pass through unchanged.
+    """
+    if value is None:
+        return None
+    dt = _to_instant(value)
+    if dt is None:
+        return str(value)
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def _le(a: Any, b: Any) -> bool:
     """``a <= b`` comparing ISO instants when both parse, else lexicographically.
 

@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
 
-from ..recall.validity import to_utc_iso
+from ..recall.validity import to_utc_instant, to_utc_iso
 
 try:
     from neo4j import GraphDatabase
@@ -172,7 +172,10 @@ class GraphStore:
             where_parts.append("o.name = $obj")
             params["obj"] = obj
         if as_of:
-            params["as_of"] = _to_iso(as_of)
+            # Expand a bare-date as_of to a full midnight-UTC instant so the
+            # raw-string predicate compares correctly against full-instant
+            # bounds (write bounds keep _to_iso's conservative behavior).
+            params["as_of"] = to_utc_instant(as_of)
             where_parts.append(
                 "(r.valid_from IS NULL OR r.valid_from <= $as_of) "
                 "AND (r.valid_until = 'current' OR r.valid_until IS NULL OR r.valid_until > $as_of)"

@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any, Literal
 
 try:
@@ -103,6 +104,17 @@ class RecallRequest(BaseModel):
             "Unset falls back to the server-wide recall.token_budget config."
         ),
     )
+    include_invalidated: bool = Field(
+        False,
+        description="Include facts marked stale (default: invalidated facts are hidden).",
+    )
+    as_of: str | None = Field(
+        None,
+        description=(
+            "Point-in-time recall (ISO-8601): return facts valid at this "
+            "world-time instant, ignoring later invalidation."
+        ),
+    )
 
 
 class AnswerRequest(BaseModel):
@@ -118,6 +130,12 @@ class AnswerRequest(BaseModel):
             "Hard cap on the total (estimated) text tokens of the memories "
             "fed to the answer LLM (same contract as /recall)."
         ),
+    )
+    include_invalidated: bool = Field(
+        False, description="Include facts marked stale (same contract as /recall)."
+    )
+    as_of: str | None = Field(
+        None, description="Point-in-time recall (ISO-8601); same contract as /recall."
     )
 
 
@@ -473,6 +491,8 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         full_pipeline: bool,
         filters: dict[str, Any] | None = None,
         token_budget: int | None = None,
+        include_invalidated: bool = False,
+        as_of: str | None = None,
     ):
         trace = RecallTrace()
         # Reranking is part of the full pipeline; if it was requested but the
@@ -491,6 +511,8 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             # Per-request budget wins; unset falls back to the server-wide
             # default so operators can cap every client uniformly.
             token_budget=token_budget if token_budget is not None else cfg.token_budget,
+            include_invalidated=include_invalidated,
+            as_of=as_of,
         )
         if cfg.auto_record_ior:
             record_recall_events(pipeline, results)
@@ -502,6 +524,8 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         full_pipeline: bool,
         filters: dict[str, Any] | None = None,
         token_budget: int | None = None,
+        include_invalidated: bool = False,
+        as_of: str | None = None,
     ):
         """Offload the blocking recall stack to a worker thread.
 
@@ -510,7 +534,14 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         behind the slowest retriever.
         """
         return await asyncio.to_thread(
-            _run_recall_sync, query, limit, full_pipeline, filters, token_budget
+            _run_recall_sync,
+            query,
+            limit,
+            full_pipeline,
+            filters,
+            token_budget,
+            include_invalidated,
+            as_of,
         )
 
     @app.get("/", include_in_schema=False)
@@ -556,7 +587,13 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     async def recall_endpoint(req: RecallRequest):
         try:
             results, trace = await _run_recall(
-                req.query, req.limit, req.full_pipeline, req.filters, req.token_budget
+                req.query,
+                req.limit,
+                req.full_pipeline,
+                req.filters,
+                req.token_budget,
+                req.include_invalidated,
+                req.as_of,
             )
         except Exception as exc:
             log.exception("recall endpoint failed")
@@ -581,16 +618,27 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         token_budget = req.token_budget if req.token_budget is not None else cfg.token_budget
         try:
             results, trace = await _run_recall(
-                req.query, req.limit, req.full_pipeline, req.filters, token_budget
+                req.query,
+                req.limit,
+                req.full_pipeline,
+                req.filters,
+                token_budget,
+                req.include_invalidated,
+                req.as_of,
             )
             # recall_filters keeps the answer generator's retry sub-recalls
-            # inside the same filtered scope as the primary recall.
+            # inside the same filtered scope; the validity view must reach the
+            # generator too, or its retry sub-recalls would ignore as_of.
             ans = await asyncio.to_thread(
-                answer_gen.generate,
-                req.query,
-                results,
-                recall_filters=req.filters,
-                token_budget=token_budget,
+                partial(
+                    answer_gen.generate,
+                    req.query,
+                    results,
+                    recall_filters=req.filters,
+                    token_budget=token_budget,
+                    include_invalidated=req.include_invalidated,
+                    as_of=req.as_of,
+                )
             )
         except Exception as exc:
             log.exception("answer endpoint failed")
