@@ -711,3 +711,17 @@ def test_fallback_filters_validity_before_truncate():
     )
     assert "stale" not in {r.id for r in out}
     assert "fresh" in {r.id for r in out}
+
+
+def test_graph_rel_probe_is_undirected_and_overfetches_nodes():
+    # #3: undirected rel match so target-only nodes (valid incoming edge, no
+    # outgoing) aren't wrongly dropped. #2: node candidates over-fetched
+    # before the bare-node skip so stale-only early nodes don't hide valid ones.
+    import inspect
+
+    from mnemostack.recall.retrievers import MemgraphRetriever
+
+    src = inspect.getsource(MemgraphRetriever.search)
+    assert "-[r]-(m)" in src and "-[r]->(m)" not in src   # undirected
+    assert "startNode(r).name" in src and "endNode(r).name" in src
+    assert "self.max_nodes * 3" in src                     # node over-fetch
