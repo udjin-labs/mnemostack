@@ -211,7 +211,12 @@ def test_extract_links_wikilink_alias_with_spaces_asset_filtered():
 def test_extract_links_entity_escaped_wikilink():
     # &#91; / &#x5B; / &lbrack; all decode to '[' — an entity-escaped opener is
     # literal text, not a wikilink.
-    for enc in ("&#91;&#91;Draft]]", "&#x5B;&#x5B;Draft]]", "&lbrack;&lbrack;Draft]]"):
+    for enc in (
+        "&#91;&#91;Draft]]",
+        "&#x5B;&#x5B;Draft]]",
+        "&lbrack;&lbrack;Draft]]",
+        "&lsqb;&lsqb;Draft]]",
+    ):
         text = f"{enc} and real [[Real]]"
         assert {link.target for link in extract_links(text)} == {"Real"}, text
 

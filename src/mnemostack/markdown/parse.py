@@ -147,7 +147,8 @@ _ESC_BRACKET = "\ue000"
 
 # HTML character references that markdown-it decodes to a literal ``[`` — the
 # other way (besides ``\\[``) to display bracket syntax without opening a link.
-_BRACKET_ENTITY_RE = re.compile(r"&(?:#0*91|#[xX]0*5[bB]|lbrack);")
+# Covers the decimal/hex numeric forms and both HTML5 named refs (lbrack/lsqb).
+_BRACKET_ENTITY_RE = re.compile(r"&(?:#0*91|#[xX]0*5[bB]|lbrack|lsqb);")
 
 
 def _mask_escaped_brackets(text: str) -> str:
