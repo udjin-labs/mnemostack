@@ -628,3 +628,32 @@ def test_mcp_search_threads_validity_params(monkeypatch):
         )
     )
     assert captured == {"include_invalidated": True, "as_of": "2026-03-01"}
+
+
+def test_mcp_invalidate_works_without_embedding_provider(monkeypatch):
+    import mnemostack.mcp.server as srv
+
+    class _RecordingVector:
+        def __init__(self, **_):
+            self.called = False
+
+        def invalidate(self, ids, **_):
+            self.called = True
+            return len(ids)
+
+    vec = _RecordingVector()
+
+    def _no_provider(*_a, **_k):
+        raise RuntimeError("GEMINI_API_KEY not set")
+
+    # Embedding provider is unavailable — invalidation is payload-only and must
+    # still work (it builds a dimension-only store, no embeddings).
+    monkeypatch.setattr(srv, "get_provider", _no_provider)
+    monkeypatch.setattr(srv, "VectorStore", lambda **_: vec)
+    mcp = build_server(collection="test", embedding_provider="ollama")
+
+    result = asyncio.run(mcp.call_tool("mnemostack_invalidate", {"ids": ["7"]}))
+    payload = result.structured_content
+    assert payload["ok"] is True
+    assert payload["invalidated"] == 1
+    assert vec.called is True

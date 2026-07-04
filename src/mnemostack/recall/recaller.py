@@ -18,7 +18,7 @@ from .mca_prefilter import mca_prefilter as run_mca_prefilter
 from .query_expansion import expand_query
 from .tokens import TokenCounter, apply_token_budget
 from .trace import RecallTrace, RetrieverTrace
-from .validity import filter_by_validity
+from .validity import filter_by_validity, keep_payload
 
 logger = logging.getLogger(__name__)
 
@@ -287,11 +287,24 @@ class Recaller:
                 bm25_limit=bm25_limit,
                 filters=filters,
                 trace=trace,
+                include_invalidated=include_invalidated,
+                as_of=as_of,
             )
         else:
             results = self._recall_once(
-                query, limit, vector_limit, bm25_limit, filters, trace=trace
+                query,
+                limit,
+                vector_limit,
+                bm25_limit,
+                filters,
+                trace=trace,
+                include_invalidated=include_invalidated,
+                as_of=as_of,
             )
+        # Retriever hits are already validity-filtered before fusion (so stale
+        # facts can't crowd out current ones in the top-K, and vector-floor
+        # candidates stay clean). This is a cheap idempotent safety net for any
+        # path that might inject records after fusion.
         results = filter_by_validity(
             results, include_invalidated=include_invalidated, as_of=as_of
         )
@@ -310,6 +323,8 @@ class Recaller:
         apply_vector_floor: bool = True,
         vector_floor_candidates: list[RecallResult] | None = None,
         trace: RecallTrace | None = None,
+        include_invalidated: bool = False,
+        as_of: str | None = None,
     ) -> list[RecallResult]:
         # Retrievers mode: fuse N arbitrary ranked lists
         if self.retrievers:
@@ -321,12 +336,20 @@ class Recaller:
                 apply_vector_floor=apply_vector_floor,
                 vector_floor_candidates=vector_floor_candidates,
                 trace=trace,
+                include_invalidated=include_invalidated,
+                as_of=as_of,
             )
         if self.embedding is None or self.vector is None:
             raise ValueError(
                 "legacy recall path requires embedding_provider and vector_store "
                 "(or pass retrievers=[...])"
             )
+        # Drop stale hits at the source — before fusion's top-K cut and before
+        # vector-floor candidates are built — so invalidated facts can neither
+        # crowd out current ones nor be re-appended by the floor.
+        def _keep(payload: dict[str, Any] | None) -> bool:
+            return keep_payload(payload, include_invalidated=include_invalidated, as_of=as_of)
+
         with histogram("mnemostack.recall.latency_ms"):
             # Vector search
             vector_hits: list[Hit] = []
@@ -335,6 +358,7 @@ class Recaller:
             if query_vec:
                 with histogram("mnemostack.recall.vector_latency_ms"):
                     vector_hits = self.vector.search(query_vec, limit=vector_limit, filters=filters)
+                vector_hits = [h for h in vector_hits if _keep(h.payload)]
                 counter("mnemostack.recall.vector_hits", len(vector_hits))
             raw_vector_candidates = self._vector_floor_candidates_from_hits(vector_hits)
             if vector_floor_candidates is not None:
@@ -353,6 +377,7 @@ class Recaller:
 
                 with histogram("mnemostack.recall.bm25_latency_ms"):
                     bm25_hits = self.bm25.search(query, limit=bm25_limit, predicate=predicate)
+                bm25_hits = [(d, s) for d, s in bm25_hits if _keep(d.payload)]
                 counter("mnemostack.recall.bm25_hits", len(bm25_hits))
 
             # Build id→source map and per-list tuples for RRF
@@ -375,6 +400,7 @@ class Recaller:
             mca_hits = (
                 self._mca_hits(query, bm25_limit, filters) if self.mca_prefilter_enabled else []
             )
+            mca_hits = [h for h in mca_hits if _keep(h.payload)]
             mca_by_id = {hit.id: hit for hit in mca_hits}
             ranked_lists: list[list[tuple[Any, float]]] = [vector_list, bm25_list]
             if mca_hits:
@@ -513,6 +539,8 @@ class Recaller:
         filters: dict[str, Any] | None,
         *,
         trace: RecallTrace | None = None,
+        include_invalidated: bool = False,
+        as_of: str | None = None,
     ) -> list[RecallResult]:
         ranked_lists: list[list[tuple[Any, float]]] = []
         id_to_result: dict[Any, RecallResult] = {}
@@ -528,6 +556,8 @@ class Recaller:
                 apply_vector_floor=False,
                 vector_floor_candidates=vector_floor_candidates,
                 trace=trace,
+                include_invalidated=include_invalidated,
+                as_of=as_of,
             )
             if trace is not None:
                 # Disambiguate which expanded query produced these entries.
@@ -596,6 +626,8 @@ class Recaller:
         apply_vector_floor: bool = True,
         vector_floor_candidates: list[RecallResult] | None = None,
         trace: RecallTrace | None = None,
+        include_invalidated: bool = False,
+        as_of: str | None = None,
     ) -> list[RecallResult]:
         """Fuse N retrievers' ranked lists via RRF. Preserves source tags.
 
@@ -612,7 +644,25 @@ class Recaller:
             start = time.monotonic()
             err: str | None = None
             try:
-                hits = retr.search(query, limit=per_source_limit, filters=filters)
+                # Graph facts carry no validity payload, so filter_by_validity
+                # can't enforce point-in-time on them — push `as_of` into the
+                # retriever that advertises it (MemgraphRetriever) so it filters
+                # at query time, matching GraphStore.query_triples(as_of=...).
+                if as_of is not None and getattr(retr, "accepts_as_of", False):
+                    hits = retr.search(query, limit=per_source_limit, filters=filters, as_of=as_of)
+                else:
+                    hits = retr.search(query, limit=per_source_limit, filters=filters)
+                # Drop stale hits before fusion/floor so invalidated facts
+                # neither crowd out current ones nor get re-appended by the
+                # vector floor. Graph hits (no bounds) already came filtered
+                # from the `as_of` push-down above.
+                hits = [
+                    h
+                    for h in hits
+                    if keep_payload(
+                        h.payload, include_invalidated=include_invalidated, as_of=as_of
+                    )
+                ]
             except Exception as exc:  # noqa: BLE001 — fail-open: one broken retriever must not kill recall
                 hits = []
                 err = f"{type(exc).__name__}: {exc}"

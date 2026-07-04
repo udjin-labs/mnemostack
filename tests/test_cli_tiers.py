@@ -610,3 +610,29 @@ def test_validity_flags_parse_on_search_and_answer(monkeypatch):
     inv = parser.parse_args(["invalidate", "id1", "id2", "--valid-until", "2026-06-01"])
     assert inv.ids == ["id1", "id2"]
     assert inv.valid_until == "2026-06-01"
+
+
+def test_cmd_invalidate_coerces_digit_ids(monkeypatch):
+    import mnemostack.cli as cli
+
+    class _FakeStore:
+        def __init__(self, **_):
+            self.ids = None
+
+        def collection_exists(self):
+            return True
+
+        def invalidate(self, ids, **_):
+            self.ids = list(ids)
+            return len(ids)
+
+    store = _FakeStore()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    args = argparse.Namespace(
+        collection="t", qdrant="http://localhost:6333",
+        ids=["1", "abc", "a1b2"], invalidated_at=None, valid_until=None,
+        index_root=None, json=False,
+    )
+    assert cli.cmd_invalidate(args) == 0
+    # digit-only -> int; anything with non-digits stays a string
+    assert store.ids == [1, "abc", "a1b2"]
