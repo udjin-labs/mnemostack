@@ -35,11 +35,14 @@ def is_current(payload: dict[str, Any] | None) -> bool:
 
 
 def _to_instant(value: Any) -> datetime | None:
-    """Parse an ISO-8601 value to an aware UTC datetime, or None if unparseable.
+    """Parse an ISO-8601 date or datetime to an aware UTC datetime.
 
-    Naive timestamps are assumed UTC; a trailing ``Z`` is accepted. Returning
-    None lets callers fall back to a lexicographic compare for values that are
-    not full ISO instants (e.g. a bare ``2026-03-01`` date).
+    Returns None only when the value is not an ISO instant at all (e.g. the
+    ``current`` marker), letting callers fall back to a raw compare. A bare date
+    maps to midnight; a naive datetime is assumed UTC; a trailing ``Z`` is
+    accepted. Every separator ``datetime.fromisoformat`` allows (``T``, ``t``,
+    space, ``_``, the ``+`` from ``isoformat(sep=...)``, …), basic and ISO-week
+    forms, and comma-decimal fractions are handled by the parser itself.
     """
     try:
         text = str(value)
@@ -52,47 +55,41 @@ def _to_instant(value: Any) -> datetime | None:
 
 
 def to_utc_iso(value: Any) -> Any:
-    """Canonicalize a timezone-bearing ISO instant to UTC ISO; pass others through.
+    """Canonicalize any ISO date/datetime to a single UTC instant string.
 
     Graph validity predicates compare timestamps as raw strings in Cypher (no
-    instant parsing available there), so an offset-bearing value must be
-    normalized to UTC on both the write and the query side for the comparison
-    to be correct. Bare dates (``2024-01-15``), the ``current`` marker, and
-    ``None`` are returned unchanged — only genuinely zoned datetimes are
-    rewritten, so date-only graph data keeps its format.
+    instant parsing available there), so every stored bound and every ``as_of``
+    must land in **one** canonical form or the comparison misclassifies facts.
+    Any value ``datetime.fromisoformat`` accepts — a bare date (mapped to
+    midnight UTC), any separator, a basic/ISO-week form, or an offset — is
+    rewritten to ``YYYY-MM-DDTHH:MM:SS[.ffffff]Z``. The ``current`` marker,
+    ``None``, and anything unparseable pass through unchanged.
+
+    Precision is preserved (a whole-second instant stays ``…00Z``), not widened
+    to microseconds, so bounds written by the previous normalizer still compare
+    equal — forcing microseconds would make ``…00Z`` and ``…00.000000Z`` (the
+    same instant) sort unequal. Sub-second lexical ordering across *mixed*
+    precision (a fractional bound vs. a whole-second ``as_of``) remains a known
+    limitation of the raw-string compare; a full fix needs parsed-instant
+    comparison in the graph query layer.
     """
     if value is None:
         return None
-    text = str(value)
-    if "T" not in text:  # bare date or marker like "current" — leave as-is
-        return text
-    dt = _to_instant(text)
-    if dt is None:
-        return text
-    # Emit the ``Z`` suffix, not ``+00:00``: graph predicates compare these as
-    # raw strings in Cypher, and ``Z`` is the common form of existing UTC rows,
-    # so ``Z`` keeps exact-boundary instants lexically comparable with them
-    # (``'...Z' <= '...+00:00'`` is false — the two forms don't sort equal).
+    dt = _to_instant(value)
+    if dt is None:  # not an ISO instant (e.g. the "current" marker)
+        return str(value)
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def to_utc_instant(value: Any) -> Any:
     """Normalize an ``as_of`` query value to a full UTC instant string.
 
-    Like ``to_utc_iso`` but also expands a **date-only** value (``2026-03-01``)
-    to a full midnight-UTC instant (``2026-03-01T00:00:00Z``). Used for the
-    ``as_of`` bound in graph Cypher, where bounds written from datetimes are
-    stored as full instants: a bare-date ``as_of`` would otherwise be shorter
-    than (and sort before) ``valid_from = '...T00:00:00Z'`` at the exact start,
-    dropping a fact the vector-side ``valid_at`` treats as valid at midnight.
-    Non-instant markers (``current``) and ``None`` pass through unchanged.
+    Now identical to :func:`to_utc_iso` — both canonicalize every parseable
+    value (including a bare date, expanded to midnight UTC) to the same
+    ``…Z`` form, so an ``as_of`` and a stored bound are directly
+    string-comparable in Cypher. Kept as a named alias for call-site clarity.
     """
-    if value is None:
-        return None
-    dt = _to_instant(value)
-    if dt is None:
-        return str(value)
-    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return to_utc_iso(value)
 
 
 def _le(a: Any, b: Any) -> bool:
