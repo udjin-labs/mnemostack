@@ -16,11 +16,17 @@ and reconstructs the world-time window instead, matching
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .recaller import RecallResult
+
+# A trailing ISO timezone suffix: ``Z`` or ``±HH:MM`` / ``±HHMM`` (4 offset
+# digits, so a date's ``-15`` never matches). Stripped only to test whether the
+# remainder is a bare calendar date — i.e. a date carrying a zone but no time.
+_ZONE_SUFFIX_RE = re.compile(r"([Zz]|[+-]\d{2}:?\d{2})$")
 
 VALID_FROM = "valid_from"
 VALID_UNTIL = "valid_until"
@@ -82,39 +88,51 @@ def _is_bare_date(text: str) -> bool:
 
 
 def _utc_z(instant: datetime) -> str:
-    """Format an aware datetime as a fixed-precision UTC ``…Z`` string.
+    """Format an aware datetime as a UTC ``…Z`` string, preserving its precision.
 
-    Always emits microseconds so that raw-string Cypher comparison sorts
-    chronologically: a fractional instant (``…00.500000Z``) and a whole-second
-    one (``…00.000000Z``) share the same width, so ``.``-vs-``Z`` ordering can't
-    invert them. ``Z`` (not ``+00:00``) matches the common form of existing
-    UTC rows.
+    Emits ``Z`` (not ``+00:00``) because graph predicates compare these as raw
+    strings and ``Z`` is the common form of existing UTC rows. Precision is
+    **not** widened: a whole-second instant stays ``…00:00Z`` so it still
+    compares equal to bounds written by the previous normalizer (forcing
+    microseconds would make ``…00Z`` and ``…00.000000Z`` — the same instant —
+    sort unequal, silently dropping facts at their exact boundary).
     """
-    return instant.astimezone(timezone.utc).isoformat(timespec="microseconds").replace(
-        "+00:00", "Z"
-    )
+    return instant.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _is_date_with_zone(text: str) -> bool:
+    """True when ``text`` is a calendar date carrying a zone suffix but no time.
+
+    ``2024-01-15+02:00`` / ``2024-01-15Z`` — ``datetime.fromisoformat`` parses
+    these into a *naive* datetime (it reads the offset digits as a time), so
+    they must not be treated as a real time-of-day. Stripping the zone leaves a
+    bare date, which marks them as date-only and leaves them unchanged.
+    """
+    return _is_bare_date(_ZONE_SUFFIX_RE.sub("", text))
 
 
 def to_utc_iso(value: Any) -> Any:
     """Canonicalize a timezone-bearing ISO instant to UTC ISO; pass others through.
 
     Graph validity predicates compare timestamps as raw strings in Cypher (no
-    instant parsing available there), so any datetime must be normalized to a
-    single canonical UTC form on both the write and the query side for the
-    comparison to be correct. A value is normalized when it is a genuine
-    datetime — i.e. ``datetime.fromisoformat`` parses it but ``date.fromisoformat``
-    does not. This catches every separator ``fromisoformat`` accepts (``T``,
-    ``t``, space, ``_``, …), separatorless basic forms (``20260704000000+0200``),
-    and fractional seconds alike. Bare dates (``2024-01-15``), the ``current``
-    marker, and ``None`` are returned unchanged, so date-only graph data keeps
-    its format.
+    instant parsing available there), so an offset-bearing datetime must be
+    normalized to UTC on both the write and the query side. A value is
+    normalized when it is a genuine datetime — ``datetime.fromisoformat`` parses
+    it, and it is not a pure date (``2024-01-15``) or a date carrying only a
+    zone suffix (``2024-01-15+02:00``). That still catches every separator
+    ``fromisoformat`` accepts (``T``, ``t``, space, ``_``, …) and separatorless
+    basic forms. Bare dates, offset-suffixed dates, the ``current`` marker, and
+    ``None`` are returned unchanged, so date-only graph data keeps its format.
+    Precision is preserved (see ``_utc_z``) so bounds written by the previous
+    normalizer still compare equal.
     """
     if value is None:
         return None
     text = str(value)
     raw = _parse_iso(text)
-    if raw is None or _is_bare_date(text):
-        # Not a datetime: a marker like "current", or a pure calendar date.
+    if raw is None or _is_bare_date(text) or _is_date_with_zone(text):
+        # Not a real datetime: a marker like "current", a pure calendar date,
+        # or a date with only a zone suffix and no time-of-day.
         return text
     # A naive datetime is presumed UTC (matching ``_to_instant``) before
     # formatting — ``astimezone`` on a naive value would assume the system zone.
@@ -138,8 +156,8 @@ def to_utc_instant(value: Any) -> Any:
     dt = _to_instant(value)
     if dt is None:
         return str(value)
-    # Same fixed-microsecond ``…Z`` form as ``to_utc_iso`` so an ``as_of`` and a
-    # stored bound are directly string-comparable in Cypher.
+    # Same ``…Z`` form as ``to_utc_iso`` (precision preserved) so an ``as_of``
+    # and a stored bound are directly string-comparable in Cypher.
     return _utc_z(dt)
 
 
