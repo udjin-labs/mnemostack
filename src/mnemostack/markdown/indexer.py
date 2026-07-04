@@ -104,6 +104,7 @@ def collect_markdown(
     *,
     chunk_size: int = 1200,
     index_root: str | None = None,
+    root_dir: str | Path | None = None,
 ) -> MarkdownCollection:
     """Walk ``root`` for ``*.md`` files and return their chunks + link edges.
 
@@ -113,6 +114,11 @@ def collect_markdown(
     heading path into each chunk's payload. Links (``[[wikilinks]]`` and inline
     ``[text](target.md)``) resolve against the corpus by note name or relative
     path; unresolved targets become dangling edges.
+
+    ``root_dir`` pins the corpus root when ``root`` is a single file: source
+    paths become relative to it (``sub/a.md`` rather than ``a.md``) so a nested
+    single-file refresh updates the same chunk/graph nodes as the parent
+    directory index. Defaults to the file's parent.
     """
     root = Path(root)
 
@@ -127,11 +133,12 @@ def collect_markdown(
         resolution_files = files
     else:
         # Single-file run: only ``root`` is chunked, but links resolve against
-        # the whole parent corpus so ``[b](b.md)`` / ``[[B]]`` still find a
-        # sibling and match the canonical node names a directory index makes.
-        # A non-``.md`` target yields no files (``files == 0``), so the CLI
-        # errors out before a ``--recreate`` could drop the collection.
-        base = root.parent
+        # the whole corpus (``root_dir`` if given, else the parent) so
+        # ``[b](b.md)`` / ``[[B]]`` still find a sibling and match the canonical
+        # node names a directory index makes. A non-``.md`` target yields no
+        # files (``files == 0``), so the CLI errors out before a ``--recreate``
+        # could drop the collection.
+        base = Path(root_dir) if root_dir is not None else root.parent
         files = [root] if root.suffix.lower() == ".md" else []
         resolution_files = _md_files(base)
 

@@ -97,9 +97,10 @@ def _is_note_target(raw: str) -> bool:
     pdf, archive, ...) is not a note, so it never becomes a graph edge. Bare
     targets, ``.md`` targets, and note names that merely contain dots
     (``2026.07.04``) are all notes. A ``?query`` (and ``#anchor``) is stripped
-    first so ``paper.pdf?download=1`` is still recognized as an asset.
+    and the path is percent-decoded first, so ``paper.pdf?download=1`` and
+    ``paper%2Epdf`` are both recognized as assets.
     """
-    anchorless = raw.split("#", 1)[0].split("?", 1)[0].split("|", 1)[0]
+    anchorless = unquote(raw.split("#", 1)[0].split("?", 1)[0].split("|", 1)[0])
     last = anchorless.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].lower()
     dot = last.rfind(".")
     return dot < 0 or last[dot:] not in _ASSET_EXTS
@@ -146,19 +147,65 @@ def _is_escaped(text: str, pos: int) -> bool:
     return n % 2 == 1
 
 
+# Raw-source regions whose ``[[...]]`` is not a real wikilink occurrence: fenced
+# code blocks, inline code spans (matching backtick runs), and HTML comments.
+# Used only to narrow the escaped-wikilink whitelist below.
+_FENCE_RE = re.compile(r"^ {0,3}([`~]{3,})[^\n]*$", re.MULTILINE)
+_BACKTICKS_RE = re.compile(r"`+")
+_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+
+
+def _ignored_ranges(text: str) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    # Fenced blocks: pair a fence with the next matching bare fence (else EOF).
+    open_start: int | None = None
+    open_fence = ""
+    for m in _FENCE_RE.finditer(text):
+        token = m.group(1)
+        if open_start is None:
+            open_start, open_fence = m.start(), token
+        elif token[0] == open_fence[0] and len(token) >= len(open_fence):
+            ranges.append((open_start, m.end()))
+            open_start, open_fence = None, ""
+    if open_start is not None:
+        ranges.append((open_start, len(text)))
+    # Inline code spans: pair backtick runs of equal length.
+    runs = [(m.start(), m.end()) for m in _BACKTICKS_RE.finditer(text)]
+    i = 0
+    while i < len(runs):
+        length = runs[i][1] - runs[i][0]
+        j = i + 1
+        while j < len(runs) and (runs[j][1] - runs[j][0]) != length:
+            j += 1
+        if j < len(runs):
+            ranges.append((runs[i][0], runs[j][1]))
+            i = j + 1
+        else:
+            i += 1
+    ranges.extend((m.start(), m.end()) for m in _COMMENT_RE.finditer(text))
+    return ranges
+
+
 def _unescaped_wikilink_targets(text: str) -> set[str]:
-    """Raw ``[[target]]`` strings that appear un-escaped in the source.
+    """Raw ``[[target]]`` strings that appear as a *real* wikilink in the source.
 
     markdown-it unescapes ``\\[`` inside a text token (dropping the backslash),
     so a rendered ``\\[[Draft]]`` looks identical to a real wikilink there. This
-    set — computed on the raw source, where the escape is still visible — gates
-    the text-token scan so an escaped example doesn't become an edge.
+    set — computed on the raw source, where the escape and code/comment context
+    are still visible — gates the text-token scan so an escaped example doesn't
+    become an edge. An occurrence is only counted when it is un-escaped, not an
+    embed (``![[...]]``), and not inside a code span/block or HTML comment.
     """
-    return {
-        m.group(1)
-        for m in _WIKILINK_RE.finditer(text)
-        if not _is_escaped(text, m.start())
-    }
+    ignored = _ignored_ranges(text)
+    out: set[str] = set()
+    for m in _WIKILINK_RE.finditer(text):
+        s = m.start()
+        if _is_escaped(text, s) or (s > 0 and text[s - 1] == "!"):
+            continue
+        if any(a <= s < b for a, b in ignored):
+            continue
+        out.add(m.group(1))
+    return out
 
 
 def extract_links(text: str) -> list[Link]:

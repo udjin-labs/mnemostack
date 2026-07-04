@@ -747,9 +747,18 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
 
     # Collect and validate the file set BEFORE any destructive collection call:
     # --recreate on a mistyped/empty path must not drop the existing collection
-    # when there is nothing to index.
-    index_root = str((target if target.is_dir() else target.parent).resolve())
-    col = collect_markdown(target, chunk_size=args.chunk_size, index_root=index_root)
+    # when there is nothing to index. An explicit --index-root pins the corpus
+    # root so a nested single-file refresh (`index-markdown notes/sub/a.md
+    # --index-root notes`) updates the same chunks/graph nodes as the parent
+    # directory index, instead of inserting a second copy under a narrower root.
+    root_dir = str(Path(args.index_root).resolve()) if getattr(args, "index_root", None) else None
+    if root_dir is not None:
+        index_root = root_dir
+    else:
+        index_root = str((target if target.is_dir() else target.parent).resolve())
+    col = collect_markdown(
+        target, chunk_size=args.chunk_size, index_root=index_root, root_dir=root_dir
+    )
     if col.files == 0:
         print(f"error: no .md files found under {target}", file=sys.stderr)
         return 2
@@ -1269,6 +1278,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Index a markdown folder: frontmatter -> filters, links -> graph edges",
     )
     p_index_md.add_argument("path", help="Markdown file or directory to index")
+    p_index_md.add_argument(
+        "--index-root",
+        default=None,
+        metavar="DIR",
+        help=(
+            "Corpus root for a single-file refresh; source paths become relative "
+            "to it so `index-markdown vault/sub/a.md --index-root vault` updates "
+            "the same chunks as the directory index (default: the file's parent)"
+        ),
+    )
     p_index_md.add_argument(
         "--chunk-size",
         type=int,

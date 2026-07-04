@@ -177,6 +177,19 @@ def test_extract_links_skips_escaped_wikilink():
     assert [(link.target, link.is_wikilink) for link in links] == [("Real", True)]
 
 
+def test_extract_links_escaped_wikilink_not_whitelisted_by_code_occurrence():
+    # [[Draft]] appears unescaped only inside a code span; the escaped \[[Draft]]
+    # in prose must NOT be whitelisted by that ignored occurrence.
+    text = "code `[[Draft]]` and escaped \\[[Draft]] and real [[Real]]"
+    assert {link.target for link in extract_links(text)} == {"Real"}
+
+
+def test_extract_links_percent_encoded_extension_is_asset():
+    # paper%2Epdf decodes to paper.pdf — an asset, not a note.
+    links = extract_links("[p](paper%2Epdf) [r](real.md)")
+    assert {link.target for link in links} == {"real"}
+
+
 def test_extract_links_wikilink_inside_link_label_not_double_counted():
     # [[B]] inside a normal link's label is part of the label text, not its own
     # edge — only the outer a.md link (and the standalone [[C]]) count.
@@ -372,6 +385,15 @@ def test_collect_relative_link_case_insensitive_sibling(tmp_path):
     edge = next(e for e in col.edges if e.source == "b/src.md")
     assert edge.target == "b/Note.md"
     assert edge.resolved is True
+
+
+def test_collect_single_file_root_dir_keeps_nested_source(tmp_path):
+    # A nested single-file refresh with an explicit root_dir stores the source
+    # relative to that root (sub/a.md), matching the directory index's id/nodes.
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "a.md").write_text("# A\nbody a")
+    col = collect_markdown(tmp_path / "sub" / "a.md", root_dir=tmp_path)
+    assert [c.payload["source"] for c in col.chunks] == ["sub/a.md"]
 
 
 def test_collect_reserves_heading_path_over_frontmatter(tmp_path):
