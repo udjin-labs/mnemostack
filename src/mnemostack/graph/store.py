@@ -170,6 +170,22 @@ class GraphStore:
                 )
         return len(targets)
 
+    def file_link_sources(self, *, index_root: str | None = None) -> list[str]:
+        """Names of ``:File`` nodes with outgoing ``LINKS_TO`` edges in a root.
+
+        Lets a re-index discover files it linked from previously: any source no
+        longer present on disk can then have its stale edges cleared via
+        ``sync_file_links(name, [])``.
+        """
+        root = index_root or ""
+        with self.driver.session(database=self.database) as session:
+            result = session.run(
+                "MATCH (f:File {index_root: $root})-[:LINKS_TO]->() "
+                "RETURN DISTINCT f.name AS name",
+                root=root,
+            )
+            return [rec["name"] for rec in result if rec["name"] is not None]
+
     def invalidate(
         self,
         subject: str,

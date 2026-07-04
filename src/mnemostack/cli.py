@@ -798,6 +798,14 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
         fresh_by_source: dict[str, set[str]] = {source: set() for source in col.sources}
         for cid, _text, payload in chunks:
             fresh_by_source[payload["source"]].add(cid)
+        # Reconcile deletions: a file removed from the folder is absent from
+        # col.sources. Seed each prior source already stored under this
+        # index_root (but no longer present) with an empty fresh set so its
+        # stale points are pruned instead of lingering searchable forever.
+        for hit in store.scroll(filters={"index_root": index_root}):
+            prior = (hit.payload or {}).get("source")
+            if prior and prior not in fresh_by_source:
+                fresh_by_source[prior] = set()
         for source in failed_sources:
             fresh_by_source.pop(source, None)
         if failed_sources:
@@ -831,6 +839,13 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
             print(f"warning: graph unavailable, links not written ({exc})", file=sys.stderr)
         else:
             try:
+                # Reconcile deletions: a file removed from the folder still has
+                # LINKS_TO edges in the graph. Seed each prior link-source no
+                # longer present with an empty target list so sync clears its
+                # stale edges.
+                for prior in graph.file_link_sources(index_root=index_root):
+                    if prior not in by_source and prior not in failed_sources:
+                        by_source[prior] = []
                 for source, targets in by_source.items():
                     edges_written += graph.sync_file_links(
                         source, targets, index_root=index_root

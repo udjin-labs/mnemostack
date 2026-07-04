@@ -91,6 +91,28 @@ def test_extract_links_skips_fenced_code_blocks():
     assert "Fenced Note" not in targets and "fenced" not in targets
 
 
+def test_extract_links_mixed_fence_delimiters_stay_excluded():
+    # A ~~~ block containing an inner ``` line must stay one block: links after
+    # the inner mismatched fence are still code samples, not references.
+    text = (
+        "real [[Live]]\n\n"
+        "~~~\ncode ``` inner\n[[Fenced]] and [x](fenced.md)\n~~~\n"
+    )
+    targets = {link.target for link in extract_links(text)}
+    assert "Live" in targets
+    assert "Fenced" not in targets and "fenced" not in targets
+
+
+def test_extract_links_keeps_dotted_note_names():
+    # A note basename that merely contains dots (a daily note, a version note)
+    # is a real note; only known asset extensions are rejected.
+    links = extract_links("daily [[2026.07.04]], asset [[paper.pdf]], ver [v](v1.2.0.md)")
+    targets = [(link.target, link.is_wikilink) for link in links]
+    assert ("2026.07.04", True) in targets     # dotted note kept
+    assert ("v1.2.0", False) in targets        # dotted .md note kept
+    assert all(t != "paper.pdf" for t, _ in targets)  # .pdf asset dropped
+
+
 def test_extract_links_spaced_and_escaped_inline_targets():
     # Angle-bracketed (<My Note.md>) and %20-escaped inline destinations are
     # valid intra-corpus note references; both normalize to the same key.
@@ -172,6 +194,31 @@ def test_collect_relative_link_prefers_own_directory(tmp_path):
     col = collect_markdown(tmp_path)
     edge = next(e for e in col.edges if e.source == "one/src.md")
     assert edge.target == "one/note.md"
+
+
+def test_collect_relative_link_case_insensitive_sibling(tmp_path):
+    # [x](note.md) from b/src.md must resolve to the same-dir b/Note.md
+    # (case-insensitive) rather than falling through to a/note.md elsewhere.
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    (tmp_path / "a" / "note.md").write_text("# A note")
+    (tmp_path / "b" / "Note.md").write_text("# B note")
+    (tmp_path / "b" / "src.md").write_text("see [x](note.md)")
+    col = collect_markdown(tmp_path)
+    edge = next(e for e in col.edges if e.source == "b/src.md")
+    assert edge.target == "b/Note.md"
+    assert edge.resolved is True
+
+
+def test_collect_indexes_uppercase_md_suffix(tmp_path):
+    # README.MD must be indexed (rglob("*.md") alone would skip it on a
+    # case-sensitive filesystem) and be resolvable as a link target.
+    (tmp_path / "README.MD").write_text("# Readme\nbody text")
+    (tmp_path / "a.md").write_text("see [[Readme]]")
+    col = collect_markdown(tmp_path)
+    assert "README.MD" in col.sources
+    edge = next(e for e in col.edges if e.source == "a.md")
+    assert edge.resolved is True and edge.target == "README.MD"
 
 
 def test_collect_relative_link_escaping_corpus_is_not_resolved(tmp_path):
@@ -279,6 +326,24 @@ def test_sync_file_links_sets_python_lowercased_name():
     assert merge.kwargs["dst_lower"] == "tïtle.md"
 
 
+def test_file_link_sources_lists_names_for_root():
+    store, session = _graph_with_fake_session()
+
+    class _Rec:
+        def __init__(self, name):
+            self._name = name
+
+        def __getitem__(self, key):
+            return self._name
+
+    session.run.return_value = [_Rec("a.md"), _Rec("gone.md")]
+    names = store.file_link_sources(index_root="/v")
+    assert names == ["a.md", "gone.md"]
+    cypher = session.run.call_args.args[0]
+    assert "LINKS_TO" in cypher and "index_root" in cypher
+    assert session.run.call_args.kwargs.get("root") == "/v"
+
+
 # ---------- CLI ----------
 
 
@@ -321,6 +386,9 @@ def test_cmd_index_markdown_indexes_and_writes_edges(tmp_path, monkeypatch, caps
             self.links[source] = list(targets)
             self.roots[source] = index_root
             return len(targets)
+
+        def file_link_sources(self, *, index_root=None):
+            return []
 
         def close(self):
             pass
@@ -439,6 +507,9 @@ def test_cmd_index_markdown_graph_write_failure_does_not_fail_run(
         def __init__(self, **_):
             pass
 
+        def file_link_sources(self, *, index_root=None):
+            return []
+
         def sync_file_links(self, source, targets, *, index_root=None):
             raise RuntimeError("Memgraph disconnected mid-write")
 
@@ -460,3 +531,126 @@ def test_cmd_index_markdown_graph_write_failure_does_not_fail_run(
     assert cli.cmd_index_markdown(args) == 0
     assert store.upserts                      # vectors were written
     assert "graph write failed" in capsys.readouterr().err
+
+
+class _Hit:
+    def __init__(self, payload):
+        self.payload = payload
+
+
+def test_cmd_index_markdown_prune_removes_deleted_file_chunks(tmp_path, monkeypatch):
+    import argparse
+
+    import mnemostack.cli as cli
+
+    v = _vault(tmp_path)
+    root = str(v.resolve())
+
+    class _FakeProvider:
+        dimension = 3
+
+        def embed(self, text):
+            return [0.1, 0.2, 0.3]
+
+    class _PruneStore:
+        def __init__(self, **_):
+            # a leftover point for a file that no longer exists on disk
+            self._prior = [("id-gone", {"source": "gone.md", "index_root": root})]
+            self.deleted = []
+
+        def collection_exists(self):
+            return True
+
+        def ensure_collection(self, recreate=False):
+            return True
+
+        def upsert(self, cid, vec, payload):
+            pass
+
+        def iter_ids(self, filters=None):
+            for pid, pl in self._prior:
+                if not filters or all(pl.get(k) == val for k, val in filters.items()):
+                    yield pid
+
+        def scroll(self, filters=None):
+            for _pid, pl in self._prior:
+                if not filters or all(pl.get(k) == val for k, val in filters.items()):
+                    yield _Hit(pl)
+
+        def delete_points(self, ids):
+            self.deleted.extend(ids)
+            return len(ids)
+
+    store = _PruneStore()
+    monkeypatch.setattr(cli, "get_provider", lambda *_a, **_k: _FakeProvider())
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+
+    args = argparse.Namespace(
+        path=str(v), provider="fake", embedding_model=None,
+        collection="c", qdrant="http://localhost:6333",
+        chunk_size=1200, memgraph_uri=None,
+        graph_timeout=5.0, recreate=False, prune=True, yes=True,
+    )
+    assert cli.cmd_index_markdown(args) == 0
+    # the deleted file's stale point is pruned even though it isn't in the walk
+    assert "id-gone" in store.deleted
+
+
+def test_cmd_index_markdown_clears_graph_links_for_deleted_file(tmp_path, monkeypatch):
+    import argparse
+
+    import mnemostack.cli as cli
+
+    v = _vault(tmp_path)
+
+    class _FakeProvider:
+        dimension = 3
+
+        def embed(self, text):
+            return [0.1, 0.2, 0.3]
+
+    class _FakeStore:
+        def __init__(self, **_):
+            pass
+
+        def collection_exists(self):
+            return False
+
+        def ensure_collection(self, recreate=False):
+            return True
+
+        def iter_ids(self, filters=None):
+            return []
+
+        def upsert(self, cid, vec, payload):
+            pass
+
+    class _Graph:
+        def __init__(self, **_):
+            self.synced = {}
+
+        def file_link_sources(self, *, index_root=None):
+            # a file that had links previously but is no longer on disk
+            return ["gone.md", "a.md"]
+
+        def sync_file_links(self, source, targets, *, index_root=None):
+            self.synced[source] = list(targets)
+            return len(targets)
+
+        def close(self):
+            pass
+
+    graph = _Graph()
+    monkeypatch.setattr(cli, "get_provider", lambda *_a, **_k: _FakeProvider())
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: _FakeStore())
+    monkeypatch.setattr("mnemostack.graph.GraphStore", lambda **_: graph)
+
+    args = argparse.Namespace(
+        path=str(v), provider="fake", embedding_model=None,
+        collection="c", qdrant="http://localhost:6333",
+        chunk_size=1200, memgraph_uri="bolt://localhost:7687",
+        graph_timeout=5.0, recreate=False, prune=False, yes=True,
+    )
+    assert cli.cmd_index_markdown(args) == 0
+    # gone.md is no longer on disk -> its LINKS_TO edges are cleared (synced [])
+    assert graph.synced.get("gone.md") == []

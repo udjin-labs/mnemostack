@@ -37,17 +37,29 @@ _MDLINK_RE = re.compile(
     r"(?<!\!)\[[^\]]*\]\(\s*(?:<([^>]*)>|([^)\s]+))(?:\s+\"[^\"]*\")?\s*\)"
 )
 
-# Fenced code block delimiter (``` or ~~~ at line start) — link-like syntax
-# inside a fence is a code sample, not a real reference, so it is excluded.
-_CODE_FENCE_RE = re.compile(r"^(?:```|~~~)", re.MULTILINE)
+# Fenced code block delimiter: a run of >=3 backticks or tildes at line start.
+# Link-like syntax inside a fence is a code sample, not a real reference.
+_CODE_FENCE_RE = re.compile(r"^([`~]{3,})", re.MULTILINE)
 
 
 def _code_fence_ranges(text: str) -> list[tuple[int, int]]:
-    """(start, end) spans of fenced code blocks, pairing opening/closing fences."""
-    fences = [m.start() for m in _CODE_FENCE_RE.finditer(text)]
-    ranges = []
-    for i in range(0, len(fences) - 1, 2):
-        ranges.append((fences[i], fences[i + 1]))
+    """(start, end) spans of fenced code blocks.
+
+    A fence closes only on a matching delimiter — same character and at least
+    the opening length — so a ``~~~`` block containing a ``` line (or vice
+    versa) stays a single block instead of pairing the opener with the inner,
+    mismatched fence and exposing the sample links after it.
+    """
+    ranges: list[tuple[int, int]] = []
+    open_start: int | None = None
+    open_fence = ""
+    for m in _CODE_FENCE_RE.finditer(text):
+        token = m.group(1)
+        if open_start is None:
+            open_start, open_fence = m.start(), token
+        elif token[0] == open_fence[0] and len(token) >= len(open_fence):
+            ranges.append((open_start, m.start()))
+            open_start, open_fence = None, ""
     return ranges
 
 
@@ -86,16 +98,32 @@ def _strip_target(raw: str) -> str:
     return target
 
 
-def _is_note_target(raw: str) -> bool:
-    """True when ``raw`` points at a note (``.md`` or extensionless), not an asset.
+# Common attachment/asset extensions. A link to one of these is not a note, so
+# it never becomes a graph edge. A denylist (rather than "any dotted segment")
+# keeps note basenames that merely contain dots — a daily note ``2026.07.04`` or
+# ``v1.2.0`` — as real notes.
+_ASSET_EXTS = frozenset(
+    {
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".ico", ".tif",
+        ".tiff", ".pdf", ".mp4", ".mov", ".webm", ".mkv", ".mp3", ".wav", ".ogg",
+        ".flac", ".zip", ".gz", ".tar", ".7z", ".rar", ".docx", ".xlsx", ".pptx",
+        ".doc", ".xls", ".ppt", ".csv", ".json", ".yaml", ".yml", ".toml",
+    }
+)
 
-    A target whose final path segment has a non-``.md`` file extension (an
-    image, pdf, ...) is not a note, so it never becomes a graph edge. Bare and
-    ``.md`` targets are notes.
+
+def _is_note_target(raw: str) -> bool:
+    """True when ``raw`` points at a note, not an attachment/asset.
+
+    A target whose final path segment ends with a known asset extension (image,
+    pdf, archive, ...) is not a note, so it never becomes a graph edge. Bare
+    targets, ``.md`` targets, and note names that merely contain dots
+    (``2026.07.04``) are all notes.
     """
     anchorless = raw.split("#", 1)[0].split("|", 1)[0]
-    last = anchorless.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
-    return not ("." in last and not last.lower().endswith(".md"))
+    last = anchorless.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].lower()
+    dot = last.rfind(".")
+    return dot < 0 or last[dot:] not in _ASSET_EXTS
 
 
 @dataclass(frozen=True)

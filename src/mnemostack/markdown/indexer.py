@@ -68,16 +68,18 @@ def _norm_target(raw: str) -> str:
     return key
 
 
-def _resolve_relative(source_rel: str, target: str, all_rels: set[str]) -> str | None:
+def _resolve_relative(source_rel: str, target: str, rels_lower: dict[str, str]) -> str | None:
     """Resolve an inline link relative to its source file's directory.
 
     ``[c](../index.md)`` from ``sub/page.md`` resolves to ``index.md`` — so
     normal markdown relative links (and same-directory links in folders with
-    duplicate basenames) point at the right note. A link that walks *above* the
-    corpus root (``../outside.md`` from a top-level note) escapes the corpus and
-    returns None, so it is never mistaken for an in-vault edge even if a
-    same-named file happens to exist inside the root. Returns the matched
-    corpus-relative path, or None if nothing resolves.
+    duplicate basenames) point at the right note. Matching is case-insensitive
+    (``[x](note.md)`` finds a sibling ``Note.md``) via ``rels_lower`` (lower-cased
+    relative path → canonical). A link that walks *above* the corpus root
+    (``../outside.md`` from a top-level note) escapes the corpus and returns
+    None, so it is never mistaken for an in-vault edge even if a same-named file
+    happens to exist inside the root. Returns the canonical corpus-relative
+    path, or None if nothing resolves.
     """
     combined = PurePosixPath(source_rel).parent / _norm_target(target)
     parts: list[str] = []
@@ -91,8 +93,9 @@ def _resolve_relative(source_rel: str, target: str, all_rels: set[str]) -> str |
             parts.append(part)
     normalized = "/".join(parts)
     for candidate in (f"{normalized}.md", normalized):
-        if candidate in all_rels:
-            return candidate
+        match = rels_lower.get(candidate.lower())
+        if match is not None:
+            return match
     return None
 
 
@@ -112,18 +115,24 @@ def collect_markdown(
     path; unresolved targets become dangling edges.
     """
     root = Path(root)
-    files = sorted(root.rglob("*.md")) if root.is_dir() else [root]
+    # Match ``.md`` case-insensitively so ``README.MD`` on a case-sensitive
+    # filesystem is indexed too (``rglob("*.md")`` would skip it).
+    if root.is_dir():
+        files = sorted(f for f in root.rglob("*") if f.is_file() and f.suffix.lower() == ".md")
+    else:
+        files = [root]
     base = root if root.is_dir() else root.parent
 
     # Resolution maps: note name (basename) and relative path (without .md)
     # both point at the canonical relative path. Keys are lower-cased so link
     # resolution is case-insensitive (Obsidian-style); path keys win over
-    # bare names. `all_rels` is the set of real files for relative resolution.
+    # bare names. `rels_lower` maps a lower-cased relative path to its canonical
+    # form so same-directory resolution is case-insensitive too.
     key_to_rel: dict[str, str] = {}
-    all_rels: set[str] = set()
+    rels_lower: dict[str, str] = {}
     for f in files:
         rel = _rel(f, base)
-        all_rels.add(rel)
+        rels_lower[rel.lower()] = rel
         rel_key = rel[:-3] if rel.lower().endswith(".md") else rel
         key_to_rel.setdefault(f.stem.lower(), rel)
         key_to_rel[rel_key.lower()] = rel
@@ -143,7 +152,7 @@ def collect_markdown(
                 # Inline markdown link: resolve relative to the source file
                 # first (handles ../ and same-dir links, and duplicate
                 # basenames), then fall back to a corpus-wide name/path match.
-                resolved = _resolve_relative(rel, link.target, all_rels)
+                resolved = _resolve_relative(rel, link.target, rels_lower)
             resolved = resolved or key_to_rel.get(link.target.lower()) or key_to_rel.get(norm.lower())
             out.edges.append(
                 LinkEdge(
