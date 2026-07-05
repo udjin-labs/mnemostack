@@ -1589,6 +1589,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Memgraph connection timeout in seconds (default 5.0)",
     )
     p_serve.add_argument(
+        "--qdrant-health-timeout",
+        type=int,
+        default=cfg.vector.health_timeout,
+        help="Qdrant timeout (seconds) for /healthz, /readyz, /status probes (default 2)",
+    )
+    p_serve.add_argument(
         "--bm25-path",
         action="append",
         default=list(cfg.recall.bm25_paths),
@@ -1678,6 +1684,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         graph_password=_graph_auth(args)["password"],
         graph_database=_graph_auth(args)["database"],
         graph_timeout=args.graph_timeout,
+        qdrant_health_timeout=args.qdrant_health_timeout,
         bm25_paths=list(args.bm25_path) if args.bm25_path else None,
         vector_floor=max(0, int(args.vector_floor)),
         rerank_mode=args.rerank_mode,

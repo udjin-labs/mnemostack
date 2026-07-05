@@ -101,19 +101,43 @@ def _patched_app(
     with_answer: bool = True,
     pipeline: _FakePipeline | None = None,
     config: ServerConfig | None = None,
+    qdrant_reachable: bool = False,
+    embedding_healthy: bool = True,
 ):
-    """Build the FastAPI app with the heavy retrieval layers mocked out."""
+    """Build the FastAPI app with the heavy retrieval layers mocked out.
+
+    `qdrant_reachable` controls the dedicated health/readiness probe client:
+    False (default) -> the probe raises, so /readyz is 503 and /health degraded;
+    True -> the probe succeeds. Readiness keys off this probe, not the store.
+    `embedding_healthy` controls the provider's health_check (both gate /readyz).
+    """
     import mnemostack.server as srv
 
     monkeypatch.setattr(
         srv, "VectorStore", lambda **_: type("VS", (), {"count": lambda self: 0, "dimension": 3})()
     )
 
+    def _fake_probe(*_a, **_k):
+        class _Probe:
+            def get_collections(self):
+                if not qdrant_reachable:
+                    raise ConnectionError("qdrant down")
+                return object()
+
+        return _Probe()
+
+    monkeypatch.setattr(srv, "_make_probe_client", _fake_probe)
+
     class _FakeProvider:
         dimension = 3
 
         def embed(self, text):  # unused; kept for shape
             return [0.0, 0.0, 0.0]
+
+        def health_check(self):
+            if embedding_healthy:
+                return True, "ok"
+            return False, "embedding backend down"
 
     monkeypatch.setattr(srv, "get_provider", lambda _name, **_kwargs: _FakeProvider())
 
@@ -197,6 +221,116 @@ def test_health_endpoint(monkeypatch):
     data = r.json()
     assert data["provider"] == "fake"
     assert "qdrant" in data and "memgraph" in data
+
+
+def _readyz_until(client, want_embedding: bool, tries: int = 200):
+    """Poll /readyz until embedding readiness settles.
+
+    Embedding readiness is refreshed in a background thread (serve-stale-while-
+    revalidate), so the first probe reports the sentinel `embedding=False` before
+    the (instant, faked) refresh lands. Poll until it reaches the expected state.
+    """
+    import time
+
+    r = client.get("/readyz")
+    for _ in range(tries):
+        if r.json().get("embedding") is want_embedding:
+            return r
+        time.sleep(0.01)
+        r = client.get("/readyz")
+    return r
+
+
+def test_healthz_liveness_always_ok(monkeypatch):
+    # Liveness must not depend on Qdrant/graph — up even with no backends.
+    app, _ = _patched_app(monkeypatch)
+    r = TestClient(app).get("/healthz")
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
+    assert r.json()["version"]
+
+
+def test_readyz_503_when_qdrant_unreachable(monkeypatch):
+    # Probe client raises (as a real outage would) -> get_collections fails -> not ready.
+    app, _ = _patched_app(monkeypatch, qdrant_reachable=False)
+    r = TestClient(app).get("/readyz")
+    assert r.status_code == 503
+    assert r.json()["status"] == "not_ready"
+    assert r.json()["qdrant"] is False
+    # Graph is intentionally absent from readiness — no field, no ping.
+    assert "memgraph" not in r.json()
+
+
+def test_readyz_200_when_qdrant_reachable(monkeypatch):
+    app, _ = _patched_app(monkeypatch, qdrant_reachable=True)
+    r = _readyz_until(TestClient(app), want_embedding=True)
+    assert r.status_code == 200
+    assert r.json()["status"] == "ready"
+    assert r.json()["qdrant"] is True
+    assert r.json()["embedding"] is True
+
+
+def test_readyz_503_when_embedding_down(monkeypatch):
+    # Qdrant is reachable but the embedding provider is down -> not ready, since
+    # recall can't embed a query. Embedding is a hard readiness dependency.
+    app, _ = _patched_app(monkeypatch, qdrant_reachable=True, embedding_healthy=False)
+    # embedding stays False (down); the background refresh confirms not-ready.
+    r = _readyz_until(TestClient(app), want_embedding=False)
+    assert r.status_code == 503
+    assert r.json()["status"] == "not_ready"
+    assert r.json()["qdrant"] is True
+    assert r.json()["embedding"] is False
+
+
+def test_status_reports_config_and_counters(monkeypatch):
+    app, _ = _patched_app(monkeypatch)
+    r = TestClient(app).get("/status")
+    assert r.status_code == 200
+    d = r.json()
+    assert d["provider"] == "fake"
+    assert d["collection"]
+    assert "recall_calls" in d and "degraded_events" in d
+    # graph_configured is intentionally not exposed (config conflates unset with
+    # the localhost default, so the field would be misleading).
+    assert "graph_configured" not in d
+
+
+def test_status_degraded_events_counts_only_serving_degradations(monkeypatch):
+    from mnemostack.observability import counter
+
+    app, _ = _patched_app(monkeypatch)
+    # A real serving-path degradation is counted...
+    counter("mnemostack.recall.fallback_triggered", 2)
+    # ...but an unrelated ingest failure (which could leak in via a shared
+    # recorder) and a routine no-parse are not.
+    counter("mnemostack.ingest.failed", 5)
+    counter("mnemostack.recall.temporal_no_parse", 3)
+    d = TestClient(app).get("/status").json()
+    assert d["degraded_events"] == 2
+
+
+def test_status_counts_trace_only_degradations(monkeypatch):
+    # Reranker unavailable / retriever failures live only on the per-call trace;
+    # they must still reach /status via the mirrored degradation counter.
+    from mnemostack.recall import RecallTrace
+
+    app, _ = _patched_app(monkeypatch)
+    tr = RecallTrace()
+    tr.mark("reranker:unavailable")
+    tr.mark("retriever:bm25:failed")
+    tr.mark("temporal:no_parse")  # routine — must NOT count
+    tr.mark("reranker:unavailable")  # deduped per trace — must NOT double-count
+    d = TestClient(app).get("/status").json()
+    assert d["degraded_events"] == 2
+
+
+def test_status_counts_answer_unavailable_outage(monkeypatch):
+    # When the LLM isn't configured, POST /answer 503s before the generator can
+    # emit answer.errors — the outage must still surface in degraded_events.
+    app, _ = _patched_app(monkeypatch, with_answer=False)
+    client = TestClient(app)
+    assert client.post("/answer", json={"query": "hi"}).status_code == 503
+    assert client.get("/status").json()["degraded_events"] >= 1
 
 
 def test_build_app_passes_configured_provider_models(monkeypatch):

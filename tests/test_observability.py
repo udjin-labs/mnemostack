@@ -163,3 +163,41 @@ def test_recaller_emits_metrics_via_observability():
         assert len(rec.histogram_values("mnemostack.recall.latency_ms")) == 1
     finally:
         set_recorder(NullRecorder())
+
+
+def test_snapshot_counters_is_a_copy():
+    rec = InMemoryRecorder()
+    rec.record_counter("mnemostack.recall.calls", 2)
+    snap = rec.snapshot_counters()
+    assert snap[("mnemostack.recall.calls",)] == 2.0
+    # Mutating the live recorder must not change an already-taken snapshot.
+    rec.record_counter("mnemostack.recall.calls", 1)
+    assert snap[("mnemostack.recall.calls",)] == 2.0
+    assert rec.counter_value("mnemostack.recall.calls") == 3.0
+
+
+def test_snapshot_survives_concurrent_writes():
+    # Regression: iterating the live dict while a new key is recorded in another
+    # thread could raise "dictionary changed size during iteration". Reading a
+    # snapshot must never raise regardless of concurrent writers.
+    import threading
+
+    rec = InMemoryRecorder()
+    stop = threading.Event()
+
+    def writer():
+        i = 0
+        while not stop.is_set():
+            rec.record_counter(f"mnemostack.test.metric_{i}", 1)
+            i += 1
+
+    t = threading.Thread(target=writer)
+    t.start()
+    try:
+        for _ in range(2000):
+            # Iterating the snapshot must not raise even as keys are added.
+            total = sum(rec.snapshot_counters().values())
+            assert total >= 0
+    finally:
+        stop.set()
+        t.join()

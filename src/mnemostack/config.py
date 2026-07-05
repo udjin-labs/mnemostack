@@ -65,6 +65,10 @@ class VectorConfig:
     chunk_size: int = 800
     overlap: int = 100
     window_size: int = 1
+    # Short timeout (whole seconds) for the HTTP server's liveness/readiness
+    # Qdrant ping — kept separate from recall so a slow Qdrant fails a probe
+    # promptly instead of hanging a worker for the recall client's full timeout.
+    health_timeout: int = 2
 
 
 @dataclass
@@ -228,6 +232,8 @@ def _apply_env_overrides(cfg: Config) -> Config:
     collection = env.get("MNEMOSTACK_VECTOR_COLLECTION") or env.get("MNEMOSTACK_COLLECTION")
     if collection:
         cfg.vector.collection = collection
+    if v := env.get("MNEMOSTACK_VECTOR_HEALTH_TIMEOUT"):
+        cfg.vector.health_timeout = max(1, int(v))
 
     # LLM
     llm_provider = env.get("MNEMOSTACK_LLM_PROVIDER") or env.get("MNEMOSTACK_LLM")
@@ -282,6 +288,7 @@ vector:
   chunk_size: 800
   overlap: 100
   window_size: 1
+  health_timeout: 2         # seconds; HTTP server's Qdrant liveness/readiness ping
 
 llm:
   provider: gemini

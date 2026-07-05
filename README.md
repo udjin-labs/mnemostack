@@ -714,6 +714,9 @@ Endpoints:
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET`  | `/health`  | Qdrant + Memgraph reachability + config summary |
+| `GET`  | `/healthz` | Liveness probe — `200` whenever the process is up (no backend checks) |
+| `GET`  | `/readyz`  | Readiness probe — `503` when Qdrant is unreachable (graph is fail-soft, never gates) |
+| `GET`  | `/status`  | Operator snapshot — config, live dependency reachability, headline counters |
 | `POST` | `/recall`  | Hybrid recall with optional 8-stage pipeline |
 | `POST` | `/answer`  | Recall + LLM answer synthesis with citations |
 | `POST` | `/feedback` | Explicit click/usefulness feedback for stateful learning |
