@@ -211,9 +211,58 @@ def test_catch_up_reconciles_baseline_diff(tmp_path):
     new.write_text("# N\n")
     gone = os.path.abspath(str(tmp_path / "gone.md"))  # in baseline, not on disk now
 
-    w._catch_up({gone: 1.0})
+    w._catch_up({gone: 1.0})  # queues the diff (honors debounce, no force)
+    clock.t = 1.0
+    w.flush()
     assert syncer.indexed == [os.path.abspath(str(new))]
     assert syncer.removed == [gone]
+
+
+def test_poll_and_debounce_intervals_floored_to_avoid_busy_loop():
+    # --watch-poll-interval 0 / --watch-debounce 0 must not sleep(0) forever.
+    w = MarkdownWatcher(_FakeSyncer(), ".", poll_interval=0.0, debounce=0.0)
+    assert w.poll_interval >= 0.05  # floored
+
+
+def test_reconcile_drops_sources_whose_file_is_gone(tmp_path):
+    # A source indexed in the store but with no backing file on disk (e.g. a
+    # file created+deleted during the initial index) is dropped on reconcile.
+    store = _mem_store()
+    root = str(tmp_path.resolve())
+    syncer = MarkdownSyncer(store, _FakeProvider(), index_root=root, chunk_size=10000)
+
+    present = tmp_path / "here.md"
+    present.write_text("# H\n")
+    syncer.index_file(present)
+    # simulate a transient file the initial pass indexed but which is now gone
+    # (real chunk ids are UUID strings, so pruning stringifies them consistently)
+    from mnemostack.ingest import stable_chunk_id
+
+    gid = stable_chunk_id("ghost.md", 0, "ghost")
+    store.upsert(
+        gid, [1.0, 0.0, 0.0, 0.0], {"text": "ghost", "source": "ghost.md", "index_root": root}
+    )
+
+    removed = syncer.reconcile_deletions()
+    assert removed == ["ghost.md"]
+    assert _sources_in(store, root) == {"here.md"}  # present source untouched
+
+
+def test_watcher_reconcile_reports_removals(tmp_path):
+    store = _mem_store()
+    root = str(tmp_path.resolve())
+    syncer = MarkdownSyncer(store, _FakeProvider(), index_root=root, chunk_size=10000)
+    from mnemostack.ingest import stable_chunk_id
+
+    store.upsert(
+        stable_chunk_id("gone.md", 0, "x"),
+        [1.0, 0.0, 0.0, 0.0],
+        {"text": "x", "source": "gone.md", "index_root": root},
+    )
+    results = []
+    w = MarkdownWatcher(syncer, tmp_path, on_result=results.append)
+    w.reconcile()
+    assert [r.source for r in results] == ["gone.md"]
 
 
 def test_handle_event_does_not_resolve_symlinks(tmp_path):

@@ -121,11 +121,14 @@ class MarkdownWatcher:
     ):
         self.syncer = syncer
         self.root = str(Path(root).resolve())
-        self.poll_interval = poll_interval
+        # Floor both idle ticks so --watch-poll-interval 0 / --watch-debounce 0
+        # (accepted as "as fast as possible") don't spin a core on sleep(0).
+        self.poll_interval = max(poll_interval, _MIN_IDLE_TICK)
         self._sleep = sleep
         self._debouncer = _Debouncer(debounce, clock)
         self._on_result = on_result
         self._on_error = on_error
+        self._reconcile_pending = threading.Event()
 
     # --- event core (filesystem-agnostic, unit-testable) ---
 
@@ -193,17 +196,35 @@ class MarkdownWatcher:
             self._run_polling(stop_event, baseline)
 
     def _catch_up(self, baseline: dict[str, float] | None) -> dict[str, float]:
-        """Reconcile changes since ``baseline`` immediately; return the new snapshot."""
+        """Queue changes since ``baseline`` (the startup gap); return new snapshot.
+
+        Events are only *queued*, not force-applied: a file still being written
+        as the watcher starts must wait out the debounce window like any other,
+        so the loop's later ``flush()`` applies it once quiet.
+        """
         if baseline is None:
             return self._scan()  # nothing to reconcile: current state is the baseline
-        snap = self.poll_once(baseline)
-        self.flush(force=True)  # apply the catch-up now, not after a debounce window
-        return snap
+        return self.poll_once(baseline)
+
+    def reconcile(self) -> None:
+        """Drop indexed sources whose file is gone (deletions events can miss)."""
+        try:
+            removed = self.syncer.reconcile_deletions()
+        except Exception as exc:  # noqa: BLE001 — reconcile is best-effort, never fatal
+            if self._on_error is not None:
+                self._on_error("<reconcile>", REMOVE, exc)
+            return
+        if self._on_result is not None:
+            from .sync import FileSyncResult
+
+            for source in removed:
+                self._on_result(FileSyncResult(source=source, pruned=1))
 
     def _run_polling(
         self, stop_event: threading.Event | None, baseline: dict[str, float] | None = None
     ) -> None:
         snap = self._catch_up(baseline)
+        self.reconcile()  # drop sources deleted during the initial index
         while not (stop_event is not None and stop_event.is_set()):
             self._sleep(self.poll_interval)
             snap = self.poll_once(snap)
@@ -230,11 +251,17 @@ class MarkdownWatcher:
                     self._emit(event.src_path, UPSERT)
 
             def on_deleted(self, event):
-                if not event.is_directory:
+                if event.is_directory:
+                    # A folder removed as one DirDeletedEvent carries no per-file
+                    # deletes; reconcile against disk to drop the gone sources.
+                    watcher._reconcile_pending.set()
+                else:
                     self._emit(event.src_path, REMOVE)
 
             def on_moved(self, event):
-                if not event.is_directory:
+                if event.is_directory:
+                    watcher._reconcile_pending.set()  # subtree moved out of the root
+                else:
                     self._emit(event.src_path, REMOVE)
                     self._emit(event.dest_path, UPSERT)
 
@@ -244,6 +271,7 @@ class MarkdownWatcher:
         # Start observing BEFORE the catch-up so changes during reconciliation
         # are queued (the debouncer coalesces any duplicates).
         self._catch_up(baseline)
+        self.reconcile()  # drop sources deleted during the initial index
         # Idle sleep is decoupled from the debounce window: with --watch-debounce 0
         # (immediate) a raw sleep(delay) would spin a core, so floor the tick.
         idle = max(self._debouncer.delay, _MIN_IDLE_TICK)
@@ -251,6 +279,9 @@ class MarkdownWatcher:
             while not (stop_event is not None and stop_event.is_set()):
                 self._sleep(idle)
                 self.flush()
+                if self._reconcile_pending.is_set():
+                    self._reconcile_pending.clear()
+                    self.reconcile()
         finally:
             observer.stop()
             observer.join()

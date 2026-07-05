@@ -195,3 +195,25 @@ class MarkdownSyncer:
         if self.graph is not None:
             self.graph.sync_file_links(source, [], index_root=self.index_root)
         return FileSyncResult(source=source, pruned=pruned)
+
+    def reconcile_deletions(self) -> list[str]:
+        """Remove sources under index_root whose file no longer exists on disk.
+
+        A safety net for deletions the incremental event stream can miss: a file
+        created and deleted during the initial index (never observed), or a
+        directory removed as a single event. Enumerates the indexed sources and
+        drops any whose backing file is gone.
+        """
+        # Collect the source set fully before removing anything — deleting points
+        # mid-scroll would mutate the collection the lazy scroll is iterating.
+        sources: set[str] = set()
+        for hit in self.store.scroll(filters={"index_root": self.index_root}):
+            source = (hit.payload or {}).get("source")
+            if source:
+                sources.add(source)
+        removed: list[str] = []
+        for source in sorted(sources):
+            if not os.path.exists(os.path.join(self.index_root, source)):
+                self.remove_file(os.path.join(self.index_root, source))
+                removed.append(source)
+        return removed
