@@ -465,6 +465,71 @@ def test_graph_valid_clause_include_invalidated_is_permissive():
     assert "$as_of" in graph_valid_clause("n", "2026-03-01", include_invalidated=True)
 
 
+def test_graph_as_of_predicate_parses_instants_and_guards_markers():
+    # #87: point-in-time bounds are compared as PARSED instants, so mixed
+    # sub-second precision orders correctly (a raw string compare misreads
+    # `…00.5Z` as before `…00Z`). Structure is asserted here; the datetime()
+    # semantics (incl. bare-date append and marker guards) were verified against
+    # a live Memgraph — datetime(NULL) and datetime('current') both raise there,
+    # so the markers must be guarded by CASE *before* any datetime() call.
+    from mnemostack.recall.retrievers import graph_valid_clause
+    from mnemostack.recall.validity import graph_as_of_predicate
+
+    p = graph_as_of_predicate("r")
+    assert "datetime(" in p and "datetime($as_of)" in p  # parsed, not raw-string
+    # a bare-date bound gets midnight-Z appended (Memgraph rejects a date with
+    # no timezone), an instant (already has 'T') is parsed as-is
+    assert "CONTAINS 'T'" in p and "+ 'T00:00:00Z'" in p
+    # markers guarded by CASE before datetime() is ever evaluated
+    assert "CASE WHEN r.valid_from IS NULL THEN true" in p
+    assert "r.valid_until = 'current' OR r.valid_until IS NULL THEN true" in p
+    # a non-canonical bound (unvalidated LLM free text like "early 2024") is
+    # regex-vetted and falls back to the old raw-string compare, so it never
+    # reaches datetime() (which would raise and abort the WHOLE query)
+    assert "=~ '" in p
+    assert "ELSE r.valid_from <= $as_of END" in p
+    assert "ELSE r.valid_until > $as_of END" in p
+    # the shared predicate is what graph_valid_clause emits for an as_of query
+    assert graph_valid_clause("r", "2026-03-01") == p
+
+
+def test_graph_ts_regex_accepts_canonical_rejects_garbage():
+    # The vetting regex decides which bounds reach Cypher datetime(). Python
+    # re.fullmatch mirrors Cypher `=~` (full-string match) for this subset, so
+    # this is a re-runnable check that impossible dates / junk fall back instead
+    # of aborting the query. (Verified equivalent against a live Memgraph.)
+    import re
+
+    from mnemostack.recall.validity import _GRAPH_TS_RE
+
+    rx = re.compile(_GRAPH_TS_RE)
+    for good in (
+        "2024-01-01",
+        "2024-12-31",
+        "2024-02-28",
+        "2026-03-01T00:00:00Z",
+        "2026-03-01T00:00:00.500Z",  # 3 frac digits (ms) — Memgraph accepts
+        "2026-03-01T00:00:00.500000Z",  # 6 frac digits (µs) — Memgraph accepts
+        "2026-03-01T00:00:00+02:00",
+    ):
+        assert rx.fullmatch(good), good
+    for bad in (
+        "early 2024",
+        "recently",
+        "current",
+        "2024-13-01",  # month 13
+        "2024-02-31",  # Feb has no 31st
+        "2024-02-29",  # Feb capped at 28 (regex can't check leap) -> raw-string fallback
+        "2023-02-29",  # non-leap Feb 29 (would abort datetime) -> fallback
+        "2024-04-31",  # April has no 31st
+        "2024-01-01TBD",  # junk time suffix
+        "2024-01-01T99:99:99Z",  # impossible time
+        "2026-03-01T00:00:00.5Z",  # 1 frac digit — Memgraph datetime() raises
+        "2026-03-01T00:00:00.123456789Z",  # 9 frac digits — Memgraph raises
+    ):
+        assert not rx.fullmatch(bad), bad
+
+
 def test_recall_pushes_include_invalidated_to_graph():
     from mnemostack.recall.recaller import Recaller
 

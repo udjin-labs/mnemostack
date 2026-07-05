@@ -37,7 +37,7 @@ except ImportError:  # pragma: no cover - qdrant-client is a runtime dependency
 from .bm25 import BM25, BM25Doc, Tokenizer, tokenize
 from .filters import payload_matches
 from .recaller import RecallResult
-from .validity import to_utc_instant
+from .validity import graph_as_of_predicate, to_utc_instant
 
 logger = logging.getLogger(__name__)
 
@@ -439,18 +439,19 @@ def graph_valid_clause(var: str, as_of: str | None, include_invalidated: bool = 
       ``include_invalidated`` — point-in-time reconstruction is explicit).
 
     Shared by ``MemgraphRetriever`` and the pipeline's graph-resurrection stage
-    so both filter graph facts consistently. Timestamps are compared as strings
-    in Cypher, so bind a UTC-normalized ``$as_of`` (see ``to_utc_iso``).
+    so both filter graph facts consistently. Point-in-time bounds are compared
+    as **parsed instants** (``datetime(...)``), not raw strings, so mixed
+    sub-second precision orders correctly (a raw compare misreads ``…00.5Z`` as
+    before ``…00Z`` because ``.`` < ``Z``). A ``CASE`` guards the
+    ``'current'``/NULL markers so ``datetime()`` is never evaluated on them;
+    ``datetime(NULL)`` is null (not an error) for an open ``valid_from``. Bind a
+    ``datetime()``-parseable ``$as_of`` (see ``to_utc_instant``).
     """
     if as_of is None:
         if include_invalidated:
             return "true"
         return f"coalesce({var}.valid_until, 'current') = 'current'"
-    return (
-        f"({var}.valid_from IS NULL OR {var}.valid_from <= $as_of) AND "
-        f"({var}.valid_until = 'current' OR {var}.valid_until IS NULL "
-        f"OR {var}.valid_until > $as_of)"
-    )
+    return graph_as_of_predicate(var)
 
 
 class MemgraphRetriever(Retriever):
@@ -536,8 +537,8 @@ class MemgraphRetriever(Retriever):
         if not words:
             return []
         # Normalize `as_of` to a full UTC instant (expanding a bare date to
-        # midnight-Z) so the raw-string Cypher comparison is correct against
-        # full-instant bounds written via GraphStore.
+        # midnight-Z) so it parses via Cypher datetime() in the point-in-time
+        # predicate (see graph_as_of_predicate).
         as_of = to_utc_instant(as_of)
         node_valid = self._valid_clause("n", as_of, include_invalidated)
         rel_valid = self._valid_clause("r", as_of, include_invalidated)
@@ -693,6 +694,9 @@ class MemgraphRetriever(Retriever):
                     )
                 return results[:limit]
         except Exception:
+            # Fail open (graph is optional), but log — a bad query or a malformed
+            # stored bound blanks graph recall for this call, which was silent.
+            logger.warning("graph recall failed, returning no graph hits", exc_info=True)
             return []
 
 
