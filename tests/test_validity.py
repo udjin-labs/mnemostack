@@ -465,6 +465,34 @@ def test_graph_valid_clause_include_invalidated_is_permissive():
     assert "$as_of" in graph_valid_clause("n", "2026-03-01", include_invalidated=True)
 
 
+def test_graph_as_of_predicate_parses_instants_and_guards_markers():
+    # #87: point-in-time bounds are compared as PARSED instants, so mixed
+    # sub-second precision orders correctly (a raw string compare misreads
+    # `…00.5Z` as before `…00Z`). Structure is asserted here; the datetime()
+    # semantics (incl. bare-date append and marker guards) were verified against
+    # a live Memgraph — datetime(NULL) and datetime('current') both raise there,
+    # so the markers must be guarded by CASE *before* any datetime() call.
+    from mnemostack.recall.retrievers import graph_valid_clause
+    from mnemostack.recall.validity import graph_as_of_predicate
+
+    p = graph_as_of_predicate("r")
+    assert "datetime(" in p and "datetime($as_of)" in p  # parsed, not raw-string
+    # a bare-date bound gets midnight-Z appended (Memgraph rejects a date with
+    # no timezone), an instant (already has 'T') is parsed as-is
+    assert "CONTAINS 'T'" in p and "+ 'T00:00:00Z'" in p
+    # markers guarded by CASE before datetime() is ever evaluated
+    assert "CASE WHEN r.valid_from IS NULL THEN true" in p
+    assert "r.valid_until = 'current' OR r.valid_until IS NULL THEN true" in p
+    # a non-canonical bound (unvalidated LLM free text like "early 2024") is
+    # regex-vetted and falls back to the old raw-string compare, so it never
+    # reaches datetime() (which would raise and abort the WHOLE query)
+    assert "=~ '" in p
+    assert "ELSE r.valid_from <= $as_of END" in p
+    assert "ELSE r.valid_until > $as_of END" in p
+    # the shared predicate is what graph_valid_clause emits for an as_of query
+    assert graph_valid_clause("r", "2026-03-01") == p
+
+
 def test_recall_pushes_include_invalidated_to_graph():
     from mnemostack.recall.recaller import Recaller
 
