@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -102,6 +103,309 @@ def cmd_health(args: argparse.Namespace) -> int:
         return 1
 
     return 0 if ok else 1
+
+
+# ----- doctor: comprehensive deployment diagnostic -----
+
+# Check statuses, ordered by severity. `misconfig` (invalid config) forces exit
+# 2, `down` (a core recall dependency — embedding or Qdrant — unreachable) forces
+# exit 1; `warn` / `disabled` / `ok` never fail the exit code. The LLM (answer is
+# optional) and the graph (optional/fail-soft — recall works without it) never
+# exceed `warn`, so a missing LLM or an unreachable graph is reported but does
+# not fail a deploy/CI gate wired to the exit code.
+_DOCTOR_MARKERS = {
+    "ok": "OK",
+    "warn": "WARN",
+    "down": "DOWN",
+    "misconfig": "MISCONFIG",
+    "disabled": "OFF",
+}
+
+
+def _doctor_qdrant(add, url: str, collection: str, timeout: int, expected_dim: int | None) -> None:
+    """Read-only Qdrant probe: reachability, collection, count, dimension match.
+
+    Never calls ensure_collection — a diagnostic must not create a collection as
+    a side effect. Mirrors VectorStore._validate_dimension's read to compare the
+    stored vector size against the provider's dimension.
+    """
+    try:
+        from qdrant_client import QdrantClient
+    except ImportError as e:  # pragma: no cover - qdrant-client is a core dep
+        add("qdrant", "down", f"qdrant-client not importable: {e}")
+        return
+    try:
+        client = QdrantClient(url=url, timeout=timeout)
+        client.get_collections()
+    except Exception as e:  # noqa: BLE001
+        add(
+            "qdrant",
+            "down",
+            f"unreachable at {url}: {e}",
+            "check the Qdrant URL and that the service is running",
+        )
+        return
+    try:
+        from qdrant_client.http.exceptions import UnexpectedResponse
+
+        info = client.get_collection(collection)
+    except ValueError as e:
+        # Narrow — only a genuine "not found" is the pre-ingest case. Any other
+        # ValueError (or the non-404 / non-ValueError errors below) is a real
+        # failure and must read as `down`, not be masked as "collection missing".
+        if "not found" not in str(e).lower():
+            add("qdrant", "down", f"reachable at {url}; collection query failed: {e}")
+            return
+        add(
+            "qdrant",
+            "warn",
+            f"reachable at {url}; collection '{collection}' does not exist yet",
+            "index data (mnemostack index ...) to create the collection",
+        )
+        return
+    except UnexpectedResponse as e:
+        if getattr(e, "status_code", None) != 404:
+            add(
+                "qdrant",
+                "down",
+                f"reachable at {url}; collection query failed ({e})",
+                "check Qdrant auth / permissions for this collection",
+            )
+            return
+        add(
+            "qdrant",
+            "warn",
+            f"reachable at {url}; collection '{collection}' does not exist yet",
+            "index data (mnemostack index ...) to create the collection",
+        )
+        return
+    except Exception as e:  # noqa: BLE001
+        add("qdrant", "down", f"reachable at {url}; collection query failed: {e}")
+        return
+    count = getattr(info, "points_count", None) or 0
+    size = None
+    try:
+        # A named-vectors config is a dict with no `.size`; skip the check then,
+        # exactly as VectorStore._validate_dimension does.
+        size = getattr(info.config.params.vectors, "size", None)
+    except Exception:  # noqa: BLE001
+        size = None
+    detail = f"reachable at {url}; collection '{collection}' exists, points={count}"
+    if expected_dim is not None and size is not None and int(size) != int(expected_dim):
+        add(
+            "qdrant",
+            "down",
+            detail + f"; VECTOR SIZE MISMATCH: stored={size}, provider={expected_dim}",
+            "the collection was built with a different embedding model/dimension; "
+            "re-index into a fresh collection or use the original provider/model",
+        )
+        return
+    if size is not None:
+        detail += f", dim={size}"
+    if count == 0:
+        add("qdrant", "warn", detail + " (empty — no data indexed)")
+    else:
+        add("qdrant", "ok", detail)
+
+
+def _doctor_llm(add, name: str, model: str | None, live: bool) -> None:
+    """LLM reachability. Never exceeds `warn` — /answer is optional."""
+    # Case-insensitive: get_llm() lowercases names, so a mixed-case config value
+    # is valid.
+    if name.lower() not in list_llms():
+        add(
+            "llm",
+            "warn",
+            f"unknown provider '{name}' — /answer will be unavailable",
+            f"set llm.provider to one of: {', '.join(sorted(list_llms()))}",
+        )
+        return
+    try:
+        llm = get_llm(name, **model_kwargs(model))
+    except Exception as e:  # noqa: BLE001
+        add(
+            "llm",
+            "warn",
+            f"{name} not usable: {e} — /answer will be unavailable",
+            "answer is optional; configure the LLM only if you use /answer",
+        )
+        return
+    if not live:
+        add("llm", "ok", f"{name} configured (pass --check-llm for a live probe)")
+        return
+    try:
+        ok, msg = llm.health_check()
+        add(
+            "llm",
+            "ok" if ok else "warn",
+            f"{name} — {msg}" + ("" if ok else " (/answer would fail)"),
+            None if ok else "check the LLM API key / host",
+        )
+    except Exception as e:  # noqa: BLE001
+        add("llm", "warn", f"{name}: {e}")
+
+
+def _doctor_graph(add, cfg) -> None:
+    """Graph reachability. The graph is optional/fail-soft — recall works without
+    it — so a configured-but-unreachable graph is a `warn`, not a `down`: it is
+    reported prominently but does not fail the exit code (mirrors /readyz, which
+    deliberately doesn't gate readiness on the graph). Disabled (uri unset) is
+    reported as such, not a failure."""
+    if not cfg.graph.uri:
+        add("graph", "disabled", "not configured (graph is optional)")
+        return
+    store = None
+    try:
+        from .graph.factory import make_graph_store
+
+        store = make_graph_store(
+            cfg.graph.uri,
+            timeout=cfg.graph.health_timeout,
+            user=cfg.graph.user,
+            password=cfg.graph.password,
+            database=cfg.graph.database,
+        )
+        ok, msg = store.health_check()
+        if ok:
+            add(
+                "graph",
+                "ok",
+                f"reachable at {cfg.graph.uri}; nodes={store.count_nodes()} "
+                f"edges={store.count_edges()}",
+            )
+        else:
+            add(
+                "graph",
+                "warn",
+                f"configured but unreachable at {cfg.graph.uri}: {msg} "
+                "(optional — recall still works; graph recall is skipped)",
+                "check the Memgraph/Neo4j URI, auth, and that the service is running",
+            )
+    except Exception as e:  # noqa: BLE001
+        add(
+            "graph",
+            "warn",
+            f"configured but unreachable at {cfg.graph.uri}: {e} "
+            "(optional — recall still works; graph recall is skipped)",
+            "check the Memgraph/Neo4j URI, auth, and that the service is running",
+        )
+    finally:
+        if store is not None:
+            try:
+                store.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _api_key_hint(cfg) -> str | None:
+    key_env = getattr(cfg.embedding, "api_key_env", None)
+    if key_env and cfg.embedding.provider == "gemini" and not os.environ.get(key_env):
+        return f"set {key_env} (required for the gemini provider)"
+    return None
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Diagnose a mnemostack deployment: config, dependencies, versions.
+
+    Read-only — never creates or modifies a collection. Exit codes: 0 = healthy,
+    1 = a core recall dependency is down, 2 = configuration is invalid.
+    """
+    import platform
+
+    cfg = Config.load()
+    checks: list[dict[str, Any]] = []
+
+    def add(section: str, status: str, detail: str, hint: str | None = None) -> None:
+        checks.append({"section": section, "status": status, "detail": detail, "hint": hint})
+
+    add("mnemostack", "ok", f"version {__version__}")
+    add("python", "ok", platform.python_version())
+
+    # Config validation. Provider name comes from args (seeded from config, so
+    # it reflects the deployed config file / env unless overridden on the CLI).
+    # Compare case-insensitively — get_provider() lowercases names, so a
+    # mixed-case config value (e.g. MNEMOSTACK_PROVIDER=OLLAMA) is valid.
+    provider_name = args.provider
+    provider_known = provider_name.lower() in list_providers()
+    if provider_known:
+        add("config.embedding_provider", "ok", provider_name)
+    else:
+        add(
+            "config.embedding_provider",
+            "misconfig",
+            f"unknown provider '{provider_name}'",
+            f"set embedding.provider to one of: {', '.join(sorted(list_providers()))}",
+        )
+    if cfg.recall.rerank_mode in RERANK_MODES:
+        add("config.rerank_mode", "ok", cfg.recall.rerank_mode)
+    else:
+        add(
+            "config.rerank_mode",
+            "misconfig",
+            f"invalid rerank_mode '{cfg.recall.rerank_mode}'",
+            f"set recall.rerank_mode to one of: {', '.join(sorted(RERANK_MODES))}",
+        )
+
+    # Embedding provider (a hard recall dependency).
+    provider = None
+    if provider_known:
+        try:
+            provider = get_provider(provider_name, **model_kwargs(_embedding_model(args)))
+        except ValueError as e:
+            add("embedding", "misconfig", str(e), _api_key_hint(cfg))
+        except Exception as e:  # noqa: BLE001
+            add("embedding", "down", str(e))
+        if provider is not None:
+            try:
+                ok, msg = provider.health_check()
+                add(
+                    "embedding",
+                    "ok" if ok else "down",
+                    f"{provider.name} (dim={provider.dimension}) — {msg}",
+                    None if ok else "check the provider is reachable and the API key/host is valid",
+                )
+            except Exception as e:  # noqa: BLE001
+                add("embedding", "down", f"{provider.name}: {e}")
+
+    # Qdrant (a hard recall dependency), read-only.
+    expected_dim = provider.dimension if provider is not None else None
+    _doctor_qdrant(add, args.qdrant, args.collection, cfg.vector.health_timeout, expected_dim)
+
+    # LLM (optional — answer only) and graph (optional).
+    _doctor_llm(add, cfg.llm.provider, cfg.llm.model, bool(getattr(args, "check_llm", False)))
+    _doctor_graph(add, cfg)
+
+    statuses = [c["status"] for c in checks]
+    exit_code = 2 if "misconfig" in statuses else (1 if "down" in statuses else 0)
+
+    if getattr(args, "json", False):
+        summary = {s: statuses.count(s) for s in _DOCTOR_MARKERS}
+        print(
+            json.dumps(
+                {
+                    "version": __version__,
+                    "checks": checks,
+                    "summary": summary,
+                    "exit_code": exit_code,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    else:
+        for c in checks:
+            marker = _DOCTOR_MARKERS.get(c["status"], c["status"]).ljust(9)
+            print(f"[{marker}] {c['section']}: {c['detail']}")
+            if c["hint"]:
+                print(f"{' ' * 12}↳ {c['hint']}")
+        verdict = {
+            0: "healthy",
+            1: "degraded — a core dependency is down",
+            2: "misconfigured — fix the config and re-run",
+        }[exit_code]
+        print(f"\ndoctor: {verdict}")
+
+    return exit_code
 
 
 def _load_enricher(spec: str):
@@ -1091,6 +1395,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_health = sub.add_parser("health", parents=[common], help="Check stack health")
     p_health.set_defaults(func=cmd_health)
+
+    p_doctor = sub.add_parser(
+        "doctor",
+        parents=[common],
+        help="Diagnose config + dependencies (read-only; exit 0 ok / 1 down / 2 misconfigured)",
+    )
+    p_doctor.add_argument(
+        "--json", action="store_true", help="Emit the diagnostic report as JSON"
+    )
+    p_doctor.add_argument(
+        "--check-llm",
+        action="store_true",
+        help="Include a live (billable) LLM generation probe (default: config check only)",
+    )
+    p_doctor.set_defaults(func=cmd_doctor)
 
     p_search = sub.add_parser("search", parents=[common], help="Hybrid recall")
     p_search.add_argument("query", help="Search query text")
