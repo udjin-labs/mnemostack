@@ -259,6 +259,29 @@ def test_failed_upsert_is_retried_on_next_poll(tmp_path):
     assert syncer.indexed == [os.path.abspath(str(f))]
 
 
+def test_polling_reconciles_periodically(tmp_path, monkeypatch):
+    # Polling mode must run reconcile() periodically, not only at startup, so a
+    # delete that failed mid-run is retried (its source lingers in the store).
+    import threading
+
+    clock = _FakeClock()
+    syncer = _FakeSyncer()
+    stop = threading.Event()
+    ticks = {"n": 0}
+
+    def fake_sleep(_d):
+        clock.t += 31  # advance past _RESCAN_EVERY each tick
+        ticks["n"] += 1
+        if ticks["n"] >= 2:
+            stop.set()
+
+    w = MarkdownWatcher(syncer, tmp_path, clock=clock, sleep=fake_sleep, poll_interval=1.0)
+    calls = {"n": 0}
+    monkeypatch.setattr(w, "reconcile", lambda: calls.__setitem__("n", calls["n"] + 1))
+    w._run_polling(stop, baseline=None)
+    assert calls["n"] >= 2  # startup + at least one periodic reconcile
+
+
 def test_events_outside_watched_root_ignored(tmp_path):
     # A move whose destination is outside the watched subtree must not be indexed.
     import os

@@ -42,9 +42,11 @@ REMOVE = "remove"
 #: don't busy-loop on sleep(0).
 _MIN_IDLE_TICK = 0.1
 
-#: How often the watchdog backend does a safety-net mtime rescan for changes it
-#: can't emit events for (directory moves, externally-edited symlink targets).
-_WATCHDOG_RESCAN_EVERY = 30.0
+#: How often both backends run a safety-net reconcile — a store-vs-disk deletion
+#: sweep (and, for watchdog, an mtime rescan for changes it can't emit events
+#: for: directory moves, externally-edited symlink targets). Also the retry path
+#: for a delete whose graph/vector write failed transiently.
+_RESCAN_EVERY = 30.0
 
 
 def _is_markdown(path: str) -> bool:
@@ -249,6 +251,7 @@ class MarkdownWatcher:
     ) -> None:
         snap = self._catch_up(baseline)
         self.reconcile()  # drop sources deleted during the initial index
+        next_reconcile = self._debouncer.clock() + _RESCAN_EVERY
         while not (stop_event is not None and stop_event.is_set()):
             self._sleep(self.poll_interval)
             snap = self.poll_once(snap)
@@ -256,6 +259,13 @@ class MarkdownWatcher:
             # written re-stamps its mtime each tick, resetting the window, so it
             # is only applied once it has been quiet for the debounce interval.
             self.flush()
+            # Periodic reconcile: retry a delete whose graph/vector write failed
+            # (poll_once won't re-emit a REMOVE for a path already gone from the
+            # snapshot), plus sweep any deletion the diff missed.
+            now = self._debouncer.clock()
+            if now >= next_reconcile:
+                next_reconcile = now + _RESCAN_EVERY
+                self.reconcile()
 
     def _run_watchdog(  # pragma: no cover - needs watchdog + real FS
         self, stop_event: threading.Event | None, baseline: dict[str, float] | None = None
@@ -293,7 +303,7 @@ class MarkdownWatcher:
         # Idle sleep is decoupled from the debounce window: with --watch-debounce 0
         # (immediate) a raw sleep(delay) would spin a core, so floor the tick.
         idle = max(self._debouncer.delay, _MIN_IDLE_TICK)
-        next_rescan = self._debouncer.clock() + _WATCHDOG_RESCAN_EVERY
+        next_rescan = self._debouncer.clock() + _RESCAN_EVERY
         try:
             while not (stop_event is not None and stop_event.is_set()):
                 self._sleep(idle)
@@ -305,7 +315,7 @@ class MarkdownWatcher:
                 # and reconcile drops whatever disappeared.
                 now = self._debouncer.clock()
                 if now >= next_rescan:
-                    next_rescan = now + _WATCHDOG_RESCAN_EVERY
+                    next_rescan = now + _RESCAN_EVERY
                     snap = self.poll_once(snap)
                     self.reconcile()
         finally:
