@@ -197,11 +197,16 @@ class MarkdownSyncer:
     def remove_file(self, path: str | Path) -> FileSyncResult:
         """Drop a deleted file's chunks and clear its outgoing graph links."""
         source = self.source_for(path)
+        # Clear the graph edges BEFORE pruning the vector record. If the graph
+        # write fails (a transient Memgraph outage), the exception propagates
+        # with the vector chunks still present, so reconcile_deletions finds this
+        # source again and retries — pruning the vector first would orphan the
+        # graph edges with no record left to retry from.
+        if self.graph is not None:
+            self.graph.sync_file_links(source, [], index_root=self.index_root)
         pruned = prune_stale_chunks(
             self.store, {source: set()}, index_root=self.index_root
         )
-        if self.graph is not None:
-            self.graph.sync_file_links(source, [], index_root=self.index_root)
         return FileSyncResult(source=source, pruned=pruned)
 
     def reconcile_deletions(self, within: str | Path | None = None) -> list[str]:
@@ -217,10 +222,14 @@ class MarkdownSyncer:
         scope = os.path.abspath(str(within)) if within is not None else self.index_root
         # Collect the source set fully before removing anything — deleting points
         # mid-scroll would mutate the collection the lazy scroll is iterating.
+        # Only markdown-owned sources (payload carries the indexer's `_md_keys`
+        # record) are eligible, so a markdown watcher never prunes chunks the
+        # generic `index` command wrote under the same collection/root.
         sources: set[str] = set()
         for hit in self.store.scroll(filters={"index_root": self.index_root}):
-            source = (hit.payload or {}).get("source")
-            if source:
+            payload = hit.payload or {}
+            source = payload.get("source")
+            if source and payload.get("_md_keys"):
                 sources.add(source)
         removed: list[str] = []
         for source in sorted(sources):

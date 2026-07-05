@@ -240,7 +240,7 @@ def test_reconcile_drops_sources_whose_file_is_gone(tmp_path):
 
     gid = stable_chunk_id("ghost.md", 0, "ghost")
     store.upsert(
-        gid, [1.0, 0.0, 0.0, 0.0], {"text": "ghost", "source": "ghost.md", "index_root": root}
+        gid, [1.0, 0.0, 0.0, 0.0], {"text": "ghost", "source": "ghost.md", "index_root": root, "_md_keys": ["text", "source"]}
     )
 
     removed = syncer.reconcile_deletions()
@@ -268,12 +268,12 @@ def test_reconcile_scoped_to_subtree_spares_outside_siblings(tmp_path):
     store.upsert(
         stable_chunk_id("sub/gone.md", 0, "a"),
         [1.0, 0.0, 0.0, 0.0],
-        {"text": "a", "source": "sub/gone.md", "index_root": root},
+        {"text": "a", "source": "sub/gone.md", "index_root": root, "_md_keys": ["text", "source"]},
     )
     store.upsert(
         stable_chunk_id("other.md", 0, "b"),
         [1.0, 0.0, 0.0, 0.0],
-        {"text": "b", "source": "other.md", "index_root": root},
+        {"text": "b", "source": "other.md", "index_root": root, "_md_keys": ["text", "source"]},
     )
 
     removed = syncer.reconcile_deletions(within=str(tmp_path / "sub"))
@@ -290,7 +290,7 @@ def test_watcher_reconcile_reports_removals(tmp_path):
     store.upsert(
         stable_chunk_id("gone.md", 0, "x"),
         [1.0, 0.0, 0.0, 0.0],
-        {"text": "x", "source": "gone.md", "index_root": root},
+        {"text": "x", "source": "gone.md", "index_root": root, "_md_keys": ["text", "source"]},
     )
     results = []
     w = MarkdownWatcher(syncer, tmp_path, on_result=results.append)
