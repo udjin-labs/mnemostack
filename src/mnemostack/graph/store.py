@@ -147,28 +147,62 @@ class GraphStore:
         non-ASCII names — Memgraph's ``toLower`` only folds ASCII.
         """
         root = index_root or ""
+        # One managed write transaction: the delete + re-creates commit together
+        # or roll back together, so a mid-way graph failure never leaves the file
+        # with its edges deleted-but-not-recreated (silent link loss). The driver
+        # also auto-retries the whole transaction on a transient error.
         with self.driver.session(database=self.database) as session:
-            session.run(
-                "MATCH (:File {name: $src, index_root: $root})-[r:LINKS_TO]->() DELETE r",
-                src=source,
-                root=root,
-            )
-            for target in targets:
-                session.run(
-                    "MERGE (s:File {name: $src, index_root: $root}) "
-                    "MERGE (o:File {name: $dst, index_root: $root}) "
-                    "SET s.valid_until = coalesce(s.valid_until, 'current'), "
-                    "    o.valid_until = coalesce(o.valid_until, 'current'), "
-                    "    s.name_lower = $src_lower, o.name_lower = $dst_lower "
-                    "MERGE (s)-[r:LINKS_TO]->(o) "
-                    "SET r.valid_until = coalesce(r.valid_until, 'current')",
-                    src=source,
-                    dst=target,
-                    root=root,
-                    src_lower=source.lower(),
-                    dst_lower=target.lower(),
-                )
+            session.execute_write(self._sync_file_links_tx, source, list(targets), root)
         return len(targets)
+
+    @staticmethod
+    def _sync_file_links_tx(tx: Any, source: str, targets: list[str], root: str) -> None:
+        tx.run(
+            "MATCH (:File {name: $src, index_root: $root})-[r:LINKS_TO]->() DELETE r",
+            src=source,
+            root=root,
+        )
+        for target in targets:
+            tx.run(
+                "MERGE (s:File {name: $src, index_root: $root}) "
+                "MERGE (o:File {name: $dst, index_root: $root}) "
+                "SET s.valid_until = coalesce(s.valid_until, 'current'), "
+                "    o.valid_until = coalesce(o.valid_until, 'current'), "
+                "    s.name_lower = $src_lower, o.name_lower = $dst_lower "
+                "MERGE (s)-[r:LINKS_TO]->(o) "
+                "SET r.valid_until = coalesce(r.valid_until, 'current')",
+                src=source,
+                dst=target,
+                root=root,
+                src_lower=source.lower(),
+                dst_lower=target.lower(),
+            )
+
+    def referrers_of_dangling(
+        self, name_keys: list[str], *, index_root: str | None = None
+    ) -> list[str]:
+        """Sources linking to a dangling ``:File`` node a new note now satisfies.
+
+        When a note ``b.md`` is created, a pre-existing ``[[B]]`` in ``a.md`` that
+        was stored as a dangling edge to a node named ``B`` should now resolve to
+        ``b.md``. This finds each source ``a.md`` whose ``LINKS_TO`` target's
+        ``name_lower`` is one of the new note's name keys (its stem / relative
+        path without ``.md``); the caller re-resolves those sources' links.
+        Case-insensitive via ``name_lower``. Only name-based dangling targets are
+        matched — the new note's own ``:File`` node is named by its rel (e.g.
+        ``b.md``), which is never a bare name key, so it can't match itself.
+        """
+        root = index_root or ""
+        keys = [k.lower() for k in name_keys]
+        with self.driver.session(database=self.database) as session:
+            result = session.run(
+                "MATCH (x:File {index_root: $root})-[:LINKS_TO]->(d:File {index_root: $root}) "
+                "WHERE d.name_lower IN $keys "
+                "RETURN DISTINCT x.name AS name",
+                root=root,
+                keys=keys,
+            )
+            return [rec["name"] for rec in result if rec["name"] is not None]
 
     def file_link_sources(self, *, index_root: str | None = None) -> list[str]:
         """Names of ``:File`` nodes with outgoing ``LINKS_TO`` edges in a root.
