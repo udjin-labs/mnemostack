@@ -506,7 +506,7 @@ def test_graph_ts_regex_accepts_canonical_rejects_garbage():
     for good in (
         "2024-01-01",
         "2024-12-31",
-        "2024-02-29",  # regex can't check leap years; matches (rare residual)
+        "2024-02-28",
         "2026-03-01T00:00:00Z",
         "2026-03-01T00:00:00.500000Z",
         "2026-03-01T00:00:00+02:00",
@@ -518,6 +518,8 @@ def test_graph_ts_regex_accepts_canonical_rejects_garbage():
         "current",
         "2024-13-01",  # month 13
         "2024-02-31",  # Feb has no 31st
+        "2024-02-29",  # Feb capped at 28 (regex can't check leap) -> raw-string fallback
+        "2023-02-29",  # non-leap Feb 29 (would abort datetime) -> fallback
         "2024-04-31",  # April has no 31st
         "2024-01-01TBD",  # junk time suffix
         "2024-01-01T99:99:99Z",  # impossible time

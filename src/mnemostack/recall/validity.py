@@ -126,14 +126,17 @@ def to_utc_instant(value: Any) -> Any:
 #:
 #: Validates per-month day ranges and a strict time/offset suffix so impossible
 #: calendar dates and malformed times are rejected. Uses ``[0-9]``/``[.]`` (no
-#: backslashes) to avoid Cypher string-escape ambiguity. The one residual it
-#: can't catch is a non-leap-year ``…-02-29`` (regex can't know leap years) —
-#: vanishingly rare and, if it ever reached ``datetime()``, only that one fact's
-#: query would fail, never a whole recall.
+#: backslashes) to avoid Cypher string-escape ambiguity. Every value this matches
+#: is a date ``datetime()`` can parse — so the datetime() branch never raises.
+#: February is capped at 28 because regex can't know leap years: a non-leap
+#: ``…-02-29`` would abort ``datetime()``, so ALL ``-02-29`` fall to the
+#: raw-string branch instead (a genuine leap-year Feb-29 bound thus compares as a
+#: raw string — correct for a date, losing only the ultra-rare Feb-29 +
+#: sub-second-precision fix).
 _GRAPH_TS_RE = (
     "([0-9]{4}-(0[13578]|1[02])-(0[1-9]|[12][0-9]|3[01])"
     "|[0-9]{4}-(0[469]|11)-(0[1-9]|[12][0-9]|30)"
-    "|[0-9]{4}-02-(0[1-9]|1[0-9]|2[0-9]))"
+    "|[0-9]{4}-02-(0[1-9]|1[0-9]|2[0-8]))"
     "(T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?(Z|[+-]([01][0-9]|2[0-3]):?[0-5][0-9]))?"
 )
 
