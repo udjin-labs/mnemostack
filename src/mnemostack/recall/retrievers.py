@@ -536,8 +536,11 @@ class MemgraphRetriever(Retriever):
         # Only bind $as_of when the predicate references it.
         extra = {"as_of": as_of} if as_of is not None else {}
         counts: dict[str, dict[str, Any]] = defaultdict(lambda: {"count": 0, "type": "", "mc": ""})
+        # Only pass database= when a non-default DB is configured, so an injected
+        # driver whose session() takes no args (fakes/wrappers) still works.
+        session_kwargs = {"database": self.database} if self.database else {}
         try:
-            with driver.session(database=self.database) as session:
+            with driver.session(**session_kwargs) as session:
                 for w in words:
                     # Probe 1: numeric-looking tokens may be contact IDs
                     # (Telegram, Discord, etc). If a canonical Person node has

@@ -161,6 +161,42 @@ def test_memgraph_retriever_database_defaults_none():
     assert r.database is None
 
 
+def test_memgraph_retriever_tolerates_no_arg_session_driver():
+    # An injected driver whose session() predates the database= kwarg must still
+    # work when no non-default database is configured — otherwise the broad
+    # except swallows the TypeError and graph recall silently goes empty.
+    from mnemostack.recall.retrievers import MemgraphRetriever
+
+    calls = {"n": 0}
+
+    class _Session:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def run(self, *a, **k):
+            calls["n"] += 1
+
+            class _R:
+                def __iter__(self_inner):
+                    return iter(())
+
+                def single(self_inner):
+                    return None
+
+            return _R()
+
+    class _NoArgDriver:
+        def session(self):  # no database= parameter
+            return _Session()
+
+    r = MemgraphRetriever(uri="bolt://x", driver=_NoArgDriver())  # database defaults None
+    r.search("alice")
+    assert calls["n"] > 0  # queries ran; session() was called without database=
+
+
 # ---------- MCP build_server threads auth into constructed components ----------
 
 

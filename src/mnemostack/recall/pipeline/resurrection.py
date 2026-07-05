@@ -127,8 +127,11 @@ class GraphResurrection(Stage):
         ).lower()
 
         seed_match: dict[str, dict[str, Any]] = {}
+        # Only pass database= when a non-default DB is configured, so an injected
+        # driver whose session() takes no args (fakes/wrappers) still works.
+        session_kwargs = {"database": self.database} if self.database else {}
         try:
-            with driver.session(database=self.database) as session:
+            with driver.session(**session_kwargs) as session:
                 for seed in list(seeds)[: self.max_seeds]:
                     rows = session.run(
                         f"""
