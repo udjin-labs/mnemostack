@@ -13,6 +13,7 @@ the stage is a no-op. This matches legacy behaviour.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from ..recaller import RecallResult
@@ -20,6 +21,8 @@ from ..retrievers import graph_valid_clause
 from ..validity import to_utc_instant
 from .base import PipelineContext, Stage
 from .stages import STOPWORDS
+
+logger = logging.getLogger(__name__)
 
 try:
     from neo4j import GraphDatabase
@@ -160,6 +163,9 @@ class GraphResurrection(Stage):
                         slot["seeds"].add(seed)
                         slot["rels"].add(nb.get("rel") or "")
         except Exception:
+            # Fail soft (graph optional), but log — a malformed stored bound or
+            # driver error skips resurrection for this call, which was silent.
+            logger.warning("graph resurrection failed, skipping", exc_info=True)
             return results
 
         resurrected: list[tuple[RecallResult, float]] = []

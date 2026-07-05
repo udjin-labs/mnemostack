@@ -117,6 +117,92 @@ def to_utc_instant(value: Any) -> Any:
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+#: Cypher regex (Java syntax, used with ``=~``) matching a canonical ISO date or
+#: date-time bound — the only shapes Memgraph's ``datetime()`` can parse. A stored
+#: bound not matching this (e.g. free text an LLM put in ``valid_from`` via
+#: TripleExtractor: "early 2024", or an impossible date "2024-02-31", or junk
+#: "2024-01-01TBD") falls back to the old raw-string comparison instead of
+#: reaching ``datetime()``, which would raise and abort the whole query.
+#:
+#: Validates per-month day ranges and a strict time/offset suffix so impossible
+#: calendar dates and malformed times are rejected. Uses ``[0-9]``/``[.]`` (no
+#: backslashes) to avoid Cypher string-escape ambiguity. Every value this matches
+#: is a date ``datetime()`` can parse — so the datetime() branch never raises.
+#: February is capped at 28 because regex can't know leap years: a non-leap
+#: ``…-02-29`` would abort ``datetime()``, so ALL ``-02-29`` fall to the
+#: raw-string branch instead (a genuine leap-year Feb-29 bound thus compares as a
+#: raw string — correct for a date, losing only the ultra-rare Feb-29 +
+#: sub-second-precision fix). Fractional seconds are restricted to 3 or 6 digits
+#: — the only counts Memgraph's ``datetime()`` accepts (milli/micro); any other
+#: count raises, so e.g. ``.5`` or ``.123456789`` falls back. ``to_utc_iso``
+#: only ever emits 0 or 6 fractional digits, so canonical bounds always match.
+_GRAPH_TS_RE = (
+    "([0-9]{4}-(0[13578]|1[02])-(0[1-9]|[12][0-9]|3[01])"
+    "|[0-9]{4}-(0[469]|11)-(0[1-9]|[12][0-9]|30)"
+    "|[0-9]{4}-02-(0[1-9]|1[0-9]|2[0-8]))"
+    "(T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.]([0-9]{3}|[0-9]{6}))?"
+    "(Z|[+-]([01][0-9]|2[0-3]):?[0-5][0-9]))?"
+)
+
+
+def _graph_instant_expr(field: str) -> str:
+    """Cypher expr parsing a (regex-vetted) bound string to a ZonedDateTime.
+
+    A bare calendar date (no ``T``) has midnight-UTC appended first — Memgraph's
+    ``datetime()`` rejects a date without a timezone (``"Timezone is not
+    designated"``). Only reached for values matching :data:`_GRAPH_TS_RE`.
+    """
+    return (
+        f"datetime(CASE WHEN {field} CONTAINS 'T' THEN {field} "
+        f"ELSE {field} + 'T00:00:00Z' END)"
+    )
+
+
+def _graph_bound_clause(field: str, op: str) -> str:
+    """One bound comparison: parsed-instant for canonical values, raw-string else.
+
+    ``field <op> as_of`` where a canonical ISO value is compared as a parsed
+    instant (fixes mixed sub-second precision) and anything else falls back to
+    the pre-existing raw-string compare — which never raises, so a single
+    malformed bound excludes/includes only its own fact instead of aborting the
+    whole graph query.
+    """
+    return (
+        f"CASE WHEN {field} =~ '{_GRAPH_TS_RE}' "
+        f"THEN {_graph_instant_expr(field)} {op} datetime($as_of) "
+        f"ELSE {field} {op} $as_of END"
+    )
+
+
+def graph_as_of_predicate(var: str) -> str:
+    """Cypher point-in-time validity predicate comparing PARSED instants.
+
+    ``valid_from <= as_of AND (valid_until absent/'current' OR valid_until >
+    as_of)``, but a canonical ISO bound is parsed with ``datetime()`` instead of
+    compared as a raw string, so mixed sub-second precision orders correctly (a
+    raw compare misreads ``…00.5Z`` as *before* ``…00Z`` because ``.`` < ``Z``).
+    Guards, in order:
+
+    - The markers (``valid_from`` NULL, ``valid_until`` ``'current'``/NULL) are
+      handled by ``CASE`` *before* any ``datetime()`` call — Memgraph raises on
+      ``datetime(NULL)`` and ``datetime('current')`` and does not guarantee
+      ``OR`` short-circuits.
+    - A non-canonical bound (unparseable free text stored via an unvalidated LLM
+      path) falls back to the old raw-string compare, so it never reaches
+      ``datetime()`` and can't abort the query (see :func:`_graph_bound_clause`).
+
+    Bind a ``datetime()``-parseable ``$as_of`` (a full instant, via
+    :func:`to_utc_instant`). Verified against Memgraph.
+    """
+    vf, vu = f"{var}.valid_from", f"{var}.valid_until"
+    return (
+        f"(CASE WHEN {vf} IS NULL THEN true "
+        f"ELSE {_graph_bound_clause(vf, '<=')} END) AND "
+        f"(CASE WHEN {vu} = 'current' OR {vu} IS NULL THEN true "
+        f"ELSE {_graph_bound_clause(vu, '>')} END)"
+    )
+
+
 def _le(a: Any, b: Any) -> bool:
     """``a <= b`` comparing ISO instants when both parse, else lexicographically.
 
