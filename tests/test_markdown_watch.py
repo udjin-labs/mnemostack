@@ -156,6 +156,49 @@ def test_poll_once_detects_create_modify_delete(tmp_path):
     assert syncer.removed == [str(f.resolve())]
 
 
+def test_polling_scan_is_case_insensitive(tmp_path):
+    # The indexer accepts .MD/.Md; the polling scan must track them too, or an
+    # uppercase file indexed initially would never sync its later edits/deletes.
+    clock = _FakeClock()
+    syncer = _FakeSyncer()
+    w = _watcher(tmp_path, syncer, clock)
+    f = tmp_path / "README.MD"
+    f.write_text("# H\n")
+    w.poll_once({})
+    clock.t = 1.0
+    w.flush()
+    assert syncer.indexed == [str(f.resolve())]
+
+
+def test_polling_honors_debounce_for_active_writes(tmp_path):
+    # A file still being written re-stamps its mtime each tick, resetting the
+    # quiet window; polling must NOT apply until it has been quiet for debounce.
+    import os
+
+    clock = _FakeClock()
+    syncer = _FakeSyncer()
+    w = _watcher(tmp_path, syncer, clock)  # debounce=1.0
+    f = tmp_path / "a.md"
+    f.write_text("v1")
+
+    snap = w.poll_once({})  # detected at t=0, deadline 1.0
+    w.flush()
+    assert syncer.indexed == []  # window not elapsed
+
+    # still writing at t=0.5 -> new mtime -> deadline resets to 1.5
+    clock.t = 0.5
+    os.utime(f, (snap[str(f.resolve())] + 5, snap[str(f.resolve())] + 5))
+    snap = w.poll_once(snap)
+    clock.t = 1.0
+    w.flush()
+    assert syncer.indexed == []  # reset window still open
+
+    # quiet through the window -> applied once
+    clock.t = 1.5
+    w.flush()
+    assert syncer.indexed == [str(f.resolve())]
+
+
 # ---------- syncer integration (in-memory Qdrant + fake embedder) ----------
 
 

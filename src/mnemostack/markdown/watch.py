@@ -126,9 +126,15 @@ class MarkdownWatcher:
 
     def _scan(self) -> dict[str, float]:
         snap: dict[str, float] = {}
-        for p in Path(self.root).rglob("*.md"):
+        # rglob("*.md") is case-sensitive on Linux, but the indexer accepts any
+        # case (.MD/.Md); scan all entries and reuse the same suffix check so a
+        # `README.MD` indexed initially is still tracked for changes/deletion.
+        for p in Path(self.root).rglob("*"):
+            if not _is_markdown(p.name):
+                continue
             try:
-                snap[str(p.resolve())] = p.stat().st_mtime
+                if p.is_file():
+                    snap[str(p.resolve())] = p.stat().st_mtime
             except OSError:
                 continue
         return snap
@@ -158,7 +164,10 @@ class MarkdownWatcher:
         while not (stop_event is not None and stop_event.is_set()):
             self._sleep(self.poll_interval)
             snap = self.poll_once(snap)
-            self.flush(force=True)  # a poll already batches, so apply immediately
+            # Honor --watch-debounce even in polling mode: a file still being
+            # written re-stamps its mtime each tick, resetting the window, so it
+            # is only applied once it has been quiet for the debounce interval.
+            self.flush()
 
     def _run_watchdog(self, stop_event: threading.Event | None) -> None:  # pragma: no cover - needs watchdog + real FS
         watcher = self
