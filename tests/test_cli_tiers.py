@@ -528,6 +528,8 @@ def test_serve_passes_token_budget_to_server_config(monkeypatch):
         rerank_mode="relevant_only",
         token_budget=1234,
         auto_record_ior=False,
+        auth=False,
+        keys_file=None,
         host="127.0.0.1",
         port=8000,
         reload=False,
