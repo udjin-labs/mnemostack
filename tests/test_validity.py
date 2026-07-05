@@ -677,10 +677,13 @@ def test_graph_bare_node_skipped_when_no_valid_edge():
             return False
 
     class _FakeDriver:
+        # No-arg session() — an injected driver from before database= existed;
+        # must still work when no non-default database is configured.
         def session(self):
             return _FakeSession()
 
     r = MemgraphRetriever.__new__(MemgraphRetriever)
+    r.database = None
     r.min_word = 3
     r.contains_min = 5
     r.max_nodes = 10

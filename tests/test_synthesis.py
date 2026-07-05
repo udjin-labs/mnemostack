@@ -169,7 +169,7 @@ def test_cli_synthesize_graph_only_skips_vector_setup(monkeypatch, capsys):
     class FakeMemgraphRetriever:
         name = "memgraph"
 
-        def __init__(self, uri=None):
+        def __init__(self, uri=None, **_):
             self.uri = uri
 
         def search(self, query, limit=20, filters=None):

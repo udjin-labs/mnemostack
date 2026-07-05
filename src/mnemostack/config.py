@@ -191,6 +191,9 @@ def _apply_env_overrides(cfg: Config) -> Config:
         MNEMOSTACK_LLM              (alias for LLM_PROVIDER)
         MNEMOSTACK_LLM_MODEL
         MNEMOSTACK_GRAPH_URI
+        MNEMOSTACK_GRAPH_USER
+        MNEMOSTACK_GRAPH_PASSWORD
+        MNEMOSTACK_GRAPH_DATABASE
         MNEMOSTACK_GRAPH_TIMEOUT
         MNEMOSTACK_GRAPH_HEALTH_TIMEOUT
         MNEMOSTACK_BM25_PATHS       (os.pathsep-separated)
@@ -237,6 +240,12 @@ def _apply_env_overrides(cfg: Config) -> Config:
     graph_uri = env.get("MNEMOSTACK_GRAPH_URI") or env.get("MNEMOSTACK_MEMGRAPH_URI")
     if graph_uri:
         cfg.graph.uri = graph_uri
+    if v := env.get("MNEMOSTACK_GRAPH_USER"):
+        cfg.graph.user = v
+    if v := env.get("MNEMOSTACK_GRAPH_PASSWORD"):
+        cfg.graph.password = v
+    if v := env.get("MNEMOSTACK_GRAPH_DATABASE"):
+        cfg.graph.database = v
     if v := env.get("MNEMOSTACK_GRAPH_TIMEOUT"):
         cfg.graph.timeout = float(v)
     if v := env.get("MNEMOSTACK_GRAPH_HEALTH_TIMEOUT"):

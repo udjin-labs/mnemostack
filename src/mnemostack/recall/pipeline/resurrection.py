@@ -55,10 +55,13 @@ class GraphResurrection(Stage):
         max_per_seed: int = 5,
         driver: Any = None,
         timeout: float = 5.0,
+        # database appended at the tail to preserve positional back-compat.
+        database: str | None = None,
     ):
         self.uri = uri
         self.user = user
         self.password = password
+        self.database = database
         self.limit = limit
         self.min_seed_len = min_seed_len
         self.max_seeds = max_seeds
@@ -124,8 +127,11 @@ class GraphResurrection(Stage):
         ).lower()
 
         seed_match: dict[str, dict[str, Any]] = {}
+        # Only pass database= when a non-default DB is configured, so an injected
+        # driver whose session() takes no args (fakes/wrappers) still works.
+        session_kwargs = {"database": self.database} if self.database else {}
         try:
-            with driver.session() as session:
+            with driver.session(**session_kwargs) as session:
                 for seed in list(seeds)[: self.max_seeds]:
                     rows = session.run(
                         f"""
