@@ -217,6 +217,20 @@ def test_doctor_unknown_provider_is_misconfig_exit_2(patched, monkeypatch, capsy
     assert "unknown provider" in out
 
 
+def test_doctor_mixed_case_provider_is_not_misconfig(patched, capsys):
+    # get_provider() lowercases names, so a mixed-case config value (e.g.
+    # MNEMOSTACK_PROVIDER=OLLAMA) is valid and must not be flagged MISCONFIG.
+    patched(
+        provider=_FakeProvider(healthy=True),
+        qdrant_cls=_fake_qdrant_cls(reachable=True, exists=True, size=8),
+        llm=_FakeLLM(),
+    )
+    rc = cli.cmd_doctor(_args(provider="OLLAMA"))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "MISCONFIG" not in out
+
+
 def test_doctor_json_output(patched, capsys):
     patched(
         provider=_FakeProvider(dim=8, healthy=True),

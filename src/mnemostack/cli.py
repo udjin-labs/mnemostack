@@ -210,7 +210,9 @@ def _doctor_qdrant(add, url: str, collection: str, timeout: int, expected_dim: i
 
 def _doctor_llm(add, name: str, model: str | None, live: bool) -> None:
     """LLM reachability. Never exceeds `warn` — /answer is optional."""
-    if name not in list_llms():
+    # Case-insensitive: get_llm() lowercases names, so a mixed-case config value
+    # is valid.
+    if name.lower() not in list_llms():
         add(
             "llm",
             "warn",
@@ -321,8 +323,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     # Config validation. Provider name comes from args (seeded from config, so
     # it reflects the deployed config file / env unless overridden on the CLI).
+    # Compare case-insensitively — get_provider() lowercases names, so a
+    # mixed-case config value (e.g. MNEMOSTACK_PROVIDER=OLLAMA) is valid.
     provider_name = args.provider
-    if provider_name in list_providers():
+    provider_known = provider_name.lower() in list_providers()
+    if provider_known:
         add("config.embedding_provider", "ok", provider_name)
     else:
         add(
@@ -343,7 +348,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     # Embedding provider (a hard recall dependency).
     provider = None
-    if provider_name in list_providers():
+    if provider_known:
         try:
             provider = get_provider(provider_name, **model_kwargs(_embedding_model(args)))
         except ValueError as e:
