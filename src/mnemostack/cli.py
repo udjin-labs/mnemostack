@@ -304,6 +304,58 @@ def _api_key_hint(cfg) -> str | None:
     return None
 
 
+def cmd_tenant_migrate(args: argparse.Namespace) -> int:
+    """Stamp a tenant_id onto existing points (single-tenant → multi-tenant).
+
+    Read-only until you drop ``--dry-run``: reports how many points would be
+    stamped. By default only points that lack a tenant_id are touched, so it's
+    safe to re-run. Vectors are untouched (payload-only merge write).
+    """
+    try:
+        store = VectorStore(
+            collection=args.collection,
+            dimension=1,  # dimension is irrelevant for a payload-only migration
+            host=args.qdrant,
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"error: cannot reach Qdrant at {args.qdrant}: {e}", file=sys.stderr)
+        return 1
+    if not store.collection_exists():
+        print(f"error: collection '{args.collection}' does not exist", file=sys.stderr)
+        return 1
+
+    only_missing = not args.all
+    from qdrant_client.models import Filter, IsEmptyCondition, PayloadField
+
+    from mnemostack.vector.qdrant import TENANT_ID_KEY
+
+    total = store.count()
+    missing = store.client.count(
+        collection_name=args.collection,
+        count_filter=Filter(must=[IsEmptyCondition(is_empty=PayloadField(key=TENANT_ID_KEY))]),
+    ).count
+    # Safety: --all would relabel points that already belong to a tenant. Refuse
+    # when any exist, so a mistaken --all can't collapse a multi-tenant
+    # collection into one tenant. (Default only-missing is always safe.)
+    if args.all and (total - missing) > 0:
+        print(
+            f"error: {total - missing} point(s) already carry a tenant_id; --all would "
+            "relabel them all to one tenant. Run without --all to stamp only unassigned "
+            "points, or migrate a fresh collection if the relabel is intentional.",
+            file=sys.stderr,
+        )
+        return 2
+
+    pending = missing if only_missing else total
+    scope = "without a tenant_id" if only_missing else "in the collection"
+    if args.dry_run:
+        print(f"dry-run: would stamp tenant_id='{args.tenant}' onto {pending} point(s) {scope}")
+        return 0
+    stamped = store.stamp_tenant(args.tenant, only_missing=only_missing)
+    print(f"stamped tenant_id='{args.tenant}' onto {stamped} point(s) {scope}")
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """Diagnose a mnemostack deployment: config, dependencies, versions.
 
@@ -1410,6 +1462,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Include a live (billable) LLM generation probe (default: config check only)",
     )
     p_doctor.set_defaults(func=cmd_doctor)
+
+    p_tenant_migrate = sub.add_parser(
+        "tenant-migrate",
+        parents=[common],
+        help="Stamp a tenant_id onto existing points (single-tenant -> multi-tenant)",
+    )
+    p_tenant_migrate.add_argument("--tenant", required=True, help="tenant_id to assign")
+    p_tenant_migrate.add_argument(
+        "--all",
+        action="store_true",
+        help="Stamp every point (default: only points that lack a tenant_id)",
+    )
+    p_tenant_migrate.add_argument(
+        "--dry-run", action="store_true", help="Report the count without writing"
+    )
+    p_tenant_migrate.set_defaults(func=cmd_tenant_migrate)
 
     p_search = sub.add_parser("search", parents=[common], help="Hybrid recall")
     p_search.add_argument("query", help="Search query text")

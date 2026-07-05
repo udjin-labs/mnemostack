@@ -24,7 +24,14 @@ from qdrant_client.models import (
     VectorParams,
 )
 
-from .qdrant import DimensionMismatchError, Hit, _hide_invalidated_condition
+from .qdrant import (
+    TENANT_ID_KEY,
+    DimensionMismatchError,
+    Hit,
+    _hide_invalidated_condition,
+    _stamp_tenant,
+    _tenant_condition,
+)
 
 
 class AsyncVectorStore:
@@ -93,7 +100,13 @@ class AsyncVectorStore:
                 f"Re-index with --recreate or switch the embedding model."
             )
 
-    async def count(self) -> int:
+    async def count(self, tenant: str | None = None) -> int:
+        if tenant is not None:
+            result = await self.client.count(
+                collection_name=self.collection,
+                count_filter=Filter(must=[_tenant_condition(tenant)]),
+            )
+            return result.count
         info = await self.client.get_collection(self.collection)
         return info.points_count or 0
 
@@ -102,27 +115,46 @@ class AsyncVectorStore:
         id: str | int,
         vector: list[float],
         payload: dict[str, Any] | None = None,
+        *,
+        tenant: str | None = None,
     ) -> None:
         await self.client.upsert(
             collection_name=self.collection,
-            points=[PointStruct(id=id, vector=vector, payload=payload or {})],
+            points=[PointStruct(id=id, vector=vector, payload=_stamp_tenant(payload, tenant))],
         )
 
     async def upsert_batch(
         self,
         points: list[tuple[str | int, list[float], dict[str, Any]]],
         batch_size: int = 100,
+        *,
+        tenant: str | None = None,
     ) -> int:
         total = 0
         for i in range(0, len(points), batch_size):
             chunk = points[i : i + batch_size]
-            structs = [PointStruct(id=pid, vector=vec, payload=pl or {}) for pid, vec, pl in chunk]
+            structs = [
+                PointStruct(id=pid, vector=vec, payload=_stamp_tenant(pl, tenant))
+                for pid, vec, pl in chunk
+            ]
             await self.client.upsert(collection_name=self.collection, points=structs)
             total += len(structs)
         return total
 
-    async def set_payload(self, id: str | int, payload: dict[str, Any]) -> None:
-        """Merge payload keys into an existing point (vector untouched)."""
+    async def set_payload(
+        self, id: str | int, payload: dict[str, Any], *, tenant: str | None = None
+    ) -> None:
+        """Merge payload keys into an existing point (vector untouched).
+
+        With ``tenant`` set, the write is skipped unless the point belongs to
+        that tenant (mirror of ``VectorStore.set_payload``)."""
+        if tenant is not None:
+            found = await self.client.retrieve(
+                collection_name=self.collection, ids=[id], with_payload=True
+            )
+            if not found or (found[0].payload or {}).get(TENANT_ID_KEY) != tenant:
+                return
+            payload = {**payload, TENANT_ID_KEY: tenant}
         await self.client.set_payload(
             collection_name=self.collection,
             payload=payload,
@@ -136,6 +168,7 @@ class AsyncVectorStore:
         invalidated_at: str | None = None,
         valid_until: str | None = None,
         index_root: str | None = None,
+        tenant: str | None = None,
     ) -> int:
         """Async mirror of ``VectorStore.invalidate``."""
         if isinstance(ids, (str, int)):
@@ -161,6 +194,8 @@ class AsyncVectorStore:
                 owner = current.get("index_root")
                 if owner is not None and owner != index_root:
                     continue
+            if tenant is not None and current.get(TENANT_ID_KEY) != tenant:
+                continue
             target.append(pid)
         if not target:
             return 0
@@ -177,8 +212,11 @@ class AsyncVectorStore:
         min_score: float = 0.0,
         *,
         hide_invalidated: bool = False,
+        tenant: str | None = None,
     ) -> list[Hit]:
         must: list[Any] = list(self._build_filter(filters).must or []) if filters else []
+        if tenant is not None:
+            must.append(_tenant_condition(tenant))
         if hide_invalidated:
             must.append(_hide_invalidated_condition())
         qfilter = Filter(must=must) if must else None
