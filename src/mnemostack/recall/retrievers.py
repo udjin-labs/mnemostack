@@ -535,7 +535,9 @@ class MemgraphRetriever(Retriever):
         target_valid = self._valid_clause("m", as_of, include_invalidated)
         # Only bind $as_of when the predicate references it.
         extra = {"as_of": as_of} if as_of is not None else {}
-        counts: dict[str, dict[str, Any]] = defaultdict(lambda: {"count": 0, "type": "", "mc": ""})
+        counts: dict[tuple[str, str], dict[str, Any]] = defaultdict(
+            lambda: {"count": 0, "type": "", "mc": ""}
+        )
         # Only pass database= when a non-default DB is configured, so an injected
         # driver whose session() takes no args (fakes/wrappers) still works.
         session_kwargs = {"database": self.database} if self.database else {}
@@ -552,7 +554,7 @@ class MemgraphRetriever(Retriever):
                             "MATCH (n) WHERE (n.telegram_id = $w OR n.contact_id = $w) "
                             f"AND {node_valid} "
                             "RETURN n.name AS name, labels(n)[0] AS type, "
-                            "n.memory_class AS mc LIMIT 5",
+                            "n.memory_class AS mc, n.index_root AS index_root LIMIT 5",
                             w=w,
                             **extra,
                         ).data()
@@ -568,7 +570,7 @@ class MemgraphRetriever(Retriever):
                             "MATCH (n) WHERE coalesce(n.name_lower, toLower(n.name)) = $w "
                             f"AND {node_valid} "
                             "RETURN n.name AS name, labels(n)[0] AS type, "
-                            "n.memory_class AS mc LIMIT 5",
+                            "n.memory_class AS mc, n.index_root AS index_root LIMIT 5",
                             w=w,
                             **extra,
                         ).data()
@@ -578,7 +580,7 @@ class MemgraphRetriever(Retriever):
                             "MATCH (n) WHERE toLower(coalesce(n.telegram_username, '')) = $w "
                             f"AND {node_valid} "
                             "RETURN n.name AS name, labels(n)[0] AS type, "
-                            "n.memory_class AS mc LIMIT 5",
+                            "n.memory_class AS mc, n.index_root AS index_root LIMIT 5",
                             w=w,
                             **extra,
                         ).data()
@@ -588,7 +590,7 @@ class MemgraphRetriever(Retriever):
                             "MATCH (n) WHERE coalesce(n.name_lower, toLower(n.name)) CONTAINS $w "
                             f"AND {node_valid} "
                             "RETURN n.name AS name, labels(n)[0] AS type, "
-                            "n.memory_class AS mc LIMIT 5",
+                            "n.memory_class AS mc, n.index_root AS index_root LIMIT 5",
                             w=w,
                             **extra,
                         ).data()
@@ -596,16 +598,22 @@ class MemgraphRetriever(Retriever):
                         name = n.get("name")
                         if not name:
                             continue
-                        counts[name]["count"] += 1
-                        counts[name]["type"] = n.get("type", "") or ""
-                        counts[name]["mc"] = n.get("mc", "") or ""
+                        # Key by (name, index_root) so same-named :File nodes
+                        # from different markdown roots stay distinct — the read
+                        # side must honor the (name, index_root) scoping the write
+                        # side (sync_file_links) uses. :Entity nodes have no
+                        # index_root, so their key root is "" (unchanged).
+                        key = (name, n.get("index_root") or "")
+                        counts[key]["count"] += 1
+                        counts[key]["type"] = n.get("type", "") or ""
+                        counts[key]["mc"] = n.get("mc", "") or ""
                 # Over-fetch node candidates so a window of stale-only nodes
                 # doesn't hide valid ones below it before the bare-node skip.
                 validity_active = as_of is not None or not include_invalidated
                 node_budget = self.max_nodes * 3 if validity_active else self.max_nodes
                 ranked = sorted(counts.items(), key=lambda kv: -kv[1]["count"])[:node_budget]
                 results: list[RecallResult] = []
-                for name, info in ranked:
+                for (name, root_key), info in ranked:
                     if len(results) >= self.max_nodes:
                         break
                     rel_rows = session.run(
@@ -616,11 +624,17 @@ class MemgraphRetriever(Retriever):
                         # endNode render the true direction. Filter the other
                         # endpoint `m` too so a stale/future neighbor isn't
                         # serialized into rel_text.
+                        # Pin the node to its (name, index_root): without this an
+                        # undifferentiated name match would follow LINKS_TO edges
+                        # of every same-named :File across roots. coalesce(...,'')
+                        # matches :Entity nodes (no index_root) when root_key="".
                         "MATCH (n {name: $name})-[r]-(m) "
-                        f"WHERE {node_valid} AND {rel_valid} AND {target_valid} "
+                        f"WHERE coalesce(n.index_root, '') = $root_key "
+                        f"AND {node_valid} AND {rel_valid} AND {target_valid} "
                         "RETURN startNode(r).name AS from_n, type(r) AS rel, "
                         "endNode(r).name AS to_n LIMIT $lim",
                         name=name,
+                        root_key=root_key,
                         lim=self.max_rels,
                         **extra,
                     ).data()
@@ -638,9 +652,13 @@ class MemgraphRetriever(Retriever):
                         if rel_text
                         else f"{info['type']}: {name}"
                     )
+                    # Qualify the id with the root so same-named :File nodes from
+                    # different roots don't collide into one result. :Entity nodes
+                    # (and files with no index_root) keep the plain graph:<name> id.
+                    node_id = f"{root_key}:{name}" if root_key else name
                     results.append(
                         RecallResult(
-                            id=f"graph:{name}",
+                            id=f"graph:{node_id}",
                             text=content[:300],
                             score=float(info["count"]),
                             payload={
@@ -649,6 +667,7 @@ class MemgraphRetriever(Retriever):
                                 "memory_class": info.get("mc", ""),
                                 "name": name,
                                 "type": info["type"],
+                                "index_root": root_key or None,
                             },
                             sources=["memgraph"],
                         )
