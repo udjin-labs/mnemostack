@@ -49,6 +49,7 @@ class GraphResurrection(Stage):
         uri: str = "bolt://localhost:7687",
         user: str = "",
         password: str = "",
+        database: str | None = None,
         limit: int = 3,
         min_seed_len: int = 4,
         max_seeds: int = 8,
@@ -59,6 +60,7 @@ class GraphResurrection(Stage):
         self.uri = uri
         self.user = user
         self.password = password
+        self.database = database
         self.limit = limit
         self.min_seed_len = min_seed_len
         self.max_seeds = max_seeds
@@ -125,7 +127,7 @@ class GraphResurrection(Stage):
 
         seed_match: dict[str, dict[str, Any]] = {}
         try:
-            with driver.session() as session:
+            with driver.session(database=self.database) as session:
                 for seed in list(seeds)[: self.max_seeds]:
                     rows = session.run(
                         f"""

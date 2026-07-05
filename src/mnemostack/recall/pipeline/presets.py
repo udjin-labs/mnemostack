@@ -38,6 +38,7 @@ def build_full_pipeline(
     graph_uri: str | None = None,
     graph_user: str = "",
     graph_password: str = "",
+    graph_database: str | None = None,
     graph_limit: int = 3,
     graph_timeout: float = 5.0,
 ) -> Pipeline:
@@ -98,6 +99,7 @@ def build_full_pipeline(
                 uri=graph_uri,
                 user=graph_user,
                 password=graph_password,
+                database=graph_database,
                 limit=graph_limit,
                 timeout=graph_timeout,
             )

@@ -677,10 +677,11 @@ def test_graph_bare_node_skipped_when_no_valid_edge():
             return False
 
     class _FakeDriver:
-        def session(self):
+        def session(self, database=None):
             return _FakeSession()
 
     r = MemgraphRetriever.__new__(MemgraphRetriever)
+    r.database = None
     r.min_word = 3
     r.contains_min = 5
     r.max_nodes = 10

@@ -60,6 +60,9 @@ def build_server(
     llm_model: str | None = None,
     qdrant_host: str = "http://localhost:6333",
     memgraph_uri: str | None = None,
+    graph_user: str = "",
+    graph_password: str = "",
+    graph_database: str | None = None,
     graph_timeout: float = 5.0,
     bm25_paths: list[str] | None = None,
     state_path: str | None = None,
@@ -148,7 +151,13 @@ def build_server(
         retrievers = [
             VectorRetriever(embedding=emb, vector_store=vec),
             BM25Retriever(docs=bm25_docs) if bm25_docs else None,
-            MemgraphRetriever(uri=memgraph_uri, timeout=graph_timeout)
+            MemgraphRetriever(
+                uri=memgraph_uri,
+                user=graph_user,
+                password=graph_password,
+                database=graph_database,
+                timeout=graph_timeout,
+            )
             if memgraph_uri
             else None,
             TemporalRetriever(embedding=emb, vector_store=vec),
@@ -176,6 +185,9 @@ def build_server(
             lambda: build_full_pipeline(
                 state_store=FileStateStore(resolved_state_path),
                 graph_uri=memgraph_uri,
+                graph_user=graph_user,
+                graph_password=graph_password,
+                graph_database=graph_database,
                 graph_timeout=graph_timeout,
             ),
         )
@@ -276,9 +288,15 @@ def build_server(
 
         if memgraph_uri:
             try:
-                from ..graph import GraphStore
+                from ..graph.factory import make_graph_store
 
-                gs = GraphStore(uri=memgraph_uri, timeout=graph_timeout)
+                gs = make_graph_store(
+                    memgraph_uri,
+                    timeout=graph_timeout,
+                    user=graph_user,
+                    password=graph_password,
+                    database=graph_database,
+                )
                 ok, msg = gs.health_check()
                 result["components"]["graph"] = {
                     "ok": ok,
@@ -603,9 +621,15 @@ def build_server(
             returns only facts valid at that date.
             """
             try:
-                from ..graph import GraphStore
+                from ..graph.factory import make_graph_store
 
-                gs = GraphStore(uri=memgraph_uri, timeout=graph_timeout)
+                gs = make_graph_store(
+                    memgraph_uri,
+                    timeout=graph_timeout,
+                    user=graph_user,
+                    password=graph_password,
+                    database=graph_database,
+                )
                 triples = gs.query_triples(
                     subject=subject,
                     predicate=predicate,
@@ -645,9 +669,15 @@ def build_server(
             ISO date strings for point-in-time validity.
             """
             try:
-                from ..graph import GraphStore
+                from ..graph.factory import make_graph_store
 
-                gs = GraphStore(uri=memgraph_uri, timeout=graph_timeout)
+                gs = make_graph_store(
+                    memgraph_uri,
+                    timeout=graph_timeout,
+                    user=graph_user,
+                    password=graph_password,
+                    database=graph_database,
+                )
                 gs.add_triple(
                     subject=subject,
                     predicate=predicate,
@@ -690,6 +720,9 @@ def main() -> None:
         llm_model=cfg.llm.model,
         qdrant_host=cfg.vector.host,
         memgraph_uri=cfg.graph.uri,
+        graph_user=cfg.graph.user,
+        graph_password=cfg.graph.password,
+        graph_database=cfg.graph.database,
         graph_timeout=cfg.graph.timeout,
         bm25_paths=list(cfg.recall.bm25_paths) or None,
         state_path=os.environ.get("MNEMOSTACK_STATE_PATH"),

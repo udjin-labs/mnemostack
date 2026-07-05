@@ -679,7 +679,7 @@ def test_cmd_index_markdown_indexes_and_writes_edges(tmp_path, monkeypatch, caps
     store = _FakeStore()
     monkeypatch.setattr(cli, "get_provider", lambda *_a, **_k: _FakeProvider())
     monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
-    monkeypatch.setattr("mnemostack.graph.GraphStore", _FakeGraph)
+    monkeypatch.setattr("mnemostack.graph.store.GraphStore", _FakeGraph)
 
     import argparse
 
@@ -802,7 +802,7 @@ def test_cmd_index_markdown_graph_write_failure_does_not_fail_run(
     store = _FakeStore()
     monkeypatch.setattr(cli, "get_provider", lambda *_a, **_k: _FakeProvider())
     monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
-    monkeypatch.setattr("mnemostack.graph.GraphStore", _FlakyGraph)
+    monkeypatch.setattr("mnemostack.graph.store.GraphStore", _FlakyGraph)
 
     args = argparse.Namespace(
         path=str(_vault(tmp_path)), provider="fake", embedding_model=None,
@@ -933,7 +933,7 @@ def test_cmd_index_markdown_clears_graph_links_for_deleted_file(tmp_path, monkey
     graph = _Graph()
     monkeypatch.setattr(cli, "get_provider", lambda *_a, **_k: _FakeProvider())
     monkeypatch.setattr(cli, "VectorStore", lambda **_: _FakeStore())
-    monkeypatch.setattr("mnemostack.graph.GraphStore", lambda **_: graph)
+    monkeypatch.setattr("mnemostack.graph.store.GraphStore", lambda **_: graph)
 
     args = argparse.Namespace(
         path=str(v), provider="fake", embedding_model=None,
@@ -1150,7 +1150,7 @@ def test_cmd_index_markdown_single_file_does_not_reconcile_siblings(tmp_path, mo
     graph = _Graph()
     monkeypatch.setattr(cli, "get_provider", lambda *_a, **_k: _FakeProvider())
     monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
-    monkeypatch.setattr("mnemostack.graph.GraphStore", lambda **_: graph)
+    monkeypatch.setattr("mnemostack.graph.store.GraphStore", lambda **_: graph)
 
     args = argparse.Namespace(
         path=str(tmp_path / "a.md"), provider="fake", embedding_model=None,

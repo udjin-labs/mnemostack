@@ -465,6 +465,7 @@ class MemgraphRetriever(Retriever):
         uri: str = "bolt://localhost:7687",
         user: str = "",
         password: str = "",
+        database: str | None = None,
         min_word: int = 3,
         contains_min: int = 5,
         max_nodes: int = 10,
@@ -475,6 +476,7 @@ class MemgraphRetriever(Retriever):
         self.uri = uri
         self.user = user
         self.password = password
+        self.database = database
         self.min_word = min_word
         self.contains_min = contains_min
         self.max_nodes = max_nodes
@@ -533,7 +535,7 @@ class MemgraphRetriever(Retriever):
         extra = {"as_of": as_of} if as_of is not None else {}
         counts: dict[str, dict[str, Any]] = defaultdict(lambda: {"count": 0, "type": "", "mc": ""})
         try:
-            with driver.session() as session:
+            with driver.session(database=self.database) as session:
                 for w in words:
                     # Probe 1: numeric-looking tokens may be contact IDs
                     # (Telegram, Discord, etc). If a canonical Person node has
