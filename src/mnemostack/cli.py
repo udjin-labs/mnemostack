@@ -967,7 +967,12 @@ def _watch_markdown(
             print(f"warning: graph unavailable, links not watched ({exc})", file=sys.stderr)
 
     syncer = MarkdownSyncer(
-        store, provider, index_root=index_root, chunk_size=args.chunk_size, graph=graph
+        store,
+        provider,
+        index_root=index_root,
+        chunk_size=args.chunk_size,
+        graph=graph,
+        subtree=watch_root,  # keep referrer re-resolution inside the watched tree
     )
 
     def _on_result(res: Any) -> None:

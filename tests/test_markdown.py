@@ -554,6 +554,9 @@ def _graph_with_fake_session():
     session = MagicMock()
     session.__enter__ = MagicMock(return_value=session)
     session.__exit__ = MagicMock(return_value=False)
+    # sync_file_links runs its delete+merges inside a managed write transaction;
+    # invoke the tx fn against the session so its .run() calls are recorded here.
+    session.execute_write = lambda fn, *a, **k: fn(session, *a, **k)
     driver = MagicMock()
     driver.session.return_value = session
     store.driver = driver
