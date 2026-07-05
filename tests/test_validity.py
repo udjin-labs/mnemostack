@@ -508,7 +508,8 @@ def test_graph_ts_regex_accepts_canonical_rejects_garbage():
         "2024-12-31",
         "2024-02-28",
         "2026-03-01T00:00:00Z",
-        "2026-03-01T00:00:00.500000Z",
+        "2026-03-01T00:00:00.500Z",  # 3 frac digits (ms) — Memgraph accepts
+        "2026-03-01T00:00:00.500000Z",  # 6 frac digits (µs) — Memgraph accepts
         "2026-03-01T00:00:00+02:00",
     ):
         assert rx.fullmatch(good), good
@@ -523,6 +524,8 @@ def test_graph_ts_regex_accepts_canonical_rejects_garbage():
         "2024-04-31",  # April has no 31st
         "2024-01-01TBD",  # junk time suffix
         "2024-01-01T99:99:99Z",  # impossible time
+        "2026-03-01T00:00:00.5Z",  # 1 frac digit — Memgraph datetime() raises
+        "2026-03-01T00:00:00.123456789Z",  # 9 frac digits — Memgraph raises
     ):
         assert not rx.fullmatch(bad), bad
 

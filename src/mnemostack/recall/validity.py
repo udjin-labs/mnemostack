@@ -132,12 +132,16 @@ def to_utc_instant(value: Any) -> Any:
 #: ``…-02-29`` would abort ``datetime()``, so ALL ``-02-29`` fall to the
 #: raw-string branch instead (a genuine leap-year Feb-29 bound thus compares as a
 #: raw string — correct for a date, losing only the ultra-rare Feb-29 +
-#: sub-second-precision fix).
+#: sub-second-precision fix). Fractional seconds are restricted to 3 or 6 digits
+#: — the only counts Memgraph's ``datetime()`` accepts (milli/micro); any other
+#: count raises, so e.g. ``.5`` or ``.123456789`` falls back. ``to_utc_iso``
+#: only ever emits 0 or 6 fractional digits, so canonical bounds always match.
 _GRAPH_TS_RE = (
     "([0-9]{4}-(0[13578]|1[02])-(0[1-9]|[12][0-9]|3[01])"
     "|[0-9]{4}-(0[469]|11)-(0[1-9]|[12][0-9]|30)"
     "|[0-9]{4}-02-(0[1-9]|1[0-9]|2[0-8]))"
-    "(T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?(Z|[+-]([01][0-9]|2[0-3]):?[0-5][0-9]))?"
+    "(T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.]([0-9]{3}|[0-9]{6}))?"
+    "(Z|[+-]([01][0-9]|2[0-3]):?[0-5][0-9]))?"
 )
 
 
