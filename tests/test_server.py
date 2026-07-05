@@ -102,12 +102,14 @@ def _patched_app(
     pipeline: _FakePipeline | None = None,
     config: ServerConfig | None = None,
     qdrant_reachable: bool = False,
+    embedding_healthy: bool = True,
 ):
     """Build the FastAPI app with the heavy retrieval layers mocked out.
 
     `qdrant_reachable` controls the dedicated health/readiness probe client:
     False (default) -> the probe raises, so /readyz is 503 and /health degraded;
     True -> the probe succeeds. Readiness keys off this probe, not the store.
+    `embedding_healthy` controls the provider's health_check (both gate /readyz).
     """
     import mnemostack.server as srv
 
@@ -131,6 +133,11 @@ def _patched_app(
 
         def embed(self, text):  # unused; kept for shape
             return [0.0, 0.0, 0.0]
+
+        def health_check(self):
+            if embedding_healthy:
+                return True, "ok"
+            return False, "embedding backend down"
 
     monkeypatch.setattr(srv, "get_provider", lambda _name, **_kwargs: _FakeProvider())
 
@@ -216,6 +223,24 @@ def test_health_endpoint(monkeypatch):
     assert "qdrant" in data and "memgraph" in data
 
 
+def _readyz_until(client, want_embedding: bool, tries: int = 200):
+    """Poll /readyz until embedding readiness settles.
+
+    Embedding readiness is refreshed in a background thread (serve-stale-while-
+    revalidate), so the first probe reports the sentinel `embedding=False` before
+    the (instant, faked) refresh lands. Poll until it reaches the expected state.
+    """
+    import time
+
+    r = client.get("/readyz")
+    for _ in range(tries):
+        if r.json().get("embedding") is want_embedding:
+            return r
+        time.sleep(0.01)
+        r = client.get("/readyz")
+    return r
+
+
 def test_healthz_liveness_always_ok(monkeypatch):
     # Liveness must not depend on Qdrant/graph — up even with no backends.
     app, _ = _patched_app(monkeypatch)
@@ -238,10 +263,23 @@ def test_readyz_503_when_qdrant_unreachable(monkeypatch):
 
 def test_readyz_200_when_qdrant_reachable(monkeypatch):
     app, _ = _patched_app(monkeypatch, qdrant_reachable=True)
-    r = TestClient(app).get("/readyz")
+    r = _readyz_until(TestClient(app), want_embedding=True)
     assert r.status_code == 200
     assert r.json()["status"] == "ready"
     assert r.json()["qdrant"] is True
+    assert r.json()["embedding"] is True
+
+
+def test_readyz_503_when_embedding_down(monkeypatch):
+    # Qdrant is reachable but the embedding provider is down -> not ready, since
+    # recall can't embed a query. Embedding is a hard readiness dependency.
+    app, _ = _patched_app(monkeypatch, qdrant_reachable=True, embedding_healthy=False)
+    # embedding stays False (down); the background refresh confirms not-ready.
+    r = _readyz_until(TestClient(app), want_embedding=False)
+    assert r.status_code == 503
+    assert r.json()["status"] == "not_ready"
+    assert r.json()["qdrant"] is True
+    assert r.json()["embedding"] is False
 
 
 def test_status_reports_config_and_counters(monkeypatch):
@@ -284,6 +322,15 @@ def test_status_counts_trace_only_degradations(monkeypatch):
     tr.mark("reranker:unavailable")  # deduped per trace — must NOT double-count
     d = TestClient(app).get("/status").json()
     assert d["degraded_events"] == 2
+
+
+def test_status_counts_answer_unavailable_outage(monkeypatch):
+    # When the LLM isn't configured, POST /answer 503s before the generator can
+    # emit answer.errors — the outage must still surface in degraded_events.
+    app, _ = _patched_app(monkeypatch, with_answer=False)
+    client = TestClient(app)
+    assert client.post("/answer", json={"query": "hi"}).status_code == 503
+    assert client.get("/status").json()["degraded_events"] >= 1
 
 
 def test_build_app_passes_configured_provider_models(monkeypatch):

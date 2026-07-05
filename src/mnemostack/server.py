@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+import time
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, Literal
@@ -41,6 +43,7 @@ from mnemostack.feedback import apply_feedback, record_recall_events
 from mnemostack.llm import get_llm
 from mnemostack.observability.recorder import (
     InMemoryRecorder,
+    counter,
     get_recorder,
     set_recorder,
 )
@@ -250,6 +253,10 @@ class ReadyResponse(BaseModel):
     status: str  # "ready" | "not_ready"
     version: str
     qdrant: bool  # readiness gate: recall needs the vector store
+    # readiness gate: recall can't embed a query without the provider. Checked
+    # via a cached, bounded reachability probe so /readyz neither hangs on a slow
+    # provider nor pays a live embedding call on every probe.
+    embedding: bool
     # NOTE: the graph is deliberately absent. It's optional/fail-soft, and a live
     # graph ping on the readiness hot path would let a slow/blackholed Memgraph
     # add up to graph_health_timeout of latency to /readyz and trip a probe
@@ -264,6 +271,7 @@ class StatusResponse(BaseModel):
     collection: str
     qdrant_url: str
     qdrant: bool
+    embedding: bool
     memgraph: bool
     # total recall invocations recorded, including the extra sub-recalls the
     # answer generator issues on expansion/inference retries — so this counts
@@ -294,9 +302,16 @@ _DEGRADED_METRICS = frozenset(
         "mnemostack.recall.followup_rewrite_failed",
         "mnemostack.query_expansion.errors",
         "mnemostack.answer.errors",
+        "mnemostack.answer.unavailable",
         "mnemostack.answer.list_finalize_fallback",
     }
 )
+
+
+# Embedding readiness is cached so /readyz doesn't pay a live embedding call on
+# every probe (embeddings are billed/rate-limited for hosted providers) and so
+# a slow/hung provider can't add latency to the probe.
+_EMBED_HEALTH_TTL_S = 30.0  # refresh the cached result in the background this often
 
 
 def _make_probe_client(url: str, timeout: int) -> Any:
@@ -551,6 +566,47 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         except Exception:
             return False
 
+    # Embedding reachability for readiness. Recall can't embed a query without
+    # the provider, so it's a hard readiness dependency — but a live embedding
+    # call per probe would cost money / hit rate limits, and a slow or hung
+    # provider would add latency to (or hang) the probe. So this is a
+    # serve-stale-while-revalidate cache: probes never call the provider inline;
+    # they read the last known value and, when it's older than the TTL, trigger
+    # a single background refresh (single-flight — at most one in flight). The
+    # refresh runs on a daemon thread, so a hung health_check can neither block a
+    # probe nor delay process shutdown; the worst case is readiness reporting the
+    # last known value until the background check completes. Starts not-ready
+    # (ts sentinel) until the first refresh lands — correct readiness semantics.
+    _embed_health = {"ok": False, "ts": -1e18, "refreshing": False}
+    _embed_lock = threading.Lock()
+
+    def _refresh_embedding_health() -> None:
+        ok = False
+        try:
+            healthy, _msg = provider.health_check()
+            ok = bool(healthy)
+        except Exception:
+            ok = False
+        with _embed_lock:
+            _embed_health["ok"] = ok
+            _embed_health["ts"] = time.monotonic()
+            _embed_health["refreshing"] = False
+
+    def _embedding_ok() -> bool:
+        now = time.monotonic()
+        spawn = False
+        with _embed_lock:
+            ok = bool(_embed_health["ok"])
+            stale = now - _embed_health["ts"] >= _EMBED_HEALTH_TTL_S
+            if stale and not _embed_health["refreshing"]:
+                _embed_health["refreshing"] = True
+                spawn = True
+        if spawn:
+            threading.Thread(
+                target=_refresh_embedding_health, name="embed-health", daemon=True
+            ).start()
+        return ok
+
     bm25_docs = _build_bm25_docs(cfg.bm25_paths)
     maybe_retrievers = [
         VectorRetriever(embedding=provider, vector_store=store),
@@ -705,17 +761,22 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         responses={503: {"model": ReadyResponse}},
     )
     def readyz():
-        # Readiness: can we serve traffic? Qdrant is the only hard dependency
-        # (recall needs it), so it alone gates readiness with a 503. The graph is
-        # optional/fail-soft and is intentionally not pinged here — see
-        # ReadyResponse — so a slow graph can never add latency to this probe.
+        # Readiness: can we serve traffic? The hard dependencies are Qdrant (the
+        # vector store recall reads) and the embedding provider (recall can't
+        # embed a query without it); either being down gates readiness with a
+        # 503. Both checks are bounded so a slow backend can't hang the probe.
+        # The graph is optional/fail-soft and is intentionally not pinged here —
+        # see ReadyResponse — so a slow graph can never add latency to /readyz.
         qdrant_ok = _qdrant_ok()
+        embedding_ok = _embedding_ok()
+        ready = qdrant_ok and embedding_ok
         body = ReadyResponse(
-            status="ready" if qdrant_ok else "not_ready",
+            status="ready" if ready else "not_ready",
             version=__version__,
             qdrant=qdrant_ok,
+            embedding=embedding_ok,
         )
-        if not qdrant_ok:
+        if not ready:
             from fastapi.responses import JSONResponse
 
             # mode="json" so the body stays JSON-safe if a non-native field type
@@ -746,6 +807,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             collection=cfg.collection,
             qdrant_url=cfg.qdrant_url,
             qdrant=_qdrant_ok(),
+            embedding=_embedding_ok(),
             memgraph=_graph_ok(),
             recall_calls=recall_calls,
             degraded_events=degraded,
@@ -777,6 +839,10 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     @app.post("/answer", response_model=AnswerResponse)
     async def answer_endpoint(req: AnswerRequest):
         if answer_gen is None:
+            # Count the outage: this returns before AnswerGenerator.generate()
+            # can emit mnemostack.answer.errors, so without this the operator's
+            # /status.degraded_events would read 0 during a full answer outage.
+            counter("mnemostack.answer.unavailable", 1)
             raise HTTPException(
                 status_code=503,
                 detail="answer generator unavailable (LLM not configured)",
