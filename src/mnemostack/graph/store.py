@@ -147,28 +147,36 @@ class GraphStore:
         non-ASCII names — Memgraph's ``toLower`` only folds ASCII.
         """
         root = index_root or ""
+        # One managed write transaction: the delete + re-creates commit together
+        # or roll back together, so a mid-way graph failure never leaves the file
+        # with its edges deleted-but-not-recreated (silent link loss). The driver
+        # also auto-retries the whole transaction on a transient error.
         with self.driver.session(database=self.database) as session:
-            session.run(
-                "MATCH (:File {name: $src, index_root: $root})-[r:LINKS_TO]->() DELETE r",
-                src=source,
-                root=root,
-            )
-            for target in targets:
-                session.run(
-                    "MERGE (s:File {name: $src, index_root: $root}) "
-                    "MERGE (o:File {name: $dst, index_root: $root}) "
-                    "SET s.valid_until = coalesce(s.valid_until, 'current'), "
-                    "    o.valid_until = coalesce(o.valid_until, 'current'), "
-                    "    s.name_lower = $src_lower, o.name_lower = $dst_lower "
-                    "MERGE (s)-[r:LINKS_TO]->(o) "
-                    "SET r.valid_until = coalesce(r.valid_until, 'current')",
-                    src=source,
-                    dst=target,
-                    root=root,
-                    src_lower=source.lower(),
-                    dst_lower=target.lower(),
-                )
+            session.execute_write(self._sync_file_links_tx, source, list(targets), root)
         return len(targets)
+
+    @staticmethod
+    def _sync_file_links_tx(tx: Any, source: str, targets: list[str], root: str) -> None:
+        tx.run(
+            "MATCH (:File {name: $src, index_root: $root})-[r:LINKS_TO]->() DELETE r",
+            src=source,
+            root=root,
+        )
+        for target in targets:
+            tx.run(
+                "MERGE (s:File {name: $src, index_root: $root}) "
+                "MERGE (o:File {name: $dst, index_root: $root}) "
+                "SET s.valid_until = coalesce(s.valid_until, 'current'), "
+                "    o.valid_until = coalesce(o.valid_until, 'current'), "
+                "    s.name_lower = $src_lower, o.name_lower = $dst_lower "
+                "MERGE (s)-[r:LINKS_TO]->(o) "
+                "SET r.valid_until = coalesce(r.valid_until, 'current')",
+                src=source,
+                dst=target,
+                root=root,
+                src_lower=source.lower(),
+                dst_lower=target.lower(),
+            )
 
     def referrers_of_dangling(
         self, name_keys: list[str], *, index_root: str | None = None
