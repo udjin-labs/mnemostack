@@ -124,12 +124,17 @@ class MarkdownSyncer:
         index_root: str,
         chunk_size: int,
         graph: Any = None,
+        subtree: str | None = None,
     ):
         self.store = store
         self.provider = provider
         self.index_root = str(Path(index_root).resolve())
         self.chunk_size = chunk_size
         self.graph = graph
+        # The watched subtree (may be narrower than index_root under a nested
+        # --index-root watch). Referrer re-resolution stays inside it so a
+        # sibling outside the watched tree is never rewritten.
+        self.subtree = os.path.abspath(subtree) if subtree else self.index_root
 
     def _prune_markdown_stale(self, fresh_by_source: dict[str, set[str]]) -> int:
         """Prune stale chunks of the given sources — markdown-owned points only.
@@ -183,9 +188,6 @@ class MarkdownSyncer:
                 filters={"index_root": self.index_root, "source": source}
             ):
                 existing[str(hit.id)] = hit.payload or {}
-        # A file with no prior chunks is newly created — only then can it satisfy
-        # a dangling link elsewhere (a modify of an existing note doesn't).
-        was_new = not existing
 
         cs = upsert_markdown_chunks(self.store, self.provider, chunks, existing)
 
@@ -208,12 +210,13 @@ class MarkdownSyncer:
                 edges += self.graph.sync_file_links(
                     src, targets, index_root=self.index_root
                 )
-            # A newly-created note can satisfy a dangling [[wikilink]] in another
-            # note; re-resolve those referrers so their edge points at this note
-            # (a full walk would). Only for new files — a modify can't newly
-            # satisfy anything, and skipping it avoids a per-modify graph query.
-            if was_new:
-                self._resync_referrers(col.sources, cs.failed_sources)
+            # A note can satisfy a dangling [[wikilink]] in another note; re-
+            # resolve those referrers so their edge points at this note (a full
+            # walk would). Run on every successful link-sync, not just first
+            # index: a retry after a transient graph failure (chunks already
+            # landed) must still heal the referrers. Cheap no-op when nothing
+            # dangling matches.
+            self._resync_referrers(col.sources, cs.failed_sources)
 
         first_source = col.sources[0] if col.sources else None
         return FileSyncResult(
@@ -259,8 +262,11 @@ class MarkdownSyncer:
                 continue
             referrers.update(r for r in found if r not in indexed)
         for referrer in referrers:
+            path = os.path.join(self.index_root, referrer)
+            if not _is_within(path, self.subtree):
+                continue  # sibling outside the watched subtree — don't rewrite it
             try:
-                self._resync_file_links(os.path.join(self.index_root, referrer))
+                self._resync_file_links(path)
             except Exception:  # noqa: BLE001 — a referrer fixup must not fail the new note's index
                 continue
 

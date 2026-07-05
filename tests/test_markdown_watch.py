@@ -554,23 +554,47 @@ def test_creating_a_note_reresolves_referring_dangling_wikilink(tmp_path):
     assert graph.edges["a.md"] == ["b.md"]  # re-resolved, no longer dangling
 
 
-def test_modify_does_not_trigger_referrer_resolution(tmp_path):
-    # Referrer re-resolution only makes sense for a NEW note; a plain modify of
-    # an existing note must not issue the (potentially costly) referrer query.
+def test_referrer_resolution_is_idempotent_on_reindex(tmp_path):
+    # Referrer resolution runs on every index (so a retry after a graph failure
+    # still heals referrers), but re-indexing an already-resolved note must not
+    # clobber the referrer's edge — the query finds nothing dangling now.
     store = _mem_store()
     root = str(tmp_path.resolve())
     graph = _ReverseGraph()
     syncer = MarkdownSyncer(
         store, _FakeProvider(), index_root=root, chunk_size=10000, graph=graph
     )
-    f = tmp_path / "a.md"
-    f.write_text("# A\n")
-    syncer.index_file(f)  # new -> one referrer query
-    assert graph.referrer_queries == 1
+    (tmp_path / "a.md").write_text("# A\n\nsee [[B]]\n")
+    (tmp_path / "b.md").write_text("# B\n")
+    syncer.index_file(tmp_path / "a.md")
+    syncer.index_file(tmp_path / "b.md")
+    assert graph.edges["a.md"] == ["b.md"]
 
-    f.write_text("# A\n\nmore body\n")
-    syncer.index_file(f)  # modify -> no referrer query
-    assert graph.referrer_queries == 1
+    (tmp_path / "b.md").write_text("# B\n\nmore\n")
+    syncer.index_file(tmp_path / "b.md")  # modify — still queries, no clobber
+    assert graph.edges["a.md"] == ["b.md"]
+
+
+def test_referrer_resolution_stays_within_watched_subtree(tmp_path):
+    # Under a nested --index-root watch, creating a note in the watched subtree
+    # must not rewrite a dangling referrer that lives OUTSIDE the subtree.
+    store = _mem_store()
+    root = str(tmp_path.resolve())
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    graph = _ReverseGraph()
+    syncer = MarkdownSyncer(
+        store, _FakeProvider(), index_root=root, chunk_size=10000, graph=graph,
+        subtree=str(sub),
+    )
+    # a referrer OUTSIDE the watched subtree already links to a dangling "B"
+    (tmp_path / "outside.md").write_text("# O\n\nsee [[B]]\n")
+    graph.edges["outside.md"] = ["B"]
+    # create b.md INSIDE the watched subtree
+    (sub / "b.md").write_text("# B\n")
+    syncer.index_file(sub / "b.md")
+    # outside.md's edge is left untouched (it's not in the watched subtree)
+    assert graph.edges["outside.md"] == ["B"]
 
 
 def test_syncer_syncs_and_clears_graph_links(tmp_path):
