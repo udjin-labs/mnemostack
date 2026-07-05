@@ -182,6 +182,8 @@ def _recall_for_cli(args: argparse.Namespace, recaller, query: str, limit: int):
     pipeline = build_full_pipeline(
         state_store=FileStateStore(default_state_path()),
         graph_uri=getattr(args, "memgraph_uri", None) or None,
+        graph_timeout=getattr(args, "graph_timeout", 5.0),
+        **{f"graph_{k}": v for k, v in _graph_auth(args).items()},
     )
     reranker = None
     try:
@@ -466,6 +468,15 @@ def _source_enabled_for_cli(name: str, source_filter: set[str] | None) -> bool:
     return source_filter is None or name in source_filter
 
 
+def _graph_auth(args: argparse.Namespace) -> dict[str, Any]:
+    """Graph auth (user/password/database) seeded onto the namespace by build_parser."""
+    return {
+        "user": getattr(args, "graph_user", "") or "",
+        "password": getattr(args, "graph_password", "") or "",
+        "database": getattr(args, "graph_database", None),
+    }
+
+
 def _build_recaller(
     args: argparse.Namespace,
     provider,
@@ -486,7 +497,7 @@ def _build_recaller(
             retrievers.append(BM25Retriever(docs=bm25_docs))
     memgraph_uri = getattr(args, "memgraph_uri", None)
     if _source_enabled_for_cli("memgraph", source_filter) and memgraph_uri:
-        retrievers.append(MemgraphRetriever(uri=memgraph_uri))
+        retrievers.append(MemgraphRetriever(uri=memgraph_uri, **_graph_auth(args)))
     if (
         provider is not None
         and store is not None
@@ -878,7 +889,7 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
     edges_written = 0
     graph_uri = getattr(args, "memgraph_uri", None) or None
     if graph_uri:
-        from .graph import GraphStore
+        from .graph.factory import make_graph_store
 
         # Seed with every indexed source so a file whose links were all removed
         # is still synced (sync_file_links deletes its stale LINKS_TO edges).
@@ -891,7 +902,11 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
             if edge.target not in by_source[edge.source]:
                 by_source[edge.source].append(edge.target)
         try:
-            graph = GraphStore(uri=graph_uri, timeout=getattr(args, "graph_timeout", 5.0))
+            graph = make_graph_store(
+                graph_uri,
+                timeout=getattr(args, "graph_timeout", 5.0),
+                **_graph_auth(args),
+            )
         except Exception as exc:  # noqa: BLE001 — graph optional; indexing already succeeded
             print(f"warning: graph unavailable, links not written ({exc})", file=sys.stderr)
         else:
@@ -973,6 +988,14 @@ def build_parser() -> argparse.ArgumentParser:
     cfg = Config.load()
     p = argparse.ArgumentParser(prog="mnemostack", description="Memory stack for AI agents")
     p.add_argument("--version", action="version", version=f"mnemostack {__version__}")
+    # Graph auth (user/password/database) is sourced from the config file / env,
+    # not typed CLI flags (a password on argv leaks via `ps`). Seed it onto every
+    # command's namespace so the graph construction helpers can thread it through.
+    p.set_defaults(
+        graph_user=cfg.graph.user,
+        graph_password=cfg.graph.password,
+        graph_database=cfg.graph.database,
+    )
     sub = p.add_subparsers(dest="command", required=True)
 
     common = argparse.ArgumentParser(add_help=False)
@@ -1559,6 +1582,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
         collection=args.collection,
         qdrant_url=args.qdrant,
         graph_uri=args.memgraph_uri,
+        graph_user=_graph_auth(args)["user"],
+        graph_password=_graph_auth(args)["password"],
+        graph_database=_graph_auth(args)["database"],
         graph_timeout=args.graph_timeout,
         bm25_paths=list(args.bm25_path) if args.bm25_path else None,
         vector_floor=max(0, int(args.vector_floor)),
@@ -1593,9 +1619,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
 def cmd_graph_migrate_current(args: argparse.Namespace) -> int:
     """Backfill legacy graph NULL validity markers to the explicit current marker."""
-    from .graph import GraphStore
+    from .graph.factory import make_graph_store
 
-    store = GraphStore(uri=args.memgraph_uri, timeout=args.timeout)
+    store = make_graph_store(args.memgraph_uri, timeout=args.timeout, **_graph_auth(args))
     try:
         counts = store.backfill_current_markers(dry_run=args.dry_run)
     finally:
@@ -1648,6 +1674,9 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
         llm_model=_llm_model(args),
         qdrant_host=args.qdrant,
         memgraph_uri=args.memgraph_uri,
+        graph_user=_graph_auth(args)["user"],
+        graph_password=_graph_auth(args)["password"],
+        graph_database=_graph_auth(args)["database"],
         graph_timeout=args.graph_timeout,
         bm25_paths=list(args.bm25_path) if args.bm25_path else None,
         state_path=args.state_path,

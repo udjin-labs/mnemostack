@@ -260,6 +260,10 @@ class ServerConfig:
     token_budget: int | None = None  # default recall token budget; requests may override
     state_path: str = field(default_factory=default_state_path)
     auto_record_ior: bool = False
+    # graph auth appended at the tail to preserve positional back-compat.
+    graph_user: str = ""
+    graph_password: str = ""
+    graph_database: str | None = None
 
     def __post_init__(self) -> None:
         if self.rerank_mode not in RERANK_MODES:
@@ -281,6 +285,9 @@ class ServerConfig:
             collection=cfg.vector.collection,
             qdrant_url=cfg.vector.host,
             graph_uri=cfg.graph.uri or "bolt://localhost:7687",
+            graph_user=cfg.graph.user,
+            graph_password=cfg.graph.password,
+            graph_database=cfg.graph.database,
             graph_health_timeout=cfg.graph.health_timeout,
             graph_timeout=cfg.graph.timeout,
             bm25_paths=list(cfg.recall.bm25_paths) or None,
@@ -434,10 +441,11 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
 
             d = GraphDatabase.driver(
                 cfg.graph_uri,
+                auth=(cfg.graph_user, cfg.graph_password) if cfg.graph_user else None,
                 connection_timeout=cfg.graph_health_timeout,
                 connection_acquisition_timeout=cfg.graph_health_timeout,
             )
-            with d.session() as s:
+            with d.session(database=cfg.graph_database) as s:
                 s.run("RETURN 1").single()
             d.close()
             return True
@@ -448,7 +456,15 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     maybe_retrievers = [
         VectorRetriever(embedding=provider, vector_store=store),
         BM25Retriever(docs=bm25_docs) if bm25_docs else None,
-        MemgraphRetriever(uri=cfg.graph_uri, timeout=cfg.graph_timeout) if cfg.graph_uri else None,
+        MemgraphRetriever(
+            uri=cfg.graph_uri,
+            user=cfg.graph_user,
+            password=cfg.graph_password,
+            database=cfg.graph_database,
+            timeout=cfg.graph_timeout,
+        )
+        if cfg.graph_uri
+        else None,
         TemporalRetriever(embedding=provider, vector_store=store),
     ]
     retrievers: list[Retriever] = [r for r in maybe_retrievers if r is not None]
@@ -461,6 +477,9 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     pipeline = build_full_pipeline(
         state_store=FileStateStore(state_path),
         graph_uri=cfg.graph_uri,
+        graph_user=cfg.graph_user,
+        graph_password=cfg.graph_password,
+        graph_database=cfg.graph_database,
         graph_timeout=cfg.graph_timeout,
     )
 

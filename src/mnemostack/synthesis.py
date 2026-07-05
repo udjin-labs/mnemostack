@@ -249,6 +249,7 @@ def _build_recaller_from_kwargs(
                 uri=memgraph_uri or "bolt://localhost:7687",
                 user=kwargs.get("memgraph_user", ""),
                 password=kwargs.get("memgraph_password", ""),
+                database=kwargs.get("memgraph_database"),
                 driver=kwargs.get("graph_driver"),
                 timeout=float(kwargs.get("graph_timeout", 5.0)),
             )
