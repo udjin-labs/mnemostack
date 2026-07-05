@@ -240,6 +240,54 @@ class HealthResponse(BaseModel):
     memgraph: bool
 
 
+class LiveResponse(BaseModel):
+    status: str  # always "ok" — the process is up
+    version: str
+
+
+class ReadyResponse(BaseModel):
+    status: str  # "ready" | "not_ready"
+    version: str
+    qdrant: bool  # readiness gate: recall needs the vector store
+    # graph is optional / fail-soft, so it's reported but does NOT gate readiness
+    memgraph: bool
+
+
+class StatusResponse(BaseModel):
+    version: str
+    provider: str
+    llm: str
+    collection: str
+    qdrant_url: str
+    qdrant: bool
+    memgraph: bool
+    # total recall invocations recorded, including the extra sub-recalls the
+    # answer generator issues on expansion/inference retries — so this counts
+    # recall calls, not user-facing recall requests served.
+    recall_calls: float
+    # total degradation events across the recall/answer serving path (fallbacks,
+    # rewrite failures, answer errors) — see _DEGRADED_METRICS.
+    degraded_events: float
+
+
+# Counters that represent a real degradation of the recall/answer serving path.
+# An explicit allowlist rather than a substring match: substring matching both
+# under-counts (e.g. `answer.errors` contains none of "fail"/"degrad"/"fallback")
+# and, if the recorder is ever shared across processes, leaks unrelated failures
+# (e.g. `ingest.failed`) into an operator's serving-degradation signal.
+# `temporal.no_parse` is deliberately excluded — a query with no parseable date
+# is routine, not a degradation.
+_DEGRADED_METRICS = frozenset(
+    {
+        "mnemostack.recall.fallback_triggered",
+        "mnemostack.recall.followup_rewrite_failed",
+        "mnemostack.query_expansion.errors",
+        "mnemostack.answer.errors",
+        "mnemostack.answer.list_finalize_fallback",
+    }
+)
+
+
 # ----- Server construction -----
 
 
@@ -452,6 +500,16 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         except Exception:
             return False
 
+    def _qdrant_ok() -> bool:
+        # Ping-level reachability: only that the client can reach Qdrant, not
+        # that the collection exists (a fresh deploy before any ingest is still
+        # reachable). Used by /health, /readyz and /status.
+        try:
+            store.client.get_collections()
+            return True
+        except Exception:
+            return False
+
     bm25_docs = _build_bm25_docs(cfg.bm25_paths)
     maybe_retrievers = [
         VectorRetriever(embedding=provider, vector_store=store),
@@ -583,16 +641,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
 
     @app.get("/health", response_model=HealthResponse)
     def health():
-        # Ping-level reachability. Avoid `store.count()` because it requires
-        # the collection to exist — a fresh deployment before any ingest
-        # would be reported unhealthy. Use the underlying client so we only
-        # check the HTTP endpoint is alive.
-        qdrant_ok = False
-        try:
-            store.client.get_collections()
-            qdrant_ok = True
-        except Exception:
-            qdrant_ok = False
+        qdrant_ok = _qdrant_ok()
         return HealthResponse(
             status="ok" if qdrant_ok else "degraded",
             version=__version__,
@@ -600,6 +649,64 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             collection=cfg.collection,
             qdrant=qdrant_ok,
             memgraph=_graph_ok(),
+        )
+
+    @app.get("/healthz", response_model=LiveResponse)
+    def healthz():
+        # Liveness: is the process up? Deliberately checks NO dependencies — a
+        # transient Qdrant/Memgraph outage must not make an orchestrator kill an
+        # otherwise-healthy process (that's what /readyz is for).
+        return LiveResponse(status="ok", version=__version__)
+
+    @app.get(
+        "/readyz",
+        response_model=ReadyResponse,
+        responses={503: {"model": ReadyResponse}},
+    )
+    def readyz():
+        # Readiness: can we serve traffic? Qdrant is the hard dependency (recall
+        # needs it), so it gates readiness with a 503. The graph is optional and
+        # fail-soft, so it's reported but never blocks readiness.
+        qdrant_ok = _qdrant_ok()
+        body = ReadyResponse(
+            status="ready" if qdrant_ok else "not_ready",
+            version=__version__,
+            qdrant=qdrant_ok,
+            memgraph=_graph_ok(),
+        )
+        if not qdrant_ok:
+            from fastapi.responses import JSONResponse
+
+            # mode="json" so the body stays JSON-safe if a non-native field type
+            # is ever added — returning a Response bypasses response_model.
+            return JSONResponse(status_code=503, content=body.model_dump(mode="json"))
+        return body
+
+    @app.get("/status", response_model=StatusResponse)
+    def status():
+        # Operator snapshot: config, live dependency reachability, and headline
+        # counters (recall volume + total degradation events) from the recorder.
+        rec = get_recorder()
+        recall_calls = 0.0
+        degraded = 0.0
+        if isinstance(rec, InMemoryRecorder):
+            # key = (name, labels...); sum across label sets for each metric.
+            for key, value in rec.counters.items():
+                name = key[0]
+                if name == "mnemostack.recall.calls":
+                    recall_calls += value
+                elif name in _DEGRADED_METRICS:
+                    degraded += value
+        return StatusResponse(
+            version=__version__,
+            provider=cfg.provider_name,
+            llm=cfg.llm_name,
+            collection=cfg.collection,
+            qdrant_url=cfg.qdrant_url,
+            qdrant=_qdrant_ok(),
+            memgraph=_graph_ok(),
+            recall_calls=recall_calls,
+            degraded_events=degraded,
         )
 
     @app.post("/recall", response_model=RecallResponse)

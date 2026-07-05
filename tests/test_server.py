@@ -101,12 +101,16 @@ def _patched_app(
     with_answer: bool = True,
     pipeline: _FakePipeline | None = None,
     config: ServerConfig | None = None,
+    store_factory=None,
 ):
     """Build the FastAPI app with the heavy retrieval layers mocked out."""
     import mnemostack.server as srv
 
     monkeypatch.setattr(
-        srv, "VectorStore", lambda **_: type("VS", (), {"count": lambda self: 0, "dimension": 3})()
+        srv,
+        "VectorStore",
+        store_factory
+        or (lambda **_: type("VS", (), {"count": lambda self: 0, "dimension": 3})()),
     )
 
     class _FakeProvider:
@@ -197,6 +201,85 @@ def test_health_endpoint(monkeypatch):
     data = r.json()
     assert data["provider"] == "fake"
     assert "qdrant" in data and "memgraph" in data
+
+
+class _ReachableStore:
+    """Minimal VectorStore stand-in whose Qdrant client is reachable."""
+
+    dimension = 3
+
+    def __init__(self, **_):
+        class _Client:
+            def get_collections(self):
+                return object()
+
+        self.client = _Client()
+
+
+class _UnreachableStore:
+    """VectorStore stand-in whose Qdrant client raises, as a real outage would."""
+
+    dimension = 3
+
+    def __init__(self, **_):
+        class _Client:
+            def get_collections(self):
+                raise ConnectionError("qdrant down")
+
+        self.client = _Client()
+
+
+def test_healthz_liveness_always_ok(monkeypatch):
+    # Liveness must not depend on Qdrant/graph — up even with no backends.
+    app, _ = _patched_app(monkeypatch)
+    r = TestClient(app).get("/healthz")
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
+    assert r.json()["version"]
+
+
+def test_readyz_503_when_qdrant_unreachable(monkeypatch):
+    # Qdrant client raises (as a real outage would) -> get_collections fails -> not ready.
+    app, _ = _patched_app(monkeypatch, store_factory=lambda **_: _UnreachableStore())
+    r = TestClient(app).get("/readyz")
+    assert r.status_code == 503
+    assert r.json()["status"] == "not_ready"
+    assert r.json()["qdrant"] is False
+
+
+def test_readyz_200_when_qdrant_reachable(monkeypatch):
+    app, _ = _patched_app(monkeypatch, store_factory=lambda **_: _ReachableStore())
+    r = TestClient(app).get("/readyz")
+    assert r.status_code == 200
+    assert r.json()["status"] == "ready"
+    assert r.json()["qdrant"] is True
+
+
+def test_status_reports_config_and_counters(monkeypatch):
+    app, _ = _patched_app(monkeypatch)
+    r = TestClient(app).get("/status")
+    assert r.status_code == 200
+    d = r.json()
+    assert d["provider"] == "fake"
+    assert d["collection"]
+    assert "recall_calls" in d and "degraded_events" in d
+    # graph_configured is intentionally not exposed (config conflates unset with
+    # the localhost default, so the field would be misleading).
+    assert "graph_configured" not in d
+
+
+def test_status_degraded_events_counts_only_serving_degradations(monkeypatch):
+    from mnemostack.observability import counter
+
+    app, _ = _patched_app(monkeypatch)
+    # A real serving-path degradation is counted...
+    counter("mnemostack.recall.fallback_triggered", 2)
+    # ...but an unrelated ingest failure (which could leak in via a shared
+    # recorder) and a routine no-parse are not.
+    counter("mnemostack.ingest.failed", 5)
+    counter("mnemostack.recall.temporal_no_parse", 3)
+    d = TestClient(app).get("/status").json()
+    assert d["degraded_events"] == 2
 
 
 def test_build_app_passes_configured_provider_models(monkeypatch):
