@@ -534,7 +534,15 @@ class MemgraphRetriever(Retriever):
         rel_valid = self._valid_clause("r", as_of, include_invalidated)
         target_valid = self._valid_clause("m", as_of, include_invalidated)
         # Only bind $as_of when the predicate references it.
-        extra = {"as_of": as_of} if as_of is not None else {}
+        validity_active = as_of is not None or not include_invalidated
+        # Cap each probe at the candidate budget rather than an arbitrary 5:
+        # with the (name, index_root) grouping one filename can legitimately
+        # match many nodes — one per root — and a hardcoded LIMIT would silently
+        # drop roots before the grouping/ranking below could consider them.
+        node_budget = self.max_nodes * 3 if validity_active else self.max_nodes
+        extra: dict[str, Any] = {"probe_lim": node_budget}
+        if as_of is not None:
+            extra["as_of"] = as_of
         counts: dict[tuple[str, str], dict[str, Any]] = defaultdict(
             lambda: {"count": 0, "type": "", "mc": ""}
         )
@@ -554,7 +562,8 @@ class MemgraphRetriever(Retriever):
                             "MATCH (n) WHERE (n.telegram_id = $w OR n.contact_id = $w) "
                             f"AND {node_valid} "
                             "RETURN n.name AS name, labels(n)[0] AS type, "
-                            "n.memory_class AS mc, n.index_root AS index_root LIMIT 5",
+                            "n.memory_class AS mc, n.index_root AS index_root "
+                            "LIMIT $probe_lim",
                             w=w,
                             **extra,
                         ).data()
@@ -570,7 +579,8 @@ class MemgraphRetriever(Retriever):
                             "MATCH (n) WHERE coalesce(n.name_lower, toLower(n.name)) = $w "
                             f"AND {node_valid} "
                             "RETURN n.name AS name, labels(n)[0] AS type, "
-                            "n.memory_class AS mc, n.index_root AS index_root LIMIT 5",
+                            "n.memory_class AS mc, n.index_root AS index_root "
+                            "LIMIT $probe_lim",
                             w=w,
                             **extra,
                         ).data()
@@ -580,7 +590,8 @@ class MemgraphRetriever(Retriever):
                             "MATCH (n) WHERE toLower(coalesce(n.telegram_username, '')) = $w "
                             f"AND {node_valid} "
                             "RETURN n.name AS name, labels(n)[0] AS type, "
-                            "n.memory_class AS mc, n.index_root AS index_root LIMIT 5",
+                            "n.memory_class AS mc, n.index_root AS index_root "
+                            "LIMIT $probe_lim",
                             w=w,
                             **extra,
                         ).data()
@@ -590,7 +601,8 @@ class MemgraphRetriever(Retriever):
                             "MATCH (n) WHERE coalesce(n.name_lower, toLower(n.name)) CONTAINS $w "
                             f"AND {node_valid} "
                             "RETURN n.name AS name, labels(n)[0] AS type, "
-                            "n.memory_class AS mc, n.index_root AS index_root LIMIT 5",
+                            "n.memory_class AS mc, n.index_root AS index_root "
+                            "LIMIT $probe_lim",
                             w=w,
                             **extra,
                         ).data()
@@ -609,8 +621,6 @@ class MemgraphRetriever(Retriever):
                         counts[key]["mc"] = n.get("mc", "") or ""
                 # Over-fetch node candidates so a window of stale-only nodes
                 # doesn't hide valid ones below it before the bare-node skip.
-                validity_active = as_of is not None or not include_invalidated
-                node_budget = self.max_nodes * 3 if validity_active else self.max_nodes
                 ranked = sorted(counts.items(), key=lambda kv: -kv[1]["count"])[:node_budget]
                 results: list[RecallResult] = []
                 for (name, root_key), info in ranked:

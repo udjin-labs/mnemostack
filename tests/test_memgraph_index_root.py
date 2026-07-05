@@ -55,6 +55,11 @@ class _RecordingSession:
                 for (name, root) in self._files
                 if name.lower() == w
             ]
+            # Honor the probe's LIMIT the way Memgraph would, so a regression to
+            # a too-small cap (e.g. the old hardcoded 5) would drop roots here.
+            probe_lim = params.get("probe_lim")
+            if probe_lim is not None:
+                rows = rows[:probe_lim]
             return _Result(rows)
         # rel expansion — pinned by (name, index_root)
         name = params["name"]
@@ -105,6 +110,18 @@ def test_same_named_files_across_roots_stay_distinct():
 
     # Payload carries the root for downstream attribution.
     assert {r.payload["index_root"] for r in out} == {"/corpus/a", "/corpus/b"}
+
+
+def test_more_than_five_roots_not_truncated():
+    # More roots than the old hardcoded per-probe LIMIT 5: every root must still
+    # be counted/expanded (the limit is tied to the candidate budget now).
+    files = {("index.md", f"/corpus/{i}"): [f"note-{i}.md"] for i in range(8)}
+    rel_calls: list[tuple[str, str]] = []
+    out = _retriever(files, rel_calls).search("index.md", include_invalidated=True)
+
+    ids = {r.id for r in out}
+    assert len(ids) == 8, ids
+    assert ids == {f"graph:/corpus/{i}:index.md" for i in range(8)}
 
 
 def test_entity_node_without_index_root_keeps_plain_id():
