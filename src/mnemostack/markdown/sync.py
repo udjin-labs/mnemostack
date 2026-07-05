@@ -1,0 +1,260 @@
+"""Incremental markdown sync — index or remove a single file into a live index.
+
+The one-shot ``index-markdown`` command walks a whole folder; the watcher
+(``--watch``) needs to apply one file at a time as it changes. Both share the
+same low-level steps here so a per-file update behaves identically to a full
+walk for the file it touches: embed new chunks, refresh changed payloads, prune
+chunks the file no longer produces, and re-sync its graph links.
+
+A per-file update is deliberately NOT a full-root reconcile: it touches only the
+source(s) it was given, never siblings (mirroring the one-shot command's
+``full_root_walk`` gate).
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from .indexer import collect_markdown
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .indexer import MarkdownCollection
+
+
+def _is_within(path: str, base: str) -> bool:
+    """True when ``path`` is ``base`` itself or nested under it (no symlink resolve)."""
+    try:
+        return os.path.commonpath([os.path.abspath(path), base]) == base
+    except ValueError:  # different drives on Windows, etc.
+        return False
+
+
+@dataclass
+class ChunkSyncResult:
+    inserted: int = 0
+    refreshed: int = 0
+    failed: int = 0
+    failed_sources: set[str] = field(default_factory=set)
+
+
+def upsert_markdown_chunks(
+    store: Any,
+    provider: Any,
+    chunks: list[tuple[str, str, dict]],
+    existing_payloads: dict[str, dict],
+) -> ChunkSyncResult:
+    """Embed & upsert new chunks; refresh payloads of already-indexed ones.
+
+    A chunk id already present is not re-embedded (the id is content-derived);
+    its payload is refreshed so a frontmatter edit syncs without re-embedding,
+    deleting only keys this indexer owned last run (``_md_keys``) that the file
+    no longer produces — foreign payload fields (enrichment, validity markers)
+    are preserved.
+    """
+    existing_ids = set(existing_payloads)
+    res = ChunkSyncResult()
+    for cid, text, payload in chunks:
+        if cid in existing_ids:
+            continue
+        vec = provider.embed(text)
+        if not vec:
+            res.failed += 1
+            res.failed_sources.add(payload["source"])
+            continue
+        store.upsert(cid, vec, payload)
+        res.inserted += 1
+    for cid, _text, payload in chunks:
+        if cid not in existing_ids:
+            continue
+        old = existing_payloads.get(cid, {})
+        owned = old.get("_md_keys") or []
+        stale = [k for k in owned if k not in payload]
+        if stale:
+            store.delete_payload_keys(cid, stale)
+        store.set_payload(cid, payload)
+        res.refreshed += 1
+    return res
+
+
+def build_link_map(
+    col: MarkdownCollection, failed_sources: set[str]
+) -> dict[str, list[str]]:
+    """Map each (non-failed) source to its de-duplicated outgoing link targets.
+
+    Every visited source is seeded (even with no links) so ``sync_file_links``
+    clears stale ``LINKS_TO`` edges of a file whose links were all removed.
+    """
+    by_source: dict[str, list[str]] = {
+        s: [] for s in col.sources if s not in failed_sources
+    }
+    for edge in col.edges:
+        if edge.source in failed_sources:
+            continue
+        if edge.target not in by_source[edge.source]:
+            by_source[edge.source].append(edge.target)
+    return by_source
+
+
+@dataclass
+class FileSyncResult:
+    source: str | None = None
+    inserted: int = 0
+    refreshed: int = 0
+    pruned: int = 0
+    failed: int = 0
+    edges: int = 0
+    error: str | None = None
+
+
+class MarkdownSyncer:
+    """Applies single-file markdown changes to a live collection (+ graph).
+
+    Holds the collection/embedder/graph so the watcher can call ``index_file`` /
+    ``remove_file`` per event. ``graph`` is an optional open ``GraphStore``.
+    """
+
+    def __init__(
+        self,
+        store: Any,
+        provider: Any,
+        *,
+        index_root: str,
+        chunk_size: int,
+        graph: Any = None,
+    ):
+        self.store = store
+        self.provider = provider
+        self.index_root = str(Path(index_root).resolve())
+        self.chunk_size = chunk_size
+        self.graph = graph
+
+    def _prune_markdown_stale(self, fresh_by_source: dict[str, set[str]]) -> int:
+        """Prune stale chunks of the given sources — markdown-owned points only.
+
+        Like :func:`prune_stale_chunks`, but skips points without the indexer's
+        ``_md_keys`` record, so chunks the generic ``index`` command wrote for the
+        same ``(source, index_root)`` are never deleted by the markdown watcher.
+        """
+        removed = 0
+        for source, fresh_ids in fresh_by_source.items():
+            stale: list[Any] = []
+            for hit in self.store.scroll(
+                filters={"source": source, "index_root": self.index_root}
+            ):
+                payload = hit.payload or {}
+                if payload.get("_md_keys") and str(hit.id) not in fresh_ids:
+                    stale.append(hit.id)
+            if stale:
+                removed += self.store.delete_points(stale)
+        return removed
+
+    def source_for(self, path: str | Path) -> str:
+        """The corpus-relative source string the indexer stores for ``path``.
+
+        Matches ``indexer._rel``: path relative to index_root, as posix. Uses an
+        absolute path WITHOUT resolving symlinks, so a symlinked note keeps the
+        link's source name (the one the initial walk indexed), not the target's.
+        """
+        return Path(os.path.abspath(str(path))).relative_to(self.index_root).as_posix()
+
+    def index_file(self, path: str | Path) -> FileSyncResult:
+        """Index/re-index one markdown file. Idempotent; touches only this file."""
+        col = collect_markdown(
+            Path(os.path.abspath(str(path))),  # do NOT resolve symlinks
+            chunk_size=self.chunk_size,
+            index_root=self.index_root,
+            root_dir=self.index_root,
+        )
+        if col.files == 0:
+            return FileSyncResult()  # not a .md file / vanished before we read it
+
+        chunks = [(c.id, c.text, c.payload) for c in col.chunks]
+        existing: dict[str, dict] = {}
+        for source in col.sources:
+            for hit in self.store.scroll(
+                filters={"index_root": self.index_root, "source": source}
+            ):
+                existing[str(hit.id)] = hit.payload or {}
+
+        cs = upsert_markdown_chunks(self.store, self.provider, chunks, existing)
+
+        # Prune chunks this file no longer produces (shrunk / re-chunked). Skip a
+        # source whose embeddings failed — its fresh ids never landed, so pruning
+        # would drop live data with no replacement.
+        fresh_by_source: dict[str, set[str]] = {
+            s: set() for s in col.sources if s not in cs.failed_sources
+        }
+        for cid, _text, payload in chunks:
+            src = payload["source"]
+            if src in fresh_by_source:
+                fresh_by_source[src].add(cid)
+        pruned = self._prune_markdown_stale(fresh_by_source)
+
+        edges = 0
+        if self.graph is not None:
+            by_source = build_link_map(col, cs.failed_sources)
+            for src, targets in by_source.items():
+                edges += self.graph.sync_file_links(
+                    src, targets, index_root=self.index_root
+                )
+
+        first_source = col.sources[0] if col.sources else None
+        return FileSyncResult(
+            source=first_source,
+            inserted=cs.inserted,
+            refreshed=cs.refreshed,
+            pruned=pruned,
+            failed=cs.failed,
+            edges=edges,
+        )
+
+    def remove_file(self, path: str | Path) -> FileSyncResult:
+        """Drop a deleted file's chunks and clear its outgoing graph links."""
+        source = self.source_for(path)
+        # Clear the graph edges BEFORE pruning the vector record. If the graph
+        # write fails (a transient Memgraph outage), the exception propagates
+        # with the vector chunks still present, so reconcile_deletions finds this
+        # source again and retries — pruning the vector first would orphan the
+        # graph edges with no record left to retry from.
+        if self.graph is not None:
+            self.graph.sync_file_links(source, [], index_root=self.index_root)
+        pruned = self._prune_markdown_stale({source: set()})
+        return FileSyncResult(source=source, pruned=pruned)
+
+    def reconcile_deletions(self, within: str | Path | None = None) -> list[str]:
+        """Remove sources whose file no longer exists on disk. Returns removed.
+
+        A safety net for deletions the incremental event stream can miss: a file
+        created and deleted during the initial index (never observed), or a
+        directory removed as a single event. ``within`` restricts reconciliation
+        to sources under that subtree — the watcher passes the watched folder so
+        a narrower ``--index-root`` watch never prunes siblings outside it (the
+        one-shot path gates the same reconcile behind ``full_root_walk``).
+        """
+        scope = os.path.abspath(str(within)) if within is not None else self.index_root
+        # Collect the source set fully before removing anything — deleting points
+        # mid-scroll would mutate the collection the lazy scroll is iterating.
+        # Only markdown-owned sources (payload carries the indexer's `_md_keys`
+        # record) are eligible, so a markdown watcher never prunes chunks the
+        # generic `index` command wrote under the same collection/root.
+        sources: set[str] = set()
+        for hit in self.store.scroll(filters={"index_root": self.index_root}):
+            payload = hit.payload or {}
+            source = payload.get("source")
+            if source and payload.get("_md_keys"):
+                sources.add(source)
+        removed: list[str] = []
+        for source in sorted(sources):
+            path = os.path.join(self.index_root, source)
+            if not _is_within(path, scope):
+                continue  # outside the watched subtree — don't touch siblings
+            # isfile (not exists): a directory that replaced the note at the same
+            # path means the markdown source — a file — is gone. isfile follows
+            # symlinks, so a live symlinked note still counts as present.
+            if not os.path.isfile(path):
+                self.remove_file(path)
+                removed.append(source)
+        return removed
