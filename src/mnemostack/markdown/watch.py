@@ -36,8 +36,13 @@ except Exception:  # pragma: no cover - exercised only where watchdog is absent
 UPSERT = "upsert"
 REMOVE = "remove"
 
-#: Floor for the watchdog idle/flush tick so --watch-debounce 0 doesn't busy-loop.
+#: Floor for the idle/flush tick so --watch-debounce/--watch-poll-interval 0
+#: don't busy-loop on sleep(0).
 _MIN_IDLE_TICK = 0.1
+
+#: How often the watchdog backend does a safety-net mtime rescan for changes it
+#: can't emit events for (directory moves, externally-edited symlink targets).
+_WATCHDOG_RESCAN_EVERY = 30.0
 
 
 def _is_markdown(path: str) -> bool:
@@ -128,7 +133,6 @@ class MarkdownWatcher:
         self._debouncer = _Debouncer(debounce, clock)
         self._on_result = on_result
         self._on_error = on_error
-        self._reconcile_pending = threading.Event()
 
     # --- event core (filesystem-agnostic, unit-testable) ---
 
@@ -207,9 +211,13 @@ class MarkdownWatcher:
         return self.poll_once(baseline)
 
     def reconcile(self) -> None:
-        """Drop indexed sources whose file is gone (deletions events can miss)."""
+        """Drop indexed sources whose file is gone (deletions events can miss).
+
+        Scoped to the watched folder so a narrower ``--index-root`` watch never
+        prunes siblings outside the observed subtree.
+        """
         try:
-            removed = self.syncer.reconcile_deletions()
+            removed = self.syncer.reconcile_deletions(within=self.root)
         except Exception as exc:  # noqa: BLE001 — reconcile is best-effort, never fatal
             if self._on_error is not None:
                 self._on_error("<reconcile>", REMOVE, exc)
@@ -251,17 +259,11 @@ class MarkdownWatcher:
                     self._emit(event.src_path, UPSERT)
 
             def on_deleted(self, event):
-                if event.is_directory:
-                    # A folder removed as one DirDeletedEvent carries no per-file
-                    # deletes; reconcile against disk to drop the gone sources.
-                    watcher._reconcile_pending.set()
-                else:
+                if not event.is_directory:
                     self._emit(event.src_path, REMOVE)
 
             def on_moved(self, event):
-                if event.is_directory:
-                    watcher._reconcile_pending.set()  # subtree moved out of the root
-                else:
+                if not event.is_directory:
                     self._emit(event.src_path, REMOVE)
                     self._emit(event.dest_path, UPSERT)
 
@@ -270,17 +272,25 @@ class MarkdownWatcher:
         observer.start()
         # Start observing BEFORE the catch-up so changes during reconciliation
         # are queued (the debouncer coalesces any duplicates).
-        self._catch_up(baseline)
+        snap = self._catch_up(baseline)
         self.reconcile()  # drop sources deleted during the initial index
         # Idle sleep is decoupled from the debounce window: with --watch-debounce 0
         # (immediate) a raw sleep(delay) would spin a core, so floor the tick.
         idle = max(self._debouncer.delay, _MIN_IDLE_TICK)
+        next_rescan = self._debouncer.clock() + _WATCHDOG_RESCAN_EVERY
         try:
             while not (stop_event is not None and stop_event.is_set()):
                 self._sleep(idle)
                 self.flush()
-                if self._reconcile_pending.is_set():
-                    self._reconcile_pending.clear()
+                # Periodic safety-net rescan: watchdog can't emit events for
+                # everything — a directory rename/move (its children), or a
+                # symlinked note whose target is edited via its real path outside
+                # the tree. An mtime poll (stat follows the symlink) catches these,
+                # and reconcile drops whatever disappeared.
+                now = self._debouncer.clock()
+                if now >= next_rescan:
+                    next_rescan = now + _WATCHDOG_RESCAN_EVERY
+                    snap = self.poll_once(snap)
                     self.reconcile()
         finally:
             observer.stop()

@@ -248,6 +248,39 @@ def test_reconcile_drops_sources_whose_file_is_gone(tmp_path):
     assert _sources_in(store, root) == {"here.md"}  # present source untouched
 
 
+def test_markdown_syncer_is_exported_from_package():
+    # The CHANGELOG advertises mnemostack.markdown.MarkdownSyncer — it must import.
+    from mnemostack.markdown import FileSyncResult, MarkdownSyncer
+
+    assert MarkdownSyncer is not None and FileSyncResult is not None
+
+
+def test_reconcile_scoped_to_subtree_spares_outside_siblings(tmp_path):
+    # With a narrower --index-root watch, reconcile must only prune sources under
+    # the watched subtree, never a sibling outside it (matches full_root_walk).
+    from mnemostack.ingest import stable_chunk_id
+
+    store = _mem_store()
+    root = str(tmp_path.resolve())
+    (tmp_path / "sub").mkdir()
+    syncer = MarkdownSyncer(store, _FakeProvider(), index_root=root, chunk_size=10000)
+    # both sources have no backing file; one is inside the watched subtree, one out
+    store.upsert(
+        stable_chunk_id("sub/gone.md", 0, "a"),
+        [1.0, 0.0, 0.0, 0.0],
+        {"text": "a", "source": "sub/gone.md", "index_root": root},
+    )
+    store.upsert(
+        stable_chunk_id("other.md", 0, "b"),
+        [1.0, 0.0, 0.0, 0.0],
+        {"text": "b", "source": "other.md", "index_root": root},
+    )
+
+    removed = syncer.reconcile_deletions(within=str(tmp_path / "sub"))
+    assert removed == ["sub/gone.md"]  # inside watched subtree -> pruned
+    assert _sources_in(store, root) == {"other.md"}  # sibling outside -> spared
+
+
 def test_watcher_reconcile_reports_removals(tmp_path):
     store = _mem_store()
     root = str(tmp_path.resolve())

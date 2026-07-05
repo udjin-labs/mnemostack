@@ -19,10 +19,18 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..ingest import prune_stale_chunks
-from . import collect_markdown
+from .indexer import collect_markdown
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .indexer import MarkdownCollection
+
+
+def _is_within(path: str, base: str) -> bool:
+    """True when ``path`` is ``base`` itself or nested under it (no symlink resolve)."""
+    try:
+        return os.path.commonpath([os.path.abspath(path), base]) == base
+    except ValueError:  # different drives on Windows, etc.
+        return False
 
 
 @dataclass
@@ -196,14 +204,17 @@ class MarkdownSyncer:
             self.graph.sync_file_links(source, [], index_root=self.index_root)
         return FileSyncResult(source=source, pruned=pruned)
 
-    def reconcile_deletions(self) -> list[str]:
-        """Remove sources under index_root whose file no longer exists on disk.
+    def reconcile_deletions(self, within: str | Path | None = None) -> list[str]:
+        """Remove sources whose file no longer exists on disk. Returns removed.
 
         A safety net for deletions the incremental event stream can miss: a file
         created and deleted during the initial index (never observed), or a
-        directory removed as a single event. Enumerates the indexed sources and
-        drops any whose backing file is gone.
+        directory removed as a single event. ``within`` restricts reconciliation
+        to sources under that subtree — the watcher passes the watched folder so
+        a narrower ``--index-root`` watch never prunes siblings outside it (the
+        one-shot path gates the same reconcile behind ``full_root_walk``).
         """
+        scope = os.path.abspath(str(within)) if within is not None else self.index_root
         # Collect the source set fully before removing anything — deleting points
         # mid-scroll would mutate the collection the lazy scroll is iterating.
         sources: set[str] = set()
@@ -213,7 +224,10 @@ class MarkdownSyncer:
                 sources.add(source)
         removed: list[str] = []
         for source in sorted(sources):
-            if not os.path.exists(os.path.join(self.index_root, source)):
-                self.remove_file(os.path.join(self.index_root, source))
+            path = os.path.join(self.index_root, source)
+            if not _is_within(path, scope):
+                continue  # outside the watched subtree — don't touch siblings
+            if not os.path.exists(path):
+                self.remove_file(path)
                 removed.append(source)
         return removed
