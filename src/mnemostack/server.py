@@ -252,9 +252,6 @@ class ServerConfig:
     collection: str = "mnemostack"
     qdrant_url: str = "http://localhost:6333"
     graph_uri: str | None = "bolt://localhost:7687"
-    graph_user: str = ""
-    graph_password: str = ""
-    graph_database: str | None = None
     graph_health_timeout: float = 1.0
     graph_timeout: float = 5.0
     bm25_paths: list[str] | None = None  # optional markdown dirs for BM25 corpus
@@ -263,6 +260,10 @@ class ServerConfig:
     token_budget: int | None = None  # default recall token budget; requests may override
     state_path: str = field(default_factory=default_state_path)
     auto_record_ior: bool = False
+    # graph auth appended at the tail to preserve positional back-compat.
+    graph_user: str = ""
+    graph_password: str = ""
+    graph_database: str | None = None
 
     def __post_init__(self) -> None:
         if self.rerank_mode not in RERANK_MODES:

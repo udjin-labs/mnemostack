@@ -38,9 +38,11 @@ def build_full_pipeline(
     graph_uri: str | None = None,
     graph_user: str = "",
     graph_password: str = "",
-    graph_database: str | None = None,
     graph_limit: int = 3,
     graph_timeout: float = 5.0,
+    # graph_database appended at the tail to preserve positional back-compat for
+    # library callers passing graph_limit/graph_timeout positionally.
+    graph_database: str | None = None,
 ) -> Pipeline:
     """Build the full 8-stage reranking pipeline.
 

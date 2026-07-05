@@ -192,6 +192,41 @@ def test_build_full_pipeline_accepts_graph_database():
     assert "graph_database" in inspect.signature(build_full_pipeline).parameters
 
 
+# ---------- positional back-compat: new params appended at the tail ----------
+
+
+def test_new_graph_params_are_appended_not_inserted():
+    """A mid-signature insert would shift existing positional args for library
+    callers; the new params must be the last ones on each widened signature.
+    """
+    import inspect
+
+    from mnemostack.mcp.server import build_server
+    from mnemostack.recall.pipeline import build_full_pipeline
+    from mnemostack.recall.pipeline.resurrection import GraphResurrection
+    from mnemostack.recall.retrievers import MemgraphRetriever
+
+    def _last(fn):
+        return list(inspect.signature(fn).parameters)[-1]
+
+    assert _last(build_full_pipeline) == "graph_database"
+    assert _last(GraphResurrection.__init__) == "database"
+    assert _last(MemgraphRetriever.__init__) == "database"
+    # build_server: the auth trio must sit after the pre-existing token_budget
+    bs = list(inspect.signature(build_server).parameters)
+    assert bs.index("graph_user") > bs.index("token_budget")
+
+
+def test_memgraph_retriever_positional_call_unshifted():
+    # Old-style positional call (uri, user, password, min_word) must still bind
+    # min_word — not the newly added database.
+    from mnemostack.recall.retrievers import MemgraphRetriever
+
+    r = MemgraphRetriever("bolt://x", "u", "p", 7)
+    assert r.min_word == 7
+    assert r.database is None
+
+
 # ---------- env overrides feed graph auth (not just YAML) ----------
 
 

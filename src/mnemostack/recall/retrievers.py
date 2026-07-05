@@ -465,13 +465,15 @@ class MemgraphRetriever(Retriever):
         uri: str = "bolt://localhost:7687",
         user: str = "",
         password: str = "",
-        database: str | None = None,
         min_word: int = 3,
         contains_min: int = 5,
         max_nodes: int = 10,
         max_rels: int = 5,
         driver: Any = None,
         timeout: float = 5.0,
+        # database appended at the tail to preserve positional back-compat for
+        # existing callers (a mid-signature insert would shift min_word etc.).
+        database: str | None = None,
     ):
         self.uri = uri
         self.user = user

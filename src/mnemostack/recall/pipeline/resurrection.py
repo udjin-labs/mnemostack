@@ -49,13 +49,14 @@ class GraphResurrection(Stage):
         uri: str = "bolt://localhost:7687",
         user: str = "",
         password: str = "",
-        database: str | None = None,
         limit: int = 3,
         min_seed_len: int = 4,
         max_seeds: int = 8,
         max_per_seed: int = 5,
         driver: Any = None,
         timeout: float = 5.0,
+        # database appended at the tail to preserve positional back-compat.
+        database: str | None = None,
     ):
         self.uri = uri
         self.user = user

@@ -60,15 +60,16 @@ def build_server(
     llm_model: str | None = None,
     qdrant_host: str = "http://localhost:6333",
     memgraph_uri: str | None = None,
-    graph_user: str = "",
-    graph_password: str = "",
-    graph_database: str | None = None,
     graph_timeout: float = 5.0,
     bm25_paths: list[str] | None = None,
     state_path: str | None = None,
     vector_floor: int = 0,
     rerank_mode: str = "relevant_only",
     token_budget: int | None = None,
+    # graph auth appended at the tail to preserve positional back-compat.
+    graph_user: str = "",
+    graph_password: str = "",
+    graph_database: str | None = None,
 ) -> Any:
     """Build and return a configured FastMCP server.
 
