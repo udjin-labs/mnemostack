@@ -79,14 +79,21 @@ class VectorRetriever(Retriever):
     #: the client-side filter (see `_hide_invalidated_condition`).
     accepts_as_of = True
     accepts_include_invalidated = True
+    #: Can enforce a tenant filter server-side (see VectorStore.search(tenant=)).
+    accepts_tenant = True
 
-    def search(self, query, limit=20, filters=None, as_of=None, include_invalidated=False):
+    def search(
+        self, query, limit=20, filters=None, as_of=None, include_invalidated=False, tenant=None
+    ):
         vec = self.embedding.embed(query)
         if not vec:
             return []
         hide_invalidated = as_of is None and not include_invalidated
+        # Pass tenant only when set, so a custom store without the parameter
+        # still works on the single-tenant path.
+        tkw = {"tenant": tenant} if tenant is not None else {}
         hits = self.vector_store.search(
-            vec, limit=limit, filters=filters, hide_invalidated=hide_invalidated
+            vec, limit=limit, filters=filters, hide_invalidated=hide_invalidated, **tkw
         )
         results: list[RecallResult] = []
         for h in hits:
@@ -1074,6 +1081,8 @@ class TemporalRetriever(Retriever):
     """
 
     name = "temporal"
+    #: Can enforce a tenant filter (its store search/scroll take tenant=).
+    accepts_tenant = True
     DATE_FOCUSED_SCROLL_BUFFER_MIN = 25
     DATE_FOCUSED_SCROLL_BUFFER_MULTIPLIER = 5
 
@@ -1095,7 +1104,9 @@ class TemporalRetriever(Retriever):
         """
         return "temporal:no_parse" if not self.extractor(query) else None
 
-    def search(self, query, limit=10, filters=None):
+    def search(self, query, limit=10, filters=None, tenant=None):
+        # Pass tenant only when set (a custom store may lack the parameter).
+        tkw = {"tenant": tenant} if tenant is not None else {}
         parsed_or_window = self.extractor(query)
         if not parsed_or_window:
             # Visible even without tracing — temporal boost silently lost.
@@ -1147,6 +1158,7 @@ class TemporalRetriever(Retriever):
                         batch_size=max(limit, 100),
                         filters=strict_filter,
                         with_vectors=False,
+                        **tkw,
                     ),
                     target_date,
                     max_hits=buffer_limit,
@@ -1160,6 +1172,7 @@ class TemporalRetriever(Retriever):
                             batch_size=max(limit, 100),
                             filters=temporal_filter,
                             with_vectors=False,
+                            **tkw,
                         ),
                         target_date,
                         max_hits=buffer_limit,
@@ -1181,7 +1194,7 @@ class TemporalRetriever(Retriever):
         if not vec:
             return []
         try:
-            hits = self.vector_store.search(vec, limit=limit, filters=temporal_filter)
+            hits = self.vector_store.search(vec, limit=limit, filters=temporal_filter, **tkw)
         except Exception as exc:  # noqa: BLE001 — defensive; log instead of silent
             logger.warning(
                 "TemporalRetriever: vector_store.search failed (window=%s..%s): %s",

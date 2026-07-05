@@ -13,7 +13,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..llm.base import LLMProvider
 from ..observability import counter, histogram
@@ -502,6 +502,7 @@ class AnswerGenerator:
         token_counter: TokenCounter | None = None,
         include_invalidated: bool = False,
         as_of: str | None = None,
+        tenant: str | None = None,
     ) -> Answer:
         """Synthesize answer from retrieved memories.
 
@@ -523,6 +524,11 @@ class AnswerGenerator:
         run fresh sub-recalls, so without threading these a point-in-time
         (`as_of`) retry would answer from default-current memories instead of
         the requested historical view.
+
+        `tenant` scopes only the retry paths' fresh sub-recalls to that tenant.
+        The primary answer is generated from the `memories` you pass in, so the
+        **caller** must have already scoped those to the tenant (e.g. via
+        `recall_flow(..., tenant=...)`); `tenant` here does not re-filter them.
         """
         counter("mnemostack.answer.calls", 1)
         memories = self._cap_memories(memories, token_budget, token_counter)
@@ -592,6 +598,7 @@ class AnswerGenerator:
                 token_counter=token_counter,
                 include_invalidated=include_invalidated,
                 as_of=as_of,
+                tenant=tenant,
             )
         elif (
             self.category_aware_prompts
@@ -610,6 +617,7 @@ class AnswerGenerator:
                 token_counter=token_counter,
                 include_invalidated=include_invalidated,
                 as_of=as_of,
+                tenant=tenant,
             )
         answer = self._apply_specificity_resolver(query, answer, specificity_memories, category)
         # Report the context that actually produced the answer: after an
@@ -634,6 +642,7 @@ class AnswerGenerator:
         token_counter: TokenCounter | None = None,
         include_invalidated: bool = False,
         as_of: str | None = None,
+        tenant: str | None = None,
     ) -> Answer:
         """Async wrapper around `generate`.
 
@@ -654,6 +663,7 @@ class AnswerGenerator:
                 token_counter=token_counter,
                 include_invalidated=include_invalidated,
                 as_of=as_of,
+                tenant=tenant,
             )
         )
 
@@ -668,6 +678,7 @@ class AnswerGenerator:
         token_counter: TokenCounter | None = None,
         include_invalidated: bool = False,
         as_of: str | None = None,
+        tenant: str | None = None,
     ) -> tuple[Answer, list[RecallResult]]:
         """Retry low-confidence answers with expansion + HyDE vector RRF.
 
@@ -701,12 +712,14 @@ class AnswerGenerator:
         # search_many filters each vector's list for validity and trims before
         # RRF, so a stale hit recurring across expanded vectors can't be boosted
         # into the merged context ahead of a valid single-vector hit.
+        tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
         merged_memories = self.recaller.search_many(
             vectors,
             limit=self.max_memories,
             filters=dict(recall_filters) if recall_filters is not None else None,
             include_invalidated=include_invalidated,
             as_of=as_of,
+            **tkw,
         )
         # The fresh sub-recall bypassed any budget the caller applied to the
         # primary memories; re-cap before this pool reaches another prompt.
@@ -756,6 +769,7 @@ class AnswerGenerator:
         token_counter: TokenCounter | None = None,
         include_invalidated: bool = False,
         as_of: str | None = None,
+        tenant: str | None = None,
     ) -> tuple[Answer, list[RecallResult]]:
         """Retry low-confidence inference answers with decomposed evidence queries."""
         if self.recaller is None:
@@ -765,6 +779,7 @@ class AnswerGenerator:
             return draft, memories
 
         sub_results: list[list[RecallResult]] = []
+        tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
         for sub_query in sub_queries:
             try:
                 # Keep sub-recalls inside the same filtered scope AND validity
@@ -776,6 +791,7 @@ class AnswerGenerator:
                         filters=dict(recall_filters) if recall_filters is not None else None,
                         include_invalidated=include_invalidated,
                         as_of=as_of,
+                        **tkw,
                     )
                 )
             except Exception:

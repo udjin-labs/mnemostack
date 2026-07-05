@@ -18,7 +18,7 @@ from .mca_prefilter import mca_prefilter as run_mca_prefilter
 from .query_expansion import expand_query
 from .tokens import TokenCounter, apply_token_budget
 from .trace import RecallTrace, RetrieverTrace
-from .validity import filter_by_validity, keep_payload
+from .validity import filter_by_tenant, filter_by_validity, keep_payload
 
 logger = logging.getLogger(__name__)
 
@@ -247,6 +247,7 @@ class Recaller:
         token_counter: TokenCounter | None = None,
         include_invalidated: bool = False,
         as_of: str | None = None,
+        tenant: str | None = None,
     ) -> list[RecallResult]:
         """Async wrapper around `recall`.
 
@@ -270,6 +271,7 @@ class Recaller:
             token_counter=token_counter,
             include_invalidated=include_invalidated,
             as_of=as_of,
+            tenant=tenant,
         )
 
     def recall(
@@ -285,6 +287,7 @@ class Recaller:
         token_counter: TokenCounter | None = None,
         include_invalidated: bool = False,
         as_of: str | None = None,
+        tenant: str | None = None,
     ) -> list[RecallResult]:
         """Run hybrid recall and return fused top-K results.
 
@@ -318,6 +321,7 @@ class Recaller:
                 trace=trace,
                 include_invalidated=include_invalidated,
                 as_of=as_of,
+                tenant=tenant,
             )
         else:
             results = self._recall_once(
@@ -329,6 +333,7 @@ class Recaller:
                 trace=trace,
                 include_invalidated=include_invalidated,
                 as_of=as_of,
+                tenant=tenant,
             )
         # Retriever hits are already validity-filtered before fusion (so stale
         # facts can't crowd out current ones in the top-K, and vector-floor
@@ -337,6 +342,11 @@ class Recaller:
         results = filter_by_validity(
             results, include_invalidated=include_invalidated, as_of=as_of
         )
+        # Tenant isolation backstop: when a tenant is scoped, keep only its own
+        # records regardless of which retriever produced them. Guarantees no
+        # cross-tenant leak even if a retriever path forgot the tenant filter,
+        # and drops BM25/graph hits (no tenant_id) that can't be tenant-scoped.
+        results = filter_by_tenant(results, tenant)
         if token_budget is not None:
             results, _ = apply_token_budget(results, token_budget, token_counter)
         return results
@@ -354,6 +364,7 @@ class Recaller:
         trace: RecallTrace | None = None,
         include_invalidated: bool = False,
         as_of: str | None = None,
+        tenant: str | None = None,
     ) -> list[RecallResult]:
         # Retrievers mode: fuse N arbitrary ranked lists
         if self.retrievers:
@@ -367,6 +378,7 @@ class Recaller:
                 trace=trace,
                 include_invalidated=include_invalidated,
                 as_of=as_of,
+                tenant=tenant,
             )
         if self.embedding is None or self.vector is None:
             raise ValueError(
@@ -382,6 +394,7 @@ class Recaller:
         # Over-fetch so validity filtering can't starve the fused pool.
         vector_fetch = _fetch_limit(vector_limit, include_invalidated, as_of)
         bm25_fetch = _fetch_limit(bm25_limit, include_invalidated, as_of)
+        tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
 
         with histogram("mnemostack.recall.latency_ms"):
             # Vector search
@@ -395,6 +408,7 @@ class Recaller:
                         limit=vector_fetch,
                         filters=filters,
                         hide_invalidated=_push_hide_invalidated(include_invalidated, as_of),
+                        **tkw,
                     )
                 # Filter, then trim back to the original window: the over-fetch
                 # only backfills dropped hits, so a clean index keeps exactly
@@ -408,8 +422,12 @@ class Recaller:
             # BM25 search — same filter semantics as the vector store, applied
             # in-process before the top-K cut (isolation: foreign docs must
             # not be fused into a filtered result set on this path either).
+            # BM25 is an in-memory lexical index with no tenant metadata, so it
+            # can't be tenant-scoped — skip it under a tenant to avoid fusing
+            # cross-tenant lexical hits (the backstop would drop them anyway, but
+            # skipping keeps the candidate pool tenant-clean).
             bm25_hits: list[tuple[BM25Doc, float]] = []
-            if self.bm25:
+            if self.bm25 and tenant is None:
                 predicate = None
                 if filters:
 
@@ -438,8 +456,12 @@ class Recaller:
                             ranked=[(str(d.id), s) for d, s in bm25_hits],
                         )
                     )
+            # MCA prefilters over the BM25 index, which can't be tenant-scoped —
+            # skip it under a tenant (same reasoning as BM25 above).
             mca_hits = (
-                self._mca_hits(query, bm25_fetch, filters) if self.mca_prefilter_enabled else []
+                self._mca_hits(query, bm25_fetch, filters)
+                if self.mca_prefilter_enabled and tenant is None
+                else []
             )
             mca_hits = [h for h in mca_hits if _keep(h.payload)][:bm25_limit]
             mca_by_id = {hit.id: hit for hit in mca_hits}
@@ -506,6 +528,7 @@ class Recaller:
                     filters=filters,
                     include_invalidated=include_invalidated,
                     as_of=as_of,
+                    tenant=tenant,
                 )
             if apply_vector_floor:
                 results = self._apply_vector_floor(results, raw_vector_candidates)
@@ -523,6 +546,7 @@ class Recaller:
         *,
         include_invalidated: bool = False,
         as_of: str | None = None,
+        tenant: str | None = None,
     ) -> list[RecallResult]:
         """Search Qdrant for multiple vectors and RRF-merge the ranked hits.
 
@@ -535,6 +559,7 @@ class Recaller:
             return []
 
         fetch = _fetch_limit(limit, include_invalidated, as_of)
+        tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
         ranked_lists: list[list[tuple[Any, float]]] = []
         id_to_hit: dict[Any, Hit] = {}
         for vector in vectors:
@@ -546,6 +571,7 @@ class Recaller:
                     limit=fetch,
                     filters=filters,
                     hide_invalidated=_push_hide_invalidated(include_invalidated, as_of),
+                    **tkw,
                 )
             except Exception:
                 hits = []
@@ -579,7 +605,7 @@ class Recaller:
                 )
             )
         counter("mnemostack.recall.results", len(results))
-        return results
+        return filter_by_tenant(results, tenant)
 
     def _expanded_queries(self, query: str, n_variants: int = 3) -> list[str]:
         if not self.expansion_llm:
@@ -608,6 +634,7 @@ class Recaller:
         trace: RecallTrace | None = None,
         include_invalidated: bool = False,
         as_of: str | None = None,
+        tenant: str | None = None,
     ) -> list[RecallResult]:
         ranked_lists: list[list[tuple[Any, float]]] = []
         id_to_result: dict[Any, RecallResult] = {}
@@ -625,6 +652,7 @@ class Recaller:
                 trace=trace,
                 include_invalidated=include_invalidated,
                 as_of=as_of,
+                tenant=tenant,
             )
             if trace is not None:
                 # Disambiguate which expanded query produced these entries.
@@ -695,6 +723,7 @@ class Recaller:
         trace: RecallTrace | None = None,
         include_invalidated: bool = False,
         as_of: str | None = None,
+        tenant: str | None = None,
     ) -> list[RecallResult]:
         """Fuse N retrievers' ranked lists via RRF. Preserves source tags.
 
@@ -714,6 +743,13 @@ class Recaller:
         def _run(retr):
             start = time.monotonic()
             err: str | None = None
+            # Under a tenant, only retrievers that can enforce the tenant filter
+            # may contribute — a retriever that can't scope (file-backed BM25, or
+            # graph until it's tenant-scoped) is skipped so its cross-tenant hits
+            # never enter fusion. (The post-fusion filter_by_tenant backstop is
+            # the final guarantee; this keeps the candidate pool tenant-clean.)
+            if tenant is not None and not getattr(retr, "accepts_tenant", False):
+                return retr, [], None, 0.0
             try:
                 # Graph facts carry no validity payload, so filter_by_validity
                 # can't enforce validity on them — push the validity view into
@@ -728,6 +764,8 @@ class Recaller:
                     search_kwargs["as_of"] = as_of
                 if getattr(retr, "accepts_include_invalidated", False):
                     search_kwargs["include_invalidated"] = include_invalidated
+                if tenant is not None and getattr(retr, "accepts_tenant", False):
+                    search_kwargs["tenant"] = tenant
                 hits = retr.search(query, limit=fetch_limit, **search_kwargs)
                 # Drop stale hits before fusion/floor so invalidated facts
                 # neither crowd out current ones nor get re-appended by the
@@ -762,7 +800,10 @@ class Recaller:
             per_list_weights: list[float] = []
             id_to_result: dict[Any, RecallResult] = {}
             has_vector_results = False
-            if self.mca_prefilter_enabled:
+            # Skip MCA under a tenant — it prefilters the BM25 index, which
+            # can't be tenant-scoped (same reasoning as the skipped BM25/graph
+            # retrievers in _run).
+            if self.mca_prefilter_enabled and tenant is None:
                 # MCA runs outside the per-retriever _run path, so apply the
                 # same over-fetch + validity filter here — otherwise a stale
                 # exact-token MCA hit could win RRF and only be dropped by the
@@ -1021,7 +1062,12 @@ class Recaller:
         limit: int,
         filters: dict[str, Any] | None,
         hide_invalidated: bool = False,
+        tenant: str | None = None,
     ) -> list[RecallResult]:
+        # Scope the fallback to the tenant at the source too (not just via the
+        # post-fusion backstop) so a zero-direct-hit tenant doesn't fetch the
+        # whole multi-tenant corpus. tkw only when set — custom stores unaffected.
+        tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
         if self.embedding and self.vector:
             try:
                 query_vec = self.embedding.embed(query)
@@ -1031,7 +1077,8 @@ class Recaller:
                 return []
             try:
                 hits = self.vector.search(
-                    query_vec, limit=limit, filters=filters, hide_invalidated=hide_invalidated
+                    query_vec, limit=limit, filters=filters,
+                    hide_invalidated=hide_invalidated, **tkw
                 )
             except Exception:
                 return []
@@ -1053,7 +1100,7 @@ class Recaller:
         for retriever in self.retrievers:
             if getattr(retriever, "name", None) == "vector":
                 try:
-                    return retriever.search(query, limit=limit, filters=filters)
+                    return retriever.search(query, limit=limit, filters=filters, **tkw)
                 except Exception:
                     return []
         return []
@@ -1068,6 +1115,7 @@ class Recaller:
         filters: dict[str, Any] | None,
         include_invalidated: bool = False,
         as_of: str | None = None,
+        tenant: str | None = None,
     ) -> list[RecallResult]:
         # Over-fetch + filter under the caller's validity view before the
         # merge/truncate below, so stale/out-of-window fallback hits can't
@@ -1078,6 +1126,7 @@ class Recaller:
             limit=fetch,
             filters=filters,
             hide_invalidated=_push_hide_invalidated(include_invalidated, as_of),
+            tenant=tenant,
         )
         fallback_hits = [
             h

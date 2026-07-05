@@ -776,7 +776,7 @@ def test_fallback_filters_validity_before_truncate():
                          payload={"invalidated_at": "2026-07-04"}, sources=["vector"])
     fresh = RecallResult(id="fresh", text="f", score=0.5, payload={}, sources=["vector"])
     recaller._vector_fallback_hits = (
-        lambda query, limit, filters, hide_invalidated=False: [stale, fresh]
+        lambda query, limit, filters, hide_invalidated=False, tenant=None: [stale, fresh]
     )
 
     out = recaller._maybe_apply_fallback(
