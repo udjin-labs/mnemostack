@@ -374,6 +374,71 @@ def cmd_tenant_migrate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _keys_store(args: argparse.Namespace):
+    from mnemostack.auth import FileKeyStore
+
+    return FileKeyStore(getattr(args, "keys_file", None) or None)
+
+
+def cmd_keys_add(args: argparse.Namespace) -> int:
+    """Issue a service key for a tenant. Prints the key once (never stored)."""
+    from mnemostack.auth import KeyStoreError
+
+    try:
+        key_id, key = _keys_store(args).issue(args.tenant, args.scopes, args.label or "")
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    except KeyStoreError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    scopes = ",".join(sorted({s.strip() for s in args.scopes.split(",") if s.strip()}))
+    print(f"key id:  {key_id}")
+    print(f"tenant:  {args.tenant}")
+    print(f"scopes:  {scopes}")
+    print("\nkey (shown once — store it now, it is not recoverable):")
+    print(f"  {key}")
+    return 0
+
+
+def cmd_keys_list(args: argparse.Namespace) -> int:
+    from mnemostack.auth import KeyStoreError
+
+    try:
+        keys = _keys_store(args).list_keys()
+    except KeyStoreError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(keys, ensure_ascii=False, indent=2))
+        return 0
+    if not keys:
+        print("(no keys)")
+        return 0
+    print(f"{'ID':<10} {'TENANT':<20} {'SCOPES':<20} {'CREATED':<22} LABEL")
+    for k in keys:
+        print(
+            f"{k.get('id', ''):<10} {k.get('tenant', ''):<20} "
+            f"{','.join(k.get('scopes', [])):<20} {k.get('created_at', ''):<22} {k.get('label', '')}"
+        )
+    return 0
+
+
+def cmd_keys_revoke(args: argparse.Namespace) -> int:
+    from mnemostack.auth import KeyStoreError
+
+    try:
+        removed = _keys_store(args).revoke(args.id)
+    except KeyStoreError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    if removed:
+        print(f"revoked key {args.id}")
+        return 0
+    print(f"error: no key with id '{args.id}'", file=sys.stderr)
+    return 1
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """Diagnose a mnemostack deployment: config, dependencies, versions.
 
@@ -1502,6 +1567,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="Confirm --all when points already carry a tenant_id (relabels them)",
     )
     p_tenant_migrate.set_defaults(func=cmd_tenant_migrate)
+
+    p_keys = sub.add_parser(
+        "keys", help="Manage service keys for multi-tenant auth (add / list / revoke)"
+    )
+    ksub = p_keys.add_subparsers(dest="keys_action")
+
+    def _keys_help(_args: argparse.Namespace) -> int:
+        p_keys.print_help()
+        return 2
+
+    p_keys.set_defaults(func=_keys_help)
+    _keys_file_help = (
+        "Key store path (default: $MNEMOSTACK_KEYS_FILE or ~/.config/mnemostack/keys.json)"
+    )
+    pk_add = ksub.add_parser("add", help="Issue a key for a tenant")
+    pk_add.add_argument("--tenant", required=True, help="tenant_id the key is scoped to")
+    pk_add.add_argument(
+        "--scopes", default="read", help="Comma-separated scopes: read,write,admin (default read)"
+    )
+    pk_add.add_argument("--label", default="", help="Human label (e.g. app name)")
+    pk_add.add_argument("--keys-file", default=None, help=_keys_file_help)
+    pk_add.set_defaults(func=cmd_keys_add)
+    pk_list = ksub.add_parser("list", help="List keys (hashes never shown)")
+    pk_list.add_argument("--json", action="store_true", help="JSON output")
+    pk_list.add_argument("--keys-file", default=None, help=_keys_file_help)
+    pk_list.set_defaults(func=cmd_keys_list)
+    pk_revoke = ksub.add_parser("revoke", help="Revoke a key by its id")
+    pk_revoke.add_argument("id", help="key id (from `keys list`)")
+    pk_revoke.add_argument("--keys-file", default=None, help=_keys_file_help)
+    pk_revoke.set_defaults(func=cmd_keys_revoke)
 
     p_search = sub.add_parser("search", parents=[common], help="Hybrid recall")
     p_search.add_argument("query", help="Search query text")
