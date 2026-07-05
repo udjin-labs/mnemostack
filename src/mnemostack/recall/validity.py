@@ -118,13 +118,24 @@ def to_utc_instant(value: Any) -> Any:
 
 
 #: Cypher regex (Java syntax, used with ``=~``) matching a canonical ISO date or
-#: date-time bound — the only shapes ``datetime()`` can parse. A stored bound not
-#: matching this (e.g. free text an LLM put in ``valid_from`` via TripleExtractor:
-#: "early 2024") falls back to the old raw-string comparison instead of reaching
-#: ``datetime()``, which would raise and abort the whole query. Uses ``[0-9]``
-#: (not ``\d``) to avoid Cypher string-escape ambiguity; month/day ranges are
-#: constrained so an obviously-bad numeric date ("2024-13-45") also falls back.
-_GRAPH_TS_RE = "[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])(T.*)?"
+#: date-time bound — the only shapes Memgraph's ``datetime()`` can parse. A stored
+#: bound not matching this (e.g. free text an LLM put in ``valid_from`` via
+#: TripleExtractor: "early 2024", or an impossible date "2024-02-31", or junk
+#: "2024-01-01TBD") falls back to the old raw-string comparison instead of
+#: reaching ``datetime()``, which would raise and abort the whole query.
+#:
+#: Validates per-month day ranges and a strict time/offset suffix so impossible
+#: calendar dates and malformed times are rejected. Uses ``[0-9]``/``[.]`` (no
+#: backslashes) to avoid Cypher string-escape ambiguity. The one residual it
+#: can't catch is a non-leap-year ``…-02-29`` (regex can't know leap years) —
+#: vanishingly rare and, if it ever reached ``datetime()``, only that one fact's
+#: query would fail, never a whole recall.
+_GRAPH_TS_RE = (
+    "([0-9]{4}-(0[13578]|1[02])-(0[1-9]|[12][0-9]|3[01])"
+    "|[0-9]{4}-(0[469]|11)-(0[1-9]|[12][0-9]|30)"
+    "|[0-9]{4}-02-(0[1-9]|1[0-9]|2[0-9]))"
+    "(T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?(Z|[+-]([01][0-9]|2[0-3]):?[0-5][0-9]))?"
+)
 
 
 def _graph_instant_expr(field: str) -> str:

@@ -493,6 +493,38 @@ def test_graph_as_of_predicate_parses_instants_and_guards_markers():
     assert graph_valid_clause("r", "2026-03-01") == p
 
 
+def test_graph_ts_regex_accepts_canonical_rejects_garbage():
+    # The vetting regex decides which bounds reach Cypher datetime(). Python
+    # re.fullmatch mirrors Cypher `=~` (full-string match) for this subset, so
+    # this is a re-runnable check that impossible dates / junk fall back instead
+    # of aborting the query. (Verified equivalent against a live Memgraph.)
+    import re
+
+    from mnemostack.recall.validity import _GRAPH_TS_RE
+
+    rx = re.compile(_GRAPH_TS_RE)
+    for good in (
+        "2024-01-01",
+        "2024-12-31",
+        "2024-02-29",  # regex can't check leap years; matches (rare residual)
+        "2026-03-01T00:00:00Z",
+        "2026-03-01T00:00:00.500000Z",
+        "2026-03-01T00:00:00+02:00",
+    ):
+        assert rx.fullmatch(good), good
+    for bad in (
+        "early 2024",
+        "recently",
+        "current",
+        "2024-13-01",  # month 13
+        "2024-02-31",  # Feb has no 31st
+        "2024-04-31",  # April has no 31st
+        "2024-01-01TBD",  # junk time suffix
+        "2024-01-01T99:99:99Z",  # impossible time
+    ):
+        assert not rx.fullmatch(bad), bad
+
+
 def test_recall_pushes_include_invalidated_to_graph():
     from mnemostack.recall.recaller import Recaller
 
