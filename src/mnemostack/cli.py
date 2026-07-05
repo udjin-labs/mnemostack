@@ -750,6 +750,18 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    watching = bool(getattr(args, "watch", False))
+    if watching and not target.is_dir():
+        print("error: --watch requires a directory to watch", file=sys.stderr)
+        return 2
+    # Snapshot mtimes BEFORE the initial index so the watcher can reconcile any
+    # file that changes during the (possibly long) collect/embed pass — closing
+    # the gap between "indexed" and "observing".
+    watch_baseline = None
+    if watching:
+        from .markdown.watch import _scan_mtimes
+
+        watch_baseline = _scan_mtimes(target)
 
     provider = get_provider(args.provider, **model_kwargs(_embedding_model(args)))
     store = VectorStore(
@@ -816,42 +828,20 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
     if not args.recreate and store.collection_exists():
         for hit in store.scroll(filters={"index_root": index_root}):
             existing_payloads[str(hit.id)] = hit.payload or {}
+    from .markdown.sync import build_link_map, upsert_markdown_chunks
+
     existing_ids = set(existing_payloads)
-    to_embed = [c for c in chunks if c[0] not in existing_ids]
-    skipped = len(chunks) - len(to_embed)
+    skipped = sum(1 for c in chunks if c[0] in existing_ids)
     print(
         f"Indexing {len(chunks)} markdown chunks from {col.files} file(s)"
-        f" — {len(to_embed)} new, {skipped} already indexed (skipped)."
+        f" — {len(chunks) - skipped} new, {skipped} already indexed (skipped)."
     )
 
-    inserted = 0
-    failed = 0
-    failed_sources: set[str] = set()
-    for cid, text, payload in to_embed:
-        vec = provider.embed(text)
-        if not vec:
-            failed += 1
-            failed_sources.add(payload["source"])
-            continue
-        store.upsert(cid, vec, payload)
-        inserted += 1
-
-    # Refresh payloads of unchanged chunks so frontmatter edits sync without
-    # re-embedding. Delete only keys THIS indexer owned on the previous run (the
-    # `_md_keys` record) that the file no longer produces — so removed
-    # frontmatter keys are dropped, while foreign payload fields (external
-    # enrichment, `invalidated_at`/`valid_until` validity markers) are preserved.
-    refreshed = 0
-    for cid, _text, payload in chunks:
-        if cid not in existing_ids:
-            continue
-        old = existing_payloads.get(cid, {})
-        owned = old.get("_md_keys") or []
-        stale = [k for k in owned if k not in payload]
-        if stale:
-            store.delete_payload_keys(cid, stale)
-        store.set_payload(cid, payload)
-        refreshed += 1
+    # Embed new chunks and refresh changed payloads (shared with the watcher's
+    # per-file path so a full walk and a single-file update behave identically).
+    cs = upsert_markdown_chunks(store, provider, chunks, existing_payloads)
+    inserted, refreshed, failed = cs.inserted, cs.refreshed, cs.failed
+    failed_sources = cs.failed_sources
 
     pruned = 0
     if args.prune and not args.recreate:
@@ -893,14 +883,7 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
 
         # Seed with every indexed source so a file whose links were all removed
         # is still synced (sync_file_links deletes its stale LINKS_TO edges).
-        by_source: dict[str, list[str]] = {
-            s: [] for s in col.sources if s not in failed_sources
-        }
-        for edge in col.edges:
-            if edge.source in failed_sources:
-                continue
-            if edge.target not in by_source[edge.source]:
-                by_source[edge.source].append(edge.target)
+        by_source = build_link_map(col, failed_sources)
         try:
             graph = make_graph_store(
                 graph_uri,
@@ -944,6 +927,92 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
         + (f", {edges_written} link edges" if graph_uri else "")
         + f" in collection '{args.collection}'."
     )
+
+    if getattr(args, "watch", False):
+        return _watch_markdown(
+            args, store, provider, index_root, str(target), graph_uri, watch_baseline
+        )
+    return 0
+
+
+def _watch_markdown(
+    args: argparse.Namespace,
+    store: Any,
+    provider: Any,
+    index_root: str,
+    watch_root: str,
+    graph_uri: str | None,
+    baseline: dict[str, float] | None = None,
+) -> int:
+    """Run the incremental file-watch loop after the initial index (blocking).
+
+    ``watch_root`` is the folder to observe (what was indexed); ``index_root`` is
+    the corpus root the syncer scopes ids/sources/graph nodes to — identical in
+    the common case, but distinct when ``--index-root`` pins a nested subtree.
+    """
+    from .markdown.sync import MarkdownSyncer
+    from .markdown.watch import _WATCHDOG, MarkdownWatcher
+
+    # A single graph connection kept open for the whole watch (each event's link
+    # sync reuses it). Fail-open: no graph just means links aren't synced.
+    graph = None
+    if graph_uri:
+        from .graph.factory import make_graph_store
+
+        try:
+            graph = make_graph_store(
+                graph_uri, timeout=getattr(args, "graph_timeout", 5.0), **_graph_auth(args)
+            )
+        except Exception as exc:  # noqa: BLE001 — graph optional; watch still syncs vectors
+            print(f"warning: graph unavailable, links not watched ({exc})", file=sys.stderr)
+
+    syncer = MarkdownSyncer(
+        store, provider, index_root=index_root, chunk_size=args.chunk_size, graph=graph
+    )
+
+    def _on_result(res: Any) -> None:
+        if res.source is None:
+            return
+        if res.error:
+            return
+        # A failed embedding leaves the old chunks searchable (pruning is skipped
+        # for that source, like the one-shot path). Surface it as a warning so a
+        # transient provider outage isn't reported as a clean sync.
+        if res.failed:
+            print(
+                f"  warning: {res.source} — {res.failed} chunk(s) failed to embed; "
+                "stale content kept, re-save after the provider recovers",
+                file=sys.stderr,
+            )
+            return
+        verb = "removed" if res.pruned and not res.inserted and not res.refreshed else "synced"
+        print(
+            f"  {verb} {res.source}"
+            f" (+{res.inserted}/~{res.refreshed}/-{res.pruned}"
+            + (f", {res.edges} edges" if graph is not None else "")
+            + ")"
+        )
+
+    def _on_error(path: str, kind: str, exc: Exception) -> None:
+        print(f"  error syncing {path} ({kind}): {exc}", file=sys.stderr)
+
+    watcher = MarkdownWatcher(
+        syncer,
+        watch_root,
+        debounce=args.watch_debounce,
+        poll_interval=args.watch_poll_interval,
+        on_result=_on_result,
+        on_error=_on_error,
+    )
+    backend = "watchdog" if _WATCHDOG else f"polling every {args.watch_poll_interval}s"
+    print(f"Watching {watch_root} for changes ({backend}) — Ctrl+C to stop.")
+    try:
+        watcher.run(baseline=baseline)
+    except KeyboardInterrupt:
+        print("\nStopped watching.")
+    finally:
+        if graph is not None:
+            graph.close()
     return 0
 
 
@@ -1357,6 +1426,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_index_md.add_argument(
         "--yes", "-y", action="store_true", help="Skip the confirmation prompt for --recreate"
+    )
+    p_index_md.add_argument(
+        "--watch",
+        action="store_true",
+        help="After the initial index, keep watching the folder and sync changes "
+        "incrementally (add/modify/delete). Requires a directory. Ctrl+C to stop.",
+    )
+    p_index_md.add_argument(
+        "--watch-debounce",
+        type=float,
+        default=0.5,
+        help="Quiet window (seconds) to coalesce rapid file events under --watch (default 0.5)",
+    )
+    p_index_md.add_argument(
+        "--watch-poll-interval",
+        type=float,
+        default=1.0,
+        help="Polling interval (seconds) when the watchdog extra isn't installed (default 1.0)",
     )
     p_index_md.set_defaults(func=cmd_index_markdown)
 

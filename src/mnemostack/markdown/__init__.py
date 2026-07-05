@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from .indexer import LinkEdge, MarkdownChunk, MarkdownCollection, collect_markdown
 from .parse import extract_links, parse_frontmatter
+from .sync import FileSyncResult, MarkdownSyncer
 
 __all__ = [
     "collect_markdown",
@@ -18,4 +19,6 @@ __all__ = [
     "MarkdownCollection",
     "parse_frontmatter",
     "extract_links",
+    "MarkdownSyncer",
+    "FileSyncResult",
 ]
