@@ -32,6 +32,17 @@ def _validity_active(include_invalidated: bool, as_of: str | None) -> bool:
     return (not include_invalidated) or (as_of is not None)
 
 
+def _push_hide_invalidated(include_invalidated: bool, as_of: str | None) -> bool:
+    """Whether the default hide-invalidated view can be pushed into Qdrant.
+
+    Only for the plain default view: hiding invalidated AND not point-in-time.
+    ``as_of`` recall keeps its bare-date-safe filtering client-side (see
+    ``qdrant._hide_invalidated_condition``). The client-side ``filter_by_validity``
+    stays the backstop either way, so this is purely an efficiency push-down.
+    """
+    return (not include_invalidated) and (as_of is None)
+
+
 def _fetch_limit(base: int, include_invalidated: bool, as_of: str | None) -> int:
     """Retriever search limit, over-fetched when a validity filter is active.
 
@@ -379,7 +390,12 @@ class Recaller:
                 query_vec = self.embedding.embed(query)
             if query_vec:
                 with histogram("mnemostack.recall.vector_latency_ms"):
-                    vector_hits = self.vector.search(query_vec, limit=vector_fetch, filters=filters)
+                    vector_hits = self.vector.search(
+                        query_vec,
+                        limit=vector_fetch,
+                        filters=filters,
+                        hide_invalidated=_push_hide_invalidated(include_invalidated, as_of),
+                    )
                 # Filter, then trim back to the original window: the over-fetch
                 # only backfills dropped hits, so a clean index keeps exactly
                 # its pre-invalidation candidate set (no ranking drift).
@@ -525,7 +541,12 @@ class Recaller:
             if not vector:
                 continue
             try:
-                hits = self.vector.search(vector, limit=fetch, filters=filters)
+                hits = self.vector.search(
+                    vector,
+                    limit=fetch,
+                    filters=filters,
+                    hide_invalidated=_push_hide_invalidated(include_invalidated, as_of),
+                )
             except Exception:
                 hits = []
             hits = [
@@ -999,6 +1020,7 @@ class Recaller:
         *,
         limit: int,
         filters: dict[str, Any] | None,
+        hide_invalidated: bool = False,
     ) -> list[RecallResult]:
         if self.embedding and self.vector:
             try:
@@ -1008,7 +1030,9 @@ class Recaller:
             if not query_vec:
                 return []
             try:
-                hits = self.vector.search(query_vec, limit=limit, filters=filters)
+                hits = self.vector.search(
+                    query_vec, limit=limit, filters=filters, hide_invalidated=hide_invalidated
+                )
             except Exception:
                 return []
             results: list[RecallResult] = []
@@ -1049,7 +1073,12 @@ class Recaller:
         # merge/truncate below, so stale/out-of-window fallback hits can't
         # crowd out a valid one just past the limit.
         fetch = _fetch_limit(max(limit, vector_limit), include_invalidated, as_of)
-        fallback_hits = self._vector_fallback_hits(query, limit=fetch, filters=filters)
+        fallback_hits = self._vector_fallback_hits(
+            query,
+            limit=fetch,
+            filters=filters,
+            hide_invalidated=_push_hide_invalidated(include_invalidated, as_of),
+        )
         fallback_hits = [
             h
             for h in fallback_hits

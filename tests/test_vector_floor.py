@@ -12,7 +12,7 @@ class FakeVectorStore:
     def __init__(self, hits):
         self.hits = hits
 
-    def search(self, vector, limit=10, filters=None):
+    def search(self, vector, limit=10, filters=None, **_):
         return self.hits[:limit]
 
 

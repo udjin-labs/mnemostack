@@ -55,7 +55,7 @@ class _FakeVectorStore:
         self.last_limit = None
         self.last_filters = None
 
-    def search(self, vector, limit=20, filters=None):
+    def search(self, vector, limit=20, filters=None, **_):
         self.last_query = list(vector)
         self.last_limit = limit
         self.last_filters = filters
@@ -63,7 +63,7 @@ class _FakeVectorStore:
 
 
 class _RaisingVectorStore:
-    def search(self, vector, limit=20, filters=None):
+    def search(self, vector, limit=20, filters=None, **_):
         raise RuntimeError("simulated qdrant 500")
 
 

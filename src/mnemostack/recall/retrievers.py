@@ -74,11 +74,20 @@ class VectorRetriever(Retriever):
         self.embedding = embedding
         self.vector_store = vector_store
 
-    def search(self, query, limit=20, filters=None):
+    #: Advertise validity-awareness so the recaller passes as_of/include_invalidated.
+    #: The default view (hide invalidated) is pushed into Qdrant; as_of stays in
+    #: the client-side filter (see `_hide_invalidated_condition`).
+    accepts_as_of = True
+    accepts_include_invalidated = True
+
+    def search(self, query, limit=20, filters=None, as_of=None, include_invalidated=False):
         vec = self.embedding.embed(query)
         if not vec:
             return []
-        hits = self.vector_store.search(vec, limit=limit, filters=filters)
+        hide_invalidated = as_of is None and not include_invalidated
+        hits = self.vector_store.search(
+            vec, limit=limit, filters=filters, hide_invalidated=hide_invalidated
+        )
         results: list[RecallResult] = []
         for h in hits:
             payload = dict(h.payload or {})

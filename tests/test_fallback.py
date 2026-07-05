@@ -16,7 +16,7 @@ class FakeVectorStore:
         self.hits = hits
         self.calls = 0
 
-    def search(self, vector, limit=10, filters=None):
+    def search(self, vector, limit=10, filters=None, **_):
         self.calls += 1
         return self.hits[:limit]
 
@@ -26,7 +26,7 @@ class FakeVectorStoreSequence:
         self.hit_sequences = hit_sequences
         self.calls = 0
 
-    def search(self, vector, limit=10, filters=None):
+    def search(self, vector, limit=10, filters=None, **_):
         sequence_index = min(self.calls, len(self.hit_sequences) - 1)
         self.calls += 1
         return self.hit_sequences[sequence_index][:limit]

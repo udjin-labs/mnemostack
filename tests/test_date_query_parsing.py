@@ -140,7 +140,7 @@ class _ScrollableStore:
 
         return iter([hit for hit in self.scroll_results if in_window(hit)])
 
-    def search(self, vector, limit=10, filters=None):
+    def search(self, vector, limit=10, filters=None, **_):
         self.search_called = True
         return []
 
