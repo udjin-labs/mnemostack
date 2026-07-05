@@ -14,6 +14,7 @@ failure on one file is reported and never stops the watch.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -35,9 +36,42 @@ except Exception:  # pragma: no cover - exercised only where watchdog is absent
 UPSERT = "upsert"
 REMOVE = "remove"
 
+#: Floor for the watchdog idle/flush tick so --watch-debounce 0 doesn't busy-loop.
+_MIN_IDLE_TICK = 0.1
+
 
 def _is_markdown(path: str) -> bool:
     return path.lower().endswith(".md")
+
+
+def _abspath(path: str | Path) -> str:
+    """Absolute path WITHOUT resolving symlinks.
+
+    The initial index keys chunks/links by a file's path relative to the corpus
+    root as walked (a symlinked note keeps its link path, not the target). The
+    watcher must address the same source names, so it must NOT resolve symlinks
+    (``Path.resolve()`` would), or incremental sync would update the wrong source
+    — or fail ``relative_to`` when the target is outside the root.
+    """
+    return os.path.abspath(str(path))
+
+
+def _scan_mtimes(root: str | Path) -> dict[str, float]:
+    """Map every markdown file under ``root`` to its mtime (symlinks unresolved).
+
+    Case-insensitive suffix like the indexer (``.MD``/``.Md`` count), and shared
+    with the watcher so a pre-index snapshot compares against the same key form.
+    """
+    snap: dict[str, float] = {}
+    for p in Path(root).rglob("*"):
+        if not _is_markdown(p.name):
+            continue
+        try:
+            if p.is_file():
+                snap[_abspath(p)] = p.stat().st_mtime
+        except OSError:
+            continue
+    return snap
 
 
 class _Debouncer:
@@ -97,7 +131,7 @@ class MarkdownWatcher:
 
     def handle_event(self, path: str, kind: str) -> None:
         """Queue a change. Non-markdown paths are ignored."""
-        rpath = str(Path(path).resolve())
+        rpath = _abspath(path)  # do NOT resolve symlinks — see _abspath
         if not _is_markdown(rpath):
             return
         self._debouncer.add(rpath, kind)
@@ -125,19 +159,7 @@ class MarkdownWatcher:
     # --- polling fallback ---
 
     def _scan(self) -> dict[str, float]:
-        snap: dict[str, float] = {}
-        # rglob("*.md") is case-sensitive on Linux, but the indexer accepts any
-        # case (.MD/.Md); scan all entries and reuse the same suffix check so a
-        # `README.MD` indexed initially is still tracked for changes/deletion.
-        for p in Path(self.root).rglob("*"):
-            if not _is_markdown(p.name):
-                continue
-            try:
-                if p.is_file():
-                    snap[str(p.resolve())] = p.stat().st_mtime
-            except OSError:
-                continue
-        return snap
+        return _scan_mtimes(self.root)
 
     def poll_once(self, prev: dict[str, float]) -> dict[str, float]:
         """One mtime scan: emit upsert for new/changed, remove for vanished."""
@@ -152,15 +174,36 @@ class MarkdownWatcher:
 
     # --- run loops ---
 
-    def run(self, stop_event: threading.Event | None = None) -> None:
-        """Block, applying changes until stop_event is set (or KeyboardInterrupt)."""
-        if _WATCHDOG:
-            self._run_watchdog(stop_event)
-        else:
-            self._run_polling(stop_event)
+    def run(
+        self,
+        stop_event: threading.Event | None = None,
+        *,
+        baseline: dict[str, float] | None = None,
+    ) -> None:
+        """Block, applying changes until stop_event is set (or KeyboardInterrupt).
 
-    def _run_polling(self, stop_event: threading.Event | None) -> None:
-        snap = self._scan()  # baseline: the folder is already indexed
+        ``baseline`` is an mtime snapshot taken *before* the initial index (see
+        ``_scan_mtimes``); passing it makes the watcher reconcile any file that
+        changed during that index (the window before it started observing),
+        closing the startup gap for both backends.
+        """
+        if _WATCHDOG:
+            self._run_watchdog(stop_event, baseline)
+        else:
+            self._run_polling(stop_event, baseline)
+
+    def _catch_up(self, baseline: dict[str, float] | None) -> dict[str, float]:
+        """Reconcile changes since ``baseline`` immediately; return the new snapshot."""
+        if baseline is None:
+            return self._scan()  # nothing to reconcile: current state is the baseline
+        snap = self.poll_once(baseline)
+        self.flush(force=True)  # apply the catch-up now, not after a debounce window
+        return snap
+
+    def _run_polling(
+        self, stop_event: threading.Event | None, baseline: dict[str, float] | None = None
+    ) -> None:
+        snap = self._catch_up(baseline)
         while not (stop_event is not None and stop_event.is_set()):
             self._sleep(self.poll_interval)
             snap = self.poll_once(snap)
@@ -169,7 +212,9 @@ class MarkdownWatcher:
             # is only applied once it has been quiet for the debounce interval.
             self.flush()
 
-    def _run_watchdog(self, stop_event: threading.Event | None) -> None:  # pragma: no cover - needs watchdog + real FS
+    def _run_watchdog(  # pragma: no cover - needs watchdog + real FS
+        self, stop_event: threading.Event | None, baseline: dict[str, float] | None = None
+    ) -> None:
         watcher = self
 
         class _Handler(FileSystemEventHandler):
@@ -196,9 +241,15 @@ class MarkdownWatcher:
         observer = Observer()
         observer.schedule(_Handler(), self.root, recursive=True)
         observer.start()
+        # Start observing BEFORE the catch-up so changes during reconciliation
+        # are queued (the debouncer coalesces any duplicates).
+        self._catch_up(baseline)
+        # Idle sleep is decoupled from the debounce window: with --watch-debounce 0
+        # (immediate) a raw sleep(delay) would spin a core, so floor the tick.
+        idle = max(self._debouncer.delay, _MIN_IDLE_TICK)
         try:
             while not (stop_event is not None and stop_event.is_set()):
-                self._sleep(self._debouncer.delay)
+                self._sleep(idle)
                 self.flush()
         finally:
             observer.stop()

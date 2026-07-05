@@ -13,6 +13,7 @@ source(s) it was given, never siblings (mirroring the one-shot command's
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -126,15 +127,16 @@ class MarkdownSyncer:
     def source_for(self, path: str | Path) -> str:
         """The corpus-relative source string the indexer stores for ``path``.
 
-        Matches ``indexer._rel``: path relative to index_root, as posix. Used to
-        target a file's chunks/edges when the file itself is already gone.
+        Matches ``indexer._rel``: path relative to index_root, as posix. Uses an
+        absolute path WITHOUT resolving symlinks, so a symlinked note keeps the
+        link's source name (the one the initial walk indexed), not the target's.
         """
-        return Path(path).resolve().relative_to(self.index_root).as_posix()
+        return Path(os.path.abspath(str(path))).relative_to(self.index_root).as_posix()
 
     def index_file(self, path: str | Path) -> FileSyncResult:
         """Index/re-index one markdown file. Idempotent; touches only this file."""
         col = collect_markdown(
-            Path(path).resolve(),
+            Path(os.path.abspath(str(path))),  # do NOT resolve symlinks
             chunk_size=self.chunk_size,
             index_root=self.index_root,
             root_dir=self.index_root,

@@ -750,9 +750,18 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    if getattr(args, "watch", False) and not target.is_dir():
+    watching = bool(getattr(args, "watch", False))
+    if watching and not target.is_dir():
         print("error: --watch requires a directory to watch", file=sys.stderr)
         return 2
+    # Snapshot mtimes BEFORE the initial index so the watcher can reconcile any
+    # file that changes during the (possibly long) collect/embed pass — closing
+    # the gap between "indexed" and "observing".
+    watch_baseline = None
+    if watching:
+        from .markdown.watch import _scan_mtimes
+
+        watch_baseline = _scan_mtimes(target)
 
     provider = get_provider(args.provider, **model_kwargs(_embedding_model(args)))
     store = VectorStore(
@@ -920,7 +929,9 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
     )
 
     if getattr(args, "watch", False):
-        return _watch_markdown(args, store, provider, index_root, str(target), graph_uri)
+        return _watch_markdown(
+            args, store, provider, index_root, str(target), graph_uri, watch_baseline
+        )
     return 0
 
 
@@ -931,6 +942,7 @@ def _watch_markdown(
     index_root: str,
     watch_root: str,
     graph_uri: str | None,
+    baseline: dict[str, float] | None = None,
 ) -> int:
     """Run the incremental file-watch loop after the initial index (blocking).
 
@@ -963,6 +975,16 @@ def _watch_markdown(
             return
         if res.error:
             return
+        # A failed embedding leaves the old chunks searchable (pruning is skipped
+        # for that source, like the one-shot path). Surface it as a warning so a
+        # transient provider outage isn't reported as a clean sync.
+        if res.failed:
+            print(
+                f"  warning: {res.source} — {res.failed} chunk(s) failed to embed; "
+                "stale content kept, re-save after the provider recovers",
+                file=sys.stderr,
+            )
+            return
         verb = "removed" if res.pruned and not res.inserted and not res.refreshed else "synced"
         print(
             f"  {verb} {res.source}"
@@ -985,7 +1007,7 @@ def _watch_markdown(
     backend = "watchdog" if _WATCHDOG else f"polling every {args.watch_poll_interval}s"
     print(f"Watching {watch_root} for changes ({backend}) — Ctrl+C to stop.")
     try:
-        watcher.run()
+        watcher.run(baseline=baseline)
     except KeyboardInterrupt:
         print("\nStopped watching.")
     finally:

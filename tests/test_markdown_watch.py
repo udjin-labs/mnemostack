@@ -199,6 +199,43 @@ def test_polling_honors_debounce_for_active_writes(tmp_path):
     assert syncer.indexed == [str(f.resolve())]
 
 
+def test_catch_up_reconciles_baseline_diff(tmp_path):
+    # A file created during the initial index (absent from the pre-index
+    # baseline) and one deleted during it are both reconciled at watch start.
+    import os
+
+    clock = _FakeClock()
+    syncer = _FakeSyncer()
+    w = _watcher(tmp_path, syncer, clock)
+    new = tmp_path / "new.md"
+    new.write_text("# N\n")
+    gone = os.path.abspath(str(tmp_path / "gone.md"))  # in baseline, not on disk now
+
+    w._catch_up({gone: 1.0})
+    assert syncer.indexed == [os.path.abspath(str(new))]
+    assert syncer.removed == [gone]
+
+
+def test_handle_event_does_not_resolve_symlinks(tmp_path):
+    # A symlinked note must be addressed by the link path (what the initial walk
+    # indexed), not its resolved target.
+    import os
+
+    (tmp_path / "sub").mkdir()
+    target = tmp_path / "sub" / "target.md"
+    target.write_text("# T\n")
+    link = tmp_path / "link.md"
+    os.symlink(target, link)
+
+    clock = _FakeClock()
+    syncer = _FakeSyncer()
+    w = _watcher(tmp_path, syncer, clock)
+    w.handle_event(str(link), UPSERT)
+    clock.t = 1.0
+    w.flush()
+    assert syncer.indexed == [os.path.abspath(str(link))]  # not .../sub/target.md
+
+
 # ---------- syncer integration (in-memory Qdrant + fake embedder) ----------
 
 
@@ -299,3 +336,32 @@ def test_watch_requires_a_directory(tmp_path, capsys):
     # Returns before any provider/store construction — a file can't be watched.
     assert cli.cmd_index_markdown(args) == 2
     assert "requires a directory" in capsys.readouterr().err
+
+
+def test_syncer_reports_failed_embeddings_and_keeps_stale(tmp_path):
+    # A provider failure (empty vector) must surface as res.failed and NOT prune
+    # the source's existing chunks — so the watch layer can warn, not report OK.
+    store = _mem_store()
+    root = str(tmp_path.resolve())
+    f = tmp_path / "a.md"
+    f.write_text("# A\n\noriginal body\n")
+
+    ok = MarkdownSyncer(store, _FakeProvider(), index_root=root, chunk_size=10000)
+    ok.index_file(f)
+    before = len(list(store.scroll(filters={"index_root": root, "source": "a.md"})))
+    assert before >= 1
+
+    class _FailProvider:
+        dimension = 4
+
+        def embed(self, text):
+            return []  # provider outage
+
+    f.write_text("# A\n\ncompletely different body\n")
+    failing = MarkdownSyncer(store, _FailProvider(), index_root=root, chunk_size=10000)
+    res = failing.index_file(f)
+    assert res.failed >= 1
+    assert res.inserted == 0
+    # old chunks kept (not pruned) since the re-embed failed
+    after = len(list(store.scroll(filters={"index_root": root, "source": "a.md"})))
+    assert after == before
