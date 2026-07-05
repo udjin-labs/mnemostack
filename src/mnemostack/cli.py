@@ -182,6 +182,8 @@ def _recall_for_cli(args: argparse.Namespace, recaller, query: str, limit: int):
     pipeline = build_full_pipeline(
         state_store=FileStateStore(default_state_path()),
         graph_uri=getattr(args, "memgraph_uri", None) or None,
+        graph_timeout=getattr(args, "graph_timeout", 5.0),
+        **{f"graph_{k}": v for k, v in _graph_auth(args).items()},
     )
     reranker = None
     try:
@@ -1580,6 +1582,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
         collection=args.collection,
         qdrant_url=args.qdrant,
         graph_uri=args.memgraph_uri,
+        graph_user=_graph_auth(args)["user"],
+        graph_password=_graph_auth(args)["password"],
+        graph_database=_graph_auth(args)["database"],
         graph_timeout=args.graph_timeout,
         bm25_paths=list(args.bm25_path) if args.bm25_path else None,
         vector_floor=max(0, int(args.vector_floor)),
@@ -1669,6 +1674,9 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
         llm_model=_llm_model(args),
         qdrant_host=args.qdrant,
         memgraph_uri=args.memgraph_uri,
+        graph_user=_graph_auth(args)["user"],
+        graph_password=_graph_auth(args)["password"],
+        graph_database=_graph_auth(args)["database"],
         graph_timeout=args.graph_timeout,
         bm25_paths=list(args.bm25_path) if args.bm25_path else None,
         state_path=args.state_path,

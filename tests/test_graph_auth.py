@@ -190,3 +190,105 @@ def test_build_full_pipeline_accepts_graph_database():
     from mnemostack.recall.pipeline import build_full_pipeline
 
     assert "graph_database" in inspect.signature(build_full_pipeline).parameters
+
+
+# ---------- env overrides feed graph auth (not just YAML) ----------
+
+
+def test_env_overrides_graph_auth(monkeypatch):
+    from mnemostack.config import Config
+
+    monkeypatch.setenv("MNEMOSTACK_GRAPH_USER", "neo4j")
+    monkeypatch.setenv("MNEMOSTACK_GRAPH_PASSWORD", "secret")
+    monkeypatch.setenv("MNEMOSTACK_GRAPH_DATABASE", "memories")
+
+    cfg = Config.load()
+    # env wins over any local config file, so this holds regardless of the host.
+    assert cfg.graph.user == "neo4j"
+    assert cfg.graph.password == "secret"
+    assert cfg.graph.database == "memories"
+
+
+# ---------- CLI service paths (serve / mcp-serve / non-raw search) ----------
+
+
+def _parsed_args(monkeypatch, argv):
+    """A CLI namespace with graph auth seeded from a stubbed config."""
+    from mnemostack import cli
+    from mnemostack.config import Config, GraphConfig
+
+    cfg = Config()
+    cfg.graph = GraphConfig(
+        uri="bolt://localhost:7687",
+        user="neo4j",
+        password="secret",
+        database="memories",
+    )
+    monkeypatch.setattr(Config, "load", classmethod(lambda cls, *a, **k: cfg))
+    return cli.build_parser().parse_args(argv)
+
+
+def test_cmd_serve_threads_graph_auth(monkeypatch):
+    import sys
+    import types
+
+    import mnemostack.server as server_mod
+    from mnemostack import cli
+
+    args = _parsed_args(monkeypatch, ["serve"])
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        server_mod, "build_app", lambda cfg: captured.update(cfg=cfg) or "app"
+    )
+    fake_uvicorn = types.ModuleType("uvicorn")
+    fake_uvicorn.run = lambda *a, **k: None  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
+
+    assert cli.cmd_serve(args) == 0
+    cfg = captured["cfg"]
+    assert cfg.graph_user == "neo4j"
+    assert cfg.graph_password == "secret"
+    assert cfg.graph_database == "memories"
+
+
+def test_cmd_mcp_serve_threads_graph_auth(monkeypatch):
+    import mnemostack.mcp as mcp_mod
+    from mnemostack import cli
+
+    args = _parsed_args(monkeypatch, ["mcp-serve"])
+    captured: dict[str, Any] = {}
+
+    class _Srv:
+        def run(self):
+            return None
+
+    monkeypatch.setattr(mcp_mod, "build_server", lambda **kw: captured.update(kw) or _Srv())
+
+    assert cli.cmd_mcp_serve(args) == 0
+    assert captured["graph_user"] == "neo4j"
+    assert captured["graph_password"] == "secret"
+    assert captured["graph_database"] == "memories"
+
+
+def test_recall_for_cli_threads_graph_auth(monkeypatch):
+    import pytest
+
+    from mnemostack import cli
+
+    args = _parsed_args(monkeypatch, ["search", "q"])
+    captured: dict[str, Any] = {}
+
+    class _Stop(Exception):
+        pass
+
+    def fake_build_full_pipeline(**kw):
+        captured.update(kw)
+        raise _Stop
+
+    monkeypatch.setattr(cli, "build_full_pipeline", fake_build_full_pipeline)
+
+    with pytest.raises(_Stop):
+        cli._recall_for_cli(args, recaller=None, query="q", limit=10)
+    assert captured["graph_user"] == "neo4j"
+    assert captured["graph_password"] == "secret"
+    assert captured["graph_database"] == "memories"
