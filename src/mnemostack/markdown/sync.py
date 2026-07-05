@@ -251,7 +251,10 @@ class MarkdownSyncer:
             path = os.path.join(self.index_root, source)
             if not _is_within(path, scope):
                 continue  # outside the watched subtree — don't touch siblings
-            if not os.path.exists(path):
+            # isfile (not exists): a directory that replaced the note at the same
+            # path means the markdown source — a file — is gone. isfile follows
+            # symlinks, so a live symlinked note still counts as present.
+            if not os.path.isfile(path):
                 self.remove_file(path)
                 removed.append(source)
         return removed

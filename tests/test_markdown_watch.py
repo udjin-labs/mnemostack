@@ -390,6 +390,23 @@ def test_reconcile_scoped_to_subtree_spares_outside_siblings(tmp_path):
     assert _sources_in(store, root) == {"other.md"}  # sibling outside -> spared
 
 
+def test_reconcile_treats_directory_at_source_path_as_deleted(tmp_path):
+    # A note replaced on disk by a directory of the same name means the markdown
+    # source (a file) is gone; os.path.exists would wrongly see the dir.
+    from mnemostack.ingest import stable_chunk_id
+
+    store = _mem_store()
+    root = str(tmp_path.resolve())
+    syncer = MarkdownSyncer(store, _FakeProvider(), index_root=root, chunk_size=10000)
+    (tmp_path / "a.md").mkdir()  # a.md is now a directory, not a note
+    store.upsert(
+        stable_chunk_id("a.md", 0, "x"),
+        [1.0, 0.0, 0.0, 0.0],
+        {"text": "x", "source": "a.md", "index_root": root, "_md_keys": ["text", "source"]},
+    )
+    assert syncer.reconcile_deletions() == ["a.md"]
+
+
 def test_watcher_reconcile_reports_removals(tmp_path):
     store = _mem_store()
     root = str(tmp_path.resolve())
