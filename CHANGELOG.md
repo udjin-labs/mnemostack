@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-05
+
 ### Added
 
 - **Graph auth through every entry point**: `graph.user` / `graph.password` / `graph.database` (already on `GraphConfig`) are now threaded from config into every graph connection built by the CLI, MCP server, and HTTP server — previously those surfaces constructed `GraphStore` / `MemgraphRetriever` with only `uri` + `timeout`, so a Memgraph/Neo4j deployment that requires auth or a non-default database was unusable from them. Construction goes through one shared helper (`mnemostack.graph.make_graph_store`); `MemgraphRetriever` and the pipeline's graph-resurrection stage now also honor `database`. Auth is sourced from the config file or env (`MNEMOSTACK_GRAPH_USER` / `MNEMOSTACK_GRAPH_PASSWORD` / `MNEMOSTACK_GRAPH_DATABASE`), not typed CLI flags — a password on `argv` leaks via `ps`. It reaches every graph-touching entry point, including `mnemostack serve` / `mcp-serve` and non-raw `search` / `answer` (the CLI's pipeline path). The anonymous default is unchanged, so local/on-prem deployments that need no auth are unaffected.
