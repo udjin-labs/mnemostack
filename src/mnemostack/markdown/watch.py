@@ -21,6 +21,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .sync import _is_within
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .sync import FileSyncResult, MarkdownSyncer
 
@@ -133,14 +135,20 @@ class MarkdownWatcher:
         self._debouncer = _Debouncer(debounce, clock)
         self._on_result = on_result
         self._on_error = on_error
+        #: Paths whose last upsert failed (e.g. a transient graph outage). Re-
+        #: emitted on the next poll/rescan so a temporary failure self-heals
+        #: instead of leaving vectors and links diverged until the next edit.
+        self._failed: set[str] = set()
 
     # --- event core (filesystem-agnostic, unit-testable) ---
 
     def handle_event(self, path: str, kind: str) -> None:
-        """Queue a change. Non-markdown paths are ignored."""
+        """Queue a change. Ignores non-markdown paths and paths outside root."""
         rpath = _abspath(path)  # do NOT resolve symlinks — see _abspath
         if not _is_markdown(rpath):
             return
+        if not _is_within(rpath, self.root):
+            return  # e.g. a move whose destination left the watched subtree
         self._debouncer.add(rpath, kind)
 
     def _apply(self, path: str, kind: str) -> None:
@@ -149,9 +157,12 @@ class MarkdownWatcher:
                 res = self.syncer.remove_file(path)
             else:
                 res = self.syncer.index_file(path)
+            self._failed.discard(path)
             if self._on_result is not None:
                 self._on_result(res)
         except Exception as exc:  # noqa: BLE001 — one bad file must not stop the watch
+            if kind != REMOVE:  # a failed delete is retried by reconcile_deletions
+                self._failed.add(path)
             if self._on_error is not None:
                 self._on_error(path, kind, exc)
 
@@ -169,10 +180,15 @@ class MarkdownWatcher:
         return _scan_mtimes(self.root)
 
     def poll_once(self, prev: dict[str, float]) -> dict[str, float]:
-        """One mtime scan: emit upsert for new/changed, remove for vanished."""
+        """One mtime scan: emit upsert for new/changed, remove for vanished.
+
+        A file whose last upsert failed (``_failed``) is re-emitted even if its
+        mtime is unchanged, so a transient failure retries each cycle until it
+        succeeds (the mtime snapshot advances regardless of apply success).
+        """
         cur = self._scan()
         for path, mtime in cur.items():
-            if prev.get(path) != mtime:
+            if prev.get(path) != mtime or path in self._failed:
                 self.handle_event(path, UPSERT)
         for path in prev:
             if path not in cur:

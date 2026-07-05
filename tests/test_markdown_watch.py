@@ -218,6 +218,92 @@ def test_catch_up_reconciles_baseline_diff(tmp_path):
     assert syncer.removed == [gone]
 
 
+def test_failed_upsert_is_retried_on_next_poll(tmp_path):
+    # A transient index failure (e.g. graph outage) must be retried on the next
+    # poll even though the file's mtime is unchanged.
+    import os
+
+    clock = _FakeClock()
+
+    class _FlakySyncer:
+        def __init__(self):
+            self.attempts = 0
+            self.indexed: list[str] = []
+
+        def index_file(self, path):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise RuntimeError("graph outage")
+            self.indexed.append(str(path))
+            return _Res(source=str(path), inserted=1)
+
+        def remove_file(self, path):
+            return _Res(source=str(path))
+
+    syncer = _FlakySyncer()
+    errors: list = []
+    w = MarkdownWatcher(
+        syncer, tmp_path, debounce=1.0, clock=clock, on_error=lambda *a: errors.append(a)
+    )
+    f = tmp_path / "a.md"
+    f.write_text("x")
+
+    snap = w.poll_once({})
+    clock.t = 1.0
+    w.flush()  # first attempt -> fails
+    assert syncer.indexed == [] and len(errors) == 1
+
+    snap = w.poll_once(snap)  # mtime unchanged, but _failed re-emits it
+    clock.t = 2.0
+    w.flush()  # retry -> succeeds
+    assert syncer.indexed == [os.path.abspath(str(f))]
+
+
+def test_events_outside_watched_root_ignored(tmp_path):
+    # A move whose destination is outside the watched subtree must not be indexed.
+    import os
+
+    clock = _FakeClock()
+    syncer = _FakeSyncer()
+    root = tmp_path / "sub"
+    root.mkdir()
+    w = MarkdownWatcher(syncer, root, debounce=1.0, clock=clock)
+
+    w.handle_event(str(tmp_path / "other.md"), UPSERT)  # sibling outside the root
+    clock.t = 1.0
+    w.flush(force=True)
+    assert syncer.indexed == []
+
+    inside = root / "a.md"
+    w.handle_event(str(inside), UPSERT)
+    clock.t = 2.0
+    w.flush(force=True)
+    assert syncer.indexed == [os.path.abspath(str(inside))]
+
+
+def test_prune_spares_non_markdown_chunks_for_same_source(tmp_path):
+    # A generic-index chunk (no _md_keys) sharing a source with markdown chunks
+    # must survive a markdown re-index/prune of that source.
+    from mnemostack.ingest import stable_chunk_id
+
+    store = _mem_store()
+    root = str(tmp_path.resolve())
+    syncer = MarkdownSyncer(store, _FakeProvider(), index_root=root, chunk_size=10000)
+    f = tmp_path / "a.md"
+    f.write_text("# A\n\nbody\n")
+    syncer.index_file(f)
+    gid = stable_chunk_id("a.md", 999, "generic")
+    store.upsert(
+        gid, [1.0, 0.0, 0.0, 0.0], {"text": "generic", "source": "a.md", "index_root": root}
+    )
+
+    f.write_text("# A\n\ndifferent\n")
+    syncer.index_file(f)  # re-index: prunes stale markdown chunks only
+
+    ids = {str(h.id) for h in store.scroll(filters={"index_root": root, "source": "a.md"})}
+    assert str(gid) in ids  # the non-markdown chunk was spared
+
+
 def test_poll_and_debounce_intervals_floored_to_avoid_busy_loop():
     # --watch-poll-interval 0 / --watch-debounce 0 must not sleep(0) forever.
     w = MarkdownWatcher(_FakeSyncer(), ".", poll_interval=0.0, debounce=0.0)

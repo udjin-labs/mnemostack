@@ -18,7 +18,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..ingest import prune_stale_chunks
 from .indexer import collect_markdown
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -132,6 +131,26 @@ class MarkdownSyncer:
         self.chunk_size = chunk_size
         self.graph = graph
 
+    def _prune_markdown_stale(self, fresh_by_source: dict[str, set[str]]) -> int:
+        """Prune stale chunks of the given sources — markdown-owned points only.
+
+        Like :func:`prune_stale_chunks`, but skips points without the indexer's
+        ``_md_keys`` record, so chunks the generic ``index`` command wrote for the
+        same ``(source, index_root)`` are never deleted by the markdown watcher.
+        """
+        removed = 0
+        for source, fresh_ids in fresh_by_source.items():
+            stale: list[Any] = []
+            for hit in self.store.scroll(
+                filters={"source": source, "index_root": self.index_root}
+            ):
+                payload = hit.payload or {}
+                if payload.get("_md_keys") and str(hit.id) not in fresh_ids:
+                    stale.append(hit.id)
+            if stale:
+                removed += self.store.delete_points(stale)
+        return removed
+
     def source_for(self, path: str | Path) -> str:
         """The corpus-relative source string the indexer stores for ``path``.
 
@@ -172,9 +191,7 @@ class MarkdownSyncer:
             src = payload["source"]
             if src in fresh_by_source:
                 fresh_by_source[src].add(cid)
-        pruned = prune_stale_chunks(
-            self.store, fresh_by_source, index_root=self.index_root
-        )
+        pruned = self._prune_markdown_stale(fresh_by_source)
 
         edges = 0
         if self.graph is not None:
@@ -204,9 +221,7 @@ class MarkdownSyncer:
         # graph edges with no record left to retry from.
         if self.graph is not None:
             self.graph.sync_file_links(source, [], index_root=self.index_root)
-        pruned = prune_stale_chunks(
-            self.store, {source: set()}, index_root=self.index_root
-        )
+        pruned = self._prune_markdown_stale({source: set()})
         return FileSyncResult(source=source, pruned=pruned)
 
     def reconcile_deletions(self, within: str | Path | None = None) -> list[str]:
