@@ -21,11 +21,23 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from ..observability import counter
+
 if TYPE_CHECKING:
     from .recaller import RecallResult
     from .reranker import Reranker
 
 logger = logging.getLogger(__name__)
+
+#: Degradation counter mirrored from per-call traces so process-wide surfaces
+#: (`/status`, `/metrics`) can see degradations that live only on the trace —
+#: reranker unavailable/fallback and retriever failures have no other counter.
+DEGRADED_COUNTER = "mnemostack.recall.degraded"
+
+#: Trace tags that are routine signals, not service degradations, and so must
+#: NOT count toward the operator's degraded-events total. `temporal:no_parse`
+#: fires on any non-temporal query (a parallel vector retriever still answers).
+_NON_DEGRADED_TAGS = frozenset({"temporal:no_parse"})
 
 
 @dataclass
@@ -70,6 +82,11 @@ class RecallTrace:
     def mark(self, tag: str) -> None:
         if tag not in self.degraded:
             self.degraded.append(tag)
+            # Mirror the (deduped-per-call) degradation into a process-wide
+            # counter so /status and /metrics see trace-only degradations.
+            # No-op under the default NullRecorder.
+            if tag not in _NON_DEGRADED_TAGS:
+                counter(DEGRADED_COUNTER, 1, labels={"reason": tag})
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {

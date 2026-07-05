@@ -104,6 +104,7 @@ def test_env_aliases_cover_cli_http_mcp_surfaces(isolated_env, tmp_path, monkeyp
     isolated_env.setenv("MNEMOSTACK_MEMGRAPH_URI", "bolt://memgraph:7687")
     isolated_env.setenv("MNEMOSTACK_GRAPH_TIMEOUT", "2.5")
     isolated_env.setenv("MNEMOSTACK_GRAPH_HEALTH_TIMEOUT", "0.5")
+    isolated_env.setenv("MNEMOSTACK_VECTOR_HEALTH_TIMEOUT", "5")
     isolated_env.setenv("MNEMOSTACK_BM25_PATHS", f"/a{os.pathsep}/b")
     isolated_env.setenv("MNEMOSTACK_VECTOR_FLOOR", "4")
     isolated_env.setenv("MNEMOSTACK_RERANK_MODE", "full_reorder")
@@ -113,6 +114,7 @@ def test_env_aliases_cover_cli_http_mcp_surfaces(isolated_env, tmp_path, monkeyp
     assert cfg.embedding.provider == "ollama"
     assert cfg.vector.host == "http://qdrant:6333"
     assert cfg.vector.collection == "memory"
+    assert cfg.vector.health_timeout == 5
     assert cfg.llm.provider == "ollama"
     assert cfg.graph.uri == "bolt://memgraph:7687"
     assert cfg.graph.timeout == 2.5

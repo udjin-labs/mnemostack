@@ -9,7 +9,7 @@ The main production rule is simple: durable memory must be actually durable. Do 
 Mnemostack can run as either:
 
 - an **MCP stdio server** for local agent integrations such as Claude Desktop, Claude Code, Cursor, or other MCP-capable clients; or
-- an **HTTP server** for applications and services that call `/recall`, `/answer`, `/feedback`, `/health`, and `/metrics`.
+- an **HTTP server** for applications and services that call `/recall`, `/answer`, `/feedback`, `/health` (plus `/healthz` / `/readyz` / `/status` probes), and `/metrics`.
 
 Both modes use the same backing stores:
 
@@ -482,10 +482,13 @@ MCP clients can call `mnemostack_health`.
 Health checks differ by entrypoint:
 
 - **HTTP `/health`** checks Qdrant endpoint reachability and Memgraph ping (when configured). It does **not** validate embedding provider, collection existence, or point count.
+- **HTTP `/healthz`** (liveness) returns `200` whenever the process is up and checks no backend — a failure means "restart the pod", not "a dependency is down". Point a Kubernetes `livenessProbe` here.
+- **HTTP `/readyz`** (readiness) checks the two hard dependencies recall needs — Qdrant (bounded ping; timeout `vector.health_timeout` / `--qdrant-health-timeout`, default 2s) and the embedding provider (reachability cached and refreshed in the background, so probes don't pay a live embedding call each time and a slow/wedged provider can't hang the probe) — and returns `503 not_ready` when either is down, so a load balancer stops routing traffic. The graph is optional/fail-soft and is deliberately **not** pinged here — a live graph check would let a slow/blackholed Memgraph add latency to the probe and trip its timeout; graph reachability is on `/health` and `/status` instead. Point a Kubernetes `readinessProbe` here.
+- **HTTP `/status`** returns an operator snapshot: version, configured provider/LLM/collection/Qdrant URL, live dependency reachability, and headline counters (recall volume + total degradation events).
 - **CLI `mnemostack health`** performs a deeper check: embedding provider reachable and correct dimension, Qdrant collection exists, point count non-zero, and Memgraph reachable when configured.
 - **MCP `mnemostack_health`** performs the same deep check as the CLI.
 
-For production monitoring, combine HTTP `/health` for liveness with periodic CLI `mnemostack health` for full validation.
+For production monitoring, use `/healthz` for liveness and `/readyz` for readiness probes, and combine with periodic CLI `mnemostack health` for full validation (collection exists, point count non-zero).
 
 ### Prometheus metrics
 

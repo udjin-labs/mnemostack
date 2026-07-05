@@ -521,6 +521,7 @@ def test_serve_passes_token_budget_to_server_config(monkeypatch):
         qdrant="http://localhost:6333",
         memgraph_uri=None,
         graph_timeout=5.0,
+        qdrant_health_timeout=2,
         bm25_path=[],
         state_path="/tmp/state.json",
         vector_floor=0,
