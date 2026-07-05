@@ -161,7 +161,12 @@ class MarkdownSyncer:
         return Path(os.path.abspath(str(path))).relative_to(self.index_root).as_posix()
 
     def index_file(self, path: str | Path) -> FileSyncResult:
-        """Index/re-index one markdown file. Idempotent; touches only this file."""
+        """Index/re-index one markdown file. Idempotent; touches only this file.
+
+        When the file is NEW (had no chunks), it may satisfy a dangling
+        ``[[wikilink]]`` in another note, so those referrers are re-resolved
+        afterwards (see :meth:`_resync_referrers`).
+        """
         col = collect_markdown(
             Path(os.path.abspath(str(path))),  # do NOT resolve symlinks
             chunk_size=self.chunk_size,
@@ -178,6 +183,9 @@ class MarkdownSyncer:
                 filters={"index_root": self.index_root, "source": source}
             ):
                 existing[str(hit.id)] = hit.payload or {}
+        # A file with no prior chunks is newly created — only then can it satisfy
+        # a dangling link elsewhere (a modify of an existing note doesn't).
+        was_new = not existing
 
         cs = upsert_markdown_chunks(self.store, self.provider, chunks, existing)
 
@@ -200,6 +208,12 @@ class MarkdownSyncer:
                 edges += self.graph.sync_file_links(
                     src, targets, index_root=self.index_root
                 )
+            # A newly-created note can satisfy a dangling [[wikilink]] in another
+            # note; re-resolve those referrers so their edge points at this note
+            # (a full walk would). Only for new files — a modify can't newly
+            # satisfy anything, and skipping it avoids a per-modify graph query.
+            if was_new:
+                self._resync_referrers(col.sources, cs.failed_sources)
 
         first_source = col.sources[0] if col.sources else None
         return FileSyncResult(
@@ -210,6 +224,62 @@ class MarkdownSyncer:
             failed=cs.failed,
             edges=edges,
         )
+
+    @staticmethod
+    def _name_keys(rel: str) -> list[str]:
+        """The name-based keys a link could use to resolve to ``rel``.
+
+        The note's stem (basename without ``.md``) and its corpus-relative path
+        without ``.md`` — mirrors the indexer's ``key_to_rel`` resolution keys.
+        These match a dangling ``[[wikilink]]`` node (a bare name) or a same-
+        directory inline ``[x](b.md)`` node. A still-dangling cross-directory or
+        root-absolute inline link (``[x](../sub/b.md)`` → a ``../sub/b`` node) is
+        NOT matched — its node name is source-relative, unknowable from ``rel``
+        alone — so it re-resolves only on a full ``index-markdown`` reindex.
+        """
+        base = rel.rsplit("/", 1)[-1]
+        stem = base[:-3] if base.lower().endswith(".md") else base
+        rel_key = rel[:-3] if rel.lower().endswith(".md") else rel
+        return list({stem, rel_key})
+
+    def _resync_referrers(self, sources: list[str], failed: set[str]) -> None:
+        """Re-resolve notes whose dangling links the given (new) sources satisfy."""
+        if self.graph is None:
+            return
+        indexed = set(sources)
+        referrers: set[str] = set()
+        for src in sources:
+            if src in failed:
+                continue
+            try:
+                found = self.graph.referrers_of_dangling(
+                    self._name_keys(src), index_root=self.index_root
+                )
+            except Exception:  # noqa: BLE001 — best-effort; never fail the index
+                continue
+            referrers.update(r for r in found if r not in indexed)
+        for referrer in referrers:
+            try:
+                self._resync_file_links(os.path.join(self.index_root, referrer))
+            except Exception:  # noqa: BLE001 — a referrer fixup must not fail the new note's index
+                continue
+
+    def _resync_file_links(self, path: str | Path) -> None:
+        """Re-resolve and re-sync just one file's outgoing graph links (no chunks).
+
+        Used to fix up a referrer after a note it links to is created — cheap
+        (no embedding) and does not itself trigger further referrer resolution.
+        """
+        if self.graph is None or not os.path.isfile(path):
+            return
+        col = collect_markdown(
+            Path(os.path.abspath(str(path))),
+            chunk_size=self.chunk_size,
+            index_root=self.index_root,
+            root_dir=self.index_root,
+        )
+        for src, targets in build_link_map(col, set()).items():
+            self.graph.sync_file_links(src, targets, index_root=self.index_root)
 
     def remove_file(self, path: str | Path) -> FileSyncResult:
         """Drop a deleted file's chunks and clear its outgoing graph links."""

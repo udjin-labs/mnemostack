@@ -170,6 +170,32 @@ class GraphStore:
                 )
         return len(targets)
 
+    def referrers_of_dangling(
+        self, name_keys: list[str], *, index_root: str | None = None
+    ) -> list[str]:
+        """Sources linking to a dangling ``:File`` node a new note now satisfies.
+
+        When a note ``b.md`` is created, a pre-existing ``[[B]]`` in ``a.md`` that
+        was stored as a dangling edge to a node named ``B`` should now resolve to
+        ``b.md``. This finds each source ``a.md`` whose ``LINKS_TO`` target's
+        ``name_lower`` is one of the new note's name keys (its stem / relative
+        path without ``.md``); the caller re-resolves those sources' links.
+        Case-insensitive via ``name_lower``. Only name-based dangling targets are
+        matched — the new note's own ``:File`` node is named by its rel (e.g.
+        ``b.md``), which is never a bare name key, so it can't match itself.
+        """
+        root = index_root or ""
+        keys = [k.lower() for k in name_keys]
+        with self.driver.session(database=self.database) as session:
+            result = session.run(
+                "MATCH (x:File {index_root: $root})-[:LINKS_TO]->(d:File {index_root: $root}) "
+                "WHERE d.name_lower IN $keys "
+                "RETURN DISTINCT x.name AS name",
+                root=root,
+                keys=keys,
+            )
+            return [rec["name"] for rec in result if rec["name"] is not None]
+
     def file_link_sources(self, *, index_root: str | None = None) -> list[str]:
         """Names of ``:File`` nodes with outgoing ``LINKS_TO`` edges in a root.
 

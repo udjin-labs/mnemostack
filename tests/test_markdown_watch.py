@@ -503,6 +503,76 @@ def test_syncer_indexes_modifies_and_removes_a_file(tmp_path):
     assert list(store.scroll(filters={"index_root": root, "source": "a.md"})) == []
 
 
+class _ReverseGraph:
+    """Fake graph mirroring sync_file_links + referrers_of_dangling logic."""
+
+    def __init__(self):
+        self.edges: dict[str, list[str]] = {}
+        self.referrer_queries = 0
+
+    def sync_file_links(self, source, targets, *, index_root=None):
+        self.edges[source] = list(targets)
+        return len(targets)
+
+    def referrers_of_dangling(self, name_keys, *, index_root=None):
+        self.referrer_queries += 1
+        keys = {k.lower() for k in name_keys}
+        return [
+            src
+            for src, tgts in self.edges.items()
+            if any(t.lower() in keys for t in tgts)
+        ]
+
+    def file_link_sources(self, *, index_root=None):
+        return list(self.edges)
+
+    def close(self):
+        pass
+
+
+def test_name_keys_are_stem_and_relpath_without_ext():
+    assert set(MarkdownSyncer._name_keys("b.md")) == {"b"}
+    assert set(MarkdownSyncer._name_keys("sub/b.md")) == {"b", "sub/b"}
+
+
+def test_creating_a_note_reresolves_referring_dangling_wikilink(tmp_path):
+    # a.md links [[B]] before b.md exists -> dangling edge a.md -> B. Creating
+    # b.md must re-resolve a.md's link to b.md (what a full walk would do).
+    store = _mem_store()
+    root = str(tmp_path.resolve())
+    graph = _ReverseGraph()
+    syncer = MarkdownSyncer(
+        store, _FakeProvider(), index_root=root, chunk_size=10000, graph=graph
+    )
+
+    (tmp_path / "a.md").write_text("# A\n\nsee [[B]]\n")
+    syncer.index_file(tmp_path / "a.md")
+    assert graph.edges["a.md"] == ["B"]  # dangling
+
+    (tmp_path / "b.md").write_text("# B\n")
+    syncer.index_file(tmp_path / "b.md")
+    assert graph.edges["a.md"] == ["b.md"]  # re-resolved, no longer dangling
+
+
+def test_modify_does_not_trigger_referrer_resolution(tmp_path):
+    # Referrer re-resolution only makes sense for a NEW note; a plain modify of
+    # an existing note must not issue the (potentially costly) referrer query.
+    store = _mem_store()
+    root = str(tmp_path.resolve())
+    graph = _ReverseGraph()
+    syncer = MarkdownSyncer(
+        store, _FakeProvider(), index_root=root, chunk_size=10000, graph=graph
+    )
+    f = tmp_path / "a.md"
+    f.write_text("# A\n")
+    syncer.index_file(f)  # new -> one referrer query
+    assert graph.referrer_queries == 1
+
+    f.write_text("# A\n\nmore body\n")
+    syncer.index_file(f)  # modify -> no referrer query
+    assert graph.referrer_queries == 1
+
+
 def test_syncer_syncs_and_clears_graph_links(tmp_path):
     store = _mem_store()
     root = str(tmp_path.resolve())
