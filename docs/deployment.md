@@ -483,7 +483,7 @@ Health checks differ by entrypoint:
 
 - **HTTP `/health`** checks Qdrant endpoint reachability and Memgraph ping (when configured). It does **not** validate embedding provider, collection existence, or point count.
 - **HTTP `/healthz`** (liveness) returns `200` whenever the process is up and checks no backend — a failure means "restart the pod", not "a dependency is down". Point a Kubernetes `livenessProbe` here.
-- **HTTP `/readyz`** (readiness) pings Qdrant (the hard dependency recall needs) and returns `503 not_ready` when it's unreachable, so a load balancer stops routing traffic; the graph is optional/fail-soft and is reported but never gates readiness. Point a Kubernetes `readinessProbe` here.
+- **HTTP `/readyz`** (readiness) pings Qdrant (the hard dependency recall needs) and returns `503 not_ready` when it's unreachable, so a load balancer stops routing traffic. The graph is optional/fail-soft and is deliberately **not** pinged here — a live graph check would let a slow/blackholed Memgraph add latency to the probe and trip its timeout; graph reachability is on `/health` and `/status` instead. Point a Kubernetes `readinessProbe` here.
 - **HTTP `/status`** returns an operator snapshot: version, configured provider/LLM/collection/Qdrant URL, live dependency reachability, and headline counters (recall volume + total degradation events).
 - **CLI `mnemostack health`** performs a deeper check: embedding provider reachable and correct dimension, Qdrant collection exists, point count non-zero, and Memgraph reachable when configured.
 - **MCP `mnemostack_health`** performs the same deep check as the CLI.

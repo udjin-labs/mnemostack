@@ -249,8 +249,11 @@ class ReadyResponse(BaseModel):
     status: str  # "ready" | "not_ready"
     version: str
     qdrant: bool  # readiness gate: recall needs the vector store
-    # graph is optional / fail-soft, so it's reported but does NOT gate readiness
-    memgraph: bool
+    # NOTE: the graph is deliberately absent. It's optional/fail-soft, and a live
+    # graph ping on the readiness hot path would let a slow/blackholed Memgraph
+    # add up to graph_health_timeout of latency to /readyz and trip a probe
+    # timeout — gating readiness on the graph through the back door. Graph
+    # reachability is on /health and /status instead.
 
 
 class StatusResponse(BaseModel):
@@ -431,7 +434,12 @@ def _prometheus_dump(rec: InMemoryRecorder) -> str:
     lines: list[str] = []
     seen_help: set[str] = set()
 
-    for key, val in sorted(rec.counters.items()):
+    # Iterate snapshots — the live dicts are mutated by recall running in the
+    # sync threadpool while this scrape runs.
+    counters = rec.snapshot_counters()
+    histograms = rec.snapshot_histograms()
+
+    for key, val in sorted(counters.items()):
         name, labels = _from_key(key)
         prom = _safe_name(name) + "_total"
         if prom not in seen_help:
@@ -440,7 +448,7 @@ def _prometheus_dump(rec: InMemoryRecorder) -> str:
             seen_help.add(prom)
         lines.append(f"{prom}{_fmt_labels(labels)} {val}")
 
-    for key, obs in sorted(rec.histograms.items()):
+    for key, obs in sorted(histograms.items()):
         name, labels = _from_key(key)
         prom = _safe_name(name)
         if not obs:
@@ -664,15 +672,15 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         responses={503: {"model": ReadyResponse}},
     )
     def readyz():
-        # Readiness: can we serve traffic? Qdrant is the hard dependency (recall
-        # needs it), so it gates readiness with a 503. The graph is optional and
-        # fail-soft, so it's reported but never blocks readiness.
+        # Readiness: can we serve traffic? Qdrant is the only hard dependency
+        # (recall needs it), so it alone gates readiness with a 503. The graph is
+        # optional/fail-soft and is intentionally not pinged here — see
+        # ReadyResponse — so a slow graph can never add latency to this probe.
         qdrant_ok = _qdrant_ok()
         body = ReadyResponse(
             status="ready" if qdrant_ok else "not_ready",
             version=__version__,
             qdrant=qdrant_ok,
-            memgraph=_graph_ok(),
         )
         if not qdrant_ok:
             from fastapi.responses import JSONResponse
@@ -690,8 +698,9 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         recall_calls = 0.0
         degraded = 0.0
         if isinstance(rec, InMemoryRecorder):
+            # Iterate a snapshot — the live dict is mutated by concurrent recall.
             # key = (name, labels...); sum across label sets for each metric.
-            for key, value in rec.counters.items():
+            for key, value in rec.snapshot_counters().items():
                 name = key[0]
                 if name == "mnemostack.recall.calls":
                     recall_calls += value

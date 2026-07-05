@@ -8,6 +8,7 @@ with Prometheus, OpenTelemetry, StatsD, etc.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from contextlib import contextmanager
 from typing import Protocol
@@ -58,12 +59,20 @@ class LoggingRecorder:
 class InMemoryRecorder:
     """Aggregating recorder — stores metrics in memory.
 
-    Useful for tests and short-lived scripts. Not thread-safe.
+    Useful for tests and short-lived scripts, and as the process-wide recorder
+    behind the HTTP server's `/metrics` and `/status`. Writes come from recall
+    running in FastAPI's sync threadpool while a probe reads concurrently, so
+    every access to the underlying dicts is guarded by a lock — an unguarded
+    read that iterated `counters` while a new key was being recorded could raise
+    `RuntimeError: dictionary changed size during iteration`. Readers get a
+    snapshot (`snapshot_counters` / `snapshot_histograms`); iterate those, never
+    the live dicts.
     """
 
     def __init__(self):
         self.counters: dict[tuple, float] = {}
         self.histograms: dict[tuple, list[float]] = {}
+        self._lock = threading.Lock()
 
     @staticmethod
     def _key(name: str, labels: dict[str, str] | None) -> tuple:
@@ -73,21 +82,36 @@ class InMemoryRecorder:
 
     def record_counter(self, name, value, labels=None):
         k = self._key(name, labels)
-        self.counters[k] = self.counters.get(k, 0.0) + float(value)
+        with self._lock:
+            self.counters[k] = self.counters.get(k, 0.0) + float(value)
 
     def record_histogram(self, name, value, labels=None):
         k = self._key(name, labels)
-        self.histograms.setdefault(k, []).append(float(value))
+        with self._lock:
+            self.histograms.setdefault(k, []).append(float(value))
 
     def counter_value(self, name: str, labels: dict[str, str] | None = None) -> float:
-        return self.counters.get(self._key(name, labels), 0.0)
+        with self._lock:
+            return self.counters.get(self._key(name, labels), 0.0)
 
     def histogram_values(self, name: str, labels: dict[str, str] | None = None) -> list[float]:
-        return list(self.histograms.get(self._key(name, labels), []))
+        with self._lock:
+            return list(self.histograms.get(self._key(name, labels), []))
+
+    def snapshot_counters(self) -> dict[tuple, float]:
+        """A point-in-time copy safe to iterate while writes continue."""
+        with self._lock:
+            return dict(self.counters)
+
+    def snapshot_histograms(self) -> dict[tuple, list[float]]:
+        """A point-in-time deep copy safe to iterate while writes continue."""
+        with self._lock:
+            return {k: list(v) for k, v in self.histograms.items()}
 
     def reset(self) -> None:
-        self.counters.clear()
-        self.histograms.clear()
+        with self._lock:
+            self.counters.clear()
+            self.histograms.clear()
 
 
 # Module-level singleton recorder
