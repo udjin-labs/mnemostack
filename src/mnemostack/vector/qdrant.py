@@ -14,13 +14,35 @@ from qdrant_client.models import (
     Distance,
     FieldCondition,
     Filter,
+    IsEmptyCondition,
     MatchValue,
+    PayloadField,
     PayloadSchemaType,
     PointIdsList,
     PointStruct,
     Range,
     VectorParams,
 )
+
+#: Payload key marking a fact as stale (system-time). Kept as a literal here so
+#: the vector layer doesn't depend on the recall layer; mirrors
+#: ``recall.validity.INVALIDATED_AT``.
+_INVALIDATED_AT_KEY = "invalidated_at"
+
+
+def _hide_invalidated_condition() -> IsEmptyCondition:
+    """Qdrant predicate for a "current" fact — one with no ``invalidated_at``.
+
+    This is the server-side push-down of the default validity view. It matches
+    ``recall.validity.is_current`` for every marker ``VectorStore.invalidate``
+    writes: invalidate always stamps a real UTC timestamp, so the only value that
+    ``is_current`` treats as current but ``IsEmpty`` would not — a literal empty
+    string — is never produced. Point-in-time (``as_of``) recall is deliberately
+    NOT pushed down: its ``valid_from``/``valid_until`` bounds may be bare dates,
+    and a server-side range that mis-orders those would silently drop valid facts
+    (unrecoverable past the client-side filter), so it stays in Python.
+    """
+    return IsEmptyCondition(is_empty=PayloadField(key=_INVALIDATED_AT_KEY))
 
 
 class DimensionMismatchError(ValueError):
@@ -309,13 +331,23 @@ class VectorStore:
         limit: int = 10,
         filters: dict[str, Any] | None = None,
         min_score: float = 0.0,
+        *,
+        hide_invalidated: bool = False,
     ) -> list[Hit]:
         """Semantic search with optional payload filters.
 
         filters format (simple exact-match):
             {"memory_class": "decision", "source_file": "notes.md"}
+
+        ``hide_invalidated`` pushes the default validity view into Qdrant so
+        stale facts (those carrying an ``invalidated_at`` marker) are never
+        fetched — cleaner and cheaper than fetching them and dropping them
+        client-side. The client-side ``filter_by_validity`` remains the backstop.
         """
-        qfilter = self._build_filter(filters) if filters else None
+        must: list[Any] = list(self._build_filter(filters).must or []) if filters else []
+        if hide_invalidated:
+            must.append(_hide_invalidated_condition())
+        qfilter = Filter(must=must) if must else None
         result = self.client.query_points(
             collection_name=self.collection,
             query=query_vector,

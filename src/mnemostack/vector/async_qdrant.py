@@ -24,7 +24,7 @@ from qdrant_client.models import (
     VectorParams,
 )
 
-from .qdrant import DimensionMismatchError, Hit
+from .qdrant import DimensionMismatchError, Hit, _hide_invalidated_condition
 
 
 class AsyncVectorStore:
@@ -175,8 +175,13 @@ class AsyncVectorStore:
         limit: int = 10,
         filters: dict[str, Any] | None = None,
         min_score: float = 0.0,
+        *,
+        hide_invalidated: bool = False,
     ) -> list[Hit]:
-        qfilter = self._build_filter(filters) if filters else None
+        must: list[Any] = list(self._build_filter(filters).must or []) if filters else []
+        if hide_invalidated:
+            must.append(_hide_invalidated_condition())
+        qfilter = Filter(must=must) if must else None
         result = await self.client.query_points(
             collection_name=self.collection,
             query=query_vector,

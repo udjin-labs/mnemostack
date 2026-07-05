@@ -639,8 +639,9 @@ def test_search_many_filters_per_vector_before_fusion():
     from mnemostack.vector.qdrant import Hit
 
     class _FakeVector:
-        def search(self, vector, limit, filters=None):
-            # a stale hit that would recur across vectors and get RRF-boosted
+        def search(self, vector, limit, filters=None, *, hide_invalidated=False):
+            # ignores the push-down flag on purpose: the client-side per-vector
+            # filter must still drop the stale hit (backstop), so the test holds.
             return [
                 Hit(id="stale", score=0.99, payload={"invalidated_at": "2026-07-04", "text": "s"}),
                 Hit(id="fresh", score=0.5, payload={"text": "f"}),
@@ -709,7 +710,9 @@ def test_fallback_filters_validity_before_truncate():
     stale = RecallResult(id="stale", text="s", score=0.9,
                          payload={"invalidated_at": "2026-07-04"}, sources=["vector"])
     fresh = RecallResult(id="fresh", text="f", score=0.5, payload={}, sources=["vector"])
-    recaller._vector_fallback_hits = lambda query, limit, filters: [stale, fresh]
+    recaller._vector_fallback_hits = (
+        lambda query, limit, filters, hide_invalidated=False: [stale, fresh]
+    )
 
     out = recaller._maybe_apply_fallback(
         "q", [], limit=1, vector_limit=1, filters=None
