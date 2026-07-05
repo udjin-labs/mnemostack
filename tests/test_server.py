@@ -101,17 +101,30 @@ def _patched_app(
     with_answer: bool = True,
     pipeline: _FakePipeline | None = None,
     config: ServerConfig | None = None,
-    store_factory=None,
+    qdrant_reachable: bool = False,
 ):
-    """Build the FastAPI app with the heavy retrieval layers mocked out."""
+    """Build the FastAPI app with the heavy retrieval layers mocked out.
+
+    `qdrant_reachable` controls the dedicated health/readiness probe client:
+    False (default) -> the probe raises, so /readyz is 503 and /health degraded;
+    True -> the probe succeeds. Readiness keys off this probe, not the store.
+    """
     import mnemostack.server as srv
 
     monkeypatch.setattr(
-        srv,
-        "VectorStore",
-        store_factory
-        or (lambda **_: type("VS", (), {"count": lambda self: 0, "dimension": 3})()),
+        srv, "VectorStore", lambda **_: type("VS", (), {"count": lambda self: 0, "dimension": 3})()
     )
+
+    def _fake_probe(*_a, **_k):
+        class _Probe:
+            def get_collections(self):
+                if not qdrant_reachable:
+                    raise ConnectionError("qdrant down")
+                return object()
+
+        return _Probe()
+
+    monkeypatch.setattr(srv, "_make_probe_client", _fake_probe)
 
     class _FakeProvider:
         dimension = 3
@@ -203,32 +216,6 @@ def test_health_endpoint(monkeypatch):
     assert "qdrant" in data and "memgraph" in data
 
 
-class _ReachableStore:
-    """Minimal VectorStore stand-in whose Qdrant client is reachable."""
-
-    dimension = 3
-
-    def __init__(self, **_):
-        class _Client:
-            def get_collections(self):
-                return object()
-
-        self.client = _Client()
-
-
-class _UnreachableStore:
-    """VectorStore stand-in whose Qdrant client raises, as a real outage would."""
-
-    dimension = 3
-
-    def __init__(self, **_):
-        class _Client:
-            def get_collections(self):
-                raise ConnectionError("qdrant down")
-
-        self.client = _Client()
-
-
 def test_healthz_liveness_always_ok(monkeypatch):
     # Liveness must not depend on Qdrant/graph — up even with no backends.
     app, _ = _patched_app(monkeypatch)
@@ -239,16 +226,18 @@ def test_healthz_liveness_always_ok(monkeypatch):
 
 
 def test_readyz_503_when_qdrant_unreachable(monkeypatch):
-    # Qdrant client raises (as a real outage would) -> get_collections fails -> not ready.
-    app, _ = _patched_app(monkeypatch, store_factory=lambda **_: _UnreachableStore())
+    # Probe client raises (as a real outage would) -> get_collections fails -> not ready.
+    app, _ = _patched_app(monkeypatch, qdrant_reachable=False)
     r = TestClient(app).get("/readyz")
     assert r.status_code == 503
     assert r.json()["status"] == "not_ready"
     assert r.json()["qdrant"] is False
+    # Graph is intentionally absent from readiness — no field, no ping.
+    assert "memgraph" not in r.json()
 
 
 def test_readyz_200_when_qdrant_reachable(monkeypatch):
-    app, _ = _patched_app(monkeypatch, store_factory=lambda **_: _ReachableStore())
+    app, _ = _patched_app(monkeypatch, qdrant_reachable=True)
     r = TestClient(app).get("/readyz")
     assert r.status_code == 200
     assert r.json()["status"] == "ready"
@@ -278,6 +267,21 @@ def test_status_degraded_events_counts_only_serving_degradations(monkeypatch):
     # recorder) and a routine no-parse are not.
     counter("mnemostack.ingest.failed", 5)
     counter("mnemostack.recall.temporal_no_parse", 3)
+    d = TestClient(app).get("/status").json()
+    assert d["degraded_events"] == 2
+
+
+def test_status_counts_trace_only_degradations(monkeypatch):
+    # Reranker unavailable / retriever failures live only on the per-call trace;
+    # they must still reach /status via the mirrored degradation counter.
+    from mnemostack.recall import RecallTrace
+
+    app, _ = _patched_app(monkeypatch)
+    tr = RecallTrace()
+    tr.mark("reranker:unavailable")
+    tr.mark("retriever:bm25:failed")
+    tr.mark("temporal:no_parse")  # routine — must NOT count
+    tr.mark("reranker:unavailable")  # deduped per trace — must NOT double-count
     d = TestClient(app).get("/status").json()
     assert d["degraded_events"] == 2
 

@@ -45,6 +45,7 @@ from mnemostack.observability.recorder import (
     set_recorder,
 )
 from mnemostack.recall import (
+    DEGRADED_COUNTER,
     RERANK_MODES,
     AnswerGenerator,
     BM25Retriever,
@@ -280,8 +281,15 @@ class StatusResponse(BaseModel):
 # (e.g. `ingest.failed`) into an operator's serving-degradation signal.
 # `temporal.no_parse` is deliberately excluded — a query with no parseable date
 # is routine, not a degradation.
+#
+# `mnemostack.recall.degraded` is the counter the recall trace mirrors its
+# per-call degradation tags into (reranker unavailable/fallback, retriever
+# failures) — those live only on the trace and have no other counter, so
+# without it a reranker that's unavailable at startup would leave this at 0
+# while every /recall reports degraded service.
 _DEGRADED_METRICS = frozenset(
     {
+        DEGRADED_COUNTER,
         "mnemostack.recall.fallback_triggered",
         "mnemostack.recall.followup_rewrite_failed",
         "mnemostack.query_expansion.errors",
@@ -289,6 +297,21 @@ _DEGRADED_METRICS = frozenset(
         "mnemostack.answer.list_finalize_fallback",
     }
 )
+
+
+def _make_probe_client(url: str, timeout: int) -> Any:
+    """A short-timeout Qdrant client dedicated to liveness/readiness pings.
+
+    Separate from the recall store's client (whose timeout is sized for recall,
+    not probes): a slow or blackholed Qdrant makes /readyz return 503 within
+    ``timeout`` instead of tying up a FastAPI worker thread for the store's full
+    recall timeout. Construction is lazy (no connection until first call), so
+    building the app never blocks on Qdrant. Isolated as a function so tests can
+    substitute a fake without a live Qdrant.
+    """
+    from qdrant_client import QdrantClient
+
+    return QdrantClient(url=url, timeout=timeout)
 
 
 # ----- Server construction -----
@@ -315,6 +338,11 @@ class ServerConfig:
     graph_user: str = ""
     graph_password: str = ""
     graph_database: str | None = None
+    # Short timeout (whole seconds — qdrant-client's client timeout is integer)
+    # for the dedicated liveness/readiness Qdrant ping, so a slow or blackholed
+    # Qdrant makes /readyz return 503 promptly instead of tying up a worker
+    # thread for the recall client's full timeout. Separate from recall's own.
+    qdrant_health_timeout: int = 2
 
     def __post_init__(self) -> None:
         if self.rerank_mode not in RERANK_MODES:
@@ -335,6 +363,7 @@ class ServerConfig:
             llm_model=cfg.llm.model,
             collection=cfg.vector.collection,
             qdrant_url=cfg.vector.host,
+            qdrant_health_timeout=cfg.vector.health_timeout,
             graph_uri=cfg.graph.uri or "bolt://localhost:7687",
             graph_user=cfg.graph.user,
             graph_password=cfg.graph.password,
@@ -488,6 +517,9 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     store = VectorStore(
         collection=cfg.collection, dimension=provider.dimension, host=cfg.qdrant_url
     )
+    # Dedicated short-timeout client for health/readiness pings — never the
+    # recall store's client, whose timeout is sized for recall.
+    probe_client = _make_probe_client(cfg.qdrant_url, cfg.qdrant_health_timeout)
 
     def _graph_ok() -> bool:
         if not cfg.graph_uri:
@@ -511,9 +543,10 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     def _qdrant_ok() -> bool:
         # Ping-level reachability: only that the client can reach Qdrant, not
         # that the collection exists (a fresh deploy before any ingest is still
-        # reachable). Used by /health, /readyz and /status.
+        # reachable). Used by /health, /readyz and /status. Uses the dedicated
+        # short-timeout probe client so a slow Qdrant can't hang the probe.
         try:
-            store.client.get_collections()
+            probe_client.get_collections()
             return True
         except Exception:
             return False
