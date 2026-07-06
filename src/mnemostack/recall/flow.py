@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from .filters import payload_matches
 from .tokens import TokenCounter, apply_token_budget
 from .trace import RecallTrace, apply_rerank_safe
+from .validity import filter_by_tenant
 
 if TYPE_CHECKING:
     from .pipeline import Pipeline
@@ -32,6 +33,7 @@ def recall_flow(
     token_counter: TokenCounter | None = None,
     include_invalidated: bool = False,
     as_of: str | None = None,
+    tenant: str | None = None,
 ) -> list[RecallResult]:
     """Run hybrid recall plus the canonical post-processing chain.
 
@@ -61,6 +63,7 @@ def recall_flow(
         trace=trace,
         include_invalidated=include_invalidated,
         as_of=as_of,
+        tenant=tenant,
     )
     results = recalled
     if pipeline is not None:
@@ -74,6 +77,11 @@ def recall_flow(
             # on the pipeline output too: anything that cannot be attributed
             # to the scope is dropped, not leaked.
             results = [r for r in results if payload_matches(r.payload, filters)]
+        # Tenant backstop AFTER the pipeline: the graph-resurrection stage can
+        # inject graph records that carry no tenant_id and never passed the
+        # tenant-scoped retrievers, so re-apply the isolation net here (recall's
+        # own backstop ran before the pipeline).
+        results = filter_by_tenant(results, tenant)
     if reranker is not None:
         results = apply_rerank_safe(reranker, query, results, trace)
     results = results[:limit]
@@ -98,6 +106,7 @@ async def recall_flow_async(
     token_counter: TokenCounter | None = None,
     include_invalidated: bool = False,
     as_of: str | None = None,
+    tenant: str | None = None,
 ) -> list[RecallResult]:
     """Async wrapper around `recall_flow`.
 
@@ -122,4 +131,5 @@ async def recall_flow_async(
         token_counter=token_counter,
         include_invalidated=include_invalidated,
         as_of=as_of,
+        tenant=tenant,
     )

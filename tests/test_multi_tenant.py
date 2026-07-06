@@ -241,6 +241,102 @@ def test_prune_is_tenant_scoped():
     assert store.count(tenant="alpha") == 1
 
 
+def test_filter_by_tenant_backstop():
+    from mnemostack.recall import RecallResult, filter_by_tenant
+
+    a = RecallResult(id="1", text="a", score=1.0, payload={TENANT_ID_KEY: "alpha"})
+    b = RecallResult(id="2", text="b", score=1.0, payload={TENANT_ID_KEY: "beta"})
+    c = RecallResult(id="3", text="c", score=1.0, payload={})  # e.g. a BM25/graph hit
+
+    kept = filter_by_tenant([a, b, c], "alpha")
+    assert [r.id for r in kept] == ["1"]  # foreign tenant + no-tenant hits dropped
+    assert filter_by_tenant([a, b, c], None) == [a, b, c]  # None = no-op
+
+
+def test_recall_isolates_by_tenant():
+    from mnemostack import IngestItem, Ingestor
+    from mnemostack.recall import Recaller, VectorRetriever
+
+    store = _store()
+    emb = _FakeEmbedder()
+    Ingestor(embedding=emb, vector_store=store, tenant="alpha").ingest(
+        [IngestItem(text="alpha secret plan", source="a.md")]
+    )
+    Ingestor(embedding=emb, vector_store=store, tenant="beta").ingest(
+        [IngestItem(text="beta secret plan", source="b.md")]
+    )
+    recaller = Recaller(
+        retrievers=[VectorRetriever(embedding=emb, vector_store=store)],
+        embedding_provider=emb,
+        vector_store=store,
+    )
+    # Same fake vector for both tenants, so only the tenant filter separates them.
+    results = recaller.recall("secret plan", tenant="alpha", limit=10)
+    assert results
+    assert all(r.payload.get(TENANT_ID_KEY) == "alpha" for r in results)
+    assert all("beta" not in r.text for r in results)
+
+
+def test_recall_excludes_bm25_under_tenant():
+    # BM25 (no tenant metadata) must not leak into a tenant-scoped recall.
+    from mnemostack import IngestItem, Ingestor
+    from mnemostack.recall import BM25Doc, BM25Retriever, Recaller, VectorRetriever
+
+    store = _store()
+    emb = _FakeEmbedder()
+    Ingestor(embedding=emb, vector_store=store, tenant="alpha").ingest(
+        [IngestItem(text="alpha note about widgets", source="a.md")]
+    )
+    # A BM25 corpus doc that lexically matches but carries no tenant_id.
+    bm25 = BM25Retriever(docs=[BM25Doc(id="x", text="widgets everywhere", payload={})])
+    recaller = Recaller(
+        retrievers=[VectorRetriever(embedding=emb, vector_store=store), bm25],
+        embedding_provider=emb,
+        vector_store=store,
+    )
+    results = recaller.recall("widgets", tenant="alpha", limit=10)
+    ids = {str(r.id) for r in results}
+    assert "x" not in ids  # BM25 doc excluded (no tenant_id)
+    assert all(r.payload.get(TENANT_ID_KEY) == "alpha" for r in results)
+
+
+def test_recall_legacy_path_isolates_by_tenant():
+    # The non-retrievers Recaller (embedding_provider + vector_store + bm25_docs)
+    # path: BM25 skipped under a tenant, vector pushed, backstop applied.
+    from mnemostack import IngestItem, Ingestor
+    from mnemostack.recall import BM25Doc, Recaller
+
+    store = _store()
+    emb = _FakeEmbedder()
+    Ingestor(embedding=emb, vector_store=store, tenant="alpha").ingest(
+        [IngestItem(text="alpha widget notes", source="a.md")]
+    )
+    Ingestor(embedding=emb, vector_store=store, tenant="beta").ingest(
+        [IngestItem(text="beta widget notes", source="b.md")]
+    )
+    recaller = Recaller(
+        embedding_provider=emb,
+        vector_store=store,
+        bm25_docs=[BM25Doc(id="bm", text="widget", payload={})],
+    )
+    results = recaller.recall("widget notes", tenant="alpha", limit=10)
+    assert results
+    assert all(r.payload.get(TENANT_ID_KEY) == "alpha" for r in results)
+    assert "bm" not in {str(r.id) for r in results}  # BM25 excluded under tenant
+
+
+def test_search_many_isolates_by_tenant():
+    from mnemostack.recall import Recaller
+
+    store = _store()
+    emb = _FakeEmbedder()
+    store.upsert(1, _VEC, {"text": "alpha"}, tenant="alpha")
+    store.upsert(2, _VEC, {"text": "beta"}, tenant="beta")
+    recaller = Recaller(embedding_provider=emb, vector_store=store)
+    results = recaller.search_many([_VEC, _VEC], limit=10, tenant="alpha")
+    assert {r.id for r in results} == {1}
+
+
 async def test_async_store_isolates_by_tenant():
     from qdrant_client import AsyncQdrantClient
 

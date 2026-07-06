@@ -776,7 +776,7 @@ def test_fallback_filters_validity_before_truncate():
                          payload={"invalidated_at": "2026-07-04"}, sources=["vector"])
     fresh = RecallResult(id="fresh", text="f", score=0.5, payload={}, sources=["vector"])
     recaller._vector_fallback_hits = (
-        lambda query, limit, filters, hide_invalidated=False: [stale, fresh]
+        lambda query, limit, filters, hide_invalidated=False, tenant=None: [stale, fresh]
     )
 
     out = recaller._maybe_apply_fallback(
@@ -879,3 +879,67 @@ def test_to_utc_iso_normalizes_naive_datetime_with_separator():
     # it sorts against normalized bounds. A bare date stays a date.
     assert to_utc_iso("2024-01-15T10:00:00") == "2024-01-15T10:00:00Z"
     assert to_utc_iso("2024-01-15") == "2024-01-15"
+
+
+def test_filter_by_tenant_scrubs_foreign_vector_floor_candidates():
+    from mnemostack.recall import filter_by_tenant
+
+    r = _r(
+        "1",
+        {
+            "tenant_id": "alpha",
+            # Raw vector-floor candidates are re-materialized AFTER the tenant
+            # backstop, so a foreign one hidden here must be scrubbed.
+            "_vector_floor_candidates": [
+                {"id": "2", "payload": {"tenant_id": "alpha"}},
+                {"id": "3", "payload": {"tenant_id": "beta"}},
+            ],
+        },
+    )
+    out = filter_by_tenant([r], "alpha")
+    assert len(out) == 1
+    assert [c["id"] for c in out[0].payload["_vector_floor_candidates"]] == ["2"]
+
+
+def test_recall_trace_restrict_to_ids_scrubs_foreign():
+    from mnemostack.recall import RecallTrace
+    from mnemostack.recall.trace import RetrieverTrace
+
+    tr = RecallTrace(
+        retrievers=[RetrieverTrace(name="vector", ranked=[("1", 0.9), ("2", 0.8)])],
+        fused=[("1", 0.9), ("2", 0.8)],
+        post_rerank=[("2", 0.8), ("1", 0.9)],
+    )
+    tr.restrict_to_ids(["1"])
+    assert tr.retrievers[0].ranked == [("1", 0.9)]
+    assert tr.fused == [("1", 0.9)]
+    assert tr.post_rerank == [("1", 0.9)]
+
+
+def test_vector_fallback_hits_scopes_to_tenant():
+    # A tenant-scoped fallback must query the store with tenant= (scoped at
+    # source), not fetch the whole shared collection and rely on the backstop.
+    from mnemostack.recall.recaller import Recaller
+
+    seen = {}
+
+    class _Hit:
+        def __init__(self, id, score, payload):
+            self.id, self.score, self.payload = id, score, payload
+
+    class _FakeEmbed:
+        def embed(self, q):
+            return [1.0, 0.0, 0.0, 0.0]
+
+    class _FakeVector:
+        def search(self, vec, limit, filters=None, hide_invalidated=False, tenant=None, **kw):
+            seen["tenant"] = tenant
+            return [_Hit("x", 0.9, {"tenant_id": tenant, "text": "t"})]
+
+    r = Recaller.__new__(Recaller)
+    r.embedding = _FakeEmbed()
+    r.vector = _FakeVector()
+    r.retrievers = []
+    out = r._vector_fallback_hits("q", limit=5, filters=None, tenant="alpha")
+    assert seen["tenant"] == "alpha"
+    assert out and out[0].payload["tenant_id"] == "alpha"
