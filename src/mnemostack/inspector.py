@@ -93,7 +93,8 @@ function tenant(){return $("#tenant").value;}
 async function loadTenants(){
   const d=await j("/api/tenants");$("#ver").textContent="v"+d.version;
   const sel=$("#tenant");sel.innerHTML="";
-  if(!d.tenants.length){sel.innerHTML='<option value="">(no tenants — data has no tenant_id)</option>';}
+  if(d.ok===false){$("#status").textContent=d.error||"tenant lookup failed";}
+  if(!d.tenants.length){sel.innerHTML='<option value="">('+(d.ok===false?"lookup failed":"no tenants — data has no tenant_id")+')</option>';}
   for(const t of d.tenants){const o=document.createElement("option");o.value=t.id;o.textContent=t.id+" ("+t.count+")";sel.appendChild(o);}
 }
 async function loadOverview(){
@@ -153,10 +154,19 @@ def _graph_reachable(cfg: ServerConfig) -> bool | None:
 
 def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
     cfg = config or ServerConfig.from_env()
-    provider = get_provider(cfg.provider_name, **model_kwargs(cfg.embedding_model))
-    store = VectorStore(
-        collection=cfg.collection, dimension=provider.dimension, host=cfg.qdrant_url
-    )
+    # Browse views (tenants / overview / records scroll) use count / scroll / facet
+    # and need no embeddings, so don't construct the provider eagerly — that would
+    # make `mnemostack inspect` require GEMINI_API_KEY (or the HF model/deps) just to
+    # browse read-only Qdrant data. Build the provider lazily, only when a `?q=`
+    # search must embed. The store's dimension is unused for browse/search here
+    # (search is handed a precomputed vector), so a placeholder value is fine.
+    store = VectorStore(collection=cfg.collection, dimension=1, host=cfg.qdrant_url)
+    _provider: dict[str, Any] = {}
+
+    def _embed(text: str) -> list[float]:
+        if "p" not in _provider:
+            _provider["p"] = get_provider(cfg.provider_name, **model_kwargs(cfg.embedding_model))
+        return _provider["p"].embed(text)
 
     app = FastAPI(title="mnemostack inspector", version=__version__)
 
@@ -182,15 +192,23 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
         Facet-based — cheap and approximate for very large corpora. When service
         keys land, the tenant list moves to the key store.
         """
-        out: list[dict[str, Any]] = []
         try:
             resp = store.client.facet(
                 collection_name=cfg.collection, key=TENANT_ID_KEY, limit=limit
             )
             out = [{"id": h.value, "count": h.count} for h in resp.hits]
-        except Exception as e:  # noqa: BLE001 — facet unsupported / empty collection
-            log.info("tenant facet unavailable: %s", e)
-        return {"tenants": out, "version": __version__}
+            return {"tenants": out, "ok": True, "version": __version__}
+        except Exception as e:  # noqa: BLE001
+            # Don't render a facet failure as "no tenants" — distinguish Qdrant
+            # being down from an empty/unsupported facet so the UI shows the truth.
+            reachable = _qdrant_ok()
+            log.info("tenant facet unavailable (qdrant_reachable=%s): %s", reachable, e)
+            return {
+                "tenants": [],
+                "ok": False,
+                "error": "Qdrant unreachable" if not reachable else f"tenant facet unavailable: {e}",
+                "version": __version__,
+            }
 
     @app.get("/api/overview")
     def overview(tenant: str = Query(..., min_length=1)) -> dict[str, Any]:
@@ -242,7 +260,7 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
         rows: list[dict[str, Any]] = []
         try:
             if q:
-                vec = provider.embed(q)
+                vec = _embed(q)
                 for hit in store.search(vec, limit=limit, filters=parsed, tenant=tenant):
                     rows.append(_row(hit.id, hit.payload, score=hit.score))
                 mode = "vector search"

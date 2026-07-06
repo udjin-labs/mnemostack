@@ -140,3 +140,39 @@ def test_console_escapes_attribute_context():
     # so a non-hash record id can't break out into an XSS vector.
     assert "&quot;" in insp.INSPECTOR_HTML
     assert '[<&>"\']' in insp.INSPECTOR_HTML
+
+
+def test_browse_works_without_embedding_provider(monkeypatch):
+    # Browse-only use must not require an embedding provider (no GEMINI_API_KEY):
+    # build_inspector_app is lazy, so get_provider is never called for browsing.
+    store = _seeded_store()
+
+    def _boom(*a, **k):
+        raise RuntimeError("GEMINI_API_KEY not set")
+
+    monkeypatch.setattr(insp, "get_provider", _boom)
+    monkeypatch.setattr(insp, "VectorStore", lambda **_: store)
+    app = insp.build_inspector_app(
+        ServerConfig(provider_name="gemini", collection="mt", graph_uri=None)
+    )
+    c = TestClient(app)
+    assert {t["id"] for t in c.get("/api/tenants").json()["tenants"]} == {"alpha", "beta"}
+    assert c.get("/api/overview?tenant=alpha").status_code == 200
+    assert c.get("/api/records?tenant=alpha").status_code == 200  # scroll — no embed
+
+
+def test_tenants_reports_error_when_facet_fails(monkeypatch):
+    store = _seeded_store()
+
+    def _boom(*a, **k):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(store.client, "facet", _boom)
+    monkeypatch.setattr(store.client, "get_collections", _boom)  # _qdrant_ok() -> False
+    monkeypatch.setattr(insp, "get_provider", lambda *a, **k: _FakeProvider())
+    monkeypatch.setattr(insp, "VectorStore", lambda **_: store)
+    d = TestClient(
+        insp.build_inspector_app(ServerConfig(provider_name="fake", collection="mt", graph_uri=None))
+    ).get("/api/tenants").json()
+    assert d["ok"] is False and d["tenants"] == []
+    assert "Qdrant unreachable" in d["error"]
