@@ -108,6 +108,7 @@ def test_query_triples_scoped_confines_both_endpoints():
     store.query_triples(subject="alice", tenant="acme")
     cypher, params = session.calls[0]
     assert "s.tenant = $tenant AND o.tenant = $tenant" in cypher
+    assert "r.tenant = $tenant" in cypher  # the edge is confined too
     assert params["tenant"] == "acme"
 
 
@@ -127,6 +128,8 @@ def test_invalidate_scoped_pins_both_endpoints():
     cypher, params = session.calls[0]
     assert "{name: $subject, tenant: $tenant}" in cypher
     assert "{name: $obj, tenant: $tenant}" in cypher
+    # The closed edge is confined to the tenant too, with the validity OR parenthesized.
+    assert "(r.valid_until = 'current' OR r.valid_until IS NULL) AND r.tenant = $tenant" in cypher
     assert params["tenant"] == "acme"
 
 
@@ -138,6 +141,10 @@ def test_sync_file_links_scoped_keys_file_nodes_by_tenant():
     joined = " ".join(cyphers)
     assert "index_root: $root, tenant: $tenant" in joined
     assert "s.tenant = $tenant, o.tenant = $tenant" in joined
+    # The LINKS_TO edge itself is stamped, so scoped recall (which requires
+    # r.tenant = $tenant) can traverse links written through this scoped API.
+    merge_cypher = next(c for c in cyphers if "MERGE (s)-[r:LINKS_TO]->(o)" in c)
+    assert "r.tenant = $tenant" in merge_cypher
     # The edge-clearing DELETE pins the far end to the tenant too (defense-in-depth).
     del_cypher = next(c for c in cyphers if "DELETE r" in c)
     assert "-[r:LINKS_TO]->({tenant: $tenant})" in del_cypher
@@ -153,7 +160,23 @@ def test_stamp_tenant_backfills_nodes_and_edges():
     assert counts == {"nodes": 5, "relationships": 5}
 
 
-def test_stamp_tenant_all_drops_only_missing_guard():
+def test_ingest_fallback_adapter_without_tenant_kwarg():
+    # A custom graph adapter with the legacy add_triple signature (no tenant kwarg)
+    # must still sync tags in a single-tenant ingest — tenant=None must NOT be
+    # passed, or it raises TypeError and _write_wrappers silently drops the tags.
+    from mnemostack.ingest import IngestItem, _sync_wrapper_graph
+
+    calls: list[dict[str, Any]] = []
+
+    class _LegacyAdapter:
+        # No .driver, no .add_file_tags → falls through to the add_triple path.
+        def add_triple(self, subject, predicate, obj, subject_label="Entity",
+                       obj_label="Entity", properties=None):  # NO tenant kwarg
+            calls.append({"subject": subject, "obj": obj})
+
+    item = IngestItem(source="a.txt", text="hi", metadata={"tags": ["x"]})
+    _sync_wrapper_graph(_LegacyAdapter(), item, "pid-1", tenant=None)  # must not raise
+    assert calls and calls[0]["obj"] == "x"
     session = _RecordingSession([{"n": 9}])
     store = _store_with(session)
     store.stamp_tenant("acme", only_missing=False)

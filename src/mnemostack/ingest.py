@@ -311,6 +311,10 @@ def _sync_wrapper_graph(
     if hasattr(graph, "add_file_tags"):
         graph.add_file_tags(name=name, path=item.source, indexed_date=indexed_date, tags=tags)
         return
+    # Only pass tenant= when it's actually set, so a custom graph adapter with the
+    # legacy add_triple signature (no tenant kwarg) doesn't raise TypeError and
+    # silently stop syncing tags in an ordinary single-tenant ingest.
+    tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
     for tag in tags:
         graph.add_triple(
             name,
@@ -319,7 +323,7 @@ def _sync_wrapper_graph(
             subject_label="File",
             obj_label="Tag",
             properties={"path": item.source, "indexed_date": indexed_date, "point_id": point_id},
-            tenant=tenant,
+            **tkw,
         )
 
 

@@ -209,6 +209,7 @@ class GraphStore:
             src=source,
             **common,
         )
+        set_rel_tenant = ", r.tenant = $tenant" if tenant is not None else ""
         for target in targets:
             tx.run(
                 f"MERGE (s:File {{name: $src, index_root: $root{tk}}}) "
@@ -217,7 +218,7 @@ class GraphStore:
                 f"    o.valid_until = coalesce(o.valid_until, 'current'), "
                 f"    s.name_lower = $src_lower, o.name_lower = $dst_lower{set_tenant} "
                 f"MERGE (s)-[r:LINKS_TO]->(o) "
-                f"SET r.valid_until = coalesce(r.valid_until, 'current')",
+                f"SET r.valid_until = coalesce(r.valid_until, 'current'){set_rel_tenant}",
                 src=source,
                 dst=target,
                 src_lower=source.lower(),
@@ -297,11 +298,15 @@ class GraphStore:
         rel = self._safe_rel(predicate)
         tk = self._tenant_key_frag(tenant)
         params: dict[str, Any] = {"subject": subject, "obj": obj, "ended": _to_iso(ended)}
+        # Confine the closed edge to the tenant too — a scoped invalidate must not
+        # close an edge the boundary doesn't consider owned (e.g. an untenanted or
+        # mismatched edge left by a partial migration).
+        rtenant = " AND r.tenant = $tenant" if tenant is not None else ""
         if tenant is not None:
             params["tenant"] = tenant
         query = (
             f"MATCH (s {{name: $subject{tk}}})-[r:{rel}]->(o {{name: $obj{tk}}}) "
-            f"WHERE r.valid_until = 'current' OR r.valid_until IS NULL "
+            f"WHERE (r.valid_until = 'current' OR r.valid_until IS NULL){rtenant} "
             f"SET r.valid_until = $ended "
             f"RETURN count(r) AS n"
         )
@@ -340,7 +345,12 @@ class GraphStore:
             where_parts.append("o.name = $obj")
             params["obj"] = obj
         if tenant is not None:
-            where_parts.append("s.tenant = $tenant AND o.tenant = $tenant")
+            # Confine both endpoints AND the relationship to the tenant — the
+            # boundary lives on nodes and edges, so an edge missing/mismatched on
+            # tenant (partial or hand-edited migration) is excluded, not returned.
+            where_parts.append(
+                "s.tenant = $tenant AND o.tenant = $tenant AND r.tenant = $tenant"
+            )
             params["tenant"] = tenant
         if as_of:
             # Expand a bare-date as_of to a full midnight-UTC instant, then
