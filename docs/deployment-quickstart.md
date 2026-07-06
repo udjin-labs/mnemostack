@@ -113,10 +113,12 @@ Wire these into your process manager / orchestrator:
 | `mnemostack doctor` | full read-only diagnostic + remediation hints | deploy/CI gate, on-call triage |
 
 ```bash
-curl -fsS http://localhost:8000/healthz          # {"status":"ok",...}
-curl -fsS http://localhost:8000/readyz           # 503 until Qdrant+embedding are ready
+curl -fsS http://localhost:8000/healthz          # liveness: {"status":"ok",...}
+# /readyz warms a background readiness cache, so the FIRST call can 503 even when
+# Qdrant + embedding are healthy — poll until ready:
+until curl -fsS http://localhost:8000/readyz >/dev/null; do sleep 1; done
 curl -fsS http://localhost:8000/metrics | head
-mnemostack doctor --json                         # machine-readable full report
+mnemostack doctor --json                          # machine-readable full report
 ```
 
 ## 6. Smoke test
@@ -125,8 +127,8 @@ On an installed host, verify the deployment with the built-in diagnostics — no
 source tree required:
 
 ```bash
-mnemostack health     # component reachability: embedding + Qdrant
-mnemostack doctor     # deeper checks: config, dimension match, LLM, and graph
+mnemostack health              # component reachability: embedding + Qdrant
+mnemostack doctor --check-llm  # config, dimension match, live LLM probe, and graph
 ```
 
 From a **source checkout**, a runnable smoke set (in-memory Qdrant + fake

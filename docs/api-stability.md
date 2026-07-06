@@ -94,10 +94,10 @@ the result count per request there.
 `answer` / `synthesize`) don't thread it into their graph retriever, which uses the
 built-in default.
 
-`vector.health_timeout` bounds Qdrant probes for the **HTTP server** (`/healthz`,
-`/readyz`, `/status`, via `serve --qdrant-health-timeout`); the `mnemostack health`
-CLI and the MCP health tool build the store without it and fall back to the client
-default.
+`vector.health_timeout` bounds the Qdrant readiness probe on the **HTTP server**
+(`/readyz`, `/status`, `/health` — via `serve --qdrant-health-timeout`); `/healthz`
+is liveness-only and never checks Qdrant, and the `mnemostack health` CLI and MCP
+health tool build the store without the timeout (client default).
 
 Env aliases (e.g. `MNEMOSTACK_QDRANT_URL` for `vector.host`,
 `MNEMOSTACK_MEMGRAPH_URI` for `graph.uri`) are 🟢 stable **where they exist** — not
