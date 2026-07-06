@@ -28,6 +28,7 @@ from .qdrant import (
     TENANT_ID_KEY,
     DimensionMismatchError,
     Hit,
+    TenantConflictError,
     _hide_invalidated_condition,
     _stamp_tenant,
     _tenant_condition,
@@ -110,6 +111,23 @@ class AsyncVectorStore:
         info = await self.client.get_collection(self.collection)
         return info.points_count or 0
 
+    async def _assert_tenant_owned(self, ids: list[str | int], tenant: str) -> None:
+        """Refuse to overwrite points already owned by a *different* tenant
+        (async mirror of ``VectorStore._assert_tenant_owned``)."""
+        found = await self.client.retrieve(
+            collection_name=self.collection, ids=list(ids), with_payload=[TENANT_ID_KEY]
+        )
+        conflicts = [
+            p.id
+            for p in found
+            if (owner := (p.payload or {}).get(TENANT_ID_KEY)) is not None and owner != tenant
+        ]
+        if conflicts:
+            raise TenantConflictError(
+                f"{len(conflicts)} point id(s) already owned by another tenant "
+                f"(e.g. {conflicts[0]!r}); tenant-scoped upsert will not overwrite them"
+            )
+
     async def upsert(
         self,
         id: str | int,
@@ -118,6 +136,8 @@ class AsyncVectorStore:
         *,
         tenant: str | None = None,
     ) -> None:
+        if tenant is not None:
+            await self._assert_tenant_owned([id], tenant)
         await self.client.upsert(
             collection_name=self.collection,
             points=[PointStruct(id=id, vector=vector, payload=_stamp_tenant(payload, tenant))],
@@ -133,6 +153,8 @@ class AsyncVectorStore:
         total = 0
         for i in range(0, len(points), batch_size):
             chunk = points[i : i + batch_size]
+            if tenant is not None:
+                await self._assert_tenant_owned([pid for pid, _, _ in chunk], tenant)
             structs = [
                 PointStruct(id=pid, vector=vec, payload=_stamp_tenant(pl, tenant))
                 for pid, vec, pl in chunk

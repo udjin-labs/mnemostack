@@ -12,7 +12,7 @@ import pytest
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance
 
-from mnemostack.vector import TENANT_ID_KEY, VectorStore
+from mnemostack.vector import TENANT_ID_KEY, TenantConflictError, VectorStore
 
 
 def _store() -> VectorStore:
@@ -260,3 +260,140 @@ async def test_async_store_isolates_by_tenant():
     assert alpha == {1}
     assert await store.count(tenant="beta") == 1
     await store.close()
+
+
+# --- write-side owner guards (no cross-tenant takeover) ---
+
+
+def test_upsert_refuses_cross_tenant_takeover():
+    store = _store()
+    store.upsert(1, _VEC, {"text": "alpha-owned"}, tenant="alpha")
+    with pytest.raises(TenantConflictError):
+        store.upsert(1, [0.0, 1.0, 0.0, 0.0], {"text": "beta-takeover"}, tenant="beta")
+    # alpha's point is untouched and beta owns nothing.
+    assert store.search(_VEC, limit=1, tenant="alpha")[0].payload["text"] == "alpha-owned"
+    assert store.search(_VEC, limit=10, tenant="beta") == []
+
+
+def test_upsert_same_tenant_replaces_own_point():
+    store = _store()
+    store.upsert(1, _VEC, {"text": "v1"}, tenant="alpha")
+    store.upsert(1, _VEC, {"text": "v2"}, tenant="alpha")  # own point → allowed
+    assert store.search(_VEC, limit=1, tenant="alpha")[0].payload["text"] == "v2"
+
+
+def test_upsert_can_claim_unowned_legacy_point():
+    store = _store()
+    store.upsert(1, _VEC, {"text": "legacy"})  # tenant=None → unowned
+    store.upsert(1, _VEC, {"text": "claimed"}, tenant="alpha")  # allowed
+    hit = store.search(_VEC, limit=1, tenant="alpha")[0]
+    assert hit.payload["text"] == "claimed"
+    assert hit.payload[TENANT_ID_KEY] == "alpha"
+
+
+def test_upsert_batch_refuses_cross_tenant_takeover():
+    store = _store()
+    store.upsert(1, _VEC, {"text": "alpha-owned"}, tenant="alpha")
+    with pytest.raises(TenantConflictError):
+        store.upsert_batch([(1, _VEC, {"text": "x"}), (2, _VEC, {"text": "y"})], tenant="beta")
+    # The whole conflicting chunk is refused — neither id lands for beta.
+    assert store.search(_VEC, limit=1, tenant="alpha")[0].payload["text"] == "alpha-owned"
+    assert store.count(tenant="beta") == 0
+
+
+async def test_async_upsert_refuses_cross_tenant_takeover():
+    from qdrant_client import AsyncQdrantClient
+
+    from mnemostack.vector import AsyncVectorStore
+
+    store = AsyncVectorStore.__new__(AsyncVectorStore)
+    store.collection = "mt_async_guard"
+    store.dimension = 4
+    store.distance = Distance.COSINE
+    store.client = AsyncQdrantClient(":memory:")
+    await store.ensure_collection()
+    await store.upsert(1, _VEC, {"text": "alpha"}, tenant="alpha")
+    with pytest.raises(TenantConflictError):
+        await store.upsert(1, _VEC, {"text": "beta"}, tenant="beta")
+    await store.close()
+
+
+# --- tenant_id is protected from payload deletion ---
+
+
+def test_delete_payload_keys_refuses_removing_tenant_id():
+    store = _store()
+    store.upsert(1, _VEC, {"text": "x", "k": "v"}, tenant="alpha")
+    with pytest.raises(ValueError):
+        store.delete_payload_keys(1, ["k", TENANT_ID_KEY])
+    # Raised before any delete — point still owned by alpha, nothing removed.
+    hit = store.search(_VEC, limit=1, tenant="alpha")[0]
+    assert hit.payload[TENANT_ID_KEY] == "alpha"
+    assert hit.payload.get("k") == "v"
+
+
+def test_delete_payload_keys_tenant_owner_guard():
+    store = _store()
+    store.upsert(1, _VEC, {"text": "x", "k": "v"}, tenant="alpha")
+    store.delete_payload_keys(1, ["k"], tenant="beta")  # not owner → skipped
+    assert store.search(_VEC, limit=1, tenant="alpha")[0].payload.get("k") == "v"
+    store.delete_payload_keys(1, ["k"], tenant="alpha")  # owner → deletes
+    assert "k" not in store.search(_VEC, limit=1, tenant="alpha")[0].payload
+
+
+def test_delete_points_tenant_owner_guard():
+    store = _store()
+    _seed_two_tenants(store)  # alpha owns 1,2; beta owns 3
+    # A caller scoped to beta can't delete alpha's point by a guessed id.
+    assert store.delete_points([1], tenant="beta") == 0
+    assert store.count(tenant="alpha") == 2
+    # Alpha can delete its own.
+    assert store.delete_points([1], tenant="alpha") == 1
+    assert store.count(tenant="alpha") == 1
+    # No-tenant delete stays unrestricted (legacy single-tenant path).
+    assert store.delete_points([3]) == 1
+    assert store.count(tenant="beta") == 0
+
+
+# --- migration re-keys so re-ingest stays idempotent ---
+
+
+def test_stamp_tenant_rekeys_for_idempotent_reingest():
+    from mnemostack import stable_chunk_id
+
+    store = _store()
+    legacy_id = stable_chunk_id("doc.md", 0, "hello", tenant=None)
+    store.upsert(legacy_id, _VEC, {"source": "doc.md", "offset": 0, "text": "hello"})  # no tenant
+
+    moved = store.stamp_tenant("alpha")
+    assert moved == 1
+
+    new_id = stable_chunk_id("doc.md", 0, "hello", tenant="alpha")
+    ids = {str(h.id) for h in store.search(_VEC, limit=10, tenant="alpha")}
+    assert ids == {str(new_id)}  # re-keyed to the tenant-scoped id
+    assert str(legacy_id) not in ids  # old id is gone
+
+    # A tenant-scoped re-ingest of the same content now REPLACES, not duplicates.
+    store.upsert(new_id, _VEC, {"source": "doc.md", "offset": 0, "text": "hello"}, tenant="alpha")
+    assert store.count(tenant="alpha") == 1
+
+
+def test_stamp_tenant_stamps_in_place_without_chunk_fields():
+    store = _store()
+    store.upsert(42, _VEC, {"text": "no-source-offset"})  # can't recompute an id
+    moved = store.stamp_tenant("alpha")
+    assert moved == 1
+    hit = store.search(_VEC, limit=1, tenant="alpha")[0]
+    assert hit.id == 42  # id preserved (no re-key possible)
+    assert hit.payload[TENANT_ID_KEY] == "alpha"
+
+
+def test_stamp_tenant_no_rekey_preserves_ids():
+    from mnemostack import stable_chunk_id
+
+    store = _store()
+    legacy_id = stable_chunk_id("doc.md", 0, "hello", tenant=None)
+    store.upsert(legacy_id, _VEC, {"source": "doc.md", "offset": 0, "text": "hello"})
+    store.stamp_tenant("alpha", rekey=False)
+    ids = {str(h.id) for h in store.search(_VEC, limit=10, tenant="alpha")}
+    assert ids == {str(legacy_id)}  # id unchanged on the cheap path

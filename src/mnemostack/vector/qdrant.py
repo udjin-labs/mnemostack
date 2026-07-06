@@ -75,6 +75,15 @@ class DimensionMismatchError(ValueError):
     """Existing collection stores vectors of a different size than the provider produces."""
 
 
+class TenantConflictError(ValueError):
+    """A tenant-scoped write targets a point id already owned by another tenant.
+
+    The tenant boundary is server-owned: a caller who guesses another tenant's
+    (deterministic) point id must not be able to overwrite it. Raised instead of
+    silently replacing the foreign point.
+    """
+
+
 @dataclass
 class Hit:
     """Single search result."""
@@ -246,6 +255,29 @@ class VectorStore:
 
     # ---------- write ----------
 
+    def _assert_tenant_owned(self, ids: list[str | int], tenant: str) -> None:
+        """Refuse to overwrite points already owned by a *different* tenant.
+
+        A full-point ``upsert`` replaces the whole point, so without this guard a
+        tenant-scoped caller who supplies another tenant's id would take it over
+        and re-stamp it. Points that don't exist or are unowned (no ``tenant_id``,
+        e.g. pre-migration legacy data) are free to write; a point stamped with a
+        different tenant raises ``TenantConflictError``.
+        """
+        found = self.client.retrieve(
+            collection_name=self.collection, ids=list(ids), with_payload=[TENANT_ID_KEY]
+        )
+        conflicts = [
+            p.id
+            for p in found
+            if (owner := (p.payload or {}).get(TENANT_ID_KEY)) is not None and owner != tenant
+        ]
+        if conflicts:
+            raise TenantConflictError(
+                f"{len(conflicts)} point id(s) already owned by another tenant "
+                f"(e.g. {conflicts[0]!r}); tenant-scoped upsert will not overwrite them"
+            )
+
     def upsert(
         self,
         id: str | int,
@@ -254,6 +286,8 @@ class VectorStore:
         *,
         tenant: str | None = None,
     ) -> None:
+        if tenant is not None:
+            self._assert_tenant_owned([id], tenant)
         self.client.upsert(
             collection_name=self.collection,
             points=[PointStruct(id=id, vector=vector, payload=_stamp_tenant(payload, tenant))],
@@ -269,10 +303,14 @@ class VectorStore:
         """Upsert a batch of (id, vector, payload) tuples. Returns count inserted.
 
         With ``tenant`` set, every point's payload is stamped with it (the tenant
-        wins over any caller-supplied ``tenant_id``)."""
+        wins over any caller-supplied ``tenant_id``), and any id already owned by
+        a different tenant raises ``TenantConflictError`` before the chunk is
+        written (the batch is not partially applied past the offending chunk)."""
         total = 0
         for i in range(0, len(points), batch_size):
             chunk = points[i : i + batch_size]
+            if tenant is not None:
+                self._assert_tenant_owned([pid for pid, _, _ in chunk], tenant)
             structs = [
                 PointStruct(id=pid, vector=vec, payload=_stamp_tenant(pl, tenant))
                 for pid, vec, pl in chunk
@@ -308,46 +346,154 @@ class VectorStore:
             points=[id],
         )
 
-    def stamp_tenant(self, tenant: str, *, only_missing: bool = True) -> int:
+    def stamp_tenant(self, tenant: str, *, only_missing: bool = True, rekey: bool = True) -> int:
         """Assign ``tenant_id`` to existing points (multi-tenant migration).
 
         Moves a legacy single-tenant corpus into one named tenant. With
         ``only_missing`` (default), points that already carry a ``tenant_id`` are
         left untouched — safe to re-run and safe against a partially-migrated
-        collection. Returns the number of points stamped. Server-side (one
-        ``set_payload`` over a filter), so it doesn't scroll the collection.
+        collection. Returns the number of points migrated.
+
+        With ``rekey`` (default), a point that carries the fields a chunk id is
+        derived from (``source`` / ``offset`` / ``text``) is *moved* to the
+        tenant-scoped id ``stable_chunk_id(..., tenant=tenant)``. Without this, a
+        later ``Ingestor(tenant=...)`` re-ingest of the same content computes that
+        new id and creates a **duplicate** instead of replacing the migrated point
+        — so re-keying is what keeps the migration path idempotent. Points without
+        those fields are stamped in place. Pass ``rekey=False`` for the cheap
+        server-side payload-only write (no re-id) when ids must not change.
+
+        ``rekey`` scrolls the matching points (with vectors) into memory before
+        applying moves, so it is heavier than the payload-only path — fine for a
+        one-off migration.
         """
         must: list[Any] = []
         if only_missing:
             must.append(IsEmptyCondition(is_empty=PayloadField(key=TENANT_ID_KEY)))
         sel = Filter(must=must)
-        n = self.client.count(collection_name=self.collection, count_filter=sel).count
-        if n:
+
+        if not rekey:
+            n = self.client.count(collection_name=self.collection, count_filter=sel).count
+            if n:
+                self.client.set_payload(
+                    collection_name=self.collection,
+                    payload={TENANT_ID_KEY: tenant},
+                    points=FilterSelector(filter=sel),
+                )
+            return n
+
+        from ..ingest import stable_chunk_id
+
+        # Snapshot the whole matching set first: applying moves stamps tenant_id
+        # (dropping points out of the only_missing filter) and deletes old ids, so
+        # mutating mid-scroll would perturb pagination.
+        pts: list[Any] = []
+        offset: Any = None
+        while True:
+            batch, offset = self.client.scroll(
+                collection_name=self.collection,
+                scroll_filter=sel,
+                with_payload=True,
+                with_vectors=True,
+                limit=512,
+                offset=offset,
+            )
+            pts.extend(batch)
+            if offset is None:
+                break
+        if not pts:
+            return 0
+
+        moves: list[PointStruct] = []
+        old_ids: list[Any] = []
+        stamp_ids: list[Any] = []
+        for p in pts:
+            payload = dict(p.payload or {})
+            payload[TENANT_ID_KEY] = tenant
+            src = payload.get("source")
+            off = payload.get("offset")
+            txt = payload.get("text")
+            if src is not None and off is not None and txt is not None:
+                new_id = stable_chunk_id(str(src), int(off), str(txt), tenant=tenant)
+                if str(new_id) != str(p.id):
+                    moves.append(PointStruct(id=new_id, vector=p.vector, payload=payload))
+                    old_ids.append(p.id)
+                    continue
+            stamp_ids.append(p.id)
+
+        if moves:
+            self.client.upsert(collection_name=self.collection, points=moves)
+            # Never delete an id that a move just wrote to (an id-shuffle where one
+            # point's old id equals another's new id would otherwise drop live data).
+            new_ids = {str(m.id) for m in moves}
+            delete_ids = [oid for oid in old_ids if str(oid) not in new_ids]
+            if delete_ids:
+                self.client.delete(
+                    collection_name=self.collection,
+                    points_selector=PointIdsList(points=delete_ids),
+                )
+        if stamp_ids:
             self.client.set_payload(
                 collection_name=self.collection,
                 payload={TENANT_ID_KEY: tenant},
-                points=FilterSelector(filter=sel),
+                points=stamp_ids,
             )
-        return n
+        return len(pts)
 
-    def delete_payload_keys(self, id: str | int, keys: list[str]) -> None:
-        """Remove specific payload keys from a point (vector untouched)."""
+    def delete_payload_keys(
+        self, id: str | int, keys: list[str], *, tenant: str | None = None
+    ) -> None:
+        """Remove specific payload keys from a point (vector untouched).
+
+        ``tenant_id`` is the server-owned isolation field and can never be removed
+        this way — passing it raises ``ValueError`` (otherwise a caller who knows
+        another tenant's id could strip its ``tenant_id`` and make the point vanish
+        from its owner's scoped reads). With ``tenant`` set, the delete is skipped
+        unless the point belongs to that tenant.
+        """
         if not keys:
             return
+        if TENANT_ID_KEY in keys:
+            raise ValueError(
+                f"{TENANT_ID_KEY!r} is the server-owned tenant isolation key and "
+                "cannot be removed via delete_payload_keys"
+            )
+        if tenant is not None:
+            found = self.client.retrieve(
+                collection_name=self.collection, ids=[id], with_payload=[TENANT_ID_KEY]
+            )
+            if not found or (found[0].payload or {}).get(TENANT_ID_KEY) != tenant:
+                return  # point missing or owned by another tenant — never touch it
         self.client.delete_payload(
             collection_name=self.collection,
             keys=keys,
             points=[id],
         )
 
-    def delete_points(self, ids: list[str | int], batch_size: int = 1000) -> int:
-        """Delete specific points by id. Returns count requested for deletion."""
+    def delete_points(
+        self, ids: list[str | int], batch_size: int = 1000, *, tenant: str | None = None
+    ) -> int:
+        """Delete specific points by id. Returns the number of points deleted.
+
+        With ``tenant`` set, only points owned by that tenant are deleted: a
+        caller who knows another tenant's deterministic point id can't delete it
+        by id (Qdrant deletes by id without applying the ``tenant_id`` filter, so
+        the ownership check is enforced here — the vector layer is the isolation
+        boundary). Without ``tenant`` every requested id is deleted (legacy).
+        """
         total = 0
         for i in range(0, len(ids), batch_size):
-            chunk = ids[i : i + batch_size]
+            chunk: list[Any] = list(ids[i : i + batch_size])
+            if tenant is not None:
+                found = self.client.retrieve(
+                    collection_name=self.collection, ids=chunk, with_payload=[TENANT_ID_KEY]
+                )
+                chunk = [p.id for p in found if (p.payload or {}).get(TENANT_ID_KEY) == tenant]
+                if not chunk:
+                    continue
             self.client.delete(
                 collection_name=self.collection,
-                points_selector=PointIdsList(points=list(chunk)),
+                points_selector=PointIdsList(points=chunk),
             )
             total += len(chunk)
         return total

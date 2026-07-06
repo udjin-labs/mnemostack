@@ -308,8 +308,11 @@ def cmd_tenant_migrate(args: argparse.Namespace) -> int:
     """Stamp a tenant_id onto existing points (single-tenant → multi-tenant).
 
     Read-only until you drop ``--dry-run``: reports how many points would be
-    stamped. By default only points that lack a tenant_id are touched, so it's
-    safe to re-run. Vectors are untouched (payload-only merge write).
+    migrated. By default only points that lack a tenant_id are touched, so it's
+    safe to re-run. Chunk points (those carrying source/offset/text) are moved to
+    their tenant-scoped id so a later tenant-scoped re-ingest replaces them
+    instead of creating a duplicate; other points are stamped in place. Vectors
+    are preserved (moved as-is, never re-embedded).
     """
     try:
         store = VectorStore(
@@ -329,7 +332,11 @@ def cmd_tenant_migrate(args: argparse.Namespace) -> int:
 
     from mnemostack.vector.qdrant import TENANT_ID_KEY
 
-    total = store.count()
+    # Exact count (client.count), not the approximate CollectionInfo.points_count
+    # that VectorStore.count() reads — the --all safety check below relies on
+    # (total - missing) to detect pre-stamped points, so an under-report there
+    # could let --all silently relabel an existing tenant.
+    total = store.client.count(collection_name=args.collection).count
     missing = store.client.count(
         collection_name=args.collection,
         count_filter=Filter(must=[IsEmptyCondition(is_empty=PayloadField(key=TENANT_ID_KEY))]),
