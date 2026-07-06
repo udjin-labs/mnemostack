@@ -63,11 +63,19 @@ leniently. `build_app(config)` and `ServerConfig` are 🟢 stable.
 ## Config (file + `MNEMOSTACK_*` env)
 
 🟢 **Stable** — all documented keys and their env aliases:
-`embedding.{provider,model,api_key_env,ollama_host}`,
-`vector.{host,collection,chunk_size,overlap,window_size,health_timeout}`,
+`embedding.{provider,model}`,
+`vector.{host,collection,chunk_size,window_size,health_timeout}`,
 `llm.{provider,model}`,
 `graph.{uri,user,password,database,timeout,health_timeout}`,
-`recall.{rrf_k,top_k,confidence_threshold,bm25_paths,vector_floor,rerank_mode,token_budget}`.
+`recall.{top_k,confidence_threshold,bm25_paths,vector_floor,rerank_mode,token_budget}`.
+
+🟡 **Accepted but not yet wired** — present in the config schema, but the runtime
+does not consume them today, so don't depend on them until they are:
+`embedding.api_key_env` (only drives a CLI "set `$KEY`" hint, not provider key
+resolution — the provider reads its own fixed env var), `embedding.ollama_host`,
+`vector.overlap` (the chunker's overlap is currently fixed), and `recall.rrf_k`
+(the RRF constant is currently fixed at 60). These will be wired through or
+removed; either way it won't silently change a working deployment.
 
 Env aliases (e.g. `MNEMOSTACK_QDRANT_URL` for `vector.host`,
 `MNEMOSTACK_MEMGRAPH_URI` for `graph.uri`) are 🟢 stable. Defaults won't change

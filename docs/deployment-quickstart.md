@@ -45,7 +45,7 @@ mnemostack answer "your question"   # needs an LLM configured
 ## 2. Run the HTTP server
 
 ```bash
-mnemostack serve --host 127.0.0.1 --port 8000
+mnemostack serve --host 127.0.0.1 --port 8000 --memgraph-uri ""
 ```
 
 Applications in any language then call `/recall`, `/answer`, `/feedback`. See
@@ -53,6 +53,11 @@ the [HTTP API section of the README](../README.md#http-api) for request shapes.
 
 > Binding to `0.0.0.0` exposes an **unauthenticated** API — only do it behind
 > your own auth / rate-limit layer or a private network.
+
+> `--memgraph-uri ""` keeps graph recall **off** in this minimal setup. Without
+> it, `serve` falls back to the default `bolt://localhost:7687` and every recall
+> pays a Bolt connection timeout until Memgraph is running — enable it
+> deliberately in step 3.
 
 ## 3. Add Memgraph (optional — graph recall)
 
@@ -106,9 +111,17 @@ mnemostack doctor --json                         # machine-readable full report
 
 ## 6. Smoke test
 
-The runnable smoke set (in-memory Qdrant + fake embedder — no external
-services) exercises ingest → recall, the stale-fact validity view, and markdown
-collection:
+On an installed host, verify the deployment with the built-in diagnostics — no
+source tree required:
+
+```bash
+mnemostack health     # component reachability: embedding, Qdrant, optional graph
+mnemostack doctor     # deeper checks: config, dimension match, LLM, graph
+```
+
+From a **source checkout**, a runnable smoke set (in-memory Qdrant + fake
+embedder — no external services) exercises ingest → recall, the stale-fact
+validity view, and markdown collection:
 
 ```bash
 pytest -m smoke -q
