@@ -222,11 +222,17 @@ def build_server(
         )
 
     def _get_pipeline():
+        # Under auth every call is tenant-scoped, and the graph isn't tenant-scoped
+        # yet, so drop it from the recall pipeline entirely: otherwise the
+        # GraphResurrection stage would still query the shared graph (its results
+        # are dropped by the filter_by_tenant backstop, so no leak — but a slow or
+        # down graph would add graph_timeout latency to tenant-scoped recall).
+        pipeline_graph_uri = None if auth_enabled else memgraph_uri
         return _component(
             "pipeline",
             lambda: build_full_pipeline(
                 state_store=FileStateStore(resolved_state_path),
-                graph_uri=memgraph_uri,
+                graph_uri=pipeline_graph_uri,
                 graph_user=graph_user,
                 graph_password=graph_password,
                 graph_database=graph_database,

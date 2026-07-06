@@ -805,3 +805,21 @@ def test_mcp_graph_tools_fail_closed_under_tenant(tmp_path, monkeypatch):
     r = asyncio.run(mcp.call_tool("mnemostack_graph_query", {}))
     assert r.structured_content["ok"] is False
     assert "not tenant-scoped" in r.structured_content["error"]
+
+
+def test_mcp_auth_recall_pipeline_drops_graph(tmp_path, monkeypatch):
+    # Under auth (always tenant-scoped), the recall pipeline must be built with no
+    # graph so GraphResurrection can't query the shared, non-tenant-scoped graph.
+    import mnemostack.mcp.server as srv
+
+    real = srv.build_full_pipeline
+    captured = {}
+
+    def _spy(**kw):
+        captured.setdefault("graph_uri", kw.get("graph_uri"))
+        return real(**kw)
+
+    monkeypatch.setattr(srv, "build_full_pipeline", _spy)
+    mcp = _auth_mcp(tmp_path, monkeypatch, memgraph="bolt://x")
+    asyncio.run(mcp.call_tool("mnemostack_search", {"query": "q", "limit": 1}))
+    assert captured["graph_uri"] is None
