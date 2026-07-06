@@ -278,3 +278,41 @@ def filter_by_validity(
         for r in results
         if keep_payload(r.payload, include_invalidated=include_invalidated, as_of=as_of)
     ]
+
+
+#: Payload key carrying a point's tenant (mirror of ``vector.qdrant.TENANT_ID_KEY``;
+#: kept as a literal so the recall layer doesn't import the vector layer).
+_TENANT_ID_KEY = "tenant_id"
+
+
+def filter_by_tenant(results: list[RecallResult], tenant: str | None) -> list[RecallResult]:
+    """Keep only results belonging to ``tenant`` — the recall-side isolation net.
+
+    When ``tenant`` is None (single-tenant / legacy), this is a no-op. When set,
+    it keeps only results whose payload ``tenant_id`` equals ``tenant``. This is
+    the backstop that guarantees a tenant-scoped recall can never surface another
+    tenant's data even if some retriever path forgot to push the tenant filter:
+    a hit without the matching ``tenant_id`` is dropped here. It also naturally
+    excludes hits that can't be tenant-scoped and thus carry no ``tenant_id`` —
+    file-backed BM25 and (until it's tenant-scoped) graph results — so those are
+    not fused into a tenant-scoped recall.
+    """
+    if tenant is None:
+        return results
+    kept = [r for r in results if (r.payload or {}).get(_TENANT_ID_KEY) == tenant]
+    # Also scrub the raw vector-floor candidates stashed in a surviving result's
+    # payload: they're serialized vector hits re-materialized AFTER this backstop
+    # (apply_vector_floor_after_rerank appends them post-rerank), so a foreign
+    # candidate hidden there would otherwise reach the tenant-scoped response.
+    for r in kept:
+        payload = r.payload
+        if not payload:
+            continue
+        candidates = payload.get("_vector_floor_candidates")
+        if isinstance(candidates, list):
+            payload["_vector_floor_candidates"] = [
+                c
+                for c in candidates
+                if isinstance(c, dict) and (c.get("payload") or {}).get(_TENANT_ID_KEY) == tenant
+            ]
+    return kept

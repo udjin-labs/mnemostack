@@ -79,6 +79,21 @@ class RecallTrace:
     post_rerank: list[tuple[str, float]] | None = None
     degraded: list[str] = field(default_factory=list)
 
+    def restrict_to_ids(self, allowed: Any) -> None:
+        """Drop every trace entry whose id is outside ``allowed`` (tenant scrub).
+
+        A tenant-scoped, ``include_trace`` recall must not expose another tenant's
+        ids/scores through the trace even if a retriever's tenant filter had a bug —
+        so keep only ids that survived the tenant backstop. Ids are compared as
+        strings (result ids may be int, trace ids are str).
+        """
+        allow = {str(a) for a in allowed}
+        for rt in self.retrievers:
+            rt.ranked = [(rid, s) for rid, s in rt.ranked if str(rid) in allow]
+        self.fused = [(rid, s) for rid, s in self.fused if str(rid) in allow]
+        if self.post_rerank is not None:
+            self.post_rerank = [(rid, s) for rid, s in self.post_rerank if str(rid) in allow]
+
     def mark(self, tag: str) -> None:
         if tag not in self.degraded:
             self.degraded.append(tag)
