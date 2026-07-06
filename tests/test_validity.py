@@ -879,3 +879,38 @@ def test_to_utc_iso_normalizes_naive_datetime_with_separator():
     # it sorts against normalized bounds. A bare date stays a date.
     assert to_utc_iso("2024-01-15T10:00:00") == "2024-01-15T10:00:00Z"
     assert to_utc_iso("2024-01-15") == "2024-01-15"
+
+
+def test_filter_by_tenant_scrubs_foreign_vector_floor_candidates():
+    from mnemostack.recall import filter_by_tenant
+
+    r = _r(
+        "1",
+        {
+            "tenant_id": "alpha",
+            # Raw vector-floor candidates are re-materialized AFTER the tenant
+            # backstop, so a foreign one hidden here must be scrubbed.
+            "_vector_floor_candidates": [
+                {"id": "2", "payload": {"tenant_id": "alpha"}},
+                {"id": "3", "payload": {"tenant_id": "beta"}},
+            ],
+        },
+    )
+    out = filter_by_tenant([r], "alpha")
+    assert len(out) == 1
+    assert [c["id"] for c in out[0].payload["_vector_floor_candidates"]] == ["2"]
+
+
+def test_recall_trace_restrict_to_ids_scrubs_foreign():
+    from mnemostack.recall import RecallTrace
+    from mnemostack.recall.trace import RetrieverTrace
+
+    tr = RecallTrace(
+        retrievers=[RetrieverTrace(name="vector", ranked=[("1", 0.9), ("2", 0.8)])],
+        fused=[("1", 0.9), ("2", 0.8)],
+        post_rerank=[("2", 0.8), ("1", 0.9)],
+    )
+    tr.restrict_to_ids(["1"])
+    assert tr.retrievers[0].ranked == [("1", 0.9)]
+    assert tr.fused == [("1", 0.9)]
+    assert tr.post_rerank == [("1", 0.9)]

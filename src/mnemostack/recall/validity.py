@@ -299,4 +299,20 @@ def filter_by_tenant(results: list[RecallResult], tenant: str | None) -> list[Re
     """
     if tenant is None:
         return results
-    return [r for r in results if (r.payload or {}).get(_TENANT_ID_KEY) == tenant]
+    kept = [r for r in results if (r.payload or {}).get(_TENANT_ID_KEY) == tenant]
+    # Also scrub the raw vector-floor candidates stashed in a surviving result's
+    # payload: they're serialized vector hits re-materialized AFTER this backstop
+    # (apply_vector_floor_after_rerank appends them post-rerank), so a foreign
+    # candidate hidden there would otherwise reach the tenant-scoped response.
+    for r in kept:
+        payload = r.payload
+        if not payload:
+            continue
+        candidates = payload.get("_vector_floor_candidates")
+        if isinstance(candidates, list):
+            payload["_vector_floor_candidates"] = [
+                c
+                for c in candidates
+                if isinstance(c, dict) and (c.get("payload") or {}).get(_TENANT_ID_KEY) == tenant
+            ]
+    return kept

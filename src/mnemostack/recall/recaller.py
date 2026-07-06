@@ -347,6 +347,11 @@ class Recaller:
         # cross-tenant leak even if a retriever path forgot the tenant filter,
         # and drops BM25/graph hits (no tenant_id) that can't be tenant-scoped.
         results = filter_by_tenant(results, tenant)
+        # Scrub the (opt-in) trace to the surviving tenant ids so an include_trace
+        # response can't expose another tenant's ids/scores even if a retriever's
+        # tenant filter had a bug (defense-in-depth, matching the results backstop).
+        if tenant is not None and trace is not None:
+            trace.restrict_to_ids(r.id for r in results)
         if token_budget is not None:
             results, _ = apply_token_budget(results, token_budget, token_counter)
         return results
