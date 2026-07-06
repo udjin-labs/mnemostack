@@ -2208,7 +2208,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     try:
         import uvicorn
 
-        from mnemostack.server import ServerConfig, build_app
+        from mnemostack.server import ServerConfig, _env_bool, build_app
     except ImportError as exc:
         print(
             f"error: server extra not installed ({exc}). Install with: "
@@ -2236,7 +2236,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
         token_budget=_effective_token_budget(args),
         state_path=args.state_path,
         auto_record_ior=args.auto_record_ior,
-        auth_enabled=args.auth,
+        # Honor MNEMOSTACK_AUTH_ENABLED too: cmd_serve builds ServerConfig
+        # explicitly (never from_env), so without this the documented env toggle
+        # would silently leave the endpoints unauthenticated.
+        auth_enabled=args.auth or _env_bool("MNEMOSTACK_AUTH_ENABLED"),
         keys_file=args.keys_file,
     )
     app = build_app(cfg)
