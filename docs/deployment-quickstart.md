@@ -115,16 +115,17 @@ On an installed host, verify the deployment with the built-in diagnostics — no
 source tree required:
 
 ```bash
-mnemostack health     # component reachability: embedding, Qdrant, optional graph
-mnemostack doctor     # deeper checks: config, dimension match, LLM, graph
+mnemostack health     # component reachability: embedding + Qdrant
+mnemostack doctor     # deeper checks: config, dimension match, LLM, and graph
 ```
 
 From a **source checkout**, a runnable smoke set (in-memory Qdrant + fake
 embedder — no external services) exercises ingest → recall, the stale-fact
-validity view, and markdown collection:
+validity view, and markdown collection. Target the file directly so pytest
+doesn't import the rest of the test tree (which needs the full `.[dev]` extra):
 
 ```bash
-pytest -m smoke -q
+pytest tests/test_smoke.py -q
 ```
 
 To smoke a **live** Memgraph too, set `MNEMOSTACK_SMOKE_GRAPH_URI` before

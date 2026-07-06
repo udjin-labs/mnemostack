@@ -81,9 +81,9 @@ Env aliases (e.g. `MNEMOSTACK_QDRANT_URL` for `vector.host`,
 `MNEMOSTACK_MEMGRAPH_URI` for `graph.uri`) are 🟢 stable. Defaults won't change
 without a major bump. `graph.uri = null` (disabled) is the documented off state —
 with one CLI exception: `mnemostack serve` defaults `--memgraph-uri` to
-`bolt://localhost:7687` when the flag is omitted, so pass `--memgraph-uri ""` (or
-set `MNEMOSTACK_MEMGRAPH_URI=`) to keep graph off there; other entrypoints honor
-`null` directly. `token_budget <= 0` normalizing to "no budget" is a 🟢 documented
+`bolt://localhost:7687` when the flag is omitted, so pass `--memgraph-uri ""` to
+keep graph off there (an empty `MNEMOSTACK_MEMGRAPH_URI` does **not** work — the
+env override ignores empty values). Other entrypoints honor `null` directly. `token_budget <= 0` normalizing to "no budget" is a 🟢 documented
 behavior.
 
 ## MCP tools (`mnemostack mcp-serve`)

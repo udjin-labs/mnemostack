@@ -130,7 +130,7 @@ before 1.0.
    config is invalid.
 4. If the graph is configured: run `graph-migrate-current --dry-run`, then apply
    if it reports changes.
-5. From a **source checkout**, `pytest -m smoke -q` against a staging copy; on an
-   installed host without the test tree, rely on the step-3 `mnemostack doctor`
-   diagnostics plus the step-6 spot-check.
+5. From a **source checkout**, `pytest tests/test_smoke.py -q` against a staging
+   copy; on an installed host without the test tree, rely on the step-3
+   `mnemostack doctor` diagnostics plus the step-6 spot-check.
 6. Spot-check a representative `search` / `answer`.
