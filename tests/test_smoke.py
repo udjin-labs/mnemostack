@@ -154,7 +154,13 @@ def test_smoke_graph_reachable():
     """Opt-in: a live Memgraph is reachable and answers RETURN 1."""
     from mnemostack.graph.factory import make_graph_store
 
-    store = make_graph_store(os.environ["MNEMOSTACK_SMOKE_GRAPH_URI"], timeout=5.0)
+    store = make_graph_store(
+        os.environ["MNEMOSTACK_SMOKE_GRAPH_URI"],
+        timeout=5.0,
+        user=os.environ.get("MNEMOSTACK_GRAPH_USER", ""),
+        password=os.environ.get("MNEMOSTACK_GRAPH_PASSWORD", ""),
+        database=os.environ.get("MNEMOSTACK_GRAPH_DATABASE") or None,
+    )
     try:
         ok, msg = store.health_check()
         assert ok, f"graph unreachable: {msg}"

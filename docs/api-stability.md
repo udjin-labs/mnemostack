@@ -66,16 +66,18 @@ leniently. `build_app(config)` and `ServerConfig` are 🟢 stable.
 `embedding.{provider,model}`,
 `vector.{host,collection,chunk_size,window_size,health_timeout}`,
 `llm.{provider,model}`,
-`graph.{uri,user,password,database,timeout,health_timeout}`,
+`graph.{uri,user,password,database,timeout}`,
 `recall.{top_k,confidence_threshold,bm25_paths,vector_floor,rerank_mode,token_budget}`.
 
 🟡 **Accepted but not yet wired** — present in the config schema, but the runtime
 does not consume them today, so don't depend on them until they are:
 `embedding.api_key_env` (only drives a CLI "set `$KEY`" hint, not provider key
 resolution — the provider reads its own fixed env var), `embedding.ollama_host`,
-`vector.overlap` (the chunker's overlap is currently fixed), and `recall.rrf_k`
-(the RRF constant is currently fixed at 60). These will be wired through or
-removed; either way it won't silently change a working deployment.
+`vector.overlap` (the chunker's overlap is currently fixed), `recall.rrf_k`
+(the RRF constant is currently fixed at 60), and `graph.health_timeout` (honored
+by the env / ASGI-factory server via `ServerConfig.from_env`, but the `mnemostack
+serve` CLI has no matching flag and uses the 1s default). These will be wired
+through or removed; either way it won't silently change a working deployment.
 
 Env aliases (e.g. `MNEMOSTACK_QDRANT_URL` for `vector.host`,
 `MNEMOSTACK_MEMGRAPH_URI` for `graph.uri`) are 🟢 stable. Defaults won't change
