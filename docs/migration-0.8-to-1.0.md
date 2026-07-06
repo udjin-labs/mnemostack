@@ -27,10 +27,12 @@ return noise.
 - **1.0 preserves** existing collections created with the same embedding
   model. No re-index needed.
 - **If you change the embedding model**: create a **new** collection
-  (`--collection <new>` or a fresh `--recreate`) and re-index. `mnemostack
-  doctor` detects a stored-vs-provider **dimension mismatch** and reports it as
-  `down` with a remediation hint, so a misconfigured swap fails the deploy gate
-  instead of silently returning garbage.
+  (`--collection <new>`) and re-index. `mnemostack doctor` detects a
+  stored-vs-provider **dimension mismatch** and reports it as `down` with a
+  remediation hint, so a misconfigured swap fails the deploy gate instead of
+  silently returning garbage. Avoid `--recreate` for a reversible swap — it
+  **drops and rebuilds the same collection in place**, leaving nothing to roll
+  back to.
 - **Rollback**: point `vector.collection` back at the old collection; it's
   untouched by a new-collection re-index.
 

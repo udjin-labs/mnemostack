@@ -67,7 +67,7 @@ leniently. `build_app(config)` and `ServerConfig` are 🟢 stable.
 `vector.{host,collection,chunk_size,window_size,health_timeout}`,
 `llm.{provider,model}`,
 `graph.{uri,user,password,database,timeout}`,
-`recall.{top_k,confidence_threshold,bm25_paths,vector_floor,rerank_mode,token_budget}`.
+`recall.{bm25_paths,vector_floor,rerank_mode,token_budget}`.
 
 🟡 **Accepted but not yet wired** — present in the config schema, but the runtime
 does not consume them today, so don't depend on them until they are:
@@ -78,6 +78,12 @@ resolution — the provider reads its own fixed env var), `embedding.ollama_host
 by the env / ASGI-factory server via `ServerConfig.from_env`, but the `mnemostack
 serve` CLI has no matching flag and uses the 1s default). These will be wired
 through or removed; either way it won't silently change a working deployment.
+
+🟢 **CLI-only defaults**: `recall.top_k` and `recall.confidence_threshold` are
+stable as defaults for the `search` / `answer` CLI (`--limit` / `--min-confidence`),
+but the HTTP and MCP surfaces don't read them — `/recall` and the MCP tools take a
+per-request `limit` (default 10) and apply no server-side confidence threshold. Set
+the result count per request there.
 
 Env aliases (e.g. `MNEMOSTACK_QDRANT_URL` for `vector.host`,
 `MNEMOSTACK_MEMGRAPH_URI` for `graph.uri`) are 🟢 stable. Defaults won't change
