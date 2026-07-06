@@ -2306,6 +2306,10 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         graph_password=_graph_auth(args)["password"],
         graph_database=_graph_auth(args)["database"],
         graph_timeout=args.graph_timeout,
+        # The inspector's graph reachability probe uses graph_health_timeout, so
+        # feed the CLI --graph-timeout into it or a slow/remote graph keeps the 1s
+        # default and shows as down.
+        graph_health_timeout=args.graph_timeout,
     )
     app = build_inspector_app(cfg)
     if args.host == "0.0.0.0":

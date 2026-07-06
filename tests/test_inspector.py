@@ -206,3 +206,57 @@ def test_records_returns_clean_error_on_bad_filter(client):
     d = client.get("/api/records?tenant=alpha&filters=not-json").json()
     assert d["records"] == []
     assert d.get("error")
+
+
+def test_inspector_html_has_manual_tenant_and_larger_limit():
+    from mnemostack.inspector import INSPECTOR_HTML
+
+    assert 'id="tenant-manual"' in INSPECTOR_HTML  # inspect any tenant, not just page 1
+    assert "/api/tenants?limit=1000" in INSPECTOR_HTML
+
+
+def test_cmd_inspect_wires_graph_timeout_to_probe(monkeypatch):
+    import uvicorn
+
+    import mnemostack.cli as cli
+    import mnemostack.inspector as insp_mod
+
+    captured = {}
+    monkeypatch.setattr(
+        insp_mod, "build_inspector_app", lambda cfg: (captured.__setitem__("cfg", cfg), object())[1]
+    )
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
+    args = cli.build_parser().parse_args(["inspect", "--graph-timeout", "7"])
+    cli.cmd_inspect(args)
+    assert captured["cfg"].graph_health_timeout == 7.0
+
+
+def test_graph_reachable_closes_driver_on_failure(monkeypatch):
+    pytest.importorskip("neo4j")
+    import neo4j
+
+    from mnemostack.inspector import _graph_reachable
+
+    closed = {"n": 0}
+
+    class _Session:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def run(self, *a):
+            raise RuntimeError("graph down")
+
+    class _Driver:
+        def session(self, **k):
+            return _Session()
+
+        def close(self):
+            closed["n"] += 1
+
+    monkeypatch.setattr(neo4j.GraphDatabase, "driver", lambda *a, **k: _Driver())
+    cfg = ServerConfig(graph_uri="bolt://x", graph_user="", graph_password="", graph_database=None)
+    assert _graph_reachable(cfg) is False
+    assert closed["n"] == 1  # driver closed despite the failure

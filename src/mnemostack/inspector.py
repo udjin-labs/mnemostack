@@ -76,7 +76,7 @@ INSPECTOR_HTML = """<!doctype html>
 </style></head><body>
 <h1>mnemostack inspector <span class="muted mono" id="ver"></span> <span class="pill">read-only</span></h1>
 <div class="bar">
- <label>tenant <select id="tenant"></select></label>
+ <label>tenant <select id="tenant"></select></label> <input id="tenant-manual" placeholder="or type a tenant id" size="16">
  <input type="text" id="q" placeholder="smoke query (vector search) — empty = browse records">
  <input type="text" id="filters" placeholder='filters JSON e.g. {"source":"notes.md"}' style="min-width:20rem">
  <button id="go">Search</button>
@@ -89,9 +89,9 @@ INSPECTOR_HTML = """<!doctype html>
 <script>
 const $=s=>document.querySelector(s), esc=t=>String(t??"").replace(/[<&>"']/g,c=>({"<":"&lt;","&":"&amp;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 async function j(u){const r=await fetch(u);if(!r.ok)throw new Error(r.status+" "+await r.text());return r.json();}
-function tenant(){return $("#tenant").value;}
+function tenant(){return $("#tenant-manual").value.trim()||$("#tenant").value;}
 async function loadTenants(){
-  const d=await j("/api/tenants");$("#ver").textContent="v"+d.version;
+  const d=await j("/api/tenants?limit=1000");$("#ver").textContent="v"+d.version;
   const sel=$("#tenant");sel.innerHTML="";
   if(d.ok===false){$("#status").textContent=d.error||"tenant lookup failed";}
   if(!d.tenants.length){sel.innerHTML='<option value="">('+(d.ok===false?"lookup failed":"no tenants — data has no tenant_id")+')</option>';}
@@ -126,6 +126,7 @@ $("#rows").addEventListener("click",e=>{const tr=e.target.closest("tr");if(!tr)r
   const r=window._recs[tr.dataset.id];if(!r)return;
   $("#detail").hidden=false;$("#detail").textContent=JSON.stringify(r,null,2);});
 $("#tenant").addEventListener("change",()=>{loadOverview();loadRecords();});
+$("#tenant-manual").addEventListener("change",()=>{loadOverview();loadRecords();});
 $("#go").addEventListener("click",loadRecords);
 $("#q").addEventListener("keydown",e=>{if(e.key==="Enter")loadRecords();});
 (async()=>{try{await loadTenants();await loadOverview();await loadRecords();}catch(e){$("#status").textContent=e.message;}})();
@@ -138,7 +139,10 @@ def _graph_reachable(cfg: ServerConfig) -> bool | None:
         return None
     try:
         from neo4j import GraphDatabase
-
+    except Exception:  # noqa: BLE001 — neo4j not installed
+        return False
+    driver = None
+    try:
         driver = GraphDatabase.driver(
             cfg.graph_uri,
             auth=(cfg.graph_user, cfg.graph_password) if cfg.graph_user else None,
@@ -147,10 +151,14 @@ def _graph_reachable(cfg: ServerConfig) -> bool | None:
         )
         with driver.session(database=cfg.graph_database) as s:
             s.run("RETURN 1").single()
-        driver.close()
         return True
     except Exception:  # noqa: BLE001
         return False
+    finally:
+        # /api/overview probes on every page load / tenant switch, so always close
+        # the driver — a persistent graph failure must not leak driver pools.
+        if driver is not None:
+            driver.close()
 
 
 def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
