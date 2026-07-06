@@ -2142,6 +2142,29 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     )
     p_serve.set_defaults(func=cmd_serve)
 
+    p_inspect = sub.add_parser(
+        "inspect",
+        parents=[common],
+        help="Run the read-only web inspector (operator console). Requires [server]",
+    )
+    p_inspect.add_argument("--host", default="127.0.0.1", help="Bind address (default 127.0.0.1)")
+    p_inspect.add_argument("--port", type=int, default=8100, help="Port (default 8100)")
+    p_inspect.add_argument(
+        "--memgraph-uri",
+        default=cfg.graph.uri,  # None when unconfigured — don't probe a graph that isn't set up
+        help="Memgraph bolt URI (for graph reachability display; omit for no-graph deployments)",
+    )
+    p_inspect.add_argument(
+        "--graph-timeout", type=float, default=cfg.graph.timeout, help="Graph connect timeout (s)"
+    )
+    p_inspect.add_argument(
+        "--qdrant-health-timeout",
+        type=int,
+        default=cfg.vector.health_timeout,
+        help="Qdrant reachability-probe timeout (s) for the inspector (default from config)",
+    )
+    p_inspect.set_defaults(func=cmd_inspect)
+
     p_graph_migrate = sub.add_parser(
         "graph-migrate-current",
         help="Backfill legacy NULL graph validity markers to 'current'",
@@ -2261,6 +2284,52 @@ def cmd_config_show(args: argparse.Namespace) -> int:
 
     cfg = Config.load(args.config)
     print(yaml.safe_dump(cfg.to_dict(), default_flow_style=False, sort_keys=False))
+    return 0
+
+
+def cmd_inspect(args: argparse.Namespace) -> int:
+    """Run the read-only web inspector (a memory operations console)."""
+    try:
+        import uvicorn
+
+        from mnemostack.inspector import build_inspector_app
+        from mnemostack.server import ServerConfig
+    except ImportError as exc:
+        print(
+            f"error: server extra not installed ({exc}). Install with: "
+            "pip install 'mnemostack[server]'",
+            file=sys.stderr,
+        )
+        return 2
+
+    cfg = ServerConfig(
+        provider_name=args.provider,
+        embedding_model=_embedding_model(args),
+        collection=args.collection,
+        qdrant_url=args.qdrant,
+        graph_uri=args.memgraph_uri,
+        graph_user=_graph_auth(args)["user"],
+        graph_password=_graph_auth(args)["password"],
+        graph_database=_graph_auth(args)["database"],
+        graph_timeout=args.graph_timeout,
+        # The inspector's graph reachability probe uses graph_health_timeout, so
+        # feed the CLI --graph-timeout into it or a slow/remote graph keeps the 1s
+        # default and shows as down.
+        graph_health_timeout=args.graph_timeout,
+        qdrant_health_timeout=args.qdrant_health_timeout,
+    )
+    app = build_inspector_app(cfg)
+    if args.host == "0.0.0.0":
+        print(
+            "warning: the inspector exposes read-only memory contents; binding to "
+            "0.0.0.0 makes them reachable on all interfaces — keep it behind auth",
+            file=sys.stderr,
+        )
+    print(f"mnemostack inspect: http://{args.host}:{args.port}  (read-only)")
+    print(f"  collection: {cfg.collection}")
+    print(f"  qdrant:     {cfg.qdrant_url}")
+    print(f"  memgraph:   {cfg.graph_uri}")
+    uvicorn.run(app, host=args.host, port=args.port)
     return 0
 
 
