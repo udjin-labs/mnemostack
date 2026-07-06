@@ -58,7 +58,12 @@ new id set; the old chunks become orphans.
   orphans (and generic `mnemostack index` keys ids by `(source, offset, text)`, so
   unchanged chunks keep their ids regardless). To clean in place, delete the old
   root's chunks explicitly before relying on recall. For markdown, `--index-root`
-  pins the root so a nested/single-file refresh keeps the parent index's ids.
+  pins the root so a nested/single-file refresh keeps the parent index's ids. **If
+  the graph is enabled**, a fresh Qdrant collection doesn't fix graph recall —
+  `MemgraphRetriever` searches the whole graph and can still surface the old root's
+  `:File` link nodes; clean the old graph root too (see
+  [`:File` node keying](#file-node-keying-multi-root-graphs)) or use a fresh graph
+  database.
 
 ## Graph markers: `valid_until = 'current'` vs legacy `NULL`
 
@@ -75,6 +80,11 @@ mnemostack graph-migrate-current --memgraph-uri bolt://localhost:7687 --dry-run
 # Apply:
 mnemostack graph-migrate-current --memgraph-uri bolt://localhost:7687
 ```
+
+> ⚠️ This normalizes markers on **every** node and relationship in the target
+> database, unscoped. Point it at a **dedicated** mnemostack Memgraph database (or
+> back up first) — on a graph shared with non-mnemostack data it will set
+> `valid_until = 'current'` on records mnemostack doesn't own.
 
 - Optional on 0.8.x (reads already treat `NULL` as current). Recommended before
   1.0 so the `'current'` marker is the only open-ended form on disk.

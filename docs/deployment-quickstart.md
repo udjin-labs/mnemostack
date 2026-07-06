@@ -88,7 +88,9 @@ For a fully local, no-egress stack:
   Ollama server) before running the commands above — both the embedder and the
   `answer`/`serve` LLM default to Gemini otherwise and will need `GEMINI_API_KEY`.
   Setting them in the shell/service env makes `doctor`, `index`, `search`,
-  `answer`, and `serve` all use Ollama.
+  `answer`, and `serve` all use Ollama. Pull the default models first (or set
+  `MNEMOSTACK_EMBEDDING_MODEL` / `MNEMOSTACK_LLM_MODEL` to ones you already have):
+  `ollama pull nomic-embed-text && ollama pull llama3.2:3b`.
 - **Qdrant / Memgraph**: self-hosted (Docker, binary, or systemd) on the same
   host or private network; point `MNEMOSTACK_QDRANT_URL` /
   `MNEMOSTACK_MEMGRAPH_URI` at them.
