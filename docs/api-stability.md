@@ -39,11 +39,35 @@ Contract guarantees: request fields are only ever added (never removed or
 retyped) within a major line; new response fields may appear, so parse
 leniently. `build_app(config)` and `ServerConfig` are 🟢 stable.
 
+**Authentication (opt-in, 🟢 stable).** `serve --auth` (or `MNEMOSTACK_AUTH_ENABLED`)
+turns the server into a default-deny, multi-tenant surface: `/recall`, `/answer`,
+and `/feedback` require a service key (bearer token), which resolves to a
+`Principal(tenant, scopes)` — `read` gates recall/answer, `write` gates feedback.
+The tenant is derived from the key, never asserted by the caller, and scopes every
+result. `/health`, `/healthz`, `/readyz`, `/status`, `/metrics` stay public. With
+`--auth` off the server is single-tenant and unauthenticated exactly as before —
+this is purely additive. See [Multi-tenancy & authentication](#multi-tenancy--authentication).
+
 ## CLI
 
 🟢 **Stable** commands and their documented flags / exit codes:
 `health`, `doctor`, `search`, `answer`, `index`, `index-markdown`, `invalidate`,
-`feedback`, `serve`, `mcp-serve`, `init`, `config`.
+`feedback`, `serve`, `mcp-serve`, `keys`, `tenant-migrate`, `init`, `config`.
+
+- `tenant-migrate --tenant <id>` stamps existing points into a tenant (idempotent;
+  `--all` to force-relabel, `--dry-run` to preview) — the operator path to adopting
+  tenancy on a pre-tenant collection; `VectorStore.stamp_tenant` is its library twin.
+- `keys add` / `keys list` / `keys revoke` manage the service-key store for
+  multi-tenant auth. `keys add --tenant <t> --scopes read,write` prints the
+  plaintext key **once** (only its SHA-256 hash is stored); `--keys-file` (or
+  `MNEMOSTACK_KEYS_FILE`) picks the store, defaulting to
+  `~/.config/mnemostack/keys.json`.
+- `serve --auth` and `mcp-serve --auth` gate their surfaces behind a service key
+  (`--keys-file` / `MNEMOSTACK_KEYS_FILE` picks the store; `MNEMOSTACK_AUTH_ENABLED`
+  flips auth on). HTTP `serve` reads a per-request key from the `Authorization:
+  Bearer` / `X-API-Key` header (many keys/tenants); `mcp-serve` binds **one**
+  process principal from `--api-key` / `MNEMOSTACK_API_KEY`. Default-off; see
+  [Multi-tenancy & authentication](#multi-tenancy--authentication).
 
 - `doctor` exit codes (`0` healthy / `1` core dependency down / `2` config
   invalid) are a 🟢 stable contract — safe to gate CI/deploys on. Exit `2` covers a
@@ -99,6 +123,13 @@ built-in default.
 is liveness-only and never checks Qdrant, and the `mnemostack health` CLI and MCP
 health tool build the store without the timeout (client default).
 
+🟢 **Auth env (no YAML key)** — the multi-tenant auth surface is driven by env /
+flags only, not the config file: `MNEMOSTACK_AUTH_ENABLED` (truthy →
+`serve`/`mcp-serve` require a key), `MNEMOSTACK_API_KEY` (the process's service
+key — **`mcp-serve` only**; HTTP `serve` reads a per-request bearer/`X-API-Key`
+header instead), `MNEMOSTACK_KEYS_FILE` (service-key store path). All three are
+🟢 stable and off by default.
+
 Env aliases (e.g. `MNEMOSTACK_QDRANT_URL` for `vector.host`,
 `MNEMOSTACK_MEMGRAPH_URI` for `graph.uri`) are 🟢 stable **where they exist** — not
 every stable key has one. `vector.chunk_size` and `vector.window_size`, for
@@ -124,18 +155,41 @@ is a 🟢 documented behavior.
 only registered when a graph URI is configured — a client must not assume they
 exist. Their shapes are otherwise stable.
 
+**Under `mcp-serve --auth` (🟢 stable).** The stdio transport binds one client per
+process, so the server runs *as* a single principal: the key (`--api-key` /
+`MNEMOSTACK_API_KEY`) resolves to a tenant + scopes at boot (and boot-fails loud
+without a valid key). Every tool call re-verifies the key, so revocation takes
+effect immediately mid-session. `search`/`answer` require `read`,
+`invalidate`/`feedback` require `write`, and the tenant is threaded into recall,
+answer, and invalidate. The graph tools **fail closed** under an authenticated
+tenant (the shared graph isn't tenant-scoped yet), and the recall pipeline drops
+its graph-resurrection stage for the same reason. `mnemostack_health` stays
+public. Without `--auth` the tools behave exactly as listed above.
+
 ## Python library
 
 ### 🟢 Stable
 
 - **Ingest**: `Ingestor` (constructor + `ingest` / `ingest_one` / `ingest_async`
   / `ingest_one_async` / `stream`), `IngestItem`, `IngestStats`.
-- **Vector**: `VectorStore`, `AsyncVectorStore`, `Hit`, `DimensionMismatchError`
-  — the documented methods (`upsert`, `search`, `count`, `invalidate`,
-  `ensure_collection`, `collection_exists`, `set_payload`, `scroll`). Note the
-  async surface is a **subset** of sync (no `scroll` / `iter_ids` /
-  `delete_points` / `index_payload_field`) — parity is planned but not
-  guaranteed yet, so treat async-only-missing methods as 🟡.
+- **Vector**: `VectorStore`, `AsyncVectorStore`, `Hit`, `DimensionMismatchError`,
+  `TenantConflictError`, `TENANT_ID_KEY` — the documented methods (`upsert`,
+  `search`, `count`, `invalidate`, `ensure_collection`, `collection_exists`,
+  `set_payload`, `scroll`). Note the async surface is a **subset** of sync (no
+  `scroll` / `iter_ids` / `delete_points` / `delete_payload_keys` /
+  `index_payload_field` / `stamp_tenant`) — parity is planned but not guaranteed
+  yet, so treat async-only-missing methods as 🟡. In particular the tenant helpers
+  below (`delete_payload_keys`, `stamp_tenant`) are **`VectorStore`-only** today. The
+  read/write/delete methods take an **optional keyword `tenant=`** (additive,
+  default `None` = single-tenant, unchanged behavior); when set, the server stamps
+  and filters on the `tenant_id` payload key and refuses to touch another tenant's
+  points. Two enforcement shapes: `upsert` / `upsert_batch` **raise
+  `TenantConflictError`** if an id is already owned by a different tenant (a guessed
+  id can't overwrite another tenant's point), while the id-targeted owner-guarded
+  writes — `set_payload`, `invalidate`, `delete_payload_keys`, `delete_points` —
+  **silently skip** foreign-owned ids (they leave them untouched and return without
+  error, so don't write `except TenantConflictError` around them). `stamp_tenant(
+  tenant, only_missing=True)` backfills the key on a pre-tenant collection.
 - **Embeddings**: `EmbeddingProvider` (incl. `health_check`), `get_provider`,
   `list_providers`, `register_provider`.
 - **LLM**: `LLMProvider` (incl. `health_check`), `LLMResponse`, `get_llm`,
@@ -144,9 +198,24 @@ exist. Their shapes are otherwise stable.
   `recall_flow_async`, `RecallResult`, `AnswerGenerator`, `Answer`,
   `Reranker`, `RERANK_MODES`, `BM25`, `BM25Doc`, `reciprocal_rank_fusion`,
   `build_bm25_docs`, the validity helpers (`filter_by_validity`, `is_current`,
-  `valid_at`) and token helpers (`estimate_tokens`, `apply_token_budget`,
-  `sum_tokens`, `TokenCounter`), and the trace helpers (`RecallTrace`,
-  `apply_rerank_safe`).
+  `valid_at`), the tenant backstop `filter_by_tenant`, and token helpers
+  (`estimate_tokens`, `apply_token_budget`, `sum_tokens`, `TokenCounter`), and the
+  trace helpers (`RecallTrace`, `apply_rerank_safe`). `recall_flow` /
+  `recall_flow_async` and `Recaller.recall` / `recall_async` take an **optional
+  keyword `tenant=`** (additive, default `None`) that scopes retrieval to that
+  tenant and applies `filter_by_tenant` as a backstop. `AnswerGenerator.generate`
+  (+ async) also takes `tenant=`, but it only scopes the method's **own** internal
+  retry sub-recalls (expansion / inference) — it does **not** re-filter the
+  `memories` you pass in. Pre-scope those yourself: feed `generate` the output of a
+  `tenant`-scoped `recall_flow`, don't hand it mixed-tenant memories expecting the
+  `tenant=` argument to clean them.
+- **Auth (multi-tenant service keys)**: `mnemostack.auth` — `Principal`
+  (`tenant`, `scopes`, `.can(scope)`), `KeyStore` (Protocol: `.verify(key) ->
+  Principal | None`), `FileKeyStore` (`.verify` / `.issue` / `.revoke` /
+  `.list_keys`; SHA-256-hashed JSON store), `SCOPES` (`{"read", "write",
+  "admin"}`; `admin` implies the others), `KeyStoreError`, `hash_key`,
+  `default_keys_path`. This is the credential surface behind `serve --auth` /
+  `mcp-serve --auth`; keys are stored hashed and the plaintext is shown once.
 - **Markdown**: `collect_markdown`, `MarkdownChunk`, `LinkEdge`,
   `MarkdownCollection`, `parse_frontmatter`, `extract_links`, `MarkdownSyncer`.
 - **Graph**: `GraphStore` (documented methods), `make_graph_store` (the
@@ -191,6 +260,70 @@ exist. Their shapes are otherwise stable.
 `_`-prefixed payload key, and anything imported from a submodule but absent from
 that submodule's `__all__`.
 
+## Multi-tenancy & authentication
+
+🟢 **Stable, opt-in, additive.** Multi-tenancy is off until you turn it on; a
+deployment that never passes `tenant=` or `--auth` behaves exactly as it did
+pre-1.0.
+
+**The boundary is server-enforced.** A tenant is a string carried in the
+server-owned `tenant_id` payload key. Writes stamp it, reads filter on it, and the
+store refuses to cross tenants — a client can never assert a tenant it wasn't
+issued. Enforcement has two shapes (see the Vector entry above): `upsert` **raises
+`TenantConflictError`** on a conflicting id; the id-targeted owner-guards
+(`set_payload`, `invalidate`, `delete_payload_keys`, `delete_points`) **silently
+skip** foreign-owned ids. `filter_by_tenant` is a defense-in-depth backstop on the
+recall path.
+
+**Who sets the tenant.** In the library you pass `tenant=` explicitly. On the HTTP
+and MCP surfaces the tenant is *derived from a service key*, never taken from the
+request body:
+
+1. Issue a key: `mnemostack keys add --tenant acme --scopes read,write`
+   (plaintext shown once; stored SHA-256-hashed in the keys file).
+2. Scopes gate operations: `read` → recall/answer, `write` → invalidate/feedback,
+   `admin` implies all. **Caveat — `feedback` is access-gated but not
+   tenant-partitioned:** its Q-learning / inhibition-of-return learning state is
+   process-global, so a `write`-scoped tenant's feedback can shift ranking state
+   shared with other tenants on the same process. Until per-tenant state lands
+   (planned follow-up), don't expose `feedback` across mutually-distrusting tenants
+   on one process — run a **separate process with its own `--state-path`** per trust
+   boundary (separate processes sharing the default state file still share the
+   Q-learning/IoR state), or leave feedback to a trusted operator.
+3. Run the surface with auth on:
+   - HTTP: `mnemostack serve --auth` — clients present the key as a bearer token;
+     `/recall` `/answer` `/feedback` are default-deny, health/status/metrics stay
+     public.
+   - MCP: `mnemostack mcp-serve --auth --api-key <key>` — one principal per
+     process, re-verified per call (revocation is immediate).
+4. `--keys-file` / `MNEMOSTACK_KEYS_FILE` selects the store;
+   `MNEMOSTACK_AUTH_ENABLED` / `MNEMOSTACK_API_KEY` are the env equivalents of
+   `--auth` / `--api-key`.
+
+**Current limitation (graph).** The graph (Memgraph) is **not tenant-scoped yet**,
+and the two surfaces guard it differently:
+
+- **MCP** (`mcp-serve --auth`): the graph tools fail closed, and the recall
+  pipeline is built with **no graph** under auth, so its graph-resurrection stage
+  never runs.
+- **HTTP** (`serve --auth`): the pipeline is built with the configured graph
+  **regardless of auth**, so graph resurrection still opens and queries the shared
+  Memgraph. No tenant reads another's graph nodes — the `filter_by_tenant` backstop
+  drops the (tenant-less) graph hits before they reach the caller — but the graph
+  is still contacted per recall. So under `serve --auth`, a slow or blackholed
+  Memgraph still adds latency; it is **not** skipped the way MCP skips it.
+
+Either way no tenant can read another's graph nodes. Graph tenant scoping is
+planned follow-up work; until it lands there is no per-key graph selection — the
+graph URI/database is a single process-wide setting. Note the workaround differs by
+surface: **authenticated MCP has no graph at all** (`mcp-serve --auth` forces the
+pipeline graph off and fails the graph tools closed), so per-tenant graph recall
+there isn't possible under auth — you'd run a trusted, single-tenant `mcp-serve`
+*without* `--auth` for graph. For **HTTP**, per-tenant graph recall means a
+**separate `serve` process per tenant** (each with its own `--memgraph-uri` /
+`graph.database`), not multiple databases behind one authenticated server; or
+disable the shared-graph query entirely with `--memgraph-uri ""`.
+
 ## On-disk / payload contracts
 
 Covered in detail in [migration notes](migration-0.8-to-1.0.md). Summary:
@@ -198,6 +331,12 @@ Covered in detail in [migration notes](migration-0.8-to-1.0.md). Summary:
 - 🟢 **Stable payload keys**: `text`, `source`, `offset`, `timestamp`,
   `indexed_at`, `index_root`, `invalidated_at`, `valid_from`, `valid_until`,
   `tags`. Frontmatter keys from markdown are your own namespace.
+- 🟢 **`tenant_id`** — the multi-tenant partition key. It is **server-owned**:
+  set only when a write passes `tenant=`, and the client can never assert or
+  change it — a caller `tenant_id` in an `upsert` is overridden (or rejected with
+  `TenantConflictError` if the id is another tenant's), and a `set_payload` under a
+  tenant restores the server-owned value rather than let the merge change it.
+  Absent on single-tenant collections; back-fillable via `VectorStore.stamp_tenant`.
 - 🟡 The sliding-window keys (`chunk_window`, `chunk_kind`,
   `chunk_start_offset`, `chunk_end_offset`) and `heading_path`.
 - 🔴 Ownership records (`_enrich_keys`, `_md_keys`) and `_`-prefixed keys.

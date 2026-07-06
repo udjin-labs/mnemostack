@@ -135,11 +135,72 @@ unaffected by the default "hide invalidated" view. Graph validity timestamps are
 canonicalized on write (a time-of-day is normalized to a UTC instant; a bare
 date stays a date) — values written by 0.8.x are already in the expected shape.
 
+## Multi-tenancy & authentication (new, opt-in)
+
+1.0 adds a multi-tenant boundary and service-key auth. Both are **off by default
+and purely additive** — a 0.8.x deployment that ignores them is unchanged, and no
+existing data needs migrating.
+
+- **`tenant_id` payload key** — the partition key. On a collection that never used
+  it, it's absent (reads as single-tenant), and it's **server-owned**: only a
+  write that passes `tenant=` sets it, and no client can assert or overwrite it (a
+  cross-tenant `upsert` raises `TenantConflictError`; the id-targeted owner-guards
+  `set_payload` / `invalidate` / `delete_*` silently skip a foreign-owned id). To
+  adopt tenancy on an existing collection, back-fill with
+  `mnemostack tenant-migrate --tenant <id>` (operator path; `--dry-run` to preview,
+  `--all` to force-relabel) or its library twin
+  `VectorStore.stamp_tenant(tenant, only_missing=True)` — both stamp only points
+  that lack the key by default, so they're safe to re-run.
+  ⚠️ **If your 0.8.x collection already used `tenant_id` as an ordinary payload
+  field**, it is *not* absent, and the default `only_missing` stamp leaves those
+  values untouched — recall will then treat each pre-existing value as an owner and
+  partition on it, so a collection meant to be single-tenant can fragment or a
+  wrong value can leak. Inspect the existing values first (`mnemostack inspect`),
+  then relabel the whole collection with `tenant-migrate --tenant <id> --all --yes`
+  (force-overwrite) before enabling auth.
+- **Stamping needs no re-index — but a later tenant-aware re-ingest does create new
+  ids.** `tenant-migrate` / `stamp_tenant` is a payload-only merge: it scopes
+  existing points at query time and changes no chunk id or embedding, so un-stamped
+  points simply stay outside every tenant's view until stamped. However, chunk ids
+  are **tenant-scoped** (`stable_chunk_id(..., tenant=)`), so once you re-ingest the
+  same source *under a tenant* the new points get different ids and land **beside**
+  the stamped legacy points — recall then sees duplicates. Note that tenant-aware
+  ingest is a **library** operation (`Ingestor(tenant=...)`): the `mnemostack index`
+  / `index-markdown` CLI has no `--tenant`, and its `--prune` is `index_root`-scoped
+  (not tenant-scoped), so it computes the *legacy* ids and would prune the wrong
+  set. Reconcile the first tenant re-ingest with the library
+  `prune_stale_chunks(store, fresh, tenant=<t>)` (tenant-scoped), or — simplest —
+  ingest each tenant into a **fresh collection** and cut over. Stamping alone (no
+  re-ingest) has no such duplication.
+- **Service keys** — auth on the HTTP/MCP surfaces resolves the tenant from a
+  service key (never from the request). Issue one with
+  `mnemostack keys add --tenant <t> --scopes read,write` (plaintext printed once;
+  the store holds only its SHA-256 hash). Turn the surfaces on with
+  `serve --auth` / `mcp-serve --auth` (`--keys-file` / `MNEMOSTACK_KEYS_FILE`
+  picks the store; `MNEMOSTACK_AUTH_ENABLED` flips auth on). HTTP `serve` takes a
+  per-request bearer / `X-API-Key` header; `mcp-serve` binds one process key via
+  `--api-key` / `MNEMOSTACK_API_KEY`. See
+  [api-stability.md](api-stability.md#multi-tenancy--authentication).
+- **Graph is not tenant-scoped yet.** Under auth no tenant reads another's graph
+  nodes, but the two surfaces differ: `mcp-serve --auth` fails the graph tools
+  closed and builds recall with no graph (so authenticated MCP has **no graph recall
+  at all**), while `serve --auth` still queries the configured Memgraph and relies
+  on the `filter_by_tenant` backstop to drop the (tenant-less) graph hits — so an
+  authenticated HTTP recall still contacts the shared graph. The graph URI/database
+  is a single **process-wide** setting (service keys don't pick one), so per-tenant
+  graph recall means a **separate `serve` process per tenant** (each with its own
+  `--memgraph-uri` / `graph.database`) — not several databases behind one
+  authenticated server. If you don't need it, run HTTP with `--memgraph-uri ""`.
+  Full graph tenant scoping is planned follow-up work.
+
 ## Config & CLI
 
 No config keys or CLI commands are being **removed** on the way to 1.0. Env
-aliases (`MNEMOSTACK_QDRANT_URL`, `MNEMOSTACK_MEMGRAPH_URI`, …) are stable. The
-only planned interface change is promoting a few de-facto-public names into their
+aliases (`MNEMOSTACK_QDRANT_URL`, `MNEMOSTACK_MEMGRAPH_URI`, …) are stable. New in
+1.0 and additive: the `keys` command, the `--auth` mode on `serve` / `mcp-serve`,
+and the `MNEMOSTACK_AUTH_ENABLED` / `MNEMOSTACK_API_KEY` / `MNEMOSTACK_KEYS_FILE`
+env vars (all off by default — see the multi-tenancy section above). The only
+planned interface change is promoting a few de-facto-public names into their
 package `__all__` (`make_graph_store`, `InMemoryRecorder`, `synthesize_async`) —
 additive, not breaking. See [api-stability.md](api-stability.md) for the full
 stable/experimental split; anything marked 🟡 experimental there (pipeline
