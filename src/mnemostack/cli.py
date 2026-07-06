@@ -2120,6 +2120,19 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         help="Record returned recall ids for inhibition-of-return state",
     )
     p_serve.add_argument(
+        "--auth",
+        action="store_true",
+        help=(
+            "Require a service key on /recall /answer /feedback (default-deny); "
+            "the key resolves the tenant + scopes. Issue keys with `mnemostack keys add`"
+        ),
+    )
+    p_serve.add_argument(
+        "--keys-file",
+        default=None,
+        help="Service-key store path (default: $MNEMOSTACK_KEYS_FILE or ~/.config/mnemostack/keys.json)",
+    )
+    p_serve.add_argument(
         "--vector-floor",
         type=int,
         default=cfg.recall.vector_floor,
@@ -2195,7 +2208,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     try:
         import uvicorn
 
-        from mnemostack.server import ServerConfig, build_app
+        from mnemostack.server import ServerConfig, _env_bool, build_app
     except ImportError as exc:
         print(
             f"error: server extra not installed ({exc}). Install with: "
@@ -2223,6 +2236,11 @@ def cmd_serve(args: argparse.Namespace) -> int:
         token_budget=_effective_token_budget(args),
         state_path=args.state_path,
         auto_record_ior=args.auto_record_ior,
+        # Honor MNEMOSTACK_AUTH_ENABLED too: cmd_serve builds ServerConfig
+        # explicitly (never from_env), so without this the documented env toggle
+        # would silently leave the endpoints unauthenticated.
+        auth_enabled=args.auth or _env_bool("MNEMOSTACK_AUTH_ENABLED"),
+        keys_file=args.keys_file,
     )
     app = build_app(cfg)
 

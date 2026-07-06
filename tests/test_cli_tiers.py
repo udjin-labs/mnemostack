@@ -528,6 +528,8 @@ def test_serve_passes_token_budget_to_server_config(monkeypatch):
         rerank_mode="relevant_only",
         token_budget=1234,
         auto_record_ior=False,
+        auth=False,
+        keys_file=None,
         host="127.0.0.1",
         port=8000,
         reload=False,
@@ -544,6 +546,48 @@ def test_serve_passes_token_budget_to_server_config(monkeypatch):
 
     assert rc == 0
     assert captured["cfg"].token_budget == 1234
+
+
+def test_serve_honors_auth_enabled_env(monkeypatch):
+    import sys
+
+    import mnemostack.server as srv
+    from mnemostack.cli import cmd_serve
+
+    monkeypatch.setitem(sys.modules, "uvicorn", MagicMock())
+    monkeypatch.setenv("MNEMOSTACK_AUTH_ENABLED", "1")  # env toggle, no --auth flag
+
+    args = argparse.Namespace(
+        provider="fake",
+        embedding_model=None,
+        llm="fake-llm",
+        llm_model=None,
+        collection="test",
+        qdrant="http://localhost:6333",
+        memgraph_uri=None,
+        graph_timeout=5.0,
+        qdrant_health_timeout=2,
+        bm25_path=[],
+        state_path="/tmp/state.json",
+        vector_floor=0,
+        rerank_mode="relevant_only",
+        token_budget=None,
+        auto_record_ior=False,
+        auth=False,  # not passed on the CLI — must be enabled by the env var
+        keys_file=None,
+        host="127.0.0.1",
+        port=8000,
+        reload=False,
+    )
+    captured = {}
+
+    def _fake_build_app(cfg):
+        captured["cfg"] = cfg
+        return MagicMock()
+
+    with patch.object(srv, "build_app", _fake_build_app):
+        cmd_serve(args)
+    assert captured["cfg"].auth_enabled is True
 
 
 def test_cmd_invalidate_calls_store(monkeypatch, capsys):
