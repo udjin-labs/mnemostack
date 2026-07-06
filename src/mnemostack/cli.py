@@ -2054,6 +2054,25 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         default=cfg.recall.token_budget,
         help="Default recall token budget for search/answer tool calls",
     )
+    p_mcp.add_argument(
+        "--auth",
+        action="store_true",
+        help=(
+            "Run the MCP server as an authenticated tenant: tools require the "
+            "key's scope and recall is scoped to its tenant. Provide the key with "
+            "--api-key or MNEMOSTACK_API_KEY. Issue keys with `mnemostack keys add`"
+        ),
+    )
+    p_mcp.add_argument(
+        "--api-key",
+        default=None,
+        help="Service key the MCP process runs as (or set MNEMOSTACK_API_KEY)",
+    )
+    p_mcp.add_argument(
+        "--keys-file",
+        default=None,
+        help="Service-key store path (default: $MNEMOSTACK_KEYS_FILE or ~/.config/mnemostack/keys.json)",
+    )
     p_mcp.set_defaults(func=cmd_mcp_serve)
 
     p_init = sub.add_parser(
@@ -2378,6 +2397,12 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
         vector_floor=max(0, int(args.vector_floor)),
         rerank_mode=args.rerank_mode,
         token_budget=_effective_token_budget(args),
+        # Honor the env toggles too (parity with serve / the MCP main()).
+        auth_enabled=args.auth
+        or os.environ.get("MNEMOSTACK_AUTH_ENABLED", "").strip().lower()
+        in {"1", "true", "yes", "on"},
+        api_key=args.api_key or os.environ.get("MNEMOSTACK_API_KEY") or None,
+        keys_file=args.keys_file,
     )
     mcp.run()
     return 0

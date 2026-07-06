@@ -186,6 +186,9 @@ def test_mcp_serve_passes_vector_floor_to_build_server():
         state_path="/tmp/state.json",
         vector_floor=3,
         rerank_mode="full_reorder",
+        auth=False,
+        api_key=None,
+        keys_file=None,
     )
     fake_mcp = MagicMock()
 
