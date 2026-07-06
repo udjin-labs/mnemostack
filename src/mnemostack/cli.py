@@ -319,10 +319,11 @@ def cmd_tenant_migrate(args: argparse.Namespace) -> int:
             dimension=1,  # dimension is irrelevant for a payload-only migration
             host=args.qdrant,
         )
+        exists = store.collection_exists()  # first network call — inside the guard
     except Exception as e:  # noqa: BLE001
         print(f"error: cannot reach Qdrant at {args.qdrant}: {e}", file=sys.stderr)
         return 1
-    if not store.collection_exists():
+    if not exists:
         print(f"error: collection '{args.collection}' does not exist", file=sys.stderr)
         return 1
 
@@ -335,11 +336,15 @@ def cmd_tenant_migrate(args: argparse.Namespace) -> int:
     # that VectorStore.count() reads — the --all safety check below relies on
     # (total - missing) to detect pre-stamped points, so an under-report there
     # could let --all silently relabel an existing tenant.
-    total = store.client.count(collection_name=args.collection).count
-    missing = store.client.count(
-        collection_name=args.collection,
-        count_filter=Filter(must=[IsEmptyCondition(is_empty=PayloadField(key=TENANT_ID_KEY))]),
-    ).count
+    try:
+        total = store.client.count(collection_name=args.collection).count
+        missing = store.client.count(
+            collection_name=args.collection,
+            count_filter=Filter(must=[IsEmptyCondition(is_empty=PayloadField(key=TENANT_ID_KEY))]),
+        ).count
+    except Exception as e:  # noqa: BLE001
+        print(f"error: cannot reach Qdrant at {args.qdrant}: {e}", file=sys.stderr)
+        return 1
     # Safety: --all would relabel points that already belong to a tenant. Refuse
     # when any exist, so a mistaken --all can't collapse a multi-tenant
     # collection into one tenant. (Default only-missing is always safe.)
@@ -357,7 +362,11 @@ def cmd_tenant_migrate(args: argparse.Namespace) -> int:
     if args.dry_run:
         print(f"dry-run: would stamp tenant_id='{args.tenant}' onto {pending} point(s) {scope}")
         return 0
-    stamped = store.stamp_tenant(args.tenant, only_missing=only_missing)
+    try:
+        stamped = store.stamp_tenant(args.tenant, only_missing=only_missing)
+    except Exception as e:  # noqa: BLE001
+        print(f"error: cannot reach Qdrant at {args.qdrant}: {e}", file=sys.stderr)
+        return 1
     print(f"stamped tenant_id='{args.tenant}' onto {stamped} point(s) {scope}")
     return 0
 

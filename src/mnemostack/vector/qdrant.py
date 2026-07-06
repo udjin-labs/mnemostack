@@ -44,15 +44,21 @@ def _tenant_condition(tenant: str) -> FieldCondition:
 
 
 def _stamp_tenant(payload: dict[str, Any] | None, tenant: str | None) -> dict[str, Any]:
-    """Return the payload with ``tenant_id`` set when a tenant is given.
+    """Return the payload with a server-owned ``tenant_id``.
 
-    The server-supplied tenant always wins over a caller-provided ``tenant_id``
-    so a write can't be redirected into another tenant. With no tenant the
-    payload is returned unchanged (single-tenant / legacy behavior).
+    With a tenant, the server value always wins over a caller-provided
+    ``tenant_id`` so a write can't be redirected into another tenant. With **no**
+    tenant the key is **stripped**: an unscoped write must never carry a caller
+    ``tenant_id`` (e.g. from markdown frontmatter passed straight into the
+    payload), or unauthenticated content could inject itself into a tenant's
+    scoped reads. The explicit migration path (``stamp_tenant``) sets
+    ``tenant_id`` directly, not through here.
     """
     base = dict(payload or {})
     if tenant is not None:
         base[TENANT_ID_KEY] = tenant
+    else:
+        base.pop(TENANT_ID_KEY, None)
     return base
 
 
@@ -383,19 +389,15 @@ class VectorStore:
     ) -> None:
         """Remove specific payload keys from a point (vector untouched).
 
-        ``tenant_id`` is the server-owned isolation field and can never be removed
-        this way — passing it raises ``ValueError`` (otherwise a caller who knows
-        another tenant's id could strip its ``tenant_id`` and make the point vanish
-        from its owner's scoped reads). With ``tenant`` set, the delete is skipped
-        unless the point belongs to that tenant.
+        ``tenant_id`` is the server-owned isolation field and is **silently
+        skipped** — it's never removed this way (stripping it would make the point
+        vanish from its owner's scoped reads), so a payload refresh that lists it
+        among stale keys drops the rest without aborting. With ``tenant`` set, the
+        delete is skipped unless the point belongs to that tenant.
         """
+        keys = [k for k in keys if k != TENANT_ID_KEY]
         if not keys:
             return
-        if TENANT_ID_KEY in keys:
-            raise ValueError(
-                f"{TENANT_ID_KEY!r} is the server-owned tenant isolation key and "
-                "cannot be removed via delete_payload_keys"
-            )
         if tenant is not None:
             found = self.client.retrieve(
                 collection_name=self.collection, ids=[id], with_payload=[TENANT_ID_KEY]

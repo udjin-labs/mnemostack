@@ -321,15 +321,23 @@ async def test_async_upsert_refuses_cross_tenant_takeover():
 # --- tenant_id is protected from payload deletion ---
 
 
-def test_delete_payload_keys_refuses_removing_tenant_id():
+def test_delete_payload_keys_never_removes_tenant_id():
     store = _store()
     store.upsert(1, _VEC, {"text": "x", "k": "v"}, tenant="alpha")
-    with pytest.raises(ValueError):
-        store.delete_payload_keys(1, ["k", TENANT_ID_KEY])
-    # Raised before any delete — point still owned by alpha, nothing removed.
+    # tenant_id is silently skipped (refresh-safe); the rest is still deleted.
+    store.delete_payload_keys(1, ["k", TENANT_ID_KEY])
     hit = store.search(_VEC, limit=1, tenant="alpha")[0]
-    assert hit.payload[TENANT_ID_KEY] == "alpha"
-    assert hit.payload.get("k") == "v"
+    assert hit.payload[TENANT_ID_KEY] == "alpha"  # protected, still present
+    assert "k" not in hit.payload  # other key deleted
+
+
+def test_unscoped_write_strips_caller_tenant_id():
+    # An unscoped ingest of content carrying tenant_id (e.g. markdown frontmatter)
+    # must not inject itself into that tenant's scoped reads.
+    store = _store()
+    store.upsert(1, _VEC, {"text": "x", TENANT_ID_KEY: "victim"})  # no server tenant
+    assert store.search(_VEC, limit=10, tenant="victim") == []  # invisible to victim
+    assert TENANT_ID_KEY not in store.search(_VEC, limit=1)[0].payload  # not stored
 
 
 def test_delete_payload_keys_tenant_owner_guard():
