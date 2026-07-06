@@ -199,10 +199,14 @@ public. Without `--auth` the tools behave exactly as listed above.
   `valid_at`), the tenant backstop `filter_by_tenant`, and token helpers
   (`estimate_tokens`, `apply_token_budget`, `sum_tokens`, `TokenCounter`), and the
   trace helpers (`RecallTrace`, `apply_rerank_safe`). `recall_flow` /
-  `recall_flow_async`, `Recaller.recall` / `recall_async`, and
-  `AnswerGenerator.generate` (+ async) all take an **optional keyword `tenant=`**
-  (additive, default `None`) that scopes retrieval to that tenant and applies
-  `filter_by_tenant` as a backstop.
+  `recall_flow_async` and `Recaller.recall` / `recall_async` take an **optional
+  keyword `tenant=`** (additive, default `None`) that scopes retrieval to that
+  tenant and applies `filter_by_tenant` as a backstop. `AnswerGenerator.generate`
+  (+ async) also takes `tenant=`, but it only scopes the method's **own** internal
+  retry sub-recalls (expansion / inference) — it does **not** re-filter the
+  `memories` you pass in. Pre-scope those yourself: feed `generate` the output of a
+  `tenant`-scoped `recall_flow`, don't hand it mixed-tenant memories expecting the
+  `tenant=` argument to clean them.
 - **Auth (multi-tenant service keys)**: `mnemostack.auth` — `Principal`
   (`tenant`, `scopes`, `.can(scope)`), `KeyStore` (Protocol: `.verify(key) ->
   Principal | None`), `FileKeyStore` (`.verify` / `.issue` / `.revoke` /

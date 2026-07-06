@@ -58,6 +58,12 @@ the [HTTP server section of the README](../README.md#http-server-optional) for r
 > (`mnemostack keys add --tenant <t> --scopes read,write`); `/recall` `/answer`
 > `/feedback` then require the key and scope results to its tenant. See
 > [api-stability.md](../docs/api-stability.md#multi-tenancy--authentication).
+>
+> ⚠️ **Stamp your data first.** `mnemostack index` (step 1) writes points with **no
+> `tenant_id`**, so once `--auth` is on, recall filters by the key's tenant and that
+> data is invisible. Before enabling auth, assign it a tenant with
+> `mnemostack tenant-migrate --tenant <t>` (or re-ingest tenant-aware via the
+> library `Ingestor(tenant=...)`).
 
 > `--memgraph-uri ""` keeps graph recall **off** in this minimal setup. Without
 > it, `serve` falls back to the default `bolt://localhost:7687` and every recall

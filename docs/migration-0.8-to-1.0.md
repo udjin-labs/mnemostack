@@ -157,9 +157,13 @@ existing data needs migrating.
   points simply stay outside every tenant's view until stamped. However, chunk ids
   are **tenant-scoped** (`stable_chunk_id(..., tenant=)`), so once you re-ingest the
   same source *under a tenant* the new points get different ids and land **beside**
-  the stamped legacy points — recall then sees duplicates. Run the first
-  post-migration tenant re-ingest with `--prune` (tenant-scoped) to drop the legacy
-  copies, or migrate into a fresh collection and cut over. Stamping alone (no
+  the stamped legacy points — recall then sees duplicates. Note that tenant-aware
+  ingest is a **library** operation (`Ingestor(tenant=...)`): the `mnemostack index`
+  / `index-markdown` CLI has no `--tenant`, and its `--prune` is `index_root`-scoped
+  (not tenant-scoped), so it computes the *legacy* ids and would prune the wrong
+  set. Reconcile the first tenant re-ingest with the library
+  `prune_stale_chunks(store, fresh, tenant=<t>)` (tenant-scoped), or — simplest —
+  ingest each tenant into a **fresh collection** and cut over. Stamping alone (no
   re-ingest) has no such duplication.
 - **Service keys** — auth on the HTTP/MCP surfaces resolves the tenant from a
   service key (never from the request). Issue one with
