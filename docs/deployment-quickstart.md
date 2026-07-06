@@ -55,9 +55,12 @@ the [HTTP server section of the README](../README.md#http-server-optional) for r
 > Binding to `0.0.0.0` exposes an **unauthenticated** API by default — only do it
 > behind your own auth / rate-limit layer or a private network. For built-in,
 > per-tenant auth, add `--auth` and issue a service key
-> (`mnemostack keys add --tenant <t> --scopes read,write`); `/recall` `/answer`
-> `/feedback` then require the key and scope results to its tenant. See
-> [api-stability.md](../docs/api-stability.md#multi-tenancy--authentication).
+> (`mnemostack keys add --tenant <t> --scopes read,write`); `/recall` and `/answer`
+> then require the key and scope results to its tenant. Note `/feedback` is
+> access-gated by the key but **not tenant-scoped** — its learning state is
+> process-global, so don't expose it across mutually-distrusting tenants on one
+> process (see the caveat in
+> [api-stability.md](../docs/api-stability.md#multi-tenancy--authentication)).
 >
 > ⚠️ **Stamp your data first.** `mnemostack index` (step 1) writes points with **no
 > `tenant_id`**, so once `--auth` is on, recall filters by the key's tenant and that

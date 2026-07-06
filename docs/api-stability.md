@@ -176,8 +176,10 @@ public. Without `--auth` the tools behave exactly as listed above.
   `TenantConflictError`, `TENANT_ID_KEY` — the documented methods (`upsert`,
   `search`, `count`, `invalidate`, `ensure_collection`, `collection_exists`,
   `set_payload`, `scroll`). Note the async surface is a **subset** of sync (no
-  `scroll` / `iter_ids` / `delete_points` / `index_payload_field`) — parity is
-  planned but not guaranteed yet, so treat async-only-missing methods as 🟡. The
+  `scroll` / `iter_ids` / `delete_points` / `delete_payload_keys` /
+  `index_payload_field` / `stamp_tenant`) — parity is planned but not guaranteed
+  yet, so treat async-only-missing methods as 🟡. In particular the tenant helpers
+  below (`delete_payload_keys`, `stamp_tenant`) are **`VectorStore`-only** today. The
   read/write/delete methods take an **optional keyword `tenant=`** (additive,
   default `None` = single-tenant, unchanged behavior); when set, the server stamps
   and filters on the `tenant_id` payload key and refuses to touch another tenant's
@@ -285,8 +287,9 @@ request body:
    process-global, so a `write`-scoped tenant's feedback can shift ranking state
    shared with other tenants on the same process. Until per-tenant state lands
    (planned follow-up), don't expose `feedback` across mutually-distrusting tenants
-   on one process — run a process per trust boundary, or leave feedback to a
-   trusted operator.
+   on one process — run a **separate process with its own `--state-path`** per trust
+   boundary (separate processes sharing the default state file still share the
+   Q-learning/IoR state), or leave feedback to a trusted operator.
 3. Run the surface with auth on:
    - HTTP: `mnemostack serve --auth` — clients present the key as a bearer token;
      `/recall` `/answer` `/feedback` are default-deny, health/status/metrics stay
@@ -311,9 +314,12 @@ and the two surfaces guard it differently:
   Memgraph still adds latency; it is **not** skipped the way MCP skips it.
 
 Either way no tenant can read another's graph nodes. Graph tenant scoping is
-planned follow-up work; until it lands, keep per-tenant graphs in separate
-databases (or, for HTTP, run with `--memgraph-uri ""`) if you need isolation
-without the shared-graph query.
+planned follow-up work; until it lands there is no per-key graph selection — the
+graph URI/database is a single process-wide setting, so a per-tenant graph means a
+**separate `serve`/`mcp-serve` process per tenant** (each with its own
+`--memgraph-uri` / `graph.database`), not multiple databases behind one server. For
+HTTP specifically you can instead disable the shared-graph query entirely with
+`--memgraph-uri ""`.
 
 ## On-disk / payload contracts
 
