@@ -1497,8 +1497,11 @@ def cmd_feedback(args: argparse.Namespace) -> int:
     return 0
 
 
-def build_parser() -> argparse.ArgumentParser:
-    cfg = Config.load()
+def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
+    # `config_light` skips loading the stack config (used only to seed arg
+    # defaults) so a command that needs no embedding/vector/recall config —
+    # notably `keys` — isn't blocked by an unrelated malformed config/env.
+    cfg = Config() if config_light else Config.load()
     p = argparse.ArgumentParser(prog="mnemostack", description="Memory stack for AI agents")
     p.add_argument("--version", action="version", version=f"mnemostack {__version__}")
     # Graph auth (user/password/database) is sourced from the config file / env,
@@ -2294,7 +2297,11 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
+    raw = sys.argv[1:] if argv is None else argv
+    # `keys` manages the auth store and needs no stack config, so a malformed
+    # unrelated config/env must not block adding or revoking a service key.
+    subcmd = next((a for a in raw if not a.startswith("-")), None)
+    parser = build_parser(config_light=subcmd == "keys")
     args = parser.parse_args(argv)
     return args.func(args)
 

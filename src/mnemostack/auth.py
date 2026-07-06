@@ -148,13 +148,21 @@ class FileKeyStore:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump({"keys": records}, f, indent=2)
+            os.replace(tmp, self.path)
+        except OSError as e:
+            # Disk full, quota, NFS I/O, replace failure — a store error, not a
+            # traceback (the CLI only catches KeyStoreError).
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise KeyStoreError(f"cannot write key store {self.path}: {e}") from e
         except BaseException:
             try:
                 os.unlink(tmp)
             except OSError:
                 pass
             raise
-        os.replace(tmp, self.path)
         try:
             os.chmod(self.path, 0o600)  # re-assert (defensive; already 0600)
         except OSError as e:
@@ -275,8 +283,22 @@ class FileKeyStore:
         return True
 
     def list_keys(self) -> list[dict[str, Any]]:
-        """List keys WITHOUT their hashes (safe to print)."""
-        return [
-            {k: v for k, v in r.items() if k != "hash"}
-            for r in sorted(self._load(), key=lambda r: str(r.get("created_at", "")))
-        ]
+        """List keys WITHOUT their hashes (safe to print).
+
+        Fields are coerced to display-safe types so a corrupt-but-shaped record
+        (a non-string tenant, a scopes list with non-strings) can't crash the CLI
+        formatter — the record still lists by id so an operator can revoke it.
+        """
+        out: list[dict[str, Any]] = []
+        for r in sorted(self._load(), key=lambda r: str(r.get("created_at", ""))):
+            scopes = r.get("scopes")
+            out.append(
+                {
+                    "id": str(r.get("id", "")),
+                    "tenant": str(r.get("tenant", "")),
+                    "scopes": [str(s) for s in scopes] if isinstance(scopes, list) else [],
+                    "label": str(r.get("label", "")),
+                    "created_at": str(r.get("created_at", "")),
+                }
+            )
+        return out

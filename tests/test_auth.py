@@ -316,3 +316,37 @@ def test_issue_errors_cleanly_when_parent_is_a_file(tmp_path):
     ks = FileKeyStore(blocker / "keys.json")
     with pytest.raises(KeyStoreError):
         ks.issue("acme", "read")
+
+
+def test_save_write_failure_is_store_error(tmp_path, monkeypatch):
+    from mnemostack.auth import KeyStoreError
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    ks = FileKeyStore(tmp_path / "keys.json")
+    monkeypatch.setattr("mnemostack.auth.os.replace", boom)
+    with pytest.raises(KeyStoreError):
+        ks.issue("acme", "read")
+
+
+def test_list_keys_sanitizes_malformed_record(tmp_path):
+    p = tmp_path / "keys.json"
+    p.write_text(
+        json.dumps(
+            {"keys": [{"id": 5, "hash": "abc", "tenant": ["x"], "scopes": [1, 2], "created_at": None}]}
+        )
+    )
+    rows = FileKeyStore(p).list_keys()
+    assert rows[0]["id"] == "5"
+    assert rows[0]["scopes"] == ["1", "2"]  # coerced to strings; formatter won't crash
+    ",".join(rows[0]["scopes"])  # the exact op cmd_keys_list does
+
+
+def test_keys_list_works_with_malformed_stack_config(tmp_path, monkeypatch):
+    from mnemostack.cli import main
+
+    # An unrelated malformed stack config/env must not block key management.
+    monkeypatch.setenv("MNEMOSTACK_TOKEN_BUDGET", "not-a-number")
+    rc = main(["keys", "list", "--keys-file", str(tmp_path / "keys.json")])
+    assert rc == 0
