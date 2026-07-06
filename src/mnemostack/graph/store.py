@@ -328,12 +328,16 @@ class GraphStore:
         rel = self._safe_rel(predicate)
         tk = self._tenant_key_frag(tenant)
         params: dict[str, Any] = {"subject": subject, "obj": obj, "ended": _to_iso(ended)}
-        # Confine the closed edge to the tenant too — a scoped invalidate must not
-        # close an edge the boundary doesn't consider owned (e.g. an untenanted or
-        # mismatched edge left by a partial migration).
-        rtenant = " AND r.tenant = $tenant" if tenant is not None else ""
+        # Confine the closed edge by tenant. Scoped: only this tenant's edge.
+        # Unscoped: only tenant-LESS edges (`r.tenant IS NULL`), so an unscoped
+        # invalidate can't close a tenant-owned edge after the graph was migrated
+        # (the name-only match subset-binds tenant endpoints). On a single-tenant
+        # graph every edge is tenant-less, so it behaves as before.
         if tenant is not None:
+            rtenant = " AND r.tenant = $tenant"
             params["tenant"] = tenant
+        else:
+            rtenant = " AND r.tenant IS NULL"
         query = (
             f"MATCH (s {{name: $subject{tk}}})-[r:{rel}]->(o {{name: $obj{tk}}}) "
             f"WHERE (r.valid_until = 'current' OR r.valid_until IS NULL){rtenant} "

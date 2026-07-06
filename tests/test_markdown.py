@@ -772,6 +772,22 @@ def test_cmd_index_markdown_rejects_non_positive_chunk_size(tmp_path, capsys):
     assert "chunk-size" in capsys.readouterr().err
 
 
+def test_cmd_index_markdown_rejects_recreate_under_tenant(tmp_path, capsys):
+    import argparse
+
+    import mnemostack.cli as cli
+
+    args = argparse.Namespace(
+        path=str(_vault(tmp_path)), provider="fake", embedding_model=None,
+        collection="c", qdrant="http://localhost:6333",
+        chunk_size=1200, memgraph_uri=None, index_root=None,
+        graph_timeout=5.0, recreate=True, prune=False, yes=True, tenant="acme",
+    )
+    # --recreate would drop the whole shared collection — refuse it under --tenant.
+    assert cli.cmd_index_markdown(args) == 2
+    assert "recreate" in capsys.readouterr().err.lower()
+
+
 def test_cmd_index_markdown_graph_write_failure_does_not_fail_run(
     tmp_path, monkeypatch, capsys
 ):

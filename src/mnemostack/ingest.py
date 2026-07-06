@@ -303,11 +303,25 @@ def _sync_wrapper_graph(
         # edge, so a scoped graph recall (which pins nodes AND edges to `tenant`)
         # traverses these. Unscoped keeps the legacy path-keyed write untouched.
         tk = ", tenant: $tenant" if tenant is not None else ""
-        set_tenant = ", f.tenant = $tenant" if tenant is not None else ""
-        set_rel_tenant = " SET r.tenant = $tenant" if tenant is not None else ""
+        if tenant is not None:
+            file_set = (
+                "SET f.name = $name, f.indexed_date = $indexed_date, "
+                "f.point_id = $point_id, f.tenant = $tenant "
+            )
+            set_rel_tenant = " SET r.tenant = $tenant"
+        else:
+            # Unscoped: the path-key subset-matches a tenant-owned :File node after
+            # migration, so only write metadata when the node is tenant-less — an
+            # unscoped wrapper ingest must not overwrite a tenant's point_id/date.
+            # On a single-tenant graph the node has no tenant, so this always runs.
+            file_set = (
+                "FOREACH (_ IN CASE WHEN f.tenant IS NULL THEN [1] ELSE [] END | "
+                "SET f.name = $name, f.indexed_date = $indexed_date, f.point_id = $point_id) "
+            )
+            set_rel_tenant = ""
         query = (
             f"MERGE (f:File {{path: $path{tk}}}) "
-            f"SET f.name = $name, f.indexed_date = $indexed_date, f.point_id = $point_id{set_tenant} "
+            f"{file_set}"
             "WITH f "
             "UNWIND $tags AS tag "
             f"MERGE (t:Tag {{name: tag{tk}}}) "

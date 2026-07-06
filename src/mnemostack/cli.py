@@ -1287,6 +1287,17 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
     if watching and not target.is_dir():
         print("error: --watch requires a directory to watch", file=sys.stderr)
         return 2
+    if (getattr(args, "tenant", None) or None) is not None and args.recreate:
+        # --recreate drops and rebuilds the WHOLE Qdrant collection, which in a
+        # shared multi-tenant collection would delete every other tenant's points.
+        # Refuse the combination — rebuild a single tenant with --prune instead.
+        print(
+            "error: --recreate drops the entire collection (all tenants); it can't be "
+            "scoped to --tenant. Re-index the tenant with --prune, or recreate without "
+            "--tenant.",
+            file=sys.stderr,
+        )
+        return 2
     # Snapshot mtimes BEFORE the initial index so the watcher can reconcile any
     # file that changes during the (possibly long) collect/embed pass — closing
     # the gap between "indexed" and "observing".

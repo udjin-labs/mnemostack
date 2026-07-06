@@ -137,6 +137,16 @@ def test_invalidate_scoped_pins_both_endpoints():
     assert params["tenant"] == "acme"
 
 
+def test_invalidate_unscoped_only_closes_tenant_less_edges():
+    session = _RecordingSession([{"n": 0}])
+    store = _store_with(session)
+    store.invalidate("alice", "KNOWS", "bob", "2026-01-01")  # unscoped
+    cypher, params = session.calls[0]
+    # Guarded so an unscoped invalidate can't close a tenant-owned edge.
+    assert "r.tenant IS NULL" in cypher
+    assert "tenant" not in params
+
+
 def test_sync_file_links_scoped_keys_file_nodes_by_tenant():
     session = _RecordingSession()
     store = _store_with(session)
@@ -291,6 +301,48 @@ def test_add_file_tags_legacy_adapter_falls_back_to_tenant_add_triple():
     item = IngestItem(source="a.txt", text="hi", metadata={"tags": ["x"]})
     _sync_wrapper_graph(_LegacyAdapter(), item, "pid", tenant="acme")
     assert ("add_triple", "acme") in seen and ("add_file_tags", None) not in seen
+
+
+def test_wrapper_graph_unscoped_guards_file_metadata():
+    # An unscoped wrapper ingest must not overwrite a tenant-owned :File node's
+    # metadata (path key subset-matches it) — the SET is FOREACH-guarded.
+    from mnemostack.ingest import IngestItem, _sync_wrapper_graph
+
+    session = _RecordingSession()
+    driver = MagicMock()
+    driver.session.return_value = session
+
+    class _G:
+        def __init__(self, d):
+            self.driver = d
+            self.database = None
+
+    item = IngestItem(source="a.txt", text="hi", metadata={"tags": ["x"]})
+    _sync_wrapper_graph(_G(driver), item, "pid", tenant=None)
+    cypher = session.calls[0][0]
+    assert "FOREACH (_ IN CASE WHEN f.tenant IS NULL" in cypher
+    assert "f.tenant" not in cypher.split("FOREACH")[0]  # no unconditional tenant SET
+
+
+def test_wrapper_graph_scoped_folds_tenant_into_keys():
+    from mnemostack.ingest import IngestItem, _sync_wrapper_graph
+
+    session = _RecordingSession()
+    driver = MagicMock()
+    driver.session.return_value = session
+
+    class _G:
+        def __init__(self, d):
+            self.driver = d
+            self.database = None
+
+    item = IngestItem(source="a.txt", text="hi", metadata={"tags": ["x"]})
+    _sync_wrapper_graph(_G(driver), item, "pid", tenant="acme")
+    cypher, params = session.calls[0]
+    assert "path: $path, tenant: $tenant" in cypher  # File key folds tenant
+    assert "name: tag, tenant: $tenant" in cypher  # Tag key folds tenant
+    assert "SET r.tenant = $tenant" in cypher  # TAGGED edge stamped
+    assert params["tenant"] == "acme"
 
 
 def test_ingest_fallback_adapter_without_tenant_kwarg():
