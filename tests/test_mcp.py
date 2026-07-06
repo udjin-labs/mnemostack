@@ -710,3 +710,98 @@ def test_mcp_invalidate_passes_index_root(monkeypatch):
         "mnemostack_invalidate", {"ids": ["a"], "index_root": "/root/A"}
     ))
     assert vec.kwargs["index_root"] == "/root/A"
+
+
+# --- service-key auth (multi-tenant) ---
+
+
+def _auth_mcp(tmp_path, monkeypatch, *, scopes="read", tenant="alpha", rec=None, memgraph=None):
+    import mnemostack.mcp.server as srv
+    from mnemostack.auth import FileKeyStore
+
+    monkeypatch.setattr(srv, "get_provider", lambda *a, **k: SimpleNamespace(dimension=3))
+    monkeypatch.setattr(srv, "VectorStore", lambda **_: MagicMock())
+    monkeypatch.setattr(srv, "VectorRetriever", lambda **_: MagicMock())
+    monkeypatch.setattr(srv, "TemporalRetriever", lambda **_: MagicMock())
+    monkeypatch.setattr(srv, "build_bm25_docs", lambda _paths: [])
+
+    class _Rec:
+        def __init__(self, **_):
+            pass
+
+        def recall(self, query, limit=10, **kwargs):
+            if rec is not None:
+                rec["tenant"] = kwargs.get("tenant")
+            return []
+
+    monkeypatch.setattr(srv, "Recaller", _Rec)
+    ks = tmp_path / "keys.json"
+    _kid, key = FileKeyStore(ks).issue(tenant, scopes)
+    return build_server(
+        collection="test",
+        embedding_provider="ollama",
+        memgraph_uri=memgraph,
+        auth_enabled=True,
+        api_key=key,
+        keys_file=str(ks),
+    )
+
+
+def test_mcp_auth_boot_validates_key(tmp_path):
+    from mnemostack.auth import FileKeyStore
+
+    with pytest.raises(ValueError):  # auth on but no key
+        build_server(collection="t", embedding_provider="ollama", auth_enabled=True, api_key=None)
+    ks = tmp_path / "keys.json"
+    FileKeyStore(ks).issue("alpha", "read")
+    with pytest.raises(ValueError):  # auth on but wrong key
+        build_server(
+            collection="t",
+            embedding_provider="ollama",
+            auth_enabled=True,
+            api_key="msk_wrong",
+            keys_file=str(ks),
+        )
+
+
+def test_mcp_auth_scope_enforced(tmp_path, monkeypatch):
+    mcp = _auth_mcp(tmp_path, monkeypatch, scopes="read")  # read only
+    s = asyncio.run(mcp.call_tool("mnemostack_search", {"query": "q", "limit": 1}))
+    assert s.structured_content["ok"] is True  # read scope: allowed
+    f = asyncio.run(mcp.call_tool("mnemostack_feedback", {"hit_id": "x", "signal": "useful"}))
+    assert f.structured_content["ok"] is False and "scope" in f.structured_content["error"]
+
+
+def test_mcp_auth_threads_tenant_into_recall(tmp_path, monkeypatch):
+    rec = {}
+    mcp = _auth_mcp(tmp_path, monkeypatch, tenant="acme", rec=rec)
+    asyncio.run(mcp.call_tool("mnemostack_search", {"query": "q", "limit": 1}))
+    assert rec["tenant"] == "acme"  # recall scoped to the key's tenant
+
+
+def test_mcp_auth_revoked_key_denies_mid_session(tmp_path, monkeypatch):
+    import mnemostack.mcp.server as srv
+    from mnemostack.auth import FileKeyStore
+
+    monkeypatch.setattr(srv, "get_provider", lambda *a, **k: SimpleNamespace(dimension=3))
+    monkeypatch.setattr(srv, "VectorStore", lambda **_: MagicMock())
+    monkeypatch.setattr(srv, "VectorRetriever", lambda **_: MagicMock())
+    monkeypatch.setattr(srv, "TemporalRetriever", lambda **_: MagicMock())
+    monkeypatch.setattr(srv, "build_bm25_docs", lambda _paths: [])
+    monkeypatch.setattr(srv, "Recaller", lambda **_: SimpleNamespace(recall=lambda *a, **k: []))
+    ks = tmp_path / "keys.json"
+    store = FileKeyStore(ks)
+    kid, key = store.issue("alpha", "read")
+    mcp = build_server(
+        collection="t", embedding_provider="ollama", auth_enabled=True, api_key=key, keys_file=str(ks)
+    )
+    store.revoke(kid)  # revoked after boot — per-call re-verify must catch it
+    r = asyncio.run(mcp.call_tool("mnemostack_search", {"query": "q"}))
+    assert r.structured_content["ok"] is False and "revoked" in r.structured_content["error"]
+
+
+def test_mcp_graph_tools_fail_closed_under_tenant(tmp_path, monkeypatch):
+    mcp = _auth_mcp(tmp_path, monkeypatch, memgraph="bolt://x")
+    r = asyncio.run(mcp.call_tool("mnemostack_graph_query", {}))
+    assert r.structured_content["ok"] is False
+    assert "not tenant-scoped" in r.structured_content["error"]
