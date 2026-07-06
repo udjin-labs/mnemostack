@@ -176,3 +176,11 @@ def test_tenants_reports_error_when_facet_fails(monkeypatch):
     ).get("/api/tenants").json()
     assert d["ok"] is False and d["tenants"] == []
     assert "Qdrant unreachable" in d["error"]
+
+
+def test_records_returns_clean_error_on_bad_filter(client):
+    # /api/records returns a 200 error payload (records:[] + error), which the UI
+    # must surface instead of rendering "0 record(s)".
+    d = client.get("/api/records?tenant=alpha&filters=not-json").json()
+    assert d["records"] == []
+    assert d.get("error")

@@ -113,6 +113,7 @@ async function loadRecords(){
   if($("#q").value)p.set("q",$("#q").value);
   if($("#filters").value)p.set("filters",$("#filters").value);
   let d;try{d=await j("/api/records?"+p);}catch(e){$("#status").textContent=e.message;return;}
+  if(d.error){$("#status").textContent=d.error;$("#rows").innerHTML="";window._recs={};return;}
   $("#status").textContent=d.records.length+" record(s)"+(d.mode?" · "+d.mode:"");
   $("#rows").innerHTML=d.records.map(r=>
     `<tr class="${r.invalidated?'stale':''}" data-id="${esc(r.id)}">
