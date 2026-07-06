@@ -359,6 +359,43 @@ def test_unscoped_upsert_batch_preserves_owner_and_leaves_new_unowned():
     assert store.search(_VEC, limit=1, tenant="alpha")[0].payload["text"] == "a2"
 
 
+async def test_async_set_payload_unscoped_strips_tenant_id():
+    from qdrant_client import AsyncQdrantClient
+
+    from mnemostack.vector import AsyncVectorStore
+
+    store = AsyncVectorStore.__new__(AsyncVectorStore)
+    store.collection = "mt_async_sp"
+    store.dimension = 4
+    store.distance = Distance.COSINE
+    store.client = AsyncQdrantClient(":memory:")
+    await store.ensure_collection()
+    await store.upsert(1, _VEC, {"text": "x"})  # unowned point
+    await store.set_payload(1, {"k": "v", TENANT_ID_KEY: "victim"})  # unscoped merge
+    assert await store.search(_VEC, limit=10, tenant="victim") == []  # injection prevented
+    await store.close()
+
+
+def test_stamp_tenant_all_relabels_existing_tenant_id():
+    from qdrant_client.models import PointStruct
+
+    store = _store()
+    # A legacy point that already carries a tenant_id payload value (tenant_id was
+    # an ordinary field before it became the isolation key). Seed via the raw
+    # client since upsert() now strips a caller tenant_id.
+    store.client.upsert(
+        collection_name=store.collection,
+        points=[PointStruct(id=1, vector=_VEC, payload={"text": "x", TENANT_ID_KEY: "legacy"})],
+    )
+    assert store.count(tenant="legacy") == 1
+    # only_missing (default) skips it; --all (only_missing=False) relabels it → the
+    # cleanup path the CLI exposes via `tenant-migrate --all --yes`.
+    assert store.stamp_tenant("alpha", only_missing=True) == 0
+    assert store.stamp_tenant("alpha", only_missing=False) == 1
+    assert store.count(tenant="alpha") == 1
+    assert store.count(tenant="legacy") == 0
+
+
 def test_ensure_collection_indexes_tenant_id(monkeypatch):
     # Local Qdrant doesn't report payload indexes, so assert the KEYWORD index on
     # tenant_id is requested when a fresh collection is created.

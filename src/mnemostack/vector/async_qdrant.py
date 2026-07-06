@@ -187,7 +187,9 @@ class AsyncVectorStore:
         """Merge payload keys into an existing point (vector untouched).
 
         With ``tenant`` set, the write is skipped unless the point belongs to
-        that tenant (mirror of ``VectorStore.set_payload``)."""
+        that tenant; with no tenant a caller ``tenant_id`` is dropped from the
+        merge so an unscoped refresh can't inject an owner (mirror of
+        ``VectorStore.set_payload``)."""
         if tenant is not None:
             found = await self.client.retrieve(
                 collection_name=self.collection, ids=[id], with_payload=True
@@ -195,6 +197,8 @@ class AsyncVectorStore:
             if not found or (found[0].payload or {}).get(TENANT_ID_KEY) != tenant:
                 return
             payload = {**payload, TENANT_ID_KEY: tenant}
+        else:
+            payload = {k: v for k, v in payload.items() if k != TENANT_ID_KEY}
         await self.client.set_payload(
             collection_name=self.collection,
             payload=payload,

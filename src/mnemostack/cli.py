@@ -345,14 +345,17 @@ def cmd_tenant_migrate(args: argparse.Namespace) -> int:
     except Exception as e:  # noqa: BLE001
         print(f"error: cannot reach Qdrant at {args.qdrant}: {e}", file=sys.stderr)
         return 1
-    # Safety: --all would relabel points that already belong to a tenant. Refuse
-    # when any exist, so a mistaken --all can't collapse a multi-tenant
-    # collection into one tenant. (Default only-missing is always safe.)
-    if args.all and (total - missing) > 0:
+    # Safety: --all relabels points that already carry a tenant_id (legacy user
+    # metadata OR a real other-tenant owner), so require --yes to confirm — this
+    # keeps an accidental --all from collapsing a multi-tenant collection into one
+    # tenant, while still giving a cleanup path for a legacy collection where
+    # tenant_id was an ordinary payload field. (Default only-missing is always safe.)
+    if args.all and (total - missing) > 0 and not args.yes:
         print(
             f"error: {total - missing} point(s) already carry a tenant_id; --all would "
-            "relabel them all to one tenant. Run without --all to stamp only unassigned "
-            "points, or migrate a fresh collection if the relabel is intentional.",
+            f"relabel them all to '{args.tenant}'. Pass --yes to confirm (use this to "
+            "migrate a legacy collection where tenant_id was an ordinary payload field); "
+            "run without --all to stamp only unassigned points.",
             file=sys.stderr,
         )
         return 2
@@ -1491,6 +1494,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_tenant_migrate.add_argument(
         "--dry-run", action="store_true", help="Report the count without writing"
+    )
+    p_tenant_migrate.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Confirm --all when points already carry a tenant_id (relabels them)",
     )
     p_tenant_migrate.set_defaults(func=cmd_tenant_migrate)
 
