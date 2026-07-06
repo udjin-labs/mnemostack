@@ -66,7 +66,7 @@ leniently. `build_app(config)` and `ServerConfig` are 🟢 stable.
 
 ## Config (file + `MNEMOSTACK_*` env)
 
-🟢 **Stable** — all documented keys and their env aliases:
+🟢 **Stable** — all documented keys (and their `MNEMOSTACK_*` env alias where one exists):
 `embedding.{provider,model}`,
 `vector.{host,collection,chunk_size,window_size,health_timeout}`,
 `llm.{provider,model}`,
@@ -95,7 +95,10 @@ the result count per request there.
 built-in default.
 
 Env aliases (e.g. `MNEMOSTACK_QDRANT_URL` for `vector.host`,
-`MNEMOSTACK_MEMGRAPH_URI` for `graph.uri`) are 🟢 stable. Defaults won't change
+`MNEMOSTACK_MEMGRAPH_URI` for `graph.uri`) are 🟢 stable **where they exist** — not
+every stable key has one. `vector.chunk_size` and `vector.window_size`, for
+example, are set via the YAML file or CLI flags only (no `MNEMOSTACK_*` override).
+Defaults won't change
 without a major bump. `graph.uri = null` (disabled) is the documented off state for
 the **library** recall path — but the **HTTP server defaults it on**: both
 `mnemostack serve` and the `ServerConfig.from_env()` ASGI factory expand an unset

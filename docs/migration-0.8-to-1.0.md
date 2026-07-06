@@ -98,22 +98,23 @@ the new writes `MERGE` fresh `(name, index_root)` nodes but leave the legacy
 name-only link nodes — and their `LINKS_TO` edges — in place, where recall still
 surfaces them under the empty-root key.
 
-The safe fix is to **rebuild the link graph**: point at a fresh graph database (or
-clear it) and re-index all roots. The graph is derived data, so re-indexing
-regenerates it — no surgical deletes to get wrong.
+The safe, targeted fix is to delete only the legacy markdown **link** nodes — those
+with a `LINKS_TO` edge and no `index_root` — then re-index each root. Current
+`:File {path}` and `File`-labelled triple nodes carry `TAGGED`, not `LINKS_TO`, so
+they're left untouched:
 
-> ⚠️ Do **not** blanket-delete `:File` nodes that lack `index_root`. Current ingest
-> writes tag/file nodes without one — `:File {path}` with `TAGGED` edges, and
-> `File`-labelled triple subjects — so `WHERE index_root IS NULL DETACH DELETE`
-> would drop **live** data. If you must clean in place instead of rebuilding, scope
-> to the legacy *link* nodes only (a `LINKS_TO` edge and no `index_root`); the
-> current `:File {path}`/triple nodes carry `TAGGED`, not `LINKS_TO`, so they're
-> excluded:
->
-> ```cypher
-> // legacy markdown link nodes only — leaves :File {path}/triple nodes untouched
-> MATCH (f:File)-[:LINKS_TO]-() WHERE f.index_root IS NULL DETACH DELETE f;
-> ```
+```cypher
+// legacy markdown link nodes only — leaves :File {path}/triple nodes untouched
+MATCH (f:File)-[:LINKS_TO]-() WHERE f.index_root IS NULL DETACH DELETE f;
+```
+
+> ⚠️ Only **clear/rebuild the whole graph** if it holds nothing but markdown link
+> data. `index-markdown` regenerates the link graph, but **not** manually added
+> temporal facts (`mnemostack_graph_add_triple` / `GraphStore.add_triple`) or
+> ingest tag/file nodes (`Ingestor(graph=...)`, written by `mnemostack index`) —
+> clearing drops those for good. Back them up first, or stick to the scoped delete
+> above. And never blanket-delete every `index_root`-less `:File` node: that hits
+> the live `:File {path}`/triple nodes too.
 
 ## Payload validity keys
 

@@ -50,7 +50,7 @@ mnemostack serve --host 127.0.0.1 --port 8000 --memgraph-uri ""
 ```
 
 Applications in any language then call `/recall`, `/answer`, `/feedback`. See
-the [HTTP API section of the README](../README.md#http-api) for request shapes.
+the [HTTP server section of the README](../README.md#http-server-optional) for request shapes.
 
 > Binding to `0.0.0.0` exposes an **unauthenticated** API — only do it behind
 > your own auth / rate-limit layer or a private network.
@@ -82,8 +82,12 @@ mnemostack serve --memgraph-uri "$MNEMOSTACK_MEMGRAPH_URI"
 Everything above runs air-gapped — mnemostack has no hosted dependency of its
 own. For a fully local stack:
 
-- **Embeddings**: use `--provider ollama` (a local Ollama server) instead of a
-  hosted API — no key, no egress.
+- **Embeddings & LLM**: for a no-key/no-egress stack, export
+  `MNEMOSTACK_PROVIDER=ollama` **and** `MNEMOSTACK_LLM_PROVIDER=ollama` (a local
+  Ollama server) before running the commands above — both the embedder and the
+  `answer`/`serve` LLM default to Gemini otherwise and will need `GEMINI_API_KEY`.
+  Setting them in the shell/service env makes `doctor`, `index`, `search`,
+  `answer`, and `serve` all use Ollama.
 - **Qdrant / Memgraph**: self-hosted (Docker, binary, or systemd) on the same
   host or private network; point `MNEMOSTACK_QDRANT_URL` /
   `MNEMOSTACK_MEMGRAPH_URI` at them.
