@@ -79,8 +79,9 @@ mnemostack serve --memgraph-uri "$MNEMOSTACK_MEMGRAPH_URI"
 
 ## 4. On-prem deployment path
 
-Everything above runs air-gapped — mnemostack has no hosted dependency of its
-own. For a fully local stack:
+mnemostack has no hosted dependency of **its own**, but the default provider is
+Gemini — the flow above calls the hosted Gemini APIs for embeddings and answers.
+For a fully local, no-egress stack:
 
 - **Embeddings & LLM**: for a no-key/no-egress stack, export
   `MNEMOSTACK_PROVIDER=ollama` **and** `MNEMOSTACK_LLM_PROVIDER=ollama` (a local

@@ -97,7 +97,9 @@ built-in default.
 Env aliases (e.g. `MNEMOSTACK_QDRANT_URL` for `vector.host`,
 `MNEMOSTACK_MEMGRAPH_URI` for `graph.uri`) are 🟢 stable **where they exist** — not
 every stable key has one. `vector.chunk_size` and `vector.window_size`, for
-example, are set via the YAML file or CLI flags only (no `MNEMOSTACK_*` override).
+example, are set via the YAML file or CLI flags only (no `MNEMOSTACK_*` override),
+and they tune the generic `index` command — `index-markdown` uses a fixed chunk
+size (1200) and no windowing, so it ignores both.
 Defaults won't change
 without a major bump. `graph.uri = null` (disabled) is the documented off state for
 the **library** recall path — but the **HTTP server defaults it on**: both
