@@ -86,8 +86,10 @@ own. For a fully local stack:
 - **Qdrant / Memgraph**: self-hosted (Docker, binary, or systemd) on the same
   host or private network; point `MNEMOSTACK_QDRANT_URL` /
   `MNEMOSTACK_MEMGRAPH_URI` at them.
-- **Config**: ship a `mnemostack.yaml` (see `mnemostack init`) alongside the
-  service rather than env vars; `mnemostack config` prints the effective config.
+- **Config**: run `mnemostack init` to write `~/.config/mnemostack/config.yaml`
+  (one of the paths the CLI auto-loads — `~/.config/mnemostack/config.{yaml,yml}`
+  or `~/.mnemostack.yaml`) rather than passing env vars; `mnemostack config` prints
+  the effective config.
 - Run `mnemostack doctor` as a post-deploy gate on every host.
 
 ## 5. Health & readiness verification

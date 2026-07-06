@@ -81,12 +81,14 @@ through or removed; either way it won't silently change a working deployment.
 
 Env aliases (e.g. `MNEMOSTACK_QDRANT_URL` for `vector.host`,
 `MNEMOSTACK_MEMGRAPH_URI` for `graph.uri`) are 🟢 stable. Defaults won't change
-without a major bump. `graph.uri = null` (disabled) is the documented off state —
-with one CLI exception: `mnemostack serve` defaults `--memgraph-uri` to
-`bolt://localhost:7687` when the flag is omitted, so pass `--memgraph-uri ""` to
-keep graph off there (an empty `MNEMOSTACK_MEMGRAPH_URI` does **not** work — the
-env override ignores empty values). Other entrypoints honor `null` directly. `token_budget <= 0` normalizing to "no budget" is a 🟢 documented
-behavior.
+without a major bump. `graph.uri = null` (disabled) is the documented off state for
+the **library** recall path — but the **HTTP server defaults it on**: both
+`mnemostack serve` and the `ServerConfig.from_env()` ASGI factory expand an unset
+`graph.uri` to `bolt://localhost:7687`. To keep graph off there, pass
+`--memgraph-uri ""` (CLI) or construct `ServerConfig(graph_uri=None)`
+programmatically — an empty `MNEMOSTACK_MEMGRAPH_URI` does **not** work, since the
+env override ignores empty values. `token_budget <= 0` normalizing to "no budget"
+is a 🟢 documented behavior.
 
 ## MCP tools (`mnemostack mcp-serve`)
 
@@ -175,9 +177,11 @@ Covered in detail in [migration notes](migration-0.8-to-1.0.md). Summary:
   `chunk_start_offset`, `chunk_end_offset`) and `heading_path`.
 - 🔴 Ownership records (`_enrich_keys`, `_md_keys`) and `_`-prefixed keys.
 - **Graph schema**: `:Entity` / `:File` node labels, `LINKS_TO` edges, and the
-  `valid_until = 'current'` open-ended marker are 🟢 stable contracts;
-  `:File` keying by `(name, index_root)` is stable (see migration notes for the
-  multi-root implications).
+  `valid_until = 'current'` open-ended marker are 🟢 stable contracts. Note two
+  `:File` shapes: markdown **link** nodes are keyed by `(name, index_root)` (stable
+  — see migration notes for the multi-root implications), while ingest **tag/file**
+  nodes are keyed by `{path}` (with `TAGGED` edges) and carry no `index_root`.
+  Graph queries and cleanups must handle both.
 
 ---
 

@@ -6,9 +6,10 @@ deterministic fake embedder, so they need no external services and run in CI
 and locally. They are the runnable form of the 1.0 smoke story in
 `docs/deployment-quickstart.md`.
 
-Run just the smoke set:
+Run just the smoke set (target the file so pytest doesn't import the rest of the
+tree, which needs the full ``.[dev]`` extra):
 
-    pytest -m smoke -q
+    pytest tests/test_smoke.py -q
 
 Graph (Memgraph) retrieval needs a live server, so its smoke is opt-in and
 skipped unless MNEMOSTACK_SMOKE_GRAPH_URI is set (see test_smoke_graph_*).
