@@ -308,11 +308,10 @@ def cmd_tenant_migrate(args: argparse.Namespace) -> int:
     """Stamp a tenant_id onto existing points (single-tenant → multi-tenant).
 
     Read-only until you drop ``--dry-run``: reports how many points would be
-    migrated. By default only points that lack a tenant_id are touched, so it's
-    safe to re-run. Chunk points (those carrying source/offset/text) are moved to
-    their tenant-scoped id so a later tenant-scoped re-ingest replaces them
-    instead of creating a duplicate; other points are stamped in place. Vectors
-    are preserved (moved as-is, never re-embedded).
+    stamped. By default only points that lack a tenant_id are touched, so it's
+    safe to re-run — a payload-only merge (ids and vectors untouched). After
+    migrating, run the first tenant-scoped re-ingest with ``--prune`` so its
+    tenant-scoped ids replace the migrated points instead of duplicating them.
     """
     try:
         store = VectorStore(

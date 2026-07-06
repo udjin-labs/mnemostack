@@ -346,99 +346,37 @@ class VectorStore:
             points=[id],
         )
 
-    def stamp_tenant(self, tenant: str, *, only_missing: bool = True, rekey: bool = True) -> int:
+    def stamp_tenant(self, tenant: str, *, only_missing: bool = True) -> int:
         """Assign ``tenant_id`` to existing points (multi-tenant migration).
 
-        Moves a legacy single-tenant corpus into one named tenant. With
+        Moves a legacy single-tenant corpus into one named tenant with a
+        server-side payload-only merge — **ids and vectors are untouched**. With
         ``only_missing`` (default), points that already carry a ``tenant_id`` are
-        left untouched — safe to re-run and safe against a partially-migrated
-        collection. Returns the number of points migrated.
+        left untouched, so it's safe to re-run and safe against a partially
+        migrated collection. Returns the number of points stamped.
 
-        With ``rekey`` (default), a point that carries the fields a chunk id is
-        derived from (``source`` / ``offset`` / ``text``) is *moved* to the
-        tenant-scoped id ``stable_chunk_id(..., tenant=tenant)``. Without this, a
-        later ``Ingestor(tenant=...)`` re-ingest of the same content computes that
-        new id and creates a **duplicate** instead of replacing the migrated point
-        — so re-keying is what keeps the migration path idempotent. Points without
-        those fields are stamped in place. Pass ``rekey=False`` for the cheap
-        server-side payload-only write (no re-id) when ids must not change.
-
-        ``rekey`` scrolls the matching points (with vectors) into memory before
-        applying moves, so it is heavier than the payload-only path — fine for a
-        one-off migration.
+        Idempotency note: a tenant-aware re-ingest of the *same* content via
+        ``Ingestor(tenant=...)`` computes a tenant-scoped ``stable_chunk_id`` that
+        differs from a migrated point's legacy id, so a plain re-ingest would add a
+        second (tenant-scoped) point beside the migrated one. Reconcile by running
+        the first post-migration re-ingest with ``--prune`` (tenant-scoped), which
+        drops the legacy stragglers. Re-keying here is deliberately avoided: id
+        derivation differs per indexer (the markdown indexer folds ``index_root``
+        into the hash and is not tenant-scoped), so the store can't reproduce every
+        ingester's id from payload alone — pruning is the reliable reconciliation.
         """
         must: list[Any] = []
         if only_missing:
             must.append(IsEmptyCondition(is_empty=PayloadField(key=TENANT_ID_KEY)))
         sel = Filter(must=must)
-
-        if not rekey:
-            n = self.client.count(collection_name=self.collection, count_filter=sel).count
-            if n:
-                self.client.set_payload(
-                    collection_name=self.collection,
-                    payload={TENANT_ID_KEY: tenant},
-                    points=FilterSelector(filter=sel),
-                )
-            return n
-
-        from ..ingest import stable_chunk_id
-
-        # Snapshot the whole matching set first: applying moves stamps tenant_id
-        # (dropping points out of the only_missing filter) and deletes old ids, so
-        # mutating mid-scroll would perturb pagination.
-        pts: list[Any] = []
-        offset: Any = None
-        while True:
-            batch, offset = self.client.scroll(
-                collection_name=self.collection,
-                scroll_filter=sel,
-                with_payload=True,
-                with_vectors=True,
-                limit=512,
-                offset=offset,
-            )
-            pts.extend(batch)
-            if offset is None:
-                break
-        if not pts:
-            return 0
-
-        moves: list[PointStruct] = []
-        old_ids: list[Any] = []
-        stamp_ids: list[Any] = []
-        for p in pts:
-            payload = dict(p.payload or {})
-            payload[TENANT_ID_KEY] = tenant
-            src = payload.get("source")
-            off = payload.get("offset")
-            txt = payload.get("text")
-            if src is not None and off is not None and txt is not None:
-                new_id = stable_chunk_id(str(src), int(off), str(txt), tenant=tenant)
-                if str(new_id) != str(p.id):
-                    moves.append(PointStruct(id=new_id, vector=p.vector, payload=payload))
-                    old_ids.append(p.id)
-                    continue
-            stamp_ids.append(p.id)
-
-        if moves:
-            self.client.upsert(collection_name=self.collection, points=moves)
-            # Never delete an id that a move just wrote to (an id-shuffle where one
-            # point's old id equals another's new id would otherwise drop live data).
-            new_ids = {str(m.id) for m in moves}
-            delete_ids = [oid for oid in old_ids if str(oid) not in new_ids]
-            if delete_ids:
-                self.client.delete(
-                    collection_name=self.collection,
-                    points_selector=PointIdsList(points=delete_ids),
-                )
-        if stamp_ids:
+        n = self.client.count(collection_name=self.collection, count_filter=sel).count
+        if n:
             self.client.set_payload(
                 collection_name=self.collection,
                 payload={TENANT_ID_KEY: tenant},
-                points=stamp_ids,
+                points=FilterSelector(filter=sel),
             )
-        return len(pts)
+        return n
 
     def delete_payload_keys(
         self, id: str | int, keys: list[str], *, tenant: str | None = None

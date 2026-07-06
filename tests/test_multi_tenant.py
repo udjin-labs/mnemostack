@@ -355,45 +355,28 @@ def test_delete_points_tenant_owner_guard():
     assert store.count(tenant="beta") == 0
 
 
-# --- migration re-keys so re-ingest stays idempotent ---
+# --- migration stamps payload only (ids/vectors untouched); idempotency via --prune ---
 
 
-def test_stamp_tenant_rekeys_for_idempotent_reingest():
-    from mnemostack import stable_chunk_id
-
+def test_stamp_tenant_stamps_payload_only_preserving_ids():
     store = _store()
-    legacy_id = stable_chunk_id("doc.md", 0, "hello", tenant=None)
-    store.upsert(legacy_id, _VEC, {"source": "doc.md", "offset": 0, "text": "hello"})  # no tenant
+    store.upsert(1, _VEC, {"text": "legacy-a"})  # no tenant
+    store.upsert(2, _VEC, {"text": "legacy-b"})  # no tenant
+    stamped = store.stamp_tenant("alpha")
+    assert stamped == 2
+    # ids are unchanged, and both points are now scoped to alpha.
+    ids = {h.id for h in store.search(_VEC, limit=10, tenant="alpha")}
+    assert ids == {1, 2}
+    assert all(h.payload[TENANT_ID_KEY] == "alpha" for h in store.search(_VEC, limit=10, tenant="alpha"))
 
-    moved = store.stamp_tenant("alpha")
-    assert moved == 1
 
-    new_id = stable_chunk_id("doc.md", 0, "hello", tenant="alpha")
-    ids = {str(h.id) for h in store.search(_VEC, limit=10, tenant="alpha")}
-    assert ids == {str(new_id)}  # re-keyed to the tenant-scoped id
-    assert str(legacy_id) not in ids  # old id is gone
-
-    # A tenant-scoped re-ingest of the same content now REPLACES, not duplicates.
-    store.upsert(new_id, _VEC, {"source": "doc.md", "offset": 0, "text": "hello"}, tenant="alpha")
+def test_stamp_tenant_only_missing_is_idempotent():
+    store = _store()
+    store.upsert(1, _VEC, {"text": "x"})  # no tenant
+    store.upsert(2, _VEC, {"text": "y"}, tenant="beta")  # already owned
+    stamped = store.stamp_tenant("alpha")  # only_missing default → only point 1
+    assert stamped == 1
     assert store.count(tenant="alpha") == 1
-
-
-def test_stamp_tenant_stamps_in_place_without_chunk_fields():
-    store = _store()
-    store.upsert(42, _VEC, {"text": "no-source-offset"})  # can't recompute an id
-    moved = store.stamp_tenant("alpha")
-    assert moved == 1
-    hit = store.search(_VEC, limit=1, tenant="alpha")[0]
-    assert hit.id == 42  # id preserved (no re-key possible)
-    assert hit.payload[TENANT_ID_KEY] == "alpha"
-
-
-def test_stamp_tenant_no_rekey_preserves_ids():
-    from mnemostack import stable_chunk_id
-
-    store = _store()
-    legacy_id = stable_chunk_id("doc.md", 0, "hello", tenant=None)
-    store.upsert(legacy_id, _VEC, {"source": "doc.md", "offset": 0, "text": "hello"})
-    store.stamp_tenant("alpha", rekey=False)
-    ids = {str(h.id) for h in store.search(_VEC, limit=10, tenant="alpha")}
-    assert ids == {str(legacy_id)}  # id unchanged on the cheap path
+    assert store.count(tenant="beta") == 1  # beta's point untouched
+    # Re-running stamps nothing (idempotent).
+    assert store.stamp_tenant("alpha") == 0
