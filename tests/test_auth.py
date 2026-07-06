@@ -203,3 +203,40 @@ def test_cli_keys_add_rejects_bad_scope(tmp_path, capsys):
     rc = cmd_keys_add(_ns(keys_file=str(tmp_path / "k.json"), tenant="acme", scopes="root", label=""))
     assert rc == 2
     assert "unknown scope" in capsys.readouterr().err
+
+
+def test_verify_fails_closed_on_unreadable_store(tmp_path):
+    from mnemostack.auth import KeyStoreError
+
+    # A directory at the store path: open() raises OSError, not FileNotFoundError.
+    store_path = tmp_path / "keys.json"
+    store_path.mkdir()
+    ks = FileKeyStore(store_path)
+    assert ks.verify("msk_whatever") is None  # fail closed, never raises
+    with pytest.raises(KeyStoreError):
+        ks.list_keys()  # management surfaces it loudly
+
+
+def test_malformed_shape_surfaces_not_reset(tmp_path):
+    from mnemostack.auth import KeyStoreError
+
+    p = tmp_path / "keys.json"
+    p.write_text('{"keys": "not-a-list"}')  # valid JSON, wrong shape
+    ks = FileKeyStore(p)
+    assert ks.verify("msk_x") is None
+    with pytest.raises(KeyStoreError):
+        ks.list_keys()
+    p.write_text("[]")  # top-level array is also invalid
+    with pytest.raises(KeyStoreError):
+        FileKeyStore(p).list_keys()
+
+
+def test_save_does_not_follow_tmp_symlink(tmp_path):
+    victim = tmp_path / "victim.txt"
+    victim.write_text("precious")
+    p = tmp_path / "keys.json"
+    # An attacker pre-creates a symlink at the old fixed temp path.
+    (tmp_path / "keys.json.tmp").symlink_to(victim)
+    FileKeyStore(p).issue("alpha", "read")  # writes via mkstemp (random name)
+    assert victim.read_text() == "precious"  # untouched
+    assert p.is_file() and not p.is_symlink()  # store is a real file

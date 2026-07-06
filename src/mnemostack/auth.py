@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import secrets
+import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -111,16 +112,31 @@ class FileKeyStore:
         except json.JSONDecodeError as e:
             # Fail loudly for management ops; verify() catches this and denies.
             raise KeyStoreError(f"key store {self.path} is corrupt: {e}") from e
-        records = data.get("keys", []) if isinstance(data, dict) else []
+        except OSError as e:
+            # A directory, a permission error, etc. — treat as unreadable (not
+            # empty) so verify() fails closed instead of silently denying every key.
+            raise KeyStoreError(f"key store {self.path} is unreadable: {e}") from e
+        # Valid JSON but the wrong shape must surface, not reset to empty: an empty
+        # view would deny all keys AND let a later write clobber the real store.
+        if not isinstance(data, dict) or not isinstance(data.get("keys", []), list):
+            raise KeyStoreError(
+                f"key store {self.path} has an unexpected shape "
+                "(expected an object with a 'keys' list)"
+            )
+        records = data.get("keys", [])
         return [r for r in records if isinstance(r, dict)]
 
     def _save(self, records: list[dict[str, Any]]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-        # Create the temp file 0600 BEFORE writing so the secret is never briefly
-        # world-readable (a post-hoc chmod leaves a window). os.replace preserves
-        # the temp file's mode, so the landed file is 0600.
-        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # mkstemp creates a UNIQUE file (O_CREAT|O_EXCL, mode 0600) in the target
+        # dir, so a pre-created symlink at a guessable ".tmp" path can't be followed
+        # to clobber another file (the store may live in a shared dir like /tmp).
+        # 0600 from the start means the secret is never briefly world-readable, and
+        # os.replace preserves the mode so the landed file is 0600.
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(self.path.parent), prefix=self.path.name + ".", suffix=".tmp"
+        )
+        tmp = Path(tmp_name)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump({"keys": records}, f, indent=2)
