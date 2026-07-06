@@ -181,17 +181,22 @@ existing data needs migrating.
   per-request bearer / `X-API-Key` header; `mcp-serve` binds one process key via
   `--api-key` / `MNEMOSTACK_API_KEY`. See
   [api-stability.md](api-stability.md#multi-tenancy--authentication).
-- **Graph is not tenant-scoped yet.** Under auth no tenant reads another's graph
-  nodes, but the two surfaces differ: `mcp-serve --auth` fails the graph tools
-  closed and builds recall with no graph (so authenticated MCP has **no graph recall
-  at all**), while `serve --auth` still queries the configured Memgraph and relies
-  on the `filter_by_tenant` backstop to drop the (tenant-less) graph hits — so an
-  authenticated HTTP recall still contacts the shared graph. The graph URI/database
-  is a single **process-wide** setting (service keys don't pick one), so per-tenant
-  graph recall means a **separate `serve` process per tenant** (each with its own
-  `--memgraph-uri` / `graph.database`) — not several databases behind one
-  authenticated server. If you don't need it, run HTTP with `--memgraph-uri ""`.
-  Full graph tenant scoping is planned follow-up work.
+- **Graph is tenant-scoped.** The graph now carries a server-owned `tenant`
+  property on every node and edge (the twin of the vector store's `tenant_id`), so
+  graph recall works under auth on both surfaces — one shared graph, isolated by
+  the property. Scoped writes fold `tenant` into the node key and scoped reads
+  (`query_triples`, `MemgraphRetriever`, `GraphResurrection`, and the MCP graph
+  tools) confine every match to it. **No re-index and no change for single-tenant
+  graphs**: an unscoped write/read emits the exact legacy Cypher, and a graph with
+  no `tenant` property reads as single-tenant. To adopt tenancy on an existing
+  graph, stamp it alongside the vector store:
+  `mnemostack tenant-migrate --tenant <id> --memgraph-uri <bolt>` (stamps nodes +
+  edges; `--dry-run` / `--all` mirror the vector stamp), or
+  `GraphStore.stamp_tenant(...)` in the library. **Remaining gap:** the markdown
+  link-graph writer (`index-markdown` / `MarkdownSyncer`) is not tenant-aware yet —
+  its unscoped `:File` link nodes are safely invisible to a scoped read (excluded,
+  not leaked); index markdown into a separate graph per tenant if you need its
+  links under auth. Full markdown-graph tenancy is a follow-up.
 
 ## Config & CLI
 

@@ -1,0 +1,232 @@
+"""Graph tenant-scoping — store writes/reads, retriever, and resurrection.
+
+These pin the isolation contract with fakes (no live Memgraph): the store folds
+``tenant`` into node MERGE keys and confines reads to it; the retriever and the
+resurrection stage confine their walks to the tenant and stamp ``tenant_id`` on
+what they surface so it survives the recall ``filter_by_tenant`` backstop. With
+``tenant=None`` every path emits the byte-for-byte legacy Cypher, so an existing
+single-tenant graph is untouched.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+from unittest.mock import MagicMock
+
+from mnemostack.graph.store import GraphStore
+from mnemostack.recall.pipeline.base import PipelineContext
+from mnemostack.recall.pipeline.resurrection import GraphResurrection
+from mnemostack.recall.retrievers import MemgraphRetriever
+
+
+class _RecordingSession:
+    """Fake neo4j session that records every (cypher, params) run.
+
+    ``rows`` answers node probes; ``rel_rows`` answers the retriever's
+    relationship-expansion query (detected by ``startNode(r)`` in the Cypher).
+    """
+
+    def __init__(
+        self,
+        rows: list[dict[str, Any]] | None = None,
+        rel_rows: list[dict[str, Any]] | None = None,
+    ):
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+        self._rows = rows or []
+        self._rel_rows = rel_rows or []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def run(self, cypher, **params):
+        self.calls.append((cypher, params))
+        if "startNode(r)" in cypher:
+            return _Result(self._rel_rows)
+        return _Result(self._rows)
+
+    def execute_write(self, fn, *args):
+        return fn(self, *args)
+
+    def single(self):  # for count-style single() callers
+        return None
+
+
+class _Result:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def data(self):
+        return self._rows
+
+    def single(self):
+        return self._rows[0] if self._rows else None
+
+    def __iter__(self):
+        return iter(self._rows)
+
+
+def _store_with(session):
+    store = GraphStore.__new__(GraphStore)
+    driver = MagicMock()
+    driver.session.return_value = session
+    store.driver = driver
+    store.database = None
+    return store
+
+
+# ---------- store writes ----------
+
+
+def test_add_triple_scoped_folds_tenant_into_key_and_stamps():
+    session = _RecordingSession()
+    store = _store_with(session)
+    store.add_triple("alice", "KNOWS", "bob", tenant="acme")
+    cypher, params = session.calls[0]
+    assert "{name: $subject, tenant: $tenant}" in cypher
+    assert "{name: $obj, tenant: $tenant}" in cypher
+    assert "s.tenant = $tenant, o.tenant = $tenant" in cypher
+    assert params["tenant"] == "acme"
+    assert params["props"]["tenant"] == "acme"  # edge stamped too
+
+
+def test_add_triple_unscoped_is_legacy_cypher():
+    session = _RecordingSession()
+    store = _store_with(session)
+    store.add_triple("alice", "KNOWS", "bob")
+    cypher, params = session.calls[0]
+    assert "tenant" not in cypher  # byte-for-byte legacy form
+    assert "tenant" not in params
+    assert "tenant" not in params["props"]
+
+
+def test_query_triples_scoped_confines_both_endpoints():
+    session = _RecordingSession()
+    store = _store_with(session)
+    store.query_triples(subject="alice", tenant="acme")
+    cypher, params = session.calls[0]
+    assert "s.tenant = $tenant AND o.tenant = $tenant" in cypher
+    assert params["tenant"] == "acme"
+
+
+def test_query_triples_unscoped_has_no_tenant_predicate():
+    session = _RecordingSession()
+    store = _store_with(session)
+    store.query_triples(subject="alice")
+    cypher, params = session.calls[0]
+    assert "tenant" not in cypher
+    assert "tenant" not in params
+
+
+def test_invalidate_scoped_pins_both_endpoints():
+    session = _RecordingSession([{"n": 1}])
+    store = _store_with(session)
+    store.invalidate("alice", "KNOWS", "bob", "2026-01-01", tenant="acme")
+    cypher, params = session.calls[0]
+    assert "{name: $subject, tenant: $tenant}" in cypher
+    assert "{name: $obj, tenant: $tenant}" in cypher
+    assert params["tenant"] == "acme"
+
+
+def test_sync_file_links_scoped_keys_file_nodes_by_tenant():
+    session = _RecordingSession()
+    store = _store_with(session)
+    store.sync_file_links("a.md", ["b.md"], index_root="/root", tenant="acme")
+    cyphers = [c for c, _ in session.calls]
+    joined = " ".join(cyphers)
+    assert "index_root: $root, tenant: $tenant" in joined
+    assert "s.tenant = $tenant, o.tenant = $tenant" in joined
+    # The edge-clearing DELETE pins the far end to the tenant too (defense-in-depth).
+    del_cypher = next(c for c in cyphers if "DELETE r" in c)
+    assert "-[r:LINKS_TO]->({tenant: $tenant})" in del_cypher
+
+
+def test_stamp_tenant_backfills_nodes_and_edges():
+    session = _RecordingSession([{"n": 5}])
+    store = _store_with(session)
+    counts = store.stamp_tenant("acme")
+    cyphers = [c for c, _ in session.calls]
+    assert any("SET n.tenant = $tenant" in c and "n.tenant IS NULL" in c for c in cyphers)
+    assert any("SET r.tenant = $tenant" in c and "r.tenant IS NULL" in c for c in cyphers)
+    assert counts == {"nodes": 5, "relationships": 5}
+
+
+def test_stamp_tenant_all_drops_only_missing_guard():
+    session = _RecordingSession([{"n": 9}])
+    store = _store_with(session)
+    store.stamp_tenant("acme", only_missing=False)
+    cyphers = [c for c, _ in session.calls]
+    assert not any("IS NULL" in c for c in cyphers)  # force-relabel touches every record
+
+
+# ---------- retriever ----------
+
+
+def test_retriever_advertises_accepts_tenant():
+    assert MemgraphRetriever.accepts_tenant is True
+
+
+def test_retriever_scopes_probes_and_stamps_tenant_id():
+    # A node probe matches; assert the tenant predicate rode along and the result
+    # carries tenant_id (so filter_by_tenant keeps it).
+    rows = [{"name": "alice", "type": "Entity", "mc": "", "index_root": None}]
+    rel_rows = [{"from_n": "alice", "rel": "KNOWS", "to_n": "bob"}]
+    session = _RecordingSession(rows, rel_rows)
+    driver = MagicMock()
+    driver.session.return_value = session
+    retr = MemgraphRetriever(driver=driver)
+    results = retr.search("alice", tenant="acme")
+    probe_cyphers = [c for c, _ in session.calls if "labels(n)[0]" in c]
+    assert probe_cyphers and all("n.tenant = $tenant" in c for c in probe_cyphers)
+    rel_cyphers = [c for c, _ in session.calls if "startNode(r)" in c]
+    assert rel_cyphers and all("r.tenant = $tenant" in c for c in rel_cyphers)
+    assert all(p.get("tenant") == "acme" for c, p in session.calls if "tenant" in c)
+    assert results and results[0].payload["tenant_id"] == "acme"
+
+
+def test_retriever_unscoped_adds_no_tenant_predicate():
+    rows = [{"name": "alice", "type": "Entity", "mc": "", "index_root": None}]
+    rel_rows = [{"from_n": "alice", "rel": "KNOWS", "to_n": "bob"}]
+    session = _RecordingSession(rows, rel_rows)
+    driver = MagicMock()
+    driver.session.return_value = session
+    retr = MemgraphRetriever(driver=driver)
+    results = retr.search("alice")
+    assert all("tenant" not in c for c, _ in session.calls)
+    assert results and "tenant_id" not in results[0].payload
+
+
+# ---------- resurrection ----------
+
+
+def test_resurrection_scopes_walk_and_stamps_tenant():
+    rows = [{"name": "charlie", "type": "Entity", "mc": "", "rel": "KNOWS"}]
+    session = _RecordingSession(rows)
+    driver = MagicMock()
+    driver.session.return_value = session
+    stage = GraphResurrection(driver=driver, min_seed_len=3)
+    ctx = PipelineContext(query="alice bob")
+    ctx.extras["tenant"] = "acme"
+    out = stage.apply(ctx, [])
+    walk_cyphers = [c for c, _ in session.calls]
+    assert walk_cyphers and all(
+        "n.tenant = $tenant AND m.tenant = $tenant AND r1.tenant = $tenant" in c
+        for c in walk_cyphers
+    )
+    assert all(p.get("tenant") == "acme" for _, p in session.calls)
+    injected = [r for r in out if r.payload.get("resurrected")]
+    assert injected and injected[0].payload["tenant_id"] == "acme"
+
+
+def test_resurrection_unscoped_has_no_tenant_predicate():
+    rows = [{"name": "charlie", "type": "Entity", "mc": "", "rel": "KNOWS"}]
+    session = _RecordingSession(rows)
+    driver = MagicMock()
+    driver.session.return_value = session
+    stage = GraphResurrection(driver=driver, min_seed_len=3)
+    out = stage.apply(PipelineContext(query="alice bob"), [])
+    assert all("tenant" not in c for c, _ in session.calls)
+    injected = [r for r in out if r.payload.get("resurrected")]
+    assert injected and "tenant_id" not in injected[0].payload

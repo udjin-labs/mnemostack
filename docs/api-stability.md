@@ -57,6 +57,8 @@ this is purely additive. See [Multi-tenancy & authentication](#multi-tenancy--au
 - `tenant-migrate --tenant <id>` stamps existing points into a tenant (idempotent;
   `--all` to force-relabel, `--dry-run` to preview) — the operator path to adopting
   tenancy on a pre-tenant collection; `VectorStore.stamp_tenant` is its library twin.
+  Add `--memgraph-uri <bolt>` to also stamp the graph (nodes + edges), the twin of
+  `GraphStore.stamp_tenant`.
 - `keys add` / `keys list` / `keys revoke` manage the service-key store for
   multi-tenant auth. `keys add --tenant <t> --scopes read,write` prints the
   plaintext key **once** (only its SHA-256 hash is stored); `--keys-file` (or
@@ -153,7 +155,9 @@ is a 🟢 documented behavior.
 
 🟡 **Conditional**: `mnemostack_graph_query`, `mnemostack_graph_add_triple` are
 only registered when a graph URI is configured — a client must not assume they
-exist. Their shapes are otherwise stable.
+exist. Their shapes are otherwise stable. Under `--auth` they are tenant-scoped
+(the query is confined to the key's tenant; the write is stamped with it), not
+fail-closed — see below.
 
 **Under `mcp-serve --auth` (🟢 stable).** The stdio transport binds one client per
 process, so the server runs *as* a single principal: the key (`--api-key` /
@@ -161,10 +165,13 @@ process, so the server runs *as* a single principal: the key (`--api-key` /
 without a valid key). Every tool call re-verifies the key, so revocation takes
 effect immediately mid-session. `search`/`answer` require `read`,
 `invalidate`/`feedback` require `write`, and the tenant is threaded into recall,
-answer, and invalidate. The graph tools **fail closed** under an authenticated
-tenant (the shared graph isn't tenant-scoped yet), and the recall pipeline drops
-its graph-resurrection stage for the same reason. `mnemostack_health` stays
-public. Without `--auth` the tools behave exactly as listed above.
+answer, and invalidate. The graph is **tenant-scoped** (see
+[Multi-tenancy & authentication](#multi-tenancy--authentication)): the recall
+pipeline keeps its graph-resurrection stage (confined to the caller's tenant), and
+the graph tools are tenant-scoped rather than fail-closed — `mnemostack_graph_query`
+is confined to the key's tenant, `mnemostack_graph_add_triple` (still `write`-scoped)
+is stamped with it. `mnemostack_health` stays public. Without `--auth` the tools
+behave exactly as listed above.
 
 ## Python library
 
@@ -222,7 +229,12 @@ public. Without `--auth` the tools behave exactly as listed above.
   constructor used everywhere — currently only importable as
   `mnemostack.graph.factory.make_graph_store`; **to be re-exported from
   `mnemostack.graph` and added to its `__all__` for 1.0**), `Triple`,
-  `TripleExtractor`.
+  `TripleExtractor`. The write/read methods (`add_triple`, `invalidate`,
+  `sync_file_links`, `query_triples`, `neighbors`) take an **optional keyword
+  `tenant=`** that folds a server-owned `tenant` property into the node key and
+  confines the query to it; `stamp_tenant(tenant, only_missing=True)` backfills it
+  on a pre-tenant graph. With `tenant=None` the Cypher is the legacy single-tenant
+  form (no-op). `mnemostack.graph.store.TENANT_KEY` (`"tenant"`) is the property name.
 - **Observability**: `counter`, `histogram`, `timed`, `get_recorder`,
   `set_recorder`, `MetricsRecorder`, `NullRecorder`. `InMemoryRecorder` is used
   by the HTTP server (imported from `mnemostack.observability.recorder`
@@ -300,29 +312,37 @@ request body:
    `MNEMOSTACK_AUTH_ENABLED` / `MNEMOSTACK_API_KEY` are the env equivalents of
    `--auth` / `--api-key`.
 
-**Current limitation (graph).** The graph (Memgraph) is **not tenant-scoped yet**,
-and the two surfaces guard it differently:
+**Graph tenant-scoping (🟢 stable).** The graph (Memgraph) is now tenant-scoped,
+so graph recall works under auth on **both** surfaces — one shared graph, isolated
+by a server-owned `tenant` property on every node and edge (the same shape as the
+vector store's `tenant_id`):
 
-- **MCP** (`mcp-serve --auth`): the graph tools fail closed, and the recall
-  pipeline is built with **no graph** under auth, so its graph-resurrection stage
-  never runs.
-- **HTTP** (`serve --auth`): the pipeline is built with the configured graph
-  **regardless of auth**, so graph resurrection still opens and queries the shared
-  Memgraph. No tenant reads another's graph nodes — the `filter_by_tenant` backstop
-  drops the (tenant-less) graph hits before they reach the caller — but the graph
-  is still contacted per recall. So under `serve --auth`, a slow or blackholed
-  Memgraph still adds latency; it is **not** skipped the way MCP skips it.
+- **Writes** stamp `tenant` and fold it into the node MERGE key, so two tenants
+  writing the same fact get distinct, isolated nodes. A scoped `add_triple`/
+  `invalidate`/`sync_file_links` can only ever touch its own tenant's records.
+- **Reads** (`GraphStore.query_triples`, `MemgraphRetriever`, and the pipeline's
+  `GraphResurrection` stage) confine every match to `tenant` and stamp `tenant_id`
+  into the result payload, so graph hits survive the `filter_by_tenant` backstop
+  instead of being dropped. Under `mcp-serve --auth` / `serve --auth` a tenant only
+  ever resurrects or queries its own subgraph.
+- **MCP graph tools** are no longer fail-closed under auth: `mnemostack_graph_query`
+  (a structured SPO query) and `mnemostack_graph_add_triple` are tenant-scoped —
+  the query is confined to the key's tenant and the write is stamped with it
+  (`add_triple` still requires the `write` scope).
+- **`tenant=None` is a true no-op**: every unscoped write/read emits the
+  byte-for-byte legacy Cypher, so an existing single-tenant graph is untouched and
+  needs no migration to keep working.
 
-Either way no tenant can read another's graph nodes. Graph tenant scoping is
-planned follow-up work; until it lands there is no per-key graph selection — the
-graph URI/database is a single process-wide setting. Note the workaround differs by
-surface: **authenticated MCP has no graph at all** (`mcp-serve --auth` forces the
-pipeline graph off and fails the graph tools closed), so per-tenant graph recall
-there isn't possible under auth — you'd run a trusted, single-tenant `mcp-serve`
-*without* `--auth` for graph. For **HTTP**, per-tenant graph recall means a
-**separate `serve` process per tenant** (each with its own `--memgraph-uri` /
-`graph.database`), not multiple databases behind one authenticated server; or
-disable the shared-graph query entirely with `--memgraph-uri ""`.
+Adopt tenancy on an existing graph with `mnemostack tenant-migrate --tenant <id>
+--memgraph-uri <bolt>` (stamps nodes + edges; `--dry-run` / `--all` parity with the
+vector stamp), or `GraphStore.stamp_tenant(tenant, only_missing=True)` in the
+library.
+
+**Remaining graph limitation.** The markdown link-graph writer (`MarkdownSyncer` /
+`index-markdown`) is not tenant-aware yet — it writes unscoped `:File` link nodes.
+That's safe (unscoped nodes are *excluded* from a scoped read, never leaked), but a
+tenant-aware markdown link graph is a follow-up; for now index markdown per tenant
+into a separate graph if you need its links under auth.
 
 ## On-disk / payload contracts
 
@@ -345,7 +365,11 @@ Covered in detail in [migration notes](migration-0.8-to-1.0.md). Summary:
   `:File` shapes: markdown **link** nodes are keyed by `(name, index_root)` (stable
   — see migration notes for the multi-root implications), while ingest **tag/file**
   nodes are keyed by `{path}` (with `TAGGED` edges) and carry no `index_root`.
-  Graph queries and cleanups must handle both.
+  Graph queries and cleanups must handle both. The server-owned **`tenant`**
+  property (🟢) partitions the graph: when set it's folded into the node key and
+  present on nodes and edges, exactly like the vector `tenant_id`; absent means
+  single-tenant (unscoped). A scoped read confines to it and can never see another
+  tenant's — or an unscoped — node.
 
 ---
 

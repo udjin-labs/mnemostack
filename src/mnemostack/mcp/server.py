@@ -222,17 +222,15 @@ def build_server(
         )
 
     def _get_pipeline():
-        # Under auth every call is tenant-scoped, and the graph isn't tenant-scoped
-        # yet, so drop it from the recall pipeline entirely: otherwise the
-        # GraphResurrection stage would still query the shared graph (its results
-        # are dropped by the filter_by_tenant backstop, so no leak — but a slow or
-        # down graph would add graph_timeout latency to tenant-scoped recall).
-        pipeline_graph_uri = None if auth_enabled else memgraph_uri
+        # The graph is tenant-scoped now: the GraphResurrection stage confines its
+        # seed walk to the caller's tenant (threaded in via the recall's pipeline
+        # context) and stamps `tenant_id` on what it injects, so it's safe to keep
+        # in the pipeline under auth — a tenant only ever resurrects its own nodes.
         return _component(
             "pipeline",
             lambda: build_full_pipeline(
                 state_store=FileStateStore(resolved_state_path),
-                graph_uri=pipeline_graph_uri,
+                graph_uri=memgraph_uri,
                 graph_user=graph_user,
                 graph_password=graph_password,
                 graph_database=graph_database,
@@ -686,14 +684,11 @@ def build_server(
             returns only facts valid at that date.
             """
             try:
-                # The graph is not tenant-scoped yet, so under an authenticated
-                # tenant it would leak/mix across tenants — fail closed until
-                # graph tenant scoping lands (mirrors recall skipping the graph).
-                if _authorize("read") is not None:
-                    return {
-                        "ok": False,
-                        "error": "graph tools are not tenant-scoped yet; unavailable under authenticated tenant",
-                    }
+                # Structured SPO query — the graph is tenant-scoped now, so under
+                # auth we confine the query to the caller's tenant (both endpoints
+                # pinned to `tenant`) rather than fail closed. Unscoped when auth
+                # is off (tenant=None).
+                tenant = _tenant_of(_authorize("read"))
                 from ..graph.factory import make_graph_store
 
                 gs = make_graph_store(
@@ -709,6 +704,7 @@ def build_server(
                     obj=obj,
                     as_of=as_of,
                     limit=limit,
+                    tenant=tenant,
                 )
                 gs.close()
                 return {
@@ -742,13 +738,10 @@ def build_server(
             ISO date strings for point-in-time validity.
             """
             try:
-                # Graph writes aren't tenant-scoped yet — fail closed under an
-                # authenticated tenant so a triple can't land in a shared graph.
-                if _authorize("write") is not None:
-                    return {
-                        "ok": False,
-                        "error": "graph tools are not tenant-scoped yet; unavailable under authenticated tenant",
-                    }
+                # Structured write — stamp the caller's tenant so the triple lands
+                # in that tenant's isolated subgraph (its nodes/edges carry
+                # `tenant`), never a shared namespace. Unscoped when auth is off.
+                tenant = _tenant_of(_authorize("write"))
                 from ..graph.factory import make_graph_store
 
                 gs = make_graph_store(
@@ -764,6 +757,7 @@ def build_server(
                     obj=obj,
                     valid_from=valid_from,
                     valid_until=valid_until,
+                    tenant=tenant,
                 )
                 gs.close()
                 return {"ok": True, "subject": subject, "predicate": predicate, "obj": obj}

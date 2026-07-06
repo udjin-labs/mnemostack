@@ -364,13 +364,51 @@ def cmd_tenant_migrate(args: argparse.Namespace) -> int:
     scope = "without a tenant_id" if only_missing else "in the collection"
     if args.dry_run:
         print(f"dry-run: would stamp tenant_id='{args.tenant}' onto {pending} point(s) {scope}")
-        return 0
+        return _graph_stamp_tenant(args, only_missing, dry_run=True)
     try:
         stamped = store.stamp_tenant(args.tenant, only_missing=only_missing)
     except Exception as e:  # noqa: BLE001
         print(f"error: cannot reach Qdrant at {args.qdrant}: {e}", file=sys.stderr)
         return 1
     print(f"stamped tenant_id='{args.tenant}' onto {stamped} point(s) {scope}")
+    return _graph_stamp_tenant(args, only_missing, dry_run=False)
+
+
+def _graph_stamp_tenant(args: argparse.Namespace, only_missing: bool, *, dry_run: bool) -> int:
+    """Stamp the tenant onto the graph too, when ``--memgraph-uri`` is given.
+
+    The graph twin of the vector stamp above: adopts tenancy on an existing
+    single-tenant graph so tenant-scoped graph recall (which filters on the
+    node/edge ``tenant`` property) can see the migrated facts. Opt-in — a
+    vector-only deployment passes no ``--memgraph-uri`` and this is a no-op.
+    Returns an exit code (0 ok, 1 graph unreachable) so a graph failure surfaces.
+    """
+    memgraph_uri = getattr(args, "memgraph_uri", None) or None
+    if not memgraph_uri:
+        return 0
+    from .graph.factory import make_graph_store
+
+    try:
+        gs = make_graph_store(
+            memgraph_uri,
+            timeout=getattr(args, "graph_timeout", 5.0),
+            **_graph_auth(args),
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"error: cannot reach graph at {memgraph_uri}: {e}", file=sys.stderr)
+        return 1
+    try:
+        counts = gs.stamp_tenant(args.tenant, only_missing=only_missing, dry_run=dry_run)
+    except Exception as e:  # noqa: BLE001
+        print(f"error: graph tenant stamp failed: {e}", file=sys.stderr)
+        return 1
+    finally:
+        gs.close()
+    action = "would stamp" if dry_run else "stamped"
+    print(
+        f"graph: {action} tenant='{args.tenant}' onto {counts['nodes']} node(s) "
+        f"and {counts['relationships']} relationship(s)"
+    )
     return 0
 
 
@@ -1568,6 +1606,18 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         "-y",
         action="store_true",
         help="Confirm --all when points already carry a tenant_id (relabels them)",
+    )
+    p_tenant_migrate.add_argument(
+        "--memgraph-uri",
+        default=None,
+        help="Also stamp the tenant onto the graph at this bolt URI (nodes + edges). "
+        "Omit to migrate the vector store only.",
+    )
+    p_tenant_migrate.add_argument(
+        "--graph-timeout",
+        type=float,
+        default=cfg.graph.timeout,
+        help="Memgraph connection timeout in seconds (default 5.0)",
     )
     p_tenant_migrate.set_defaults(func=cmd_tenant_migrate)
 

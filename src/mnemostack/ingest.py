@@ -272,7 +272,9 @@ def _write_wrapper_file(wrapper_dir: Path, item: IngestItem, point_id: str) -> b
     return existed
 
 
-def _sync_wrapper_graph(graph: Any, item: IngestItem, point_id: str) -> None:
+def _sync_wrapper_graph(
+    graph: Any, item: IngestItem, point_id: str, *, tenant: str | None = None
+) -> None:
     tags = _item_tags(item)
     if not tags:
         return
@@ -280,23 +282,31 @@ def _sync_wrapper_graph(graph: Any, item: IngestItem, point_id: str) -> None:
     name = Path(item.source).name or item.source or point_id
     if hasattr(graph, "driver"):
         database = getattr(graph, "database", None)
+        # Fold the tenant into the File/Tag node key and stamp it on the TAGGED
+        # edge, so a scoped graph recall (which pins nodes AND edges to `tenant`)
+        # traverses these. Unscoped keeps the legacy path-keyed write untouched.
+        tk = ", tenant: $tenant" if tenant is not None else ""
+        set_tenant = ", f.tenant = $tenant" if tenant is not None else ""
+        set_rel_tenant = " SET r.tenant = $tenant" if tenant is not None else ""
         query = (
-            "MERGE (f:File {path: $path}) "
-            "SET f.name = $name, f.indexed_date = $indexed_date, f.point_id = $point_id "
+            f"MERGE (f:File {{path: $path{tk}}}) "
+            f"SET f.name = $name, f.indexed_date = $indexed_date, f.point_id = $point_id{set_tenant} "
             "WITH f "
             "UNWIND $tags AS tag "
-            "MERGE (t:Tag {name: tag}) "
-            "MERGE (f)-[:TAGGED]->(t)"
+            f"MERGE (t:Tag {{name: tag{tk}}}) "
+            f"MERGE (f)-[r:TAGGED]->(t){set_rel_tenant}"
         )
+        params: dict[str, Any] = {
+            "name": name,
+            "path": item.source,
+            "indexed_date": indexed_date,
+            "point_id": point_id,
+            "tags": tags,
+        }
+        if tenant is not None:
+            params["tenant"] = tenant
         with graph.driver.session(database=database) as session:
-            session.run(
-                query,
-                name=name,
-                path=item.source,
-                indexed_date=indexed_date,
-                point_id=point_id,
-                tags=tags,
-            )
+            session.run(query, **params)
         return
     if hasattr(graph, "add_file_tags"):
         graph.add_file_tags(name=name, path=item.source, indexed_date=indexed_date, tags=tags)
@@ -309,6 +319,7 @@ def _sync_wrapper_graph(graph: Any, item: IngestItem, point_id: str) -> None:
             subject_label="File",
             obj_label="Tag",
             properties={"path": item.source, "indexed_date": indexed_date, "point_id": point_id},
+            tenant=tenant,
         )
 
 
@@ -648,7 +659,7 @@ class Ingestor:
                     log.warning("failed to write markdown wrapper for %s: %s", item.source, exc)
             if self.graph is not None:
                 try:
-                    _sync_wrapper_graph(self.graph, item, pid)
+                    _sync_wrapper_graph(self.graph, item, pid, tenant=self.tenant)
                 except Exception as exc:  # noqa: BLE001
                     log.warning("failed to sync wrapper graph for %s: %s", item.source, exc)
 
