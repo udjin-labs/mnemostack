@@ -532,6 +532,18 @@ def test_collect_ids_scoped_by_index_root(tmp_path):
     assert ids_a.isdisjoint(ids_b)
 
 
+def test_collect_ids_scoped_by_tenant(tmp_path):
+    # The same corpus indexed under two tenants must get distinct chunk ids, so
+    # one tenant's re-index can't clobber another's point (mirrors index_root).
+    (tmp_path / "note.md").write_text("# T\n\nsame body text here")
+    root = str(tmp_path)
+    unscoped = {c.id for c in collect_markdown(tmp_path, index_root=root).chunks}
+    ten_a = {c.id for c in collect_markdown(tmp_path, index_root=root, tenant="a").chunks}
+    ten_b = {c.id for c in collect_markdown(tmp_path, index_root=root, tenant="b").chunks}
+    assert unscoped and ten_a and ten_b
+    assert unscoped.isdisjoint(ten_a) and ten_a.isdisjoint(ten_b)
+
+
 def test_collect_sources_include_empty_files(tmp_path):
     # A frontmatter-only / empty file produces no chunks but must appear in
     # sources so the caller can prune its old points and re-sync its links.

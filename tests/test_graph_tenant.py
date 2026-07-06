@@ -93,14 +93,17 @@ def test_add_triple_scoped_folds_tenant_into_key_and_stamps():
     assert params["props"]["tenant"] == "acme"  # edge stamped too
 
 
-def test_add_triple_unscoped_is_legacy_cypher():
+def test_add_triple_unscoped_does_not_tenant_key_or_clobber():
     session = _RecordingSession()
     store = _store_with(session)
     store.add_triple("alice", "KNOWS", "bob")
     cypher, params = session.calls[0]
-    assert "tenant" not in cypher  # byte-for-byte legacy form
-    assert "tenant" not in params
-    assert "tenant" not in params["props"]
+    assert "tenant:" not in cypher  # no tenant folded into the node MERGE keys
+    assert "tenant" not in params  # no tenant param bound
+    assert "tenant" not in params["props"]  # edge not stamped
+    # The edge SET is guarded so an unscoped write can't overwrite a tenant-owned
+    # edge's props (on a single-tenant graph every edge is tenant-less, so it runs).
+    assert "CASE WHEN r.tenant IS NULL" in cypher
 
 
 def test_query_triples_scoped_confines_both_endpoints():

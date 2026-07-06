@@ -164,11 +164,11 @@ existing data needs migrating.
   points simply stay outside every tenant's view until stamped. However, chunk ids
   are **tenant-scoped** (`stable_chunk_id(..., tenant=)`), so once you re-ingest the
   same source *under a tenant* the new points get different ids and land **beside**
-  the stamped legacy points — recall then sees duplicates. Note that tenant-aware
-  ingest is a **library** operation (`Ingestor(tenant=...)`): the `mnemostack index`
-  / `index-markdown` CLI has no `--tenant`, and its `--prune` is `index_root`-scoped
-  (not tenant-scoped), so it computes the *legacy* ids and would prune the wrong
-  set. Reconcile the first tenant re-ingest with the library
+  the stamped legacy points — recall then sees duplicates. `mnemostack index-markdown
+  --tenant <id>` is tenant-scoped (ids, payloads, and graph nodes); the generic
+  `mnemostack index` CLI has no `--tenant` (that path is library-only via
+  `Ingestor(tenant=...)`). Since `--prune` on the *unscoped* generic `index` is
+  `index_root`-scoped (not tenant-scoped), reconcile a tenant re-ingest with the library
   `prune_stale_chunks(store, fresh, tenant=<t>)` (tenant-scoped), or — simplest —
   ingest each tenant into a **fresh collection** and cut over. Stamping alone (no
   re-ingest) has no such duplication.
@@ -192,11 +192,13 @@ existing data needs migrating.
   graph, stamp it alongside the vector store:
   `mnemostack tenant-migrate --tenant <id> --memgraph-uri <bolt>` (stamps nodes +
   edges; `--dry-run` / `--all` mirror the vector stamp), or
-  `GraphStore.stamp_tenant(...)` in the library. **Remaining gap:** the markdown
-  link-graph writer (`index-markdown` / `MarkdownSyncer`) is not tenant-aware yet —
-  its unscoped `:File` link nodes are safely invisible to a scoped read (excluded,
-  not leaked); index markdown into a separate graph per tenant if you need its
-  links under auth. Full markdown-graph tenancy is a follow-up.
+  `GraphStore.stamp_tenant(...)` in the library. The markdown indexer is
+  tenant-aware too — `index-markdown --tenant <id>` scopes its `:File` link
+  nodes/edges, so a multi-tenant deployment has **no unscoped graph write path**
+  (index each tenant's corpus with its own `--tenant`). Unscoped writes are
+  hardened against corrupting a migrated graph anyway: an unscoped `add_triple`
+  won't overwrite a tenant edge, and an unscoped markdown re-index won't delete a
+  tenant file's links.
 
 ## Config & CLI
 

@@ -1330,8 +1330,16 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
     # reconcile missing sources globally (prune / clear graph links); a nested
     # subtree or single file covers only part of the root and must not.
     full_root_walk = target.is_dir() and str(target) == index_root
+    tenant = getattr(args, "tenant", None) or None
+    # Forward tenant= to store/graph calls only when set (unscoped = no kwarg,
+    # so a store/graph predating the kwarg still works); our own helpers take it.
+    mtkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
     col = collect_markdown(
-        target, chunk_size=args.chunk_size, index_root=index_root, root_dir=root_dir
+        target,
+        chunk_size=args.chunk_size,
+        index_root=index_root,
+        root_dir=root_dir,
+        tenant=tenant,
     )
     if col.files == 0:
         print(f"error: no .md files found under {target}", file=sys.stderr)
@@ -1359,7 +1367,7 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
     # metadata, so a tag/date edit would otherwise leave stale filters in Qdrant.
     existing_payloads: dict[str, dict] = {}
     if not args.recreate and store.collection_exists():
-        for hit in store.scroll(filters={"index_root": index_root}):
+        for hit in store.scroll(filters={"index_root": index_root}, **mtkw):
             existing_payloads[str(hit.id)] = hit.payload or {}
     from .markdown.sync import build_link_map, upsert_markdown_chunks
 
@@ -1372,7 +1380,7 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
 
     # Embed new chunks and refresh changed payloads (shared with the watcher's
     # per-file path so a full walk and a single-file update behave identically).
-    cs = upsert_markdown_chunks(store, provider, chunks, existing_payloads)
+    cs = upsert_markdown_chunks(store, provider, chunks, existing_payloads, tenant=tenant)
     inserted, refreshed, failed = cs.inserted, cs.refreshed, cs.failed
     failed_sources = cs.failed_sources
 
@@ -1393,7 +1401,7 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
         # a single file or a nested subtree covers only part of the index_root,
         # so reconciling here would wrongly prune untouched siblings.
         if full_root_walk:
-            for hit in store.scroll(filters={"index_root": index_root}):
+            for hit in store.scroll(filters={"index_root": index_root}, **mtkw):
                 prior = (hit.payload or {}).get("source")
                 if prior and prior not in fresh_by_source:
                     fresh_by_source[prior] = set()
@@ -1405,7 +1413,7 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
                 "with failed embeddings; re-run after the provider recovers",
                 file=sys.stderr,
             )
-        pruned = prune_stale_chunks(store, fresh_by_source, index_root=index_root)
+        pruned = prune_stale_chunks(store, fresh_by_source, index_root=index_root, tenant=tenant)
 
     # Links -> graph edges. Only when a graph is configured; sources whose
     # embeddings failed are skipped so a partial index doesn't rewrite links.
@@ -1434,12 +1442,12 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
                 # file or nested subtree covers only part of the index_root, so
                 # this would wrongly clear untouched siblings' edges.
                 if full_root_walk:
-                    for prior in graph.file_link_sources(index_root=index_root):
+                    for prior in graph.file_link_sources(index_root=index_root, **mtkw):
                         if prior not in by_source and prior not in failed_sources:
                             by_source[prior] = []
                 for source, targets in by_source.items():
                     edges_written += graph.sync_file_links(
-                        source, targets, index_root=index_root
+                        source, targets, index_root=index_root, **mtkw
                     )
             except Exception as exc:  # noqa: BLE001 — graph optional; vectors already upserted
                 # A mid-run graph outage (e.g. Memgraph disconnects while
@@ -1506,6 +1514,7 @@ def _watch_markdown(
         chunk_size=args.chunk_size,
         graph=graph,
         subtree=watch_root,  # keep referrer re-resolution inside the watched tree
+        tenant=getattr(args, "tenant", None) or None,
     )
 
     def _on_result(res: Any) -> None:
@@ -2008,6 +2017,16 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         help="Index a markdown folder: frontmatter -> filters, links -> graph edges",
     )
     p_index_md.add_argument("path", help="Markdown file or directory to index")
+    p_index_md.add_argument(
+        "--tenant",
+        default=None,
+        metavar="ID",
+        help=(
+            "Index this corpus under a tenant: chunk ids, payloads, and graph "
+            "nodes/edges are scoped to it, so authenticated multi-tenant recall "
+            "sees only its own markdown (default: unscoped / single-tenant)"
+        ),
+    )
     p_index_md.add_argument(
         "--index-root",
         default=None,

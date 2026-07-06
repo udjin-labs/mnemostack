@@ -139,15 +139,27 @@ class GraphStore:
             props[TENANT_KEY] = tenant  # stamp the edge too
             params["tenant"] = tenant
             set_tenant = ", s.tenant = $tenant, o.tenant = $tenant"
+            # Scoped: the edge is this tenant's own (its key is name+tenant), so
+            # write props directly.
+            edge_set = "SET r += $props"
         else:
             set_tenant = ""
+            # Unscoped: a name-only MERGE can subset-match a tenant-owned node and
+            # its edge, so only write props on a tenant-LESS edge — an unscoped
+            # add_triple must never overwrite a tenant's edge validity/properties.
+            # On a single-tenant graph every edge is tenant-less, so this always
+            # runs (equivalent to the legacy unconditional SET). The node SETs use
+            # coalesce, so they're idempotent even if they bind a tenant node.
+            edge_set = (
+                "FOREACH (_ IN CASE WHEN r.tenant IS NULL THEN [1] ELSE [] END | SET r += $props)"
+            )
         query = (
             f"MERGE (s:{s_label} {{name: $subject{tk}}}) "
             f"MERGE (o:{o_label} {{name: $obj{tk}}}) "
             f"SET s.valid_until = coalesce(s.valid_until, 'current'), "
             f"    o.valid_until = coalesce(o.valid_until, 'current'){set_tenant} "
             f"MERGE (s)-[r:{rel}]->(o) "
-            f"SET r += $props"
+            f"{edge_set}"
         )
         with self.driver.session(database=self.database) as session:
             session.run(query, **params)

@@ -329,20 +329,21 @@ vector store's `tenant_id`):
   (a structured SPO query) and `mnemostack_graph_add_triple` are tenant-scoped —
   the query is confined to the key's tenant and the write is stamped with it
   (`add_triple` still requires the `write` scope).
-- **`tenant=None` is a true no-op**: every unscoped write/read emits the
-  byte-for-byte legacy Cypher, so an existing single-tenant graph is untouched and
-  needs no migration to keep working.
+- **`tenant=None` stays single-tenant**: on a graph with no `tenant` property,
+  every unscoped write/read behaves exactly as pre-1.0 (an existing single-tenant
+  graph is untouched and needs no migration). Unscoped writes are additionally
+  hardened so they can't corrupt a *migrated* graph: an unscoped `add_triple`
+  won't overwrite a tenant-owned edge, and an unscoped `sync_file_links` re-index
+  won't delete a tenant file's links (gated on the source node's tenant).
+- **The markdown indexer is tenant-aware**: `index-markdown --tenant <id>` (and
+  `MarkdownSyncer(tenant=...)`) scope the chunk ids, payloads, and `:File` link
+  nodes/edges to the tenant, so a multi-tenant deployment has **no unscoped graph
+  write path** — index each tenant's corpus with its own `--tenant`.
 
 Adopt tenancy on an existing graph with `mnemostack tenant-migrate --tenant <id>
 --memgraph-uri <bolt>` (stamps nodes + edges; `--dry-run` / `--all` parity with the
 vector stamp), or `GraphStore.stamp_tenant(tenant, only_missing=True)` in the
 library.
-
-**Remaining graph limitation.** The markdown link-graph writer (`MarkdownSyncer` /
-`index-markdown`) is not tenant-aware yet — it writes unscoped `:File` link nodes.
-That's safe (unscoped nodes are *excluded* from a scoped read, never leaked), but a
-tenant-aware markdown link graph is a follow-up; for now index markdown per tenant
-into a separate graph if you need its links under auth.
 
 ## On-disk / payload contracts
 
