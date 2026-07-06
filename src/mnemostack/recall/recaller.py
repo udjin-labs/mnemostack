@@ -902,6 +902,7 @@ class Recaller:
                     filters=filters,
                     include_invalidated=include_invalidated,
                     as_of=as_of,
+                    tenant=tenant,
                 )
             if apply_vector_floor:
                 results = self._apply_vector_floor(

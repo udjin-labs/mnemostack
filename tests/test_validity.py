@@ -914,3 +914,32 @@ def test_recall_trace_restrict_to_ids_scrubs_foreign():
     assert tr.retrievers[0].ranked == [("1", 0.9)]
     assert tr.fused == [("1", 0.9)]
     assert tr.post_rerank == [("1", 0.9)]
+
+
+def test_vector_fallback_hits_scopes_to_tenant():
+    # A tenant-scoped fallback must query the store with tenant= (scoped at
+    # source), not fetch the whole shared collection and rely on the backstop.
+    from mnemostack.recall.recaller import Recaller
+
+    seen = {}
+
+    class _Hit:
+        def __init__(self, id, score, payload):
+            self.id, self.score, self.payload = id, score, payload
+
+    class _FakeEmbed:
+        def embed(self, q):
+            return [1.0, 0.0, 0.0, 0.0]
+
+    class _FakeVector:
+        def search(self, vec, limit, filters=None, hide_invalidated=False, tenant=None, **kw):
+            seen["tenant"] = tenant
+            return [_Hit("x", 0.9, {"tenant_id": tenant, "text": "t"})]
+
+    r = Recaller.__new__(Recaller)
+    r.embedding = _FakeEmbed()
+    r.vector = _FakeVector()
+    r.retrievers = []
+    out = r._vector_fallback_hits("q", limit=5, filters=None, tenant="alpha")
+    assert seen["tenant"] == "alpha"
+    assert out and out[0].payload["tenant_id"] == "alpha"
