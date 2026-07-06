@@ -92,9 +92,8 @@ async function j(u){const r=await fetch(u);if(!r.ok)throw new Error(r.status+" "
 function tenant(){return $("#tenant-manual").value.trim()||$("#tenant").value;}
 async function loadTenants(){
   const d=await j("/api/tenants?limit=1000");$("#ver").textContent="v"+d.version;
-  const sel=$("#tenant");sel.innerHTML="";
+  const sel=$("#tenant");sel.innerHTML='<option value="">(all / unscoped)</option>';
   if(d.ok===false){$("#status").textContent=d.error||"tenant lookup failed";}
-  if(!d.tenants.length){sel.innerHTML='<option value="">('+(d.ok===false?"lookup failed":"no tenants — data has no tenant_id")+')</option>';}
   for(const t of d.tenants){const o=document.createElement("option");o.value=t.id;o.textContent=t.id+" ("+t.count+")";sel.appendChild(o);}
 }
 async function loadOverview(){
@@ -229,6 +228,10 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
         Facet-based — cheap and approximate for very large corpora. When service
         keys land, the tenant list moves to the key store.
         """
+        # Short-timeout reachability first: the data client (facet below) has a 30s
+        # timeout, so a blackholed Qdrant would otherwise hang the initial load.
+        if not _qdrant_ok():
+            return {"tenants": [], "ok": False, "error": "Qdrant unreachable", "version": __version__}
         try:
             resp = store.client.facet(
                 collection_name=cfg.collection, key=TENANT_ID_KEY, limit=limit
@@ -261,43 +264,55 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
                 }
 
     @app.get("/api/overview")
-    def overview(tenant: str = Query(..., min_length=1)) -> dict[str, Any]:
+    def overview(tenant: str = Query("")) -> dict[str, Any]:
+        # tenant="" browses unscoped: all points, including a legacy single-tenant
+        # collection whose points carry no tenant_id. A named tenant scopes counts.
+        scoped = tenant or None
+        ok = _qdrant_ok()  # short-timeout probe up front so a down Qdrant is prompt
         points = 0
         invalidated = 0
-        try:
-            points = store.count(tenant=tenant)
-            invalidated = store.client.count(
-                collection_name=cfg.collection,
-                # points of this tenant that DO carry an invalidated_at marker
-                # (must_not "is-current" == has invalidated_at).
-                count_filter=Filter(
-                    must=[_tenant_condition(tenant)],
-                    must_not=[_hide_invalidated_condition()],
-                ),
-            ).count
-        except Exception as e:  # noqa: BLE001
-            log.warning("overview count failed for tenant=%s: %s", tenant, e)
+        if ok:
+            try:
+                points = store.count(tenant=scoped)
+                invalidated = store.client.count(
+                    collection_name=cfg.collection,
+                    # points that DO carry an invalidated_at marker (must_not
+                    # "is-current" == has invalidated_at), scoped when a tenant is set.
+                    count_filter=Filter(
+                        must=[_tenant_condition(scoped)] if scoped else [],
+                        must_not=[_hide_invalidated_condition()],
+                    ),
+                ).count
+            except Exception as e:  # noqa: BLE001
+                log.warning("overview count failed for tenant=%r: %s", tenant, e)
         return {
             "tenant": tenant,
             "collection": cfg.collection,
             "points": points,
             "invalidated": invalidated,
-            "qdrant": _qdrant_ok(),
+            "qdrant": ok,
             "memgraph": _graph_reachable(cfg),
             "version": __version__,
         }
 
     @app.get("/api/records")
     def records(
-        tenant: str = Query(..., min_length=1),
+        tenant: str = Query(""),
         q: str | None = Query(None),
         filters: str | None = Query(None),
         limit: int = Query(50, ge=1, le=200),
     ) -> dict[str, Any]:
-        """Records for one tenant. With `q`, a vector smoke search; otherwise a
-        browse (scroll). Every read is tenant-scoped — never cross-tenant."""
+        """Records for a tenant. `tenant=""` browses unscoped (all points, incl. a
+        legacy single-tenant collection with no tenant_id); a named tenant scopes
+        the read. With `q`, a vector smoke search; otherwise a browse (scroll)."""
         import json
 
+        # Short-timeout reachability first so a blackholed Qdrant fails promptly
+        # instead of hanging on the data client's 30s timeout.
+        if not _qdrant_ok():
+            return {"records": [], "error": "Qdrant unreachable", "tenant": tenant}
+
+        scoped = tenant or None
         parsed: dict[str, Any] | None = None
         if filters:
             try:
@@ -311,11 +326,11 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
         try:
             if q:
                 vec = _embed(q)
-                for hit in store.search(vec, limit=limit, filters=parsed, tenant=tenant):
+                for hit in store.search(vec, limit=limit, filters=parsed, tenant=scoped):
                     rows.append(_row(hit.id, hit.payload, score=hit.score))
                 mode = "vector search"
             else:
-                for hit in store.scroll(filters=parsed, tenant=tenant):
+                for hit in store.scroll(filters=parsed, tenant=scoped):
                     rows.append(_row(hit.id, hit.payload))
                     if len(rows) >= limit:
                         break
@@ -323,7 +338,7 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
         except Exception as e:  # noqa: BLE001 — a malformed filter/embed error is a
             # user/runtime problem, not a server bug: return a clean message like
             # the JSON-parse path, never a raw 500 (mirrors /api/overview).
-            log.info("records query failed for tenant=%s: %s", tenant, e)
+            log.info("records query failed for tenant=%r: %s", tenant, e)
             return {"records": [], "error": f"query failed: {e}", "tenant": tenant}
         return {"records": rows, "mode": mode, "tenant": tenant}
 

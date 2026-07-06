@@ -260,3 +260,37 @@ def test_graph_reachable_closes_driver_on_failure(monkeypatch):
     cfg = ServerConfig(graph_uri="bolt://x", graph_user="", graph_password="", graph_database=None)
     assert _graph_reachable(cfg) is False
     assert closed["n"] == 1  # driver closed despite the failure
+
+
+def test_unscoped_browse_sees_all_including_legacy(monkeypatch):
+    # A legacy/default single-tenant collection (points without tenant_id) must be
+    # inspectable via the unscoped (tenant="") mode, not blank.
+    store = _seeded_store()
+    store.upsert(9, _VEC, {"text": "legacy", "source": "legacy.md"})  # no tenant
+    monkeypatch.setattr(insp, "get_provider", lambda *a, **k: _FakeProvider())
+    monkeypatch.setattr(insp, "VectorStore", lambda **_: store)
+    monkeypatch.setattr(insp, "_make_probe_client", lambda *a, **k: store.client)
+    c = TestClient(
+        insp.build_inspector_app(ServerConfig(provider_name="fake", collection="mt", graph_uri=None))
+    )
+    assert c.get("/api/overview").json()["points"] == 4  # alpha 2 + beta 1 + legacy 1
+    sources = {r["source"] for r in c.get("/api/records").json()["records"]}
+    assert {"a1.md", "b1.md", "legacy.md"} <= sources
+
+
+def test_data_endpoints_gate_on_unreachable_qdrant(monkeypatch):
+    store = _seeded_store()
+    monkeypatch.setattr(insp, "get_provider", lambda *a, **k: _FakeProvider())
+    monkeypatch.setattr(insp, "VectorStore", lambda **_: store)
+
+    class _DownProbe:
+        def get_collections(self):
+            raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(insp, "_make_probe_client", lambda *a, **k: _DownProbe())
+    c = TestClient(
+        insp.build_inspector_app(ServerConfig(provider_name="fake", collection="mt", graph_uri=None))
+    )
+    assert c.get("/api/tenants").json()["error"] == "Qdrant unreachable"
+    assert c.get("/api/overview").json()["qdrant"] is False
+    assert c.get("/api/records").json()["error"] == "Qdrant unreachable"
