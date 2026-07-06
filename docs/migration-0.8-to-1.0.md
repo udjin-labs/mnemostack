@@ -82,9 +82,22 @@ mnemostack graph-migrate-current --memgraph-uri bolt://localhost:7687
 Markdown `:File` graph nodes are keyed by `(name, index_root)`, so two corpora
 that share a filename (both have `index.md`) stay distinct nodes and only surface
 their own root's `LINKS_TO` edges. `:Entity` nodes (from triples) have no
-`index_root`. This is a 🟢 stable contract; no migration needed. If you indexed
-multiple roots into one graph on an older version that keyed by `name` alone,
-re-index the markdown roots to split them.
+`index_root`. This is a 🟢 stable contract; no migration needed for graphs first
+written by 0.8.x.
+
+If you indexed multiple roots into one graph on an **older** version that keyed
+`:File` by `name` alone, re-indexing is **not** enough on its own: the new writes
+`MERGE` fresh `(name, index_root)` nodes but leave the legacy name-only nodes — and
+their `LINKS_TO` edges — in place, where recall still surfaces them under the
+empty-root key. Drop the pre-keying nodes once, then re-index each root:
+
+```cypher
+// one-off: remove :File nodes that predate (name, index_root) keying
+MATCH (f:File) WHERE f.index_root IS NULL DETACH DELETE f;
+```
+
+New `:File` nodes always carry an `index_root` (`""` for an unnamed root), so this
+only removes pre-keying nodes — it never touches `:Entity` nodes or current data.
 
 ## Payload validity keys
 
@@ -117,5 +130,7 @@ before 1.0.
    config is invalid.
 4. If the graph is configured: run `graph-migrate-current --dry-run`, then apply
    if it reports changes.
-5. `pytest -m smoke -q` (or your own smoke) against a staging copy.
+5. From a **source checkout**, `pytest -m smoke -q` against a staging copy; on an
+   installed host without the test tree, rely on the step-3 `mnemostack doctor`
+   diagnostics plus the step-6 spot-check.
 6. Spot-check a representative `search` / `answer`.
