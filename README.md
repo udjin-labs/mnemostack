@@ -905,7 +905,7 @@ The plugin defaults to `http://127.0.0.1:18793/answer`, supports English/Russian
 - [x] LLM-based reranker
 - [x] Memgraph wrapper with temporal validity
 - [x] Consolidation runtime (phase orchestrator)
-- [x] CLI (`mnemostack health/doctor/search/answer/index/mcp-serve`)
+- [x] CLI (`mnemostack health/doctor/inspect/search/answer/index/mcp-serve`)
 - [x] MCP server (Model Context Protocol)
 - [x] Text → graph triple extractor helpers (`mnemostack.graph.TripleExtractor`)
 - [x] Config file support YAML/JSON (`mnemostack.config`, `mnemostack init`/`config` CLI)
