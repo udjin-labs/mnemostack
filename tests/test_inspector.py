@@ -154,6 +154,7 @@ def test_browse_works_without_embedding_provider(monkeypatch):
 
     monkeypatch.setattr(insp, "get_provider", _boom)
     monkeypatch.setattr(insp, "VectorStore", lambda **_: store)
+    monkeypatch.setattr(insp, "_make_probe_client", lambda *a, **k: store.client)
     app = insp.build_inspector_app(
         ServerConfig(provider_name="gemini", collection="mt", graph_uri=None)
     )
