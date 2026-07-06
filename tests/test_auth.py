@@ -275,3 +275,44 @@ def test_verify_skips_malformed_hash_and_finds_valid(tmp_path):
     assert principal is not None
     assert principal.tenant == "acme"
     assert principal.can("read")
+
+
+def test_object_without_keys_member_is_rejected(tmp_path):
+    from mnemostack.auth import KeyStoreError
+
+    p = tmp_path / "keys.json"
+    p.write_text('{"other": 1}')  # a valid object but not a key store (e.g. a config file)
+    assert FileKeyStore(p).verify("msk_x") is None
+    with pytest.raises(KeyStoreError):
+        FileKeyStore(p).list_keys()
+
+
+def test_invalid_utf8_store_is_corrupt(tmp_path):
+    from mnemostack.auth import KeyStoreError
+
+    p = tmp_path / "keys.json"
+    p.write_bytes(b"\xff\xfe not utf-8")
+    assert FileKeyStore(p).verify("msk_x") is None  # fail closed, no crash
+    with pytest.raises(KeyStoreError):
+        FileKeyStore(p).list_keys()
+
+
+def test_verify_denies_non_string_tenant(tmp_path):
+    key = "msk_t"
+    p = tmp_path / "keys.json"
+    p.write_text(
+        json.dumps(
+            {"keys": [{"id": "x", "hash": hash_key(key), "tenant": ["a", "b"], "scopes": ["read"]}]}
+        )
+    )
+    assert FileKeyStore(p).verify(key) is None
+
+
+def test_issue_errors_cleanly_when_parent_is_a_file(tmp_path):
+    from mnemostack.auth import KeyStoreError
+
+    blocker = tmp_path / "afile"
+    blocker.write_text("blocking")  # the store's parent path is a regular file
+    ks = FileKeyStore(blocker / "keys.json")
+    with pytest.raises(KeyStoreError):
+        ks.issue("acme", "read")

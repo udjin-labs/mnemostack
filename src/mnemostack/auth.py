@@ -109,33 +109,41 @@ class FileKeyStore:
                 data = json.load(f)
         except FileNotFoundError:
             return []
-        except json.JSONDecodeError as e:
-            # Fail loudly for management ops; verify() catches this and denies.
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            # Corrupt JSON or non-UTF-8/binary content — fail loudly for management
+            # ops; verify() catches this and denies.
             raise KeyStoreError(f"key store {self.path} is corrupt: {e}") from e
         except OSError as e:
             # A directory, a permission error, etc. — treat as unreadable (not
             # empty) so verify() fails closed instead of silently denying every key.
             raise KeyStoreError(f"key store {self.path} is unreadable: {e}") from e
-        # Valid JSON but the wrong shape must surface, not reset to empty: an empty
-        # view would deny all keys AND let a later write clobber the real store.
-        if not isinstance(data, dict) or not isinstance(data.get("keys", []), list):
+        # The 'keys' member must EXIST and be a list. A foreign object (e.g.
+        # MNEMOSTACK_KEYS_FILE aimed at an unrelated config file) must not read as
+        # an empty store, or a later write would overwrite it; and a wrong-typed
+        # 'keys' must surface rather than silently reset to empty (which would deny
+        # all keys and clobber the real store).
+        if not isinstance(data, dict) or not isinstance(data.get("keys"), list):
             raise KeyStoreError(
                 f"key store {self.path} has an unexpected shape "
                 "(expected an object with a 'keys' list)"
             )
-        records = data.get("keys", [])
-        return [r for r in records if isinstance(r, dict)]
+        return [r for r in data["keys"] if isinstance(r, dict)]
 
     def _save(self, records: list[dict[str, Any]]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         # mkstemp creates a UNIQUE file (O_CREAT|O_EXCL, mode 0600) in the target
         # dir, so a pre-created symlink at a guessable ".tmp" path can't be followed
         # to clobber another file (the store may live in a shared dir like /tmp).
         # 0600 from the start means the secret is never briefly world-readable, and
-        # os.replace preserves the mode so the landed file is 0600.
-        fd, tmp_name = tempfile.mkstemp(
-            dir=str(self.path.parent), prefix=self.path.name + ".", suffix=".tmp"
-        )
+        # os.replace preserves the mode so the landed file is 0600. A dir that can't
+        # be created/written (parent is a file, not writable) is a store error, not
+        # a traceback.
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp_name = tempfile.mkstemp(
+                dir=str(self.path.parent), prefix=self.path.name + ".", suffix=".tmp"
+            )
+        except OSError as e:
+            raise KeyStoreError(f"cannot write key store {self.path}: {e}") from e
         tmp = Path(tmp_name)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -159,14 +167,22 @@ class FileKeyStore:
         Serializes concurrent issue()/revoke() so a lost write can't silently
         drop a just-issued key. Best-effort: a no-op where flock is unavailable.
         """
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise KeyStoreError(
+                f"cannot create key store directory {self.path.parent}: {e}"
+            ) from e
         try:
             import fcntl
         except ImportError:  # pragma: no cover - non-POSIX
             yield
             return
         lock_path = self.path.with_suffix(self.path.suffix + ".lock")
-        fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
+        try:
+            fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
+        except OSError as e:
+            raise KeyStoreError(f"cannot open key store lock {lock_path}: {e}") from e
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
             yield
@@ -196,8 +212,8 @@ class FileKeyStore:
             # constant-time compare so a timing side-channel can't probe hashes
             if hmac.compare_digest(stored, h):
                 tenant = rec.get("tenant")
-                if not tenant:
-                    return None
+                if not isinstance(tenant, str) or not tenant:
+                    return None  # a malformed (non-string / empty) tenant denies
                 # A persisted scopes value must be a list of strings. Anything else
                 # (a dict like {"admin": false}, a bare string, null) is a malformed
                 # record and denies — never normalize it, or e.g. a dict would
