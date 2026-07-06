@@ -198,22 +198,22 @@ class GraphStore:
         common = {"root": root}
         if tenant is not None:
             common["tenant"] = tenant
-        # Confine the edge-clearing DELETE to this tenant's edges. When scoped,
-        # pin the far end AND the edge to the tenant. When UNSCOPED, only clear
-        # tenant-less edges (`r.tenant IS NULL`) so an unscoped re-index (e.g.
-        # index-markdown, which has no --tenant) can't delete a tenant's LINKS_TO
-        # edges after the graph has been tenant-migrated — the source :File node's
-        # property map subset-matches a tenant-stamped node, but its tenant edges
-        # are left intact. On a pure single-tenant graph every edge is tenant-less,
-        # so this is a no-op.
+        # Confine the edge-clearing DELETE. When scoped, pin the far end AND the
+        # edge to the tenant. When UNSCOPED, gate on the SOURCE NODE's tenant
+        # (`s.tenant IS NULL`), not the edge's: a :File property map subset-matches
+        # a tenant-stamped node, so an unscoped re-index (index-markdown, no
+        # --tenant) must not clear a *migrated* file's edges — but it must still
+        # clear a genuine single-tenant file's stale links even if those edges
+        # carry a legacy `tenant` property of their own. On an unmigrated graph the
+        # source node has no tenant, so this deletes exactly as before.
         if tenant is not None:
             del_target = "{tenant: $tenant}"
             del_where = " WHERE r.tenant = $tenant"
         else:
             del_target = ""
-            del_where = " WHERE r.tenant IS NULL"
+            del_where = " WHERE s.tenant IS NULL"
         tx.run(
-            f"MATCH (:File {{name: $src, index_root: $root{tk}}})"
+            f"MATCH (s:File {{name: $src, index_root: $root{tk}}})"
             f"-[r:LINKS_TO]->({del_target}){del_where} DELETE r",
             src=source,
             **common,
@@ -283,12 +283,17 @@ class GraphStore:
         """
         root = index_root or ""
         tk = self._tenant_key_frag(tenant)
+        # Require the edge to be tenant-owned when scoped, so this list (which
+        # drives stale-link cleanup) only reports files with an owned LINKS_TO
+        # edge — honoring the same nodes-AND-edges boundary as the other reads.
+        rel = "[r:LINKS_TO]" if tenant is not None else "[:LINKS_TO]"
+        rwhere = " WHERE r.tenant = $tenant" if tenant is not None else ""
         params: dict[str, Any] = {"root": root}
         if tenant is not None:
             params["tenant"] = tenant
         with self.driver.session(database=self.database) as session:
             result = session.run(
-                f"MATCH (f:File {{index_root: $root{tk}}})-[:LINKS_TO]->() "
+                f"MATCH (f:File {{index_root: $root{tk}}})-{rel}->(){rwhere} "
                 "RETURN DISTINCT f.name AS name",
                 **params,
             )

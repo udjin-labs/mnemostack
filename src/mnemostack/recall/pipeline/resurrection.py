@@ -17,7 +17,7 @@ import logging
 from typing import Any
 
 from ..recaller import RecallResult
-from ..retrievers import graph_valid_clause
+from ..retrievers import graph_result_id, graph_valid_clause
 from ..validity import to_utc_instant
 from .base import PipelineContext, Stage
 from .stages import STOPWORDS
@@ -206,9 +206,7 @@ class GraphResurrection(Stage):
             # the retriever and the already-tenant-scoped vector ids.
             if tenant is not None:
                 payload["tenant_id"] = tenant
-                result_id = f"graph:{tenant}:{name}"
-            else:
-                result_id = f"graph:{name}"
+            result_id = graph_result_id(name, tenant)
             rr = RecallResult(
                 id=result_id,
                 text=text,

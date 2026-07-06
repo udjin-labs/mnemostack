@@ -24,6 +24,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, cast
+from urllib.parse import quote
 
 from ..embeddings.base import EmbeddingProvider
 from ..llm.base import LLMProvider
@@ -461,6 +462,21 @@ def graph_valid_clause(var: str, as_of: str | None, include_invalidated: bool = 
     return graph_as_of_predicate(var)
 
 
+def graph_result_id(node_id: str, tenant: str | None) -> str:
+    """Stable id for a graph hit, tenant-namespaced (collision-free) when scoped.
+
+    The stateful pipeline (IoR / Q-learning / feedback) keys on ``str(result.id)``,
+    so two tenants' same-named graph nodes must not share an id. Tenants and node
+    names are arbitrary strings that can contain ``:``, so the tenant is
+    percent-encoded (``safe=""``) — otherwise tenant ``a:b`` + node ``c`` and
+    tenant ``a`` + node ``b:c`` would both render ``graph:a:b:c``. Unscoped
+    (``tenant is None``) keeps the historical ``graph:<node_id>`` form unchanged.
+    """
+    if tenant is None:
+        return f"graph:{node_id}"
+    return f"graph:{quote(tenant, safe='')}:{node_id}"
+
+
 class MemgraphRetriever(Retriever):
     """Knowledge-graph retriever — exact/contains match on node names.
 
@@ -721,9 +737,7 @@ class MemgraphRetriever(Retriever):
                     # ranking. Vector ids are already tenant-scoped (stable_chunk_id).
                     if tenant is not None:
                         payload["tenant_id"] = tenant
-                        result_id = f"graph:{tenant}:{node_id}"
-                    else:
-                        result_id = f"graph:{node_id}"
+                    result_id = graph_result_id(node_id, tenant)
                     results.append(
                         RecallResult(
                             id=result_id,

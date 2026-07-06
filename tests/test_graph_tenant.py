@@ -233,7 +233,27 @@ def test_sync_file_links_unscoped_delete_skips_tenant_edges():
     store = _store_with(session)
     store.sync_file_links("a.md", ["b.md"], index_root="/root")  # tenant=None
     del_cypher = next(c for c, _ in session.calls if "DELETE r" in c)
-    assert "WHERE r.tenant IS NULL" in del_cypher
+    # Gated on the SOURCE NODE's tenant (not the edge's), so a migrated file's
+    # edges are preserved while a genuine single-tenant file's stale links —
+    # even ones carrying a legacy `tenant` edge property — are still cleared.
+    assert "WHERE s.tenant IS NULL" in del_cypher
+
+
+def test_file_link_sources_scoped_requires_owned_edge():
+    session = _RecordingSession([])
+    store = _store_with(session)
+    store.file_link_sources(index_root="/root", tenant="acme")
+    cypher, params = session.calls[0]
+    assert "[r:LINKS_TO]" in cypher and "WHERE r.tenant = $tenant" in cypher
+    assert params["tenant"] == "acme"
+
+
+def test_graph_result_id_escapes_tenant_delimiter():
+    from mnemostack.recall.retrievers import graph_result_id
+
+    # tenant 'a:b' + node 'c'  vs  tenant 'a' + node 'b:c' must NOT collide.
+    assert graph_result_id("c", "a:b") != graph_result_id("b:c", "a")
+    assert graph_result_id("n", None) == "graph:n"  # unscoped unchanged
 
 
 def test_add_file_tags_adapter_receives_tenant():
