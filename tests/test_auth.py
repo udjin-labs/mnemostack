@@ -240,3 +240,38 @@ def test_save_does_not_follow_tmp_symlink(tmp_path):
     FileKeyStore(p).issue("alpha", "read")  # writes via mkstemp (random name)
     assert victim.read_text() == "precious"  # untouched
     assert p.is_file() and not p.is_symlink()  # store is a real file
+
+
+def test_verify_denies_non_list_scopes_no_privilege_escalation(tmp_path):
+    p = tmp_path / "keys.json"
+    key = "msk_test"
+    # A malformed scopes object would iterate to its keys — {"admin": false} must
+    # NOT grant admin; the record is denied.
+    p.write_text(
+        json.dumps(
+            {"keys": [{"id": "x", "hash": hash_key(key), "tenant": "acme", "scopes": {"admin": False}}]}
+        )
+    )
+    assert FileKeyStore(p).verify(key) is None
+
+
+def test_verify_skips_malformed_hash_and_finds_valid(tmp_path):
+    p = tmp_path / "keys.json"
+    key = "msk_good"
+    # A non-ASCII hash on an earlier record must not crash verify (TypeError from
+    # compare_digest) — it's skipped and the valid record still authenticates.
+    p.write_text(
+        json.dumps(
+            {
+                "keys": [
+                    {"id": "bad", "hash": "деadbeef", "tenant": "x", "scopes": ["read"]},
+                    {"id": "ok", "hash": hash_key(key), "tenant": "acme", "scopes": ["read"]},
+                ]
+            },
+            ensure_ascii=False,
+        )
+    )
+    principal = FileKeyStore(p).verify(key)
+    assert principal is not None
+    assert principal.tenant == "acme"
+    assert principal.can("read")

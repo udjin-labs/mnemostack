@@ -188,16 +188,26 @@ class FileKeyStore:
             log.error("key store %s unreadable — denying (fail closed)", self.path)
             return None
         for rec in records:
+            stored = rec.get("hash", "")
+            # A non-ASCII / non-str hash makes compare_digest raise TypeError, so a
+            # single malformed record would 500 auth — skip it and check the rest.
+            if not isinstance(stored, str) or not stored.isascii():
+                continue
             # constant-time compare so a timing side-channel can't probe hashes
-            if hmac.compare_digest(str(rec.get("hash", "")), h):
+            if hmac.compare_digest(stored, h):
                 tenant = rec.get("tenant")
                 if not tenant:
                     return None
+                # A persisted scopes value must be a list of strings. Anything else
+                # (a dict like {"admin": false}, a bare string, null) is a malformed
+                # record and denies — never normalize it, or e.g. a dict would
+                # iterate to its keys and silently grant "admin". Comma-string
+                # parsing stays on the issue()/CLI input path only.
+                raw_scopes = rec.get("scopes")
+                if not isinstance(raw_scopes, list):
+                    return None
                 try:
-                    # `or []` handles a null/missing scopes; the except handles a
-                    # non-iterable or invalid value — a malformed record denies,
-                    # it never crashes verify for every other key.
-                    scopes = frozenset(_normalize_scopes(rec.get("scopes") or []))
+                    scopes = frozenset(_normalize_scopes(raw_scopes))
                 except (ValueError, TypeError):
                     return None
                 return Principal(tenant=tenant, scopes=scopes)
