@@ -198,14 +198,15 @@ class GraphStore:
         common = {"root": root}
         if tenant is not None:
             common["tenant"] = tenant
-        # Pin the far end of the edge to the tenant too (not just the source): the
-        # edges this function writes are always same-tenant on both ends, so this
-        # is defense-in-depth — a stray cross-tenant edge (bad migration, hand-
-        # edited data) is left untouched rather than deleted from under it.
+        # Pin the far end of the edge AND the edge itself to the tenant (not just
+        # the source): the edges this function writes are always same-tenant, so
+        # this is defense-in-depth — a stray cross-tenant edge (bad migration,
+        # hand-edited data) is left untouched rather than deleted from under it.
         del_target = "{tenant: $tenant}" if tenant is not None else ""
+        del_where = " WHERE r.tenant = $tenant" if tenant is not None else ""
         tx.run(
             f"MATCH (:File {{name: $src, index_root: $root{tk}}})"
-            f"-[r:LINKS_TO]->({del_target}) DELETE r",
+            f"-[r:LINKS_TO]->({del_target}){del_where} DELETE r",
             src=source,
             **common,
         )
@@ -247,13 +248,17 @@ class GraphStore:
         root = index_root or ""
         keys = [k.lower() for k in name_keys]
         tk = self._tenant_key_frag(tenant)
+        # Bind the edge and require r.tenant when scoped, so this lookup honors the
+        # same nodes-AND-edges boundary as the other scoped reads.
+        rel = "[r:LINKS_TO]" if tenant is not None else "[:LINKS_TO]"
+        rtenant = " AND r.tenant = $tenant" if tenant is not None else ""
         params: dict[str, Any] = {"root": root, "keys": keys}
         if tenant is not None:
             params["tenant"] = tenant
         with self.driver.session(database=self.database) as session:
             result = session.run(
-                f"MATCH (x:File {{index_root: $root{tk}}})-[:LINKS_TO]->(d:File {{index_root: $root{tk}}}) "
-                "WHERE d.name_lower IN $keys "
+                f"MATCH (x:File {{index_root: $root{tk}}})-{rel}->(d:File {{index_root: $root{tk}}}) "
+                f"WHERE d.name_lower IN $keys{rtenant} "
                 "RETURN DISTINCT x.name AS name",
                 **params,
             )

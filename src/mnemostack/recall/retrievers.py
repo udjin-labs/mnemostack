@@ -714,11 +714,19 @@ class MemgraphRetriever(Retriever):
                     # `filter_by_tenant` backstop (which drops any result lacking
                     # a matching tenant_id). Only every node we matched is already
                     # tenant-scoped by the probes above.
+                    # Namespace the id by tenant when scoped so two tenants with the
+                    # same graph node don't share an id — the stateful pipeline
+                    # (IoR / Q-learning / feedback) keys on str(result.id), so a
+                    # shared id would let one tenant's clicks move the other's
+                    # ranking. Vector ids are already tenant-scoped (stable_chunk_id).
                     if tenant is not None:
                         payload["tenant_id"] = tenant
+                        result_id = f"graph:{tenant}:{node_id}"
+                    else:
+                        result_id = f"graph:{node_id}"
                     results.append(
                         RecallResult(
-                            id=f"graph:{node_id}",
+                            id=result_id,
                             text=content[:300],
                             score=float(info["count"]),
                             payload=payload,

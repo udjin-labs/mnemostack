@@ -200,11 +200,17 @@ class GraphResurrection(Stage):
             # Stamp the tenant so the resurrected node survives the recall
             # `filter_by_tenant` backstop (which drops any result lacking a
             # matching tenant_id). The seed walk above already confined every
-            # neighbor to this tenant.
+            # neighbor to this tenant. Namespace the id by tenant too, so two
+            # tenants' same-named graph nodes don't collide in the stateful
+            # pipeline's IoR/feedback state (keyed on str(result.id)) — matching
+            # the retriever and the already-tenant-scoped vector ids.
             if tenant is not None:
                 payload["tenant_id"] = tenant
+                result_id = f"graph:{tenant}:{name}"
+            else:
+                result_id = f"graph:{name}"
             rr = RecallResult(
-                id=f"graph:{name}",
+                id=result_id,
                 text=text,
                 score=score,
                 payload=payload,

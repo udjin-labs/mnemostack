@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock
 
+from mnemostack.cli import _graph_stamp_tenant
 from mnemostack.graph.store import GraphStore
 from mnemostack.recall.pipeline.base import PipelineContext
 from mnemostack.recall.pipeline.resurrection import GraphResurrection
@@ -145,9 +146,27 @@ def test_sync_file_links_scoped_keys_file_nodes_by_tenant():
     # r.tenant = $tenant) can traverse links written through this scoped API.
     merge_cypher = next(c for c in cyphers if "MERGE (s)-[r:LINKS_TO]->(o)" in c)
     assert "r.tenant = $tenant" in merge_cypher
-    # The edge-clearing DELETE pins the far end to the tenant too (defense-in-depth).
+    # The edge-clearing DELETE pins the far end AND the edge to the tenant.
     del_cypher = next(c for c in cyphers if "DELETE r" in c)
     assert "-[r:LINKS_TO]->({tenant: $tenant})" in del_cypher
+    assert "WHERE r.tenant = $tenant" in del_cypher
+
+
+def test_referrers_of_dangling_scoped_binds_edge_tenant():
+    session = _RecordingSession([])
+    store = _store_with(session)
+    store.referrers_of_dangling(["b"], index_root="/root", tenant="acme")
+    cypher, params = session.calls[0]
+    assert "[r:LINKS_TO]" in cypher and "r.tenant = $tenant" in cypher
+    assert params["tenant"] == "acme"
+
+
+def test_referrers_of_dangling_unscoped_leaves_edge_anonymous():
+    session = _RecordingSession([])
+    store = _store_with(session)
+    store.referrers_of_dangling(["b"], index_root="/root")
+    cypher, _ = session.calls[0]
+    assert "[:LINKS_TO]" in cypher and "tenant" not in cypher
 
 
 def test_stamp_tenant_backfills_nodes_and_edges():
@@ -158,6 +177,40 @@ def test_stamp_tenant_backfills_nodes_and_edges():
     assert any("SET n.tenant = $tenant" in c and "n.tenant IS NULL" in c for c in cyphers)
     assert any("SET r.tenant = $tenant" in c and "r.tenant IS NULL" in c for c in cyphers)
     assert counts == {"nodes": 5, "relationships": 5}
+
+
+def test_graph_stamp_all_requires_yes_when_tenants_exist(monkeypatch):
+    # `tenant-migrate --all --memgraph-uri` must NOT force-relabel a graph that
+    # already carries tenants without --yes (the vector --yes gate only sees Qdrant).
+    import argparse
+
+    import mnemostack.graph.factory as gf
+
+    calls: list[dict[str, Any]] = []
+
+    class _FakeGS:
+        def stamp_tenant(self, tenant, *, only_missing=True, dry_run=False):
+            calls.append({"only_missing": only_missing, "dry_run": dry_run})
+            # 10 total nodes, 3 untenanted → 7 already carry a tenant.
+            return {"nodes": 3 if only_missing else 10, "relationships": 0}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(gf, "make_graph_store", lambda *a, **k: _FakeGS())
+    args = argparse.Namespace(
+        memgraph_uri="bolt://x", tenant="acme", yes=False, graph_timeout=5.0
+    )
+    rc = _graph_stamp_tenant(args, only_missing=False, dry_run=False)
+    assert rc == 2  # refused
+    # only the two dry-run counts ran; the real force-relabel never did.
+    assert all(c["dry_run"] for c in calls)
+
+    calls.clear()
+    args.yes = True
+    rc = _graph_stamp_tenant(args, only_missing=False, dry_run=False)
+    assert rc == 0
+    assert any(not c["dry_run"] and not c["only_missing"] for c in calls)  # relabel ran
 
 
 def test_ingest_fallback_adapter_without_tenant_kwarg():
@@ -207,6 +260,9 @@ def test_retriever_scopes_probes_and_stamps_tenant_id():
     assert rel_cyphers and all("r.tenant = $tenant" in c for c in rel_cyphers)
     assert all(p.get("tenant") == "acme" for c, p in session.calls if "tenant" in c)
     assert results and results[0].payload["tenant_id"] == "acme"
+    # id namespaced by tenant so it can't collide with another tenant's node in
+    # the stateful pipeline's IoR/feedback state.
+    assert results[0].id.startswith("graph:acme:")
 
 
 def test_retriever_unscoped_adds_no_tenant_predicate():
@@ -219,6 +275,7 @@ def test_retriever_unscoped_adds_no_tenant_predicate():
     results = retr.search("alice")
     assert all("tenant" not in c for c, _ in session.calls)
     assert results and "tenant_id" not in results[0].payload
+    assert results[0].id == "graph:alice"  # unscoped id unchanged (no tenant prefix)
 
 
 # ---------- resurrection ----------
@@ -241,6 +298,7 @@ def test_resurrection_scopes_walk_and_stamps_tenant():
     assert all(p.get("tenant") == "acme" for _, p in session.calls)
     injected = [r for r in out if r.payload.get("resurrected")]
     assert injected and injected[0].payload["tenant_id"] == "acme"
+    assert injected[0].id.startswith("graph:acme:")  # tenant-namespaced id
 
 
 def test_resurrection_unscoped_has_no_tenant_predicate():
