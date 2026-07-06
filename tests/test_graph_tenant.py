@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock
 
-from mnemostack.cli import _graph_stamp_tenant
+from mnemostack.cli import _graph_relabel_preflight
 from mnemostack.graph.store import GraphStore
 from mnemostack.recall.pipeline.base import PipelineContext
 from mnemostack.recall.pipeline.resurrection import GraphResurrection
@@ -179,11 +179,7 @@ def test_stamp_tenant_backfills_nodes_and_edges():
     assert counts == {"nodes": 5, "relationships": 5}
 
 
-def test_graph_stamp_all_requires_yes_when_tenants_exist(monkeypatch):
-    # `tenant-migrate --all --memgraph-uri` must NOT force-relabel a graph that
-    # already carries tenants without --yes (the vector --yes gate only sees Qdrant).
-    import argparse
-
+def _fake_gf(monkeypatch, node_total, node_missing, rel_total, rel_missing):
     import mnemostack.graph.factory as gf
 
     calls: list[dict[str, Any]] = []
@@ -191,26 +187,87 @@ def test_graph_stamp_all_requires_yes_when_tenants_exist(monkeypatch):
     class _FakeGS:
         def stamp_tenant(self, tenant, *, only_missing=True, dry_run=False):
             calls.append({"only_missing": only_missing, "dry_run": dry_run})
-            # 10 total nodes, 3 untenanted → 7 already carry a tenant.
-            return {"nodes": 3 if only_missing else 10, "relationships": 0}
+            return {
+                "nodes": node_missing if only_missing else node_total,
+                "relationships": rel_missing if only_missing else rel_total,
+            }
 
         def close(self):
             pass
 
     monkeypatch.setattr(gf, "make_graph_store", lambda *a, **k: _FakeGS())
-    args = argparse.Namespace(
-        memgraph_uri="bolt://x", tenant="acme", yes=False, graph_timeout=5.0
-    )
-    rc = _graph_stamp_tenant(args, only_missing=False, dry_run=False)
-    assert rc == 2  # refused
-    # only the two dry-run counts ran; the real force-relabel never did.
-    assert all(c["dry_run"] for c in calls)
+    return calls
 
-    calls.clear()
+
+def test_graph_relabel_preflight_refuses_without_yes_when_nodes_tenanted(monkeypatch):
+    # --all against a graph whose NODES already carry tenants needs --yes.
+    import argparse
+
+    _fake_gf(monkeypatch, node_total=10, node_missing=3, rel_total=0, rel_missing=0)
+    args = argparse.Namespace(memgraph_uri="bolt://x", tenant="acme", yes=False, graph_timeout=5.0)
+    assert _graph_relabel_preflight(args) == 2  # 7 nodes already tenanted → refused
     args.yes = True
-    rc = _graph_stamp_tenant(args, only_missing=False, dry_run=False)
-    assert rc == 0
-    assert any(not c["dry_run"] and not c["only_missing"] for c in calls)  # relabel ran
+    assert _graph_relabel_preflight(args) == 0  # --yes proceeds
+
+
+def test_graph_relabel_preflight_counts_relationship_tenants(monkeypatch):
+    # Tenants on RELATIONSHIPS but not nodes must still trip the guard.
+    import argparse
+
+    _fake_gf(monkeypatch, node_total=5, node_missing=5, rel_total=8, rel_missing=2)
+    args = argparse.Namespace(memgraph_uri="bolt://x", tenant="acme", yes=False, graph_timeout=5.0)
+    assert _graph_relabel_preflight(args) == 2  # 6 edges already tenanted → refused
+
+
+def test_graph_relabel_preflight_noop_without_memgraph(monkeypatch):
+    import argparse
+
+    args = argparse.Namespace(memgraph_uri=None, tenant="acme", yes=False, graph_timeout=5.0)
+    assert _graph_relabel_preflight(args) == 0  # no graph configured → no gate
+
+
+def test_sync_file_links_unscoped_delete_skips_tenant_edges():
+    # An unscoped re-index (e.g. index-markdown) must not delete a tenant's edges
+    # after the graph has been migrated — the DELETE clears only tenant-less edges.
+    session = _RecordingSession()
+    store = _store_with(session)
+    store.sync_file_links("a.md", ["b.md"], index_root="/root")  # tenant=None
+    del_cypher = next(c for c, _ in session.calls if "DELETE r" in c)
+    assert "WHERE r.tenant IS NULL" in del_cypher
+
+
+def test_add_file_tags_adapter_receives_tenant():
+    from mnemostack.ingest import IngestItem, _sync_wrapper_graph
+
+    got: dict[str, Any] = {}
+
+    class _Adapter:  # no .driver → add_file_tags path; accepts tenant
+        def add_file_tags(self, name, path, indexed_date, tags, tenant=None):
+            got["tenant"] = tenant
+
+    item = IngestItem(source="a.txt", text="hi", metadata={"tags": ["x"]})
+    _sync_wrapper_graph(_Adapter(), item, "pid", tenant="acme")
+    assert got["tenant"] == "acme"
+
+
+def test_add_file_tags_legacy_adapter_falls_back_to_tenant_add_triple():
+    # A legacy add_file_tags (no tenant kwarg) can't scope, so under a tenant we
+    # skip it and use the tenant-threading add_triple path instead.
+    from mnemostack.ingest import IngestItem, _sync_wrapper_graph
+
+    seen: list[tuple[str, str | None]] = []
+
+    class _LegacyAdapter:
+        def add_file_tags(self, name, path, indexed_date, tags):  # no tenant
+            seen.append(("add_file_tags", None))
+
+        def add_triple(self, subject, predicate, obj, subject_label="Entity",
+                       obj_label="Entity", properties=None, tenant=None):
+            seen.append(("add_triple", tenant))
+
+    item = IngestItem(source="a.txt", text="hi", metadata={"tags": ["x"]})
+    _sync_wrapper_graph(_LegacyAdapter(), item, "pid", tenant="acme")
+    assert ("add_triple", "acme") in seen and ("add_file_tags", None) not in seen
 
 
 def test_ingest_fallback_adapter_without_tenant_kwarg():

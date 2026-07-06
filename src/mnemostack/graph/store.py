@@ -198,12 +198,20 @@ class GraphStore:
         common = {"root": root}
         if tenant is not None:
             common["tenant"] = tenant
-        # Pin the far end of the edge AND the edge itself to the tenant (not just
-        # the source): the edges this function writes are always same-tenant, so
-        # this is defense-in-depth — a stray cross-tenant edge (bad migration,
-        # hand-edited data) is left untouched rather than deleted from under it.
-        del_target = "{tenant: $tenant}" if tenant is not None else ""
-        del_where = " WHERE r.tenant = $tenant" if tenant is not None else ""
+        # Confine the edge-clearing DELETE to this tenant's edges. When scoped,
+        # pin the far end AND the edge to the tenant. When UNSCOPED, only clear
+        # tenant-less edges (`r.tenant IS NULL`) so an unscoped re-index (e.g.
+        # index-markdown, which has no --tenant) can't delete a tenant's LINKS_TO
+        # edges after the graph has been tenant-migrated — the source :File node's
+        # property map subset-matches a tenant-stamped node, but its tenant edges
+        # are left intact. On a pure single-tenant graph every edge is tenant-less,
+        # so this is a no-op.
+        if tenant is not None:
+            del_target = "{tenant: $tenant}"
+            del_where = " WHERE r.tenant = $tenant"
+        else:
+            del_target = ""
+            del_where = " WHERE r.tenant IS NULL"
         tx.run(
             f"MATCH (:File {{name: $src, index_root: $root{tk}}})"
             f"-[r:LINKS_TO]->({del_target}){del_where} DELETE r",

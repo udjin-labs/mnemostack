@@ -360,6 +360,14 @@ def cmd_tenant_migrate(args: argparse.Namespace) -> int:
         )
         return 2
 
+    # Preflight the GRAPH --all relabel gate BEFORE mutating Qdrant, so a graph
+    # that already carries tenants can't force the command to stamp the vectors
+    # and then abort — leaving the collection migrated but the graph untouched.
+    if args.all and not args.dry_run and not args.yes:
+        rc = _graph_relabel_preflight(args)
+        if rc != 0:
+            return rc
+
     pending = missing if only_missing else total
     scope = "without a tenant_id" if only_missing else "in the collection"
     if args.dry_run:
@@ -398,23 +406,6 @@ def _graph_stamp_tenant(args: argparse.Namespace, only_missing: bool, *, dry_run
         print(f"error: cannot reach graph at {memgraph_uri}: {e}", file=sys.stderr)
         return 1
     try:
-        # Safety mirror of the vector --yes gate, but for the GRAPH: an actual
-        # --all relabel rewrites every node/edge, so if the graph already carries
-        # tenant values (a real multi-tenant graph, not a legacy single-tenant one)
-        # require --yes — the vector gate above only inspects Qdrant, so a graph
-        # with tenants could otherwise be collapsed even when the collection isn't.
-        if not only_missing and not dry_run and not getattr(args, "yes", False):
-            total = gs.stamp_tenant(args.tenant, only_missing=False, dry_run=True)["nodes"]
-            missing = gs.stamp_tenant(args.tenant, only_missing=True, dry_run=True)["nodes"]
-            already = total - missing
-            if already > 0:
-                print(
-                    f"error: {already} graph node(s) already carry a tenant; --all would "
-                    f"relabel every node/edge to '{args.tenant}'. Pass --yes to confirm, "
-                    "or run without --all to stamp only untenanted records.",
-                    file=sys.stderr,
-                )
-                return 2
         counts = gs.stamp_tenant(args.tenant, only_missing=only_missing, dry_run=dry_run)
     except Exception as e:  # noqa: BLE001
         print(f"error: graph tenant stamp failed: {e}", file=sys.stderr)
@@ -426,6 +417,54 @@ def _graph_stamp_tenant(args: argparse.Namespace, only_missing: bool, *, dry_run
         f"graph: {action} tenant='{args.tenant}' onto {counts['nodes']} node(s) "
         f"and {counts['relationships']} relationship(s)"
     )
+    return 0
+
+
+def _graph_relabel_preflight(args: argparse.Namespace) -> int:
+    """Gate a graph ``--all`` force-relabel behind ``--yes`` when the graph already
+    carries tenants — run *before* any store is mutated (see ``cmd_tenant_migrate``).
+
+    The vector ``--yes`` gate only inspects Qdrant, so a graph that already holds
+    tenant values (a real multi-tenant graph) could otherwise be collapsed into one
+    tenant. Counts both **nodes and relationships** carrying a tenant, since the
+    relabel rewrites edges too. Returns 0 (ok / no graph), 1 (unreachable), or 2
+    (refused — needs ``--yes``).
+    """
+    if getattr(args, "yes", False):
+        return 0  # operator confirmed the relabel
+    memgraph_uri = getattr(args, "memgraph_uri", None) or None
+    if not memgraph_uri:
+        return 0
+    from .graph.factory import make_graph_store
+
+    try:
+        gs = make_graph_store(
+            memgraph_uri,
+            timeout=getattr(args, "graph_timeout", 5.0),
+            **_graph_auth(args),
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"error: cannot reach graph at {memgraph_uri}: {e}", file=sys.stderr)
+        return 1
+    try:
+        total = gs.stamp_tenant(args.tenant, only_missing=False, dry_run=True)
+        missing = gs.stamp_tenant(args.tenant, only_missing=True, dry_run=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"error: graph tenant check failed: {e}", file=sys.stderr)
+        return 1
+    finally:
+        gs.close()
+    already = (total["nodes"] - missing["nodes"]) + (
+        total["relationships"] - missing["relationships"]
+    )
+    if already > 0:
+        print(
+            f"error: {already} graph record(s) (nodes + edges) already carry a tenant; "
+            f"--all would relabel every node/edge to '{args.tenant}'. Pass --yes to "
+            "confirm, or run without --all to stamp only untenanted records.",
+            file=sys.stderr,
+        )
+        return 2
     return 0
 
 

@@ -272,6 +272,23 @@ def _write_wrapper_file(wrapper_dir: Path, item: IngestItem, point_id: str) -> b
     return existed
 
 
+def _accepts_kw(fn: Any, name: str) -> bool:
+    """Whether ``fn`` accepts a keyword arg ``name`` (or **kwargs).
+
+    Lets us thread ``tenant`` into a duck-typed graph adapter only when its
+    signature supports it, so a legacy adapter isn't broken by an unexpected kwarg.
+    """
+    import inspect
+
+    try:
+        params = inspect.signature(fn).parameters
+    except (ValueError, TypeError):
+        return False
+    if name in params:
+        return True
+    return any(p.kind is p.VAR_KEYWORD for p in params.values())
+
+
 def _sync_wrapper_graph(
     graph: Any, item: IngestItem, point_id: str, *, tenant: str | None = None
 ) -> None:
@@ -308,12 +325,17 @@ def _sync_wrapper_graph(
         with graph.driver.session(database=database) as session:
             session.run(query, **params)
         return
-    if hasattr(graph, "add_file_tags"):
-        graph.add_file_tags(name=name, path=item.source, indexed_date=indexed_date, tags=tags)
+    if hasattr(graph, "add_file_tags") and (tenant is None or _accepts_kw(graph.add_file_tags, "tenant")):
+        # Use the adapter's own hook, threading tenant only when it accepts it.
+        fkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
+        graph.add_file_tags(
+            name=name, path=item.source, indexed_date=indexed_date, tags=tags, **fkw
+        )
         return
-    # Only pass tenant= when it's actually set, so a custom graph adapter with the
-    # legacy add_triple signature (no tenant kwarg) doesn't raise TypeError and
-    # silently stop syncing tags in an ordinary single-tenant ingest.
+    # Fallback (and: tenant set but add_file_tags can't scope it) → add_triple,
+    # which threads tenant, so the tags land in the tenant's subgraph rather than
+    # unscoped. Only pass tenant= when set, so a legacy add_triple signature (no
+    # tenant kwarg) doesn't TypeError and silently drop tags in single-tenant use.
     tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
     for tag in tags:
         graph.add_triple(
