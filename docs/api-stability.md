@@ -181,9 +181,13 @@ public. Without `--auth` the tools behave exactly as listed above.
   read/write/delete methods take an **optional keyword `tenant=`** (additive,
   default `None` = single-tenant, unchanged behavior); when set, the server stamps
   and filters on the `tenant_id` payload key and refuses to touch another tenant's
-  points — a cross-tenant `upsert` / `set_payload` / `delete_points` raises
-  `TenantConflictError`. `stamp_tenant(tenant, only_missing=True)` backfills the
-  key on a pre-tenant collection.
+  points. Two enforcement shapes: `upsert` / `upsert_batch` **raise
+  `TenantConflictError`** if an id is already owned by a different tenant (a guessed
+  id can't overwrite another tenant's point), while the id-targeted owner-guarded
+  writes — `set_payload`, `invalidate`, `delete_payload_keys`, `delete_points` —
+  **silently skip** foreign-owned ids (they leave them untouched and return without
+  error, so don't write `except TenantConflictError` around them). `stamp_tenant(
+  tenant, only_missing=True)` backfills the key on a pre-tenant collection.
 - **Embeddings**: `EmbeddingProvider` (incl. `health_check`), `get_provider`,
   `list_providers`, `register_provider`.
 - **LLM**: `LLMProvider` (incl. `health_check`), `LLMResponse`, `get_llm`,
@@ -258,9 +262,12 @@ pre-1.0.
 
 **The boundary is server-enforced.** A tenant is a string carried in the
 server-owned `tenant_id` payload key. Writes stamp it, reads filter on it, and the
-store refuses cross-tenant writes/deletes (`TenantConflictError`) — a client can
-never assert a tenant it wasn't issued. `filter_by_tenant` is a defense-in-depth
-backstop on the recall path.
+store refuses to cross tenants — a client can never assert a tenant it wasn't
+issued. Enforcement has two shapes (see the Vector entry above): `upsert` **raises
+`TenantConflictError`** on a conflicting id; the id-targeted owner-guards
+(`set_payload`, `invalidate`, `delete_payload_keys`, `delete_points`) **silently
+skip** foreign-owned ids. `filter_by_tenant` is a defense-in-depth backstop on the
+recall path.
 
 **Who sets the tenant.** In the library you pass `tenant=` explicitly. On the HTTP
 and MCP surfaces the tenant is *derived from a service key*, never taken from the
@@ -269,7 +276,13 @@ request body:
 1. Issue a key: `mnemostack keys add --tenant acme --scopes read,write`
    (plaintext shown once; stored SHA-256-hashed in the keys file).
 2. Scopes gate operations: `read` → recall/answer, `write` → invalidate/feedback,
-   `admin` implies all.
+   `admin` implies all. **Caveat — `feedback` is access-gated but not
+   tenant-partitioned:** its Q-learning / inhibition-of-return learning state is
+   process-global, so a `write`-scoped tenant's feedback can shift ranking state
+   shared with other tenants on the same process. Until per-tenant state lands
+   (planned follow-up), don't expose `feedback` across mutually-distrusting tenants
+   on one process — run a process per trust boundary, or leave feedback to a
+   trusted operator.
 3. Run the surface with auth on:
    - HTTP: `mnemostack serve --auth` — clients present the key as a bearer token;
      `/recall` `/answer` `/feedback` are default-deny, health/status/metrics stay
@@ -280,11 +293,23 @@ request body:
    `MNEMOSTACK_AUTH_ENABLED` / `MNEMOSTACK_API_KEY` are the env equivalents of
    `--auth` / `--api-key`.
 
-**Current limitation (graph).** The graph (Memgraph) is **not tenant-scoped yet**.
-Under an authenticated tenant the MCP graph tools fail closed and the recall
-pipeline's graph-resurrection stage is disabled, so no tenant can read another's
-graph nodes. Graph tenant scoping is planned follow-up work; until it lands, keep
-per-tenant graphs in separate databases if you need graph recall under auth.
+**Current limitation (graph).** The graph (Memgraph) is **not tenant-scoped yet**,
+and the two surfaces guard it differently:
+
+- **MCP** (`mcp-serve --auth`): the graph tools fail closed, and the recall
+  pipeline is built with **no graph** under auth, so its graph-resurrection stage
+  never runs.
+- **HTTP** (`serve --auth`): the pipeline is built with the configured graph
+  **regardless of auth**, so graph resurrection still opens and queries the shared
+  Memgraph. No tenant reads another's graph nodes — the `filter_by_tenant` backstop
+  drops the (tenant-less) graph hits before they reach the caller — but the graph
+  is still contacted per recall. So under `serve --auth`, a slow or blackholed
+  Memgraph still adds latency; it is **not** skipped the way MCP skips it.
+
+Either way no tenant can read another's graph nodes. Graph tenant scoping is
+planned follow-up work; until it lands, keep per-tenant graphs in separate
+databases (or, for HTTP, run with `--memgraph-uri ""`) if you need isolation
+without the shared-graph query.
 
 ## On-disk / payload contracts
 
@@ -295,8 +320,10 @@ Covered in detail in [migration notes](migration-0.8-to-1.0.md). Summary:
   `tags`. Frontmatter keys from markdown are your own namespace.
 - 🟢 **`tenant_id`** — the multi-tenant partition key. It is **server-owned**:
   set only when a write passes `tenant=`, and the client can never assert or
-  change it (an attempt raises `TenantConflictError`). Absent on single-tenant
-  collections; back-fillable via `VectorStore.stamp_tenant`.
+  change it — a caller `tenant_id` in an `upsert` is overridden (or rejected with
+  `TenantConflictError` if the id is another tenant's), and a `set_payload` under a
+  tenant restores the server-owned value rather than let the merge change it.
+  Absent on single-tenant collections; back-fillable via `VectorStore.stamp_tenant`.
 - 🟡 The sliding-window keys (`chunk_window`, `chunk_kind`,
   `chunk_start_offset`, `chunk_end_offset`) and `heading_path`.
 - 🔴 Ownership records (`_enrich_keys`, `_md_keys`) and `_`-prefixed keys.
