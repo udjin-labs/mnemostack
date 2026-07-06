@@ -19,12 +19,21 @@ from qdrant_client.models import (
     FieldCondition,
     Filter,
     MatchValue,
+    PayloadSchemaType,
     PointStruct,
     Range,
     VectorParams,
 )
 
-from .qdrant import DimensionMismatchError, Hit, _hide_invalidated_condition
+from .qdrant import (
+    TENANT_ID_KEY,
+    DimensionMismatchError,
+    Hit,
+    TenantConflictError,
+    _hide_invalidated_condition,
+    _stamp_tenant,
+    _tenant_condition,
+)
 
 
 class AsyncVectorStore:
@@ -78,6 +87,16 @@ class AsyncVectorStore:
                 collection_name=self.collection,
                 vectors_config=VectorParams(size=self.dimension, distance=self.distance),
             )
+            # Index tenant_id (the mandatory tenant filter) — mirror of the sync
+            # store, so async-bootstrapped shared collections filter efficiently.
+            try:
+                await self.client.create_payload_index(
+                    collection_name=self.collection,
+                    field_name=TENANT_ID_KEY,
+                    field_schema=PayloadSchemaType.KEYWORD,
+                )
+            except Exception:  # noqa: BLE001
+                pass  # already indexed or local Qdrant (payload indexes are a no-op there)
             return True
         await self._validate_dimension()
         return False
@@ -93,36 +112,104 @@ class AsyncVectorStore:
                 f"Re-index with --recreate or switch the embedding model."
             )
 
-    async def count(self) -> int:
+    async def count(self, tenant: str | None = None) -> int:
+        if tenant is not None:
+            result = await self.client.count(
+                collection_name=self.collection,
+                count_filter=Filter(must=[_tenant_condition(tenant)]),
+            )
+            return result.count
         info = await self.client.get_collection(self.collection)
         return info.points_count or 0
+
+    async def _assert_tenant_owned(self, ids: list[str | int], tenant: str) -> None:
+        """Refuse to overwrite points already owned by a *different* tenant
+        (async mirror of ``VectorStore._assert_tenant_owned``)."""
+        found = await self.client.retrieve(
+            collection_name=self.collection, ids=list(ids), with_payload=[TENANT_ID_KEY]
+        )
+        conflicts = [
+            p.id
+            for p in found
+            if (owner := (p.payload or {}).get(TENANT_ID_KEY)) is not None and owner != tenant
+        ]
+        if conflicts:
+            raise TenantConflictError(
+                f"{len(conflicts)} point id(s) already owned by another tenant "
+                f"(e.g. {conflicts[0]!r}); tenant-scoped upsert will not overwrite them"
+            )
+
+    async def _existing_tenants(self, ids: list[str | int]) -> dict[Any, str]:
+        """Map ``id -> tenant_id`` for the given ids that exist and carry an owner."""
+        found = await self.client.retrieve(
+            collection_name=self.collection, ids=list(ids), with_payload=[TENANT_ID_KEY]
+        )
+        return {p.id: t for p in found if (t := (p.payload or {}).get(TENANT_ID_KEY)) is not None}
 
     async def upsert(
         self,
         id: str | int,
         vector: list[float],
         payload: dict[str, Any] | None = None,
+        *,
+        tenant: str | None = None,
     ) -> None:
+        stamped = _stamp_tenant(payload, tenant)
+        if tenant is not None:
+            await self._assert_tenant_owned([id], tenant)
+        elif (owner := (await self._existing_tenants([id])).get(id)) is not None:
+            stamped[TENANT_ID_KEY] = owner  # preserve existing owner on unscoped replace
         await self.client.upsert(
             collection_name=self.collection,
-            points=[PointStruct(id=id, vector=vector, payload=payload or {})],
+            points=[PointStruct(id=id, vector=vector, payload=stamped)],
         )
 
     async def upsert_batch(
         self,
         points: list[tuple[str | int, list[float], dict[str, Any]]],
         batch_size: int = 100,
+        *,
+        tenant: str | None = None,
     ) -> int:
         total = 0
         for i in range(0, len(points), batch_size):
             chunk = points[i : i + batch_size]
-            structs = [PointStruct(id=pid, vector=vec, payload=pl or {}) for pid, vec, pl in chunk]
+            if tenant is not None:
+                await self._assert_tenant_owned([pid for pid, _, _ in chunk], tenant)
+                structs = [
+                    PointStruct(id=pid, vector=vec, payload=_stamp_tenant(pl, tenant))
+                    for pid, vec, pl in chunk
+                ]
+            else:
+                owners = await self._existing_tenants([pid for pid, _, _ in chunk])
+                structs = []
+                for pid, vec, pl in chunk:
+                    p = _stamp_tenant(pl, None)
+                    if pid in owners:
+                        p[TENANT_ID_KEY] = owners[pid]
+                    structs.append(PointStruct(id=pid, vector=vec, payload=p))
             await self.client.upsert(collection_name=self.collection, points=structs)
             total += len(structs)
         return total
 
-    async def set_payload(self, id: str | int, payload: dict[str, Any]) -> None:
-        """Merge payload keys into an existing point (vector untouched)."""
+    async def set_payload(
+        self, id: str | int, payload: dict[str, Any], *, tenant: str | None = None
+    ) -> None:
+        """Merge payload keys into an existing point (vector untouched).
+
+        With ``tenant`` set, the write is skipped unless the point belongs to
+        that tenant; with no tenant a caller ``tenant_id`` is dropped from the
+        merge so an unscoped refresh can't inject an owner (mirror of
+        ``VectorStore.set_payload``)."""
+        if tenant is not None:
+            found = await self.client.retrieve(
+                collection_name=self.collection, ids=[id], with_payload=True
+            )
+            if not found or (found[0].payload or {}).get(TENANT_ID_KEY) != tenant:
+                return
+            payload = {**payload, TENANT_ID_KEY: tenant}
+        else:
+            payload = {k: v for k, v in payload.items() if k != TENANT_ID_KEY}
         await self.client.set_payload(
             collection_name=self.collection,
             payload=payload,
@@ -136,6 +223,7 @@ class AsyncVectorStore:
         invalidated_at: str | None = None,
         valid_until: str | None = None,
         index_root: str | None = None,
+        tenant: str | None = None,
     ) -> int:
         """Async mirror of ``VectorStore.invalidate``."""
         if isinstance(ids, (str, int)):
@@ -161,6 +249,8 @@ class AsyncVectorStore:
                 owner = current.get("index_root")
                 if owner is not None and owner != index_root:
                     continue
+            if tenant is not None and current.get(TENANT_ID_KEY) != tenant:
+                continue
             target.append(pid)
         if not target:
             return 0
@@ -177,8 +267,11 @@ class AsyncVectorStore:
         min_score: float = 0.0,
         *,
         hide_invalidated: bool = False,
+        tenant: str | None = None,
     ) -> list[Hit]:
         must: list[Any] = list(self._build_filter(filters).must or []) if filters else []
+        if tenant is not None:
+            must.append(_tenant_condition(tenant))
         if hide_invalidated:
             must.append(_hide_invalidated_condition())
         qfilter = Filter(must=must) if must else None

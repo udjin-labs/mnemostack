@@ -14,6 +14,7 @@ from qdrant_client.models import (
     Distance,
     FieldCondition,
     Filter,
+    FilterSelector,
     IsEmptyCondition,
     MatchValue,
     PayloadField,
@@ -28,6 +29,37 @@ from qdrant_client.models import (
 #: the vector layer doesn't depend on the recall layer; mirrors
 #: ``recall.validity.INVALIDATED_AT``.
 _INVALIDATED_AT_KEY = "invalidated_at"
+
+#: Payload key carrying a point's tenant. When a ``tenant`` is passed to a read
+#: it becomes a mandatory ``must`` filter (server-enforced isolation — see
+#: docs/api-stability and the multi-tenant design); when passed to a write it is
+#: stamped onto the payload, overriding any caller-supplied value so a client
+#: can never write into another tenant's namespace.
+TENANT_ID_KEY = "tenant_id"
+
+
+def _tenant_condition(tenant: str) -> FieldCondition:
+    """Qdrant predicate restricting a query to one tenant's points."""
+    return FieldCondition(key=TENANT_ID_KEY, match=MatchValue(value=tenant))
+
+
+def _stamp_tenant(payload: dict[str, Any] | None, tenant: str | None) -> dict[str, Any]:
+    """Return the payload with a server-owned ``tenant_id``.
+
+    With a tenant, the server value always wins over a caller-provided
+    ``tenant_id`` so a write can't be redirected into another tenant. With **no**
+    tenant the key is **stripped**: an unscoped write must never carry a caller
+    ``tenant_id`` (e.g. from markdown frontmatter passed straight into the
+    payload), or unauthenticated content could inject itself into a tenant's
+    scoped reads. The explicit migration path (``stamp_tenant``) sets
+    ``tenant_id`` directly, not through here.
+    """
+    base = dict(payload or {})
+    if tenant is not None:
+        base[TENANT_ID_KEY] = tenant
+    else:
+        base.pop(TENANT_ID_KEY, None)
+    return base
 
 
 def _hide_invalidated_condition() -> IsEmptyCondition:
@@ -47,6 +79,15 @@ def _hide_invalidated_condition() -> IsEmptyCondition:
 
 class DimensionMismatchError(ValueError):
     """Existing collection stores vectors of a different size than the provider produces."""
+
+
+class TenantConflictError(ValueError):
+    """A tenant-scoped write targets a point id already owned by another tenant.
+
+    The tenant boundary is server-owned: a caller who guesses another tenant's
+    (deterministic) point id must not be able to overwrite it. Raised instead of
+    silently replacing the foreign point.
+    """
 
 
 @dataclass
@@ -109,6 +150,10 @@ class VectorStore:
                 collection_name=self.collection,
                 vectors_config=VectorParams(size=self.dimension, distance=self.distance),
             )
+            # Index tenant_id: it's the mandatory filter on every tenant-scoped
+            # read, so in a large shared collection a small-tenant search/count
+            # would otherwise degrade to collection-wide filtered work.
+            self.index_payload_field(TENANT_ID_KEY, PayloadSchemaType.KEYWORD)
             return True
         self._validate_dimension()
         return False
@@ -133,7 +178,14 @@ class VectorStore:
         except Exception:  # noqa: BLE001
             pass  # already indexed or collection not ready
 
-    def count(self) -> int:
+    def count(self, tenant: str | None = None) -> int:
+        if tenant is not None:
+            # Scoped count: only this tenant's points (collection-wide
+            # points_count can't be filtered).
+            return self.client.count(
+                collection_name=self.collection,
+                count_filter=Filter(must=[_tenant_condition(tenant)]),
+            ).count
         info = self.client.get_collection(self.collection)
         return info.points_count or 0
 
@@ -147,17 +199,23 @@ class VectorStore:
         batch_size: int = 256,
         filters: dict[str, Any] | None = None,
         with_vectors: bool = False,
+        *,
+        tenant: str | None = None,
     ):
-        """Iterate over ALL points in the collection lazily.
+        """Iterate over points in the collection lazily.
 
         Memory-efficient: never loads the whole collection at once. Good for:
         - Re-indexing after schema changes
         - Bulk export / migration
         - Aggregation over entire corpus
 
-        Yields `Hit` objects (score=1.0 since this isn't a similarity query).
+        With ``tenant`` set, only that tenant's points are yielded. Yields `Hit`
+        objects (score=1.0 since this isn't a similarity query).
         """
-        qfilter = self._build_filter(filters) if filters else None
+        must: list[Any] = list(self._build_filter(filters).must or []) if filters else []
+        if tenant is not None:
+            must.append(_tenant_condition(tenant))
+        qfilter = Filter(must=must) if must else None
         next_offset: Any = None
         while True:
             points, next_offset = self.client.scroll(
@@ -180,9 +238,14 @@ class VectorStore:
         self,
         batch_size: int = 1024,
         filters: dict[str, Any] | None = None,
+        *,
+        tenant: str | None = None,
     ):
         """Lightweight iteration returning only point IDs. Faster than scroll()."""
-        qfilter = self._build_filter(filters) if filters else None
+        must: list[Any] = list(self._build_filter(filters).must or []) if filters else []
+        if tenant is not None:
+            must.append(_tenant_condition(tenant))
+        qfilter = Filter(must=must) if must else None
         next_offset: Any = None
         while True:
             points, next_offset = self.client.scroll(
@@ -202,62 +265,224 @@ class VectorStore:
 
     # ---------- write ----------
 
+    def _assert_tenant_owned(self, ids: list[str | int], tenant: str) -> None:
+        """Refuse to overwrite points already owned by a *different* tenant.
+
+        A full-point ``upsert`` replaces the whole point, so without this guard a
+        tenant-scoped caller who supplies another tenant's id would take it over
+        and re-stamp it. Points that don't exist or are unowned (no ``tenant_id``,
+        e.g. pre-migration legacy data) are free to write; a point stamped with a
+        different tenant raises ``TenantConflictError``.
+
+        Concurrency: this is a check-then-write and Qdrant has no compare-and-swap,
+        so a precisely-timed concurrent write to the *same* id by two tenants can
+        race past the check. The primary defense is the id scheme, not this guard —
+        ``stable_chunk_id(..., tenant=)`` prefixes the tenant, so honest
+        tenant-scoped writers never compute the same id and never collide; the race
+        exists only for an attacker deliberately targeting another tenant's guessed
+        id (a tamper, not a read leak). A per-process lock would not close it for
+        the real multi-tenant deployment (multiple server processes on one Qdrant)
+        and would only add contention — for a hard guarantee under adversarial
+        concurrent writes, serialize writes per collection or front the store with a
+        compare-and-swap-capable layer.
+        """
+        found = self.client.retrieve(
+            collection_name=self.collection, ids=list(ids), with_payload=[TENANT_ID_KEY]
+        )
+        conflicts = [
+            p.id
+            for p in found
+            if (owner := (p.payload or {}).get(TENANT_ID_KEY)) is not None and owner != tenant
+        ]
+        if conflicts:
+            raise TenantConflictError(
+                f"{len(conflicts)} point id(s) already owned by another tenant "
+                f"(e.g. {conflicts[0]!r}); tenant-scoped upsert will not overwrite them"
+            )
+
+    def _existing_tenants(self, ids: list[str | int]) -> dict[Any, str]:
+        """Map ``id -> tenant_id`` for the given ids that exist and carry an owner."""
+        found = self.client.retrieve(
+            collection_name=self.collection, ids=list(ids), with_payload=[TENANT_ID_KEY]
+        )
+        return {p.id: t for p in found if (t := (p.payload or {}).get(TENANT_ID_KEY)) is not None}
+
     def upsert(
         self,
         id: str | int,
         vector: list[float],
         payload: dict[str, Any] | None = None,
+        *,
+        tenant: str | None = None,
     ) -> None:
+        stamped = _stamp_tenant(payload, tenant)
+        if tenant is not None:
+            self._assert_tenant_owned([id], tenant)
+        elif (owner := self._existing_tenants([id]).get(id)) is not None:
+            # Unscoped upsert is a full replace: preserve an existing owner so an
+            # unscoped re-index of a migrated point doesn't silently orphan it
+            # (the caller's own tenant_id was already stripped by _stamp_tenant).
+            stamped[TENANT_ID_KEY] = owner
         self.client.upsert(
             collection_name=self.collection,
-            points=[PointStruct(id=id, vector=vector, payload=payload or {})],
+            points=[PointStruct(id=id, vector=vector, payload=stamped)],
         )
 
     def upsert_batch(
         self,
         points: list[tuple[str | int, list[float], dict[str, Any]]],
         batch_size: int = 100,
+        *,
+        tenant: str | None = None,
     ) -> int:
-        """Upsert a batch of (id, vector, payload) tuples. Returns count inserted."""
+        """Upsert a batch of (id, vector, payload) tuples. Returns count inserted.
+
+        With ``tenant`` set, every point's payload is stamped with it (the tenant
+        wins over any caller-supplied ``tenant_id``), and any id already owned by
+        a different tenant raises ``TenantConflictError`` before the chunk is
+        written (the batch is not partially applied past the offending chunk).
+        Unscoped (``tenant=None``) strips a caller ``tenant_id`` but preserves an
+        existing point's owner (one ownership read per chunk) so an unscoped
+        re-index doesn't orphan migrated points."""
         total = 0
         for i in range(0, len(points), batch_size):
             chunk = points[i : i + batch_size]
-            structs = [PointStruct(id=pid, vector=vec, payload=pl or {}) for pid, vec, pl in chunk]
+            if tenant is not None:
+                self._assert_tenant_owned([pid for pid, _, _ in chunk], tenant)
+                structs = [
+                    PointStruct(id=pid, vector=vec, payload=_stamp_tenant(pl, tenant))
+                    for pid, vec, pl in chunk
+                ]
+            else:
+                owners = self._existing_tenants([pid for pid, _, _ in chunk])
+                structs = []
+                for pid, vec, pl in chunk:
+                    p = _stamp_tenant(pl, None)
+                    if pid in owners:
+                        p[TENANT_ID_KEY] = owners[pid]
+                    structs.append(PointStruct(id=pid, vector=vec, payload=p))
             self.client.upsert(collection_name=self.collection, points=structs)
             total += len(structs)
         return total
 
-    def set_payload(self, id: str | int, payload: dict[str, Any]) -> None:
+    def set_payload(
+        self, id: str | int, payload: dict[str, Any], *, tenant: str | None = None
+    ) -> None:
         """Merge payload keys into an existing point without re-embedding.
 
         The vector is untouched — this is the cheap path for applying new
         payload fields (enrichment output, index_root) to already-indexed
         points. Merge semantics: keys not present in *payload* are kept.
+
+        With ``tenant`` set, the write is skipped unless the point belongs to
+        that tenant — so a caller who knows another tenant's (deterministic)
+        point id still can't relabel or overwrite it. ``payload`` also can't
+        change ``tenant_id`` under a tenant: the server-owned value is restored.
+        With **no** tenant a caller ``tenant_id`` is dropped from the merge (an
+        unscoped refresh e.g. of markdown frontmatter must not inject an owner);
+        merge semantics leave any existing owner intact.
         """
+        if tenant is not None:
+            found = self.client.retrieve(
+                collection_name=self.collection, ids=[id], with_payload=True
+            )
+            if not found or (found[0].payload or {}).get(TENANT_ID_KEY) != tenant:
+                return  # point missing or owned by another tenant — never touch it
+            payload = {**payload, TENANT_ID_KEY: tenant}  # payload can't reassign tenant
+        else:
+            payload = {k: v for k, v in payload.items() if k != TENANT_ID_KEY}
         self.client.set_payload(
             collection_name=self.collection,
             payload=payload,
             points=[id],
         )
 
-    def delete_payload_keys(self, id: str | int, keys: list[str]) -> None:
-        """Remove specific payload keys from a point (vector untouched)."""
+    def stamp_tenant(self, tenant: str, *, only_missing: bool = True) -> int:
+        """Assign ``tenant_id`` to existing points (multi-tenant migration).
+
+        Moves a legacy single-tenant corpus into one named tenant with a
+        server-side payload-only merge — **ids and vectors are untouched**. With
+        ``only_missing`` (default), points that already carry a ``tenant_id`` are
+        left untouched, so it's safe to re-run and safe against a partially
+        migrated collection. Returns the number of points stamped.
+
+        Idempotency note: a tenant-aware re-ingest of the *same* content via
+        ``Ingestor(tenant=...)`` computes a tenant-scoped ``stable_chunk_id`` that
+        differs from a migrated point's legacy id, so a plain re-ingest would add a
+        second (tenant-scoped) point beside the migrated one. Reconcile by running
+        the first post-migration re-ingest with ``--prune`` (tenant-scoped), which
+        drops the legacy stragglers. Re-keying here is deliberately avoided: id
+        derivation differs per indexer (the markdown indexer folds ``index_root``
+        into the hash and is not tenant-scoped), so the store can't reproduce every
+        ingester's id from payload alone — pruning is the reliable reconciliation.
+        """
+        must: list[Any] = []
+        if only_missing:
+            must.append(IsEmptyCondition(is_empty=PayloadField(key=TENANT_ID_KEY)))
+        sel = Filter(must=must)
+        n = self.client.count(collection_name=self.collection, count_filter=sel).count
+        if n:
+            self.client.set_payload(
+                collection_name=self.collection,
+                payload={TENANT_ID_KEY: tenant},
+                points=FilterSelector(filter=sel),
+            )
+        # A pre-existing collection was created before tenant_id existed, so
+        # ensure_collection() never indexed it. Add the KEYWORD index here so
+        # post-migration tenant-scoped reads on this large collection stay fast.
+        self.index_payload_field(TENANT_ID_KEY, PayloadSchemaType.KEYWORD)
+        return n
+
+    def delete_payload_keys(
+        self, id: str | int, keys: list[str], *, tenant: str | None = None
+    ) -> None:
+        """Remove specific payload keys from a point (vector untouched).
+
+        ``tenant_id`` is the server-owned isolation field and is **silently
+        skipped** — it's never removed this way (stripping it would make the point
+        vanish from its owner's scoped reads), so a payload refresh that lists it
+        among stale keys drops the rest without aborting. With ``tenant`` set, the
+        delete is skipped unless the point belongs to that tenant.
+        """
+        keys = [k for k in keys if k != TENANT_ID_KEY]
         if not keys:
             return
+        if tenant is not None:
+            found = self.client.retrieve(
+                collection_name=self.collection, ids=[id], with_payload=[TENANT_ID_KEY]
+            )
+            if not found or (found[0].payload or {}).get(TENANT_ID_KEY) != tenant:
+                return  # point missing or owned by another tenant — never touch it
         self.client.delete_payload(
             collection_name=self.collection,
             keys=keys,
             points=[id],
         )
 
-    def delete_points(self, ids: list[str | int], batch_size: int = 1000) -> int:
-        """Delete specific points by id. Returns count requested for deletion."""
+    def delete_points(
+        self, ids: list[str | int], batch_size: int = 1000, *, tenant: str | None = None
+    ) -> int:
+        """Delete specific points by id. Returns the number of points deleted.
+
+        With ``tenant`` set, only points owned by that tenant are deleted: a
+        caller who knows another tenant's deterministic point id can't delete it
+        by id (Qdrant deletes by id without applying the ``tenant_id`` filter, so
+        the ownership check is enforced here — the vector layer is the isolation
+        boundary). Without ``tenant`` every requested id is deleted (legacy).
+        """
         total = 0
         for i in range(0, len(ids), batch_size):
-            chunk = ids[i : i + batch_size]
+            chunk: list[Any] = list(ids[i : i + batch_size])
+            if tenant is not None:
+                found = self.client.retrieve(
+                    collection_name=self.collection, ids=chunk, with_payload=[TENANT_ID_KEY]
+                )
+                chunk = [p.id for p in found if (p.payload or {}).get(TENANT_ID_KEY) == tenant]
+                if not chunk:
+                    continue
             self.client.delete(
                 collection_name=self.collection,
-                points_selector=PointIdsList(points=list(chunk)),
+                points_selector=PointIdsList(points=chunk),
             )
             total += len(chunk)
         return total
@@ -269,6 +494,7 @@ class VectorStore:
         invalidated_at: str | None = None,
         valid_until: str | None = None,
         index_root: str | None = None,
+        tenant: str | None = None,
     ) -> int:
         """Mark chunks stale without deleting or re-embedding them.
 
@@ -315,6 +541,8 @@ class VectorStore:
                 owner = current.get("index_root")
                 if owner is not None and owner != index_root:
                     continue  # foreign root — never touch another root's chunks
+            if tenant is not None and current.get(TENANT_ID_KEY) != tenant:
+                continue  # foreign tenant — never invalidate another tenant's chunks
             target.append(pid)
         if not target:
             return 0
@@ -333,6 +561,7 @@ class VectorStore:
         min_score: float = 0.0,
         *,
         hide_invalidated: bool = False,
+        tenant: str | None = None,
     ) -> list[Hit]:
         """Semantic search with optional payload filters.
 
@@ -345,6 +574,8 @@ class VectorStore:
         client-side. The client-side ``filter_by_validity`` remains the backstop.
         """
         must: list[Any] = list(self._build_filter(filters).must or []) if filters else []
+        if tenant is not None:
+            must.append(_tenant_condition(tenant))
         if hide_invalidated:
             must.append(_hide_invalidated_condition())
         qfilter = Filter(must=must) if must else None

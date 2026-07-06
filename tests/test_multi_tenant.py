@@ -1,0 +1,502 @@
+"""Multi-tenant data-isolation boundary (vector layer).
+
+The security-critical property: with a `tenant` set, a read can NEVER see
+another tenant's points, and a write can NEVER land in another tenant's
+namespace — via any parameter combination. These run against an in-memory
+Qdrant (`:memory:`), no external services.
+"""
+
+from __future__ import annotations
+
+import pytest
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance
+
+from mnemostack.vector import TENANT_ID_KEY, TenantConflictError, VectorStore
+
+
+def _store() -> VectorStore:
+    s = VectorStore.__new__(VectorStore)
+    s.collection = "mt"
+    s.dimension = 4
+    s.distance = Distance.COSINE
+    s.client = QdrantClient(":memory:")
+    s.ensure_collection()
+    return s
+
+
+_VEC = [1.0, 0.0, 0.0, 0.0]
+
+
+def _seed_two_tenants(store: VectorStore) -> None:
+    # Same vector for both tenants so similarity can't be what separates them —
+    # only the tenant filter can.
+    store.upsert(1, _VEC, {"text": "alpha-1"}, tenant="alpha")
+    store.upsert(2, _VEC, {"text": "alpha-2"}, tenant="alpha")
+    store.upsert(3, _VEC, {"text": "beta-1"}, tenant="beta")
+
+
+def test_write_stamps_tenant_id():
+    store = _store()
+    store.upsert(1, _VEC, {"text": "x"}, tenant="alpha")
+    hit = store.search(_VEC, limit=1)[0]
+    assert hit.payload[TENANT_ID_KEY] == "alpha"
+
+
+def test_read_is_isolated_by_tenant():
+    store = _store()
+    _seed_two_tenants(store)
+
+    alpha = {h.id for h in store.search(_VEC, limit=10, tenant="alpha")}
+    beta = {h.id for h in store.search(_VEC, limit=10, tenant="beta")}
+    assert alpha == {1, 2}
+    assert beta == {3}
+    # No leakage in either direction.
+    assert alpha.isdisjoint(beta)
+
+
+def test_no_tenant_sees_everything_backward_compat():
+    # Single-tenant / legacy: without a tenant, search is unfiltered.
+    store = _store()
+    _seed_two_tenants(store)
+    all_ids = {h.id for h in store.search(_VEC, limit=10)}
+    assert all_ids == {1, 2, 3}
+
+
+def test_server_tenant_overrides_caller_supplied_tenant_id():
+    # A client can't smuggle a different tenant_id into the payload — the
+    # server-supplied tenant wins.
+    store = _store()
+    store.upsert(1, _VEC, {"text": "x", TENANT_ID_KEY: "evil"}, tenant="alpha")
+    hit = store.search(_VEC, limit=1, tenant="alpha")[0]
+    assert hit.payload[TENANT_ID_KEY] == "alpha"
+    # And it's genuinely not visible as tenant "evil".
+    assert store.search(_VEC, limit=10, tenant="evil") == []
+
+
+def test_count_is_tenant_scoped():
+    store = _store()
+    _seed_two_tenants(store)
+    assert store.count() == 3
+    assert store.count(tenant="alpha") == 2
+    assert store.count(tenant="beta") == 1
+
+
+def test_scroll_is_tenant_scoped():
+    store = _store()
+    _seed_two_tenants(store)
+    assert {h.id for h in store.scroll(tenant="alpha")} == {1, 2}
+    assert {h.id for h in store.scroll(tenant="beta")} == {3}
+
+
+def test_upsert_batch_stamps_tenant():
+    store = _store()
+    store.upsert_batch(
+        [(1, _VEC, {"text": "a"}), (2, _VEC, {"text": "b"})], tenant="alpha"
+    )
+    assert store.count(tenant="alpha") == 2
+    assert store.search(_VEC, limit=10, tenant="beta") == []
+
+
+def test_invalidate_will_not_touch_another_tenant():
+    store = _store()
+    _seed_two_tenants(store)
+    # Ask to invalidate beta's point (id 3) but scoped to tenant alpha -> skipped.
+    updated = store.invalidate([3], tenant="alpha")
+    assert updated == 0
+    # id 3 is still current (not hidden) for beta.
+    beta = {h.id for h in store.search(_VEC, limit=10, tenant="beta", hide_invalidated=True)}
+    assert 3 in beta
+    # Scoped to its own tenant, it invalidates.
+    assert store.invalidate([3], tenant="beta") == 1
+    beta_after = {
+        h.id for h in store.search(_VEC, limit=10, tenant="beta", hide_invalidated=True)
+    }
+    assert 3 not in beta_after
+
+
+@pytest.mark.parametrize("filters", [None, {"text": "alpha-1"}])
+def test_tenant_and_caller_filters_combine(filters):
+    # Caller filters AND with the tenant filter — they never widen scope.
+    store = _store()
+    _seed_two_tenants(store)
+    hits = store.search(_VEC, limit=10, filters=filters, tenant="alpha")
+    ids = {h.id for h in hits}
+    assert ids <= {1, 2}  # never beta's id 3
+    if filters:
+        assert ids == {1}
+
+
+def test_stamp_tenant_migration_is_idempotent():
+    # A legacy corpus with no tenant_id is migrated into one named tenant.
+    store = _store()
+    store.upsert(1, _VEC, {"text": "legacy-1"})
+    store.upsert(2, _VEC, {"text": "legacy-2"})
+    assert store.count(tenant="alpha") == 0  # not yet stamped
+
+    stamped = store.stamp_tenant("alpha", only_missing=True)
+    assert stamped == 2
+    assert store.count(tenant="alpha") == 2
+    # Re-run: nothing left to stamp (idempotent).
+    assert store.stamp_tenant("alpha", only_missing=True) == 0
+    # And a different tenant's later write isn't swept up by a re-run.
+    store.upsert(3, _VEC, {"text": "beta-1"}, tenant="beta")
+    assert store.stamp_tenant("alpha", only_missing=True) == 0
+    assert store.count(tenant="beta") == 1
+
+
+class _FakeEmbedder:
+    dimension = 4
+
+    @property
+    def name(self):
+        return "fake:mt"
+
+    def embed(self, text):
+        return _VEC
+
+    def embed_batch(self, texts):
+        return [_VEC for _ in texts]
+
+
+def test_ingestor_stamps_tenant():
+    from mnemostack import IngestItem, Ingestor
+
+    store = _store()
+    Ingestor(embedding=_FakeEmbedder(), vector_store=store, tenant="alpha").ingest(
+        [IngestItem(text="a note", source="n1"), IngestItem(text="another", source="n2")]
+    )
+    assert store.count(tenant="alpha") >= 1
+    assert store.search(_VEC, limit=10, tenant="beta") == []
+    for hit in store.search(_VEC, limit=10, tenant="alpha"):
+        assert hit.payload[TENANT_ID_KEY] == "alpha"
+
+
+def test_same_content_across_tenants_does_not_collide():
+    # Two tenants ingesting the IDENTICAL (source, offset, text) must NOT share a
+    # point id — otherwise the second write clobbers the first (data loss).
+    from mnemostack import IngestItem, Ingestor
+
+    store = _store()
+    item = IngestItem(text="shared content", source="doc.md")
+    Ingestor(embedding=_FakeEmbedder(), vector_store=store, tenant="alpha").ingest([item])
+    Ingestor(embedding=_FakeEmbedder(), vector_store=store, tenant="beta").ingest([item])
+
+    assert store.count(tenant="alpha") == 1
+    assert store.count(tenant="beta") == 1
+    assert store.count() == 2  # both survive — no clobber
+
+
+def test_metadata_cannot_set_tenant_id():
+    from mnemostack import IngestItem, Ingestor
+
+    # Under a tenant-scoped Ingestor, a planted metadata tenant_id is overridden.
+    store = _store()
+    Ingestor(embedding=_FakeEmbedder(), vector_store=store, tenant="alpha").ingest(
+        [IngestItem(text="x", source="a", metadata={TENANT_ID_KEY: "evil"})]
+    )
+    assert store.search(_VEC, limit=10, tenant="evil") == []
+    assert store.count(tenant="alpha") == 1
+
+    # Under a single-tenant Ingestor, a planted metadata tenant_id is stripped
+    # (the Ingestor's tenant is the only authority), so it can't lie in wait.
+    store2 = _store()
+    Ingestor(embedding=_FakeEmbedder(), vector_store=store2).ingest(
+        [IngestItem(text="y", source="b", metadata={TENANT_ID_KEY: "ghost"})]
+    )
+    assert store2.count(tenant="ghost") == 0
+    hit = store2.search(_VEC, limit=1)[0]
+    assert TENANT_ID_KEY not in hit.payload
+
+
+def test_set_payload_will_not_relabel_another_tenant():
+    store = _store()
+    _seed_two_tenants(store)  # ids 1,2 = alpha; 3 = beta
+    # Beta tries to grab alpha's point id 1 -> skipped, no change.
+    store.set_payload(1, {"note": "stolen", TENANT_ID_KEY: "beta"}, tenant="beta")
+    assert store.count(tenant="beta") == 1  # still just id 3
+    assert {h.id for h in store.search(_VEC, limit=10, tenant="alpha")} == {1, 2}
+    # Owner can set payload, but can't change its own tenant_id.
+    store.set_payload(1, {"note": "ok", TENANT_ID_KEY: "beta"}, tenant="alpha")
+    alpha_hit = next(h for h in store.search(_VEC, limit=10, tenant="alpha") if h.id == 1)
+    assert alpha_hit.payload["note"] == "ok"
+    assert alpha_hit.payload[TENANT_ID_KEY] == "alpha"
+
+
+def test_prune_is_tenant_scoped():
+    from mnemostack import stable_chunk_id
+    from mnemostack.ingest import prune_stale_chunks
+
+    store = _store()
+    # Same source in two tenants; alpha's fresh set only lists alpha's id.
+    a_id = stable_chunk_id("doc.md", 0, "a-text", tenant="alpha")
+    b_id = stable_chunk_id("doc.md", 0, "b-text", tenant="beta")
+    store.upsert(a_id, _VEC, {"text": "a-text", "source": "doc.md"}, tenant="alpha")
+    store.upsert(b_id, _VEC, {"text": "b-text", "source": "doc.md"}, tenant="beta")
+
+    # Prune alpha with a fresh set that keeps a_id — must NOT delete beta's b_id.
+    removed = prune_stale_chunks(store, {"doc.md": {a_id}}, tenant="alpha")
+    assert removed == 0
+    assert store.count(tenant="beta") == 1
+    assert store.count(tenant="alpha") == 1
+
+
+async def test_async_store_isolates_by_tenant():
+    from qdrant_client import AsyncQdrantClient
+
+    from mnemostack.vector import AsyncVectorStore
+
+    store = AsyncVectorStore.__new__(AsyncVectorStore)
+    store.collection = "mt_async"
+    store.dimension = 4
+    store.distance = Distance.COSINE
+    store.client = AsyncQdrantClient(":memory:")
+    await store.ensure_collection()
+
+    await store.upsert(1, _VEC, {"text": "a"}, tenant="alpha")
+    await store.upsert(2, _VEC, {"text": "b"}, tenant="beta")
+
+    alpha = {h.id for h in await store.search(_VEC, limit=10, tenant="alpha")}
+    assert alpha == {1}
+    assert await store.count(tenant="beta") == 1
+    await store.close()
+
+
+# --- write-side owner guards (no cross-tenant takeover) ---
+
+
+def test_upsert_refuses_cross_tenant_takeover():
+    store = _store()
+    store.upsert(1, _VEC, {"text": "alpha-owned"}, tenant="alpha")
+    with pytest.raises(TenantConflictError):
+        store.upsert(1, [0.0, 1.0, 0.0, 0.0], {"text": "beta-takeover"}, tenant="beta")
+    # alpha's point is untouched and beta owns nothing.
+    assert store.search(_VEC, limit=1, tenant="alpha")[0].payload["text"] == "alpha-owned"
+    assert store.search(_VEC, limit=10, tenant="beta") == []
+
+
+def test_upsert_same_tenant_replaces_own_point():
+    store = _store()
+    store.upsert(1, _VEC, {"text": "v1"}, tenant="alpha")
+    store.upsert(1, _VEC, {"text": "v2"}, tenant="alpha")  # own point → allowed
+    assert store.search(_VEC, limit=1, tenant="alpha")[0].payload["text"] == "v2"
+
+
+def test_upsert_can_claim_unowned_legacy_point():
+    store = _store()
+    store.upsert(1, _VEC, {"text": "legacy"})  # tenant=None → unowned
+    store.upsert(1, _VEC, {"text": "claimed"}, tenant="alpha")  # allowed
+    hit = store.search(_VEC, limit=1, tenant="alpha")[0]
+    assert hit.payload["text"] == "claimed"
+    assert hit.payload[TENANT_ID_KEY] == "alpha"
+
+
+def test_upsert_batch_refuses_cross_tenant_takeover():
+    store = _store()
+    store.upsert(1, _VEC, {"text": "alpha-owned"}, tenant="alpha")
+    with pytest.raises(TenantConflictError):
+        store.upsert_batch([(1, _VEC, {"text": "x"}), (2, _VEC, {"text": "y"})], tenant="beta")
+    # The whole conflicting chunk is refused — neither id lands for beta.
+    assert store.search(_VEC, limit=1, tenant="alpha")[0].payload["text"] == "alpha-owned"
+    assert store.count(tenant="beta") == 0
+
+
+async def test_async_upsert_refuses_cross_tenant_takeover():
+    from qdrant_client import AsyncQdrantClient
+
+    from mnemostack.vector import AsyncVectorStore
+
+    store = AsyncVectorStore.__new__(AsyncVectorStore)
+    store.collection = "mt_async_guard"
+    store.dimension = 4
+    store.distance = Distance.COSINE
+    store.client = AsyncQdrantClient(":memory:")
+    await store.ensure_collection()
+    await store.upsert(1, _VEC, {"text": "alpha"}, tenant="alpha")
+    with pytest.raises(TenantConflictError):
+        await store.upsert(1, _VEC, {"text": "beta"}, tenant="beta")
+    await store.close()
+
+
+# --- tenant_id is protected from payload deletion ---
+
+
+def test_delete_payload_keys_never_removes_tenant_id():
+    store = _store()
+    store.upsert(1, _VEC, {"text": "x", "k": "v"}, tenant="alpha")
+    # tenant_id is silently skipped (refresh-safe); the rest is still deleted.
+    store.delete_payload_keys(1, ["k", TENANT_ID_KEY])
+    hit = store.search(_VEC, limit=1, tenant="alpha")[0]
+    assert hit.payload[TENANT_ID_KEY] == "alpha"  # protected, still present
+    assert "k" not in hit.payload  # other key deleted
+
+
+def test_unscoped_write_strips_caller_tenant_id():
+    # An unscoped ingest of content carrying tenant_id (e.g. markdown frontmatter)
+    # must not inject itself into that tenant's scoped reads.
+    store = _store()
+    store.upsert(1, _VEC, {"text": "x", TENANT_ID_KEY: "victim"})  # no server tenant
+    assert store.search(_VEC, limit=10, tenant="victim") == []  # invisible to victim
+    assert TENANT_ID_KEY not in store.search(_VEC, limit=1)[0].payload  # not stored
+
+
+def test_unscoped_upsert_preserves_existing_owner():
+    # Migrate-then-reindex: an unscoped re-index (no tenant) of a point already
+    # owned by a tenant must keep that owner, not orphan it.
+    store = _store()
+    store.upsert(1, _VEC, {"text": "v1"}, tenant="alpha")  # owned by alpha
+    store.upsert(1, _VEC, {"text": "v2"})  # unscoped re-index (no tenant)
+    assert store.count(tenant="alpha") == 1  # owner preserved, not orphaned
+    assert store.search(_VEC, limit=1, tenant="alpha")[0].payload["text"] == "v2"
+
+
+def test_unscoped_upsert_batch_preserves_owner_and_leaves_new_unowned():
+    store = _store()
+    store.upsert(1, _VEC, {"text": "a"}, tenant="alpha")
+    store.upsert_batch([(1, _VEC, {"text": "a2"}), (2, _VEC, {"text": "new"})])  # unscoped
+    # point 1 kept its owner; point 2 (brand new) is unowned.
+    assert {h.id for h in store.search(_VEC, limit=10, tenant="alpha")} == {1}
+    assert store.search(_VEC, limit=1, tenant="alpha")[0].payload["text"] == "a2"
+
+
+async def test_async_set_payload_unscoped_strips_tenant_id():
+    from qdrant_client import AsyncQdrantClient
+
+    from mnemostack.vector import AsyncVectorStore
+
+    store = AsyncVectorStore.__new__(AsyncVectorStore)
+    store.collection = "mt_async_sp"
+    store.dimension = 4
+    store.distance = Distance.COSINE
+    store.client = AsyncQdrantClient(":memory:")
+    await store.ensure_collection()
+    await store.upsert(1, _VEC, {"text": "x"})  # unowned point
+    await store.set_payload(1, {"k": "v", TENANT_ID_KEY: "victim"})  # unscoped merge
+    assert await store.search(_VEC, limit=10, tenant="victim") == []  # injection prevented
+    await store.close()
+
+
+def test_stamp_tenant_all_relabels_existing_tenant_id():
+    from qdrant_client.models import PointStruct
+
+    store = _store()
+    # A legacy point that already carries a tenant_id payload value (tenant_id was
+    # an ordinary field before it became the isolation key). Seed via the raw
+    # client since upsert() now strips a caller tenant_id.
+    store.client.upsert(
+        collection_name=store.collection,
+        points=[PointStruct(id=1, vector=_VEC, payload={"text": "x", TENANT_ID_KEY: "legacy"})],
+    )
+    assert store.count(tenant="legacy") == 1
+    # only_missing (default) skips it; --all (only_missing=False) relabels it → the
+    # cleanup path the CLI exposes via `tenant-migrate --all --yes`.
+    assert store.stamp_tenant("alpha", only_missing=True) == 0
+    assert store.stamp_tenant("alpha", only_missing=False) == 1
+    assert store.count(tenant="alpha") == 1
+    assert store.count(tenant="legacy") == 0
+
+
+async def test_async_ensure_collection_indexes_tenant_id(monkeypatch):
+    from qdrant_client import AsyncQdrantClient
+
+    from mnemostack.vector import AsyncVectorStore
+
+    store = AsyncVectorStore.__new__(AsyncVectorStore)
+    store.collection = "mt_async_idx"
+    store.dimension = 4
+    store.distance = Distance.COSINE
+    store.client = AsyncQdrantClient(":memory:")
+    fields: list[str] = []
+    orig = store.client.create_payload_index
+
+    async def spy(*a, **kw):
+        fields.append(kw.get("field_name"))
+        return await orig(*a, **kw)
+
+    monkeypatch.setattr(store.client, "create_payload_index", spy)
+    await store.ensure_collection()
+    assert TENANT_ID_KEY in fields
+    await store.close()
+
+
+def test_stamp_tenant_indexes_tenant_id(monkeypatch):
+    from qdrant_client.models import PayloadSchemaType
+
+    store = _store()
+    store.upsert(1, _VEC, {"text": "legacy"})  # no tenant
+    calls: list[tuple[str, object]] = []
+    orig = store.index_payload_field
+    monkeypatch.setattr(
+        store, "index_payload_field", lambda f, sch: (calls.append((f, sch)), orig(f, sch))[1]
+    )
+    store.stamp_tenant("alpha")  # migrating an existing collection
+    assert (TENANT_ID_KEY, PayloadSchemaType.KEYWORD) in calls
+
+
+def test_ensure_collection_indexes_tenant_id(monkeypatch):
+    # Local Qdrant doesn't report payload indexes, so assert the KEYWORD index on
+    # tenant_id is requested when a fresh collection is created.
+    from qdrant_client.models import PayloadSchemaType
+
+    s = VectorStore.__new__(VectorStore)
+    s.collection = "mt_idx"
+    s.dimension = 4
+    s.distance = Distance.COSINE
+    s.client = QdrantClient(":memory:")
+    calls: list[tuple[str, object]] = []
+    orig = s.index_payload_field
+    monkeypatch.setattr(
+        s, "index_payload_field", lambda f, sch: (calls.append((f, sch)), orig(f, sch))[1]
+    )
+    s.ensure_collection()
+    assert (TENANT_ID_KEY, PayloadSchemaType.KEYWORD) in calls
+
+
+def test_delete_payload_keys_tenant_owner_guard():
+    store = _store()
+    store.upsert(1, _VEC, {"text": "x", "k": "v"}, tenant="alpha")
+    store.delete_payload_keys(1, ["k"], tenant="beta")  # not owner → skipped
+    assert store.search(_VEC, limit=1, tenant="alpha")[0].payload.get("k") == "v"
+    store.delete_payload_keys(1, ["k"], tenant="alpha")  # owner → deletes
+    assert "k" not in store.search(_VEC, limit=1, tenant="alpha")[0].payload
+
+
+def test_delete_points_tenant_owner_guard():
+    store = _store()
+    _seed_two_tenants(store)  # alpha owns 1,2; beta owns 3
+    # A caller scoped to beta can't delete alpha's point by a guessed id.
+    assert store.delete_points([1], tenant="beta") == 0
+    assert store.count(tenant="alpha") == 2
+    # Alpha can delete its own.
+    assert store.delete_points([1], tenant="alpha") == 1
+    assert store.count(tenant="alpha") == 1
+    # No-tenant delete stays unrestricted (legacy single-tenant path).
+    assert store.delete_points([3]) == 1
+    assert store.count(tenant="beta") == 0
+
+
+# --- migration stamps payload only (ids/vectors untouched); idempotency via --prune ---
+
+
+def test_stamp_tenant_stamps_payload_only_preserving_ids():
+    store = _store()
+    store.upsert(1, _VEC, {"text": "legacy-a"})  # no tenant
+    store.upsert(2, _VEC, {"text": "legacy-b"})  # no tenant
+    stamped = store.stamp_tenant("alpha")
+    assert stamped == 2
+    # ids are unchanged, and both points are now scoped to alpha.
+    ids = {h.id for h in store.search(_VEC, limit=10, tenant="alpha")}
+    assert ids == {1, 2}
+    assert all(h.payload[TENANT_ID_KEY] == "alpha" for h in store.search(_VEC, limit=10, tenant="alpha"))
+
+
+def test_stamp_tenant_only_missing_is_idempotent():
+    store = _store()
+    store.upsert(1, _VEC, {"text": "x"})  # no tenant
+    store.upsert(2, _VEC, {"text": "y"}, tenant="beta")  # already owned
+    stamped = store.stamp_tenant("alpha")  # only_missing default → only point 1
+    assert stamped == 1
+    assert store.count(tenant="alpha") == 1
+    assert store.count(tenant="beta") == 1  # beta's point untouched
+    # Re-running stamps nothing (idempotent).
+    assert store.stamp_tenant("alpha") == 0

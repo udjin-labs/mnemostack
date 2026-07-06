@@ -99,14 +99,23 @@ class IngestStats:
         return self
 
 
-def stable_chunk_id(source: str, offset: int, text: str) -> str:
+def stable_chunk_id(source: str, offset: int, text: str, *, tenant: str | None = None) -> str:
     """Deterministic UUID-5 from an (source, offset, text) triple.
 
     Same inputs always produce the same id, so upsert replaces itself and
     re-indexing is idempotent. Also exported for callers that want to compute
     ids without going through the Ingestor (e.g. to delete an item).
+
+    ``tenant`` scopes the id: two tenants ingesting the *same* (source, offset,
+    text) into one collection get **different** ids, so one can't overwrite the
+    other's point (a full-point upsert would otherwise destroy it). ``tenant``
+    is prefixed so ``tenant=None`` reproduces the historical id exactly — legacy
+    single-tenant ids are unchanged.
     """
-    digest = hashlib.sha256(f"{source}|{offset}|{text}".encode()).hexdigest()
+    base = f"{source}|{offset}|{text}"
+    if tenant is not None:
+        base = f"{tenant}\x00{base}"
+    digest = hashlib.sha256(base.encode()).hexdigest()
     return str(uuid.UUID(digest[:32]))
 
 
@@ -118,8 +127,9 @@ def _item_tags(item: IngestItem) -> list[str]:
 
 
 # Keys an enricher may never override: text/source/offset feed
-# stable_chunk_id, index_root scopes pruning.
-_PROTECTED_PAYLOAD_KEYS = frozenset({"text", "source", "offset", "index_root"})
+# stable_chunk_id, index_root scopes pruning, tenant_id is the isolation
+# boundary (only the Ingestor's `tenant` may set it — see _flush).
+_PROTECTED_PAYLOAD_KEYS = frozenset({"text", "source", "offset", "index_root", "tenant_id"})
 
 
 def apply_enrichment(
@@ -176,6 +186,7 @@ def prune_stale_chunks(
     fresh_ids_by_source: dict[str, set[str]],
     *,
     index_root: str | None = None,
+    tenant: str | None = None,
 ) -> int:
     """Delete stale chunks of re-indexed sources. Returns count removed.
 
@@ -197,7 +208,14 @@ def prune_stale_chunks(
     payload): the delete is then scoped to points carrying the same root, so
     ``note.md`` from another root — or from a version that didn't record a
     root — is never touched.
+
+    Pass *tenant* in a multi-tenant collection so only that tenant's points are
+    considered for deletion — otherwise another tenant's same-``source`` chunks
+    (which won't be in this tenant's fresh set) would be pruned as "stale".
     """
+    # Only pass tenant when set, so a custom store without the parameter (and
+    # the single-tenant path) is unaffected.
+    tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
     removed = 0
     for source, fresh_ids in fresh_ids_by_source.items():
         filters: dict[str, Any] = {"source": source}
@@ -205,7 +223,7 @@ def prune_stale_chunks(
             filters["index_root"] = index_root
         stale = [
             pid
-            for pid in (str(p) for p in vector_store.iter_ids(filters=filters))
+            for pid in (str(p) for p in vector_store.iter_ids(filters=filters, **tkw))
             if pid not in fresh_ids
         ]
         if stale:
@@ -450,9 +468,13 @@ class Ingestor:
         window_size: int = 1,
         window_separator: str = DEFAULT_WINDOW_SEPARATOR,
         enrich: Callable[[IngestItem], dict[str, Any]] | None = None,
+        tenant: str | None = None,
     ):
         self.embedding = embedding
         self.store = vector_store
+        # When set, every ingested point is stamped with this tenant_id (the
+        # write side of the multi-tenant isolation boundary). None = single-tenant.
+        self.tenant = tenant
         self.batch_size = batch_size
         self.skip_seen = skip_seen
         self.wrapper_dir = Path(wrapper_dir) if wrapper_dir is not None else None
@@ -477,7 +499,7 @@ class Ingestor:
         buffer: list[tuple[str, IngestItem]] = []
         for item in _iter_window_items(items, self.window_size, self.window_separator):
             stats.seen += 1
-            pid = stable_chunk_id(item.source, item.offset, item.text)
+            pid = stable_chunk_id(item.source, item.offset, item.text, tenant=self.tenant)
             if self.skip_seen and self._seen is not None and pid in self._seen:
                 stats.skipped += 1
                 continue
@@ -528,7 +550,7 @@ class Ingestor:
         total_seen = 0
         for item in _iter_window_items(item_iter, self.window_size, self.window_separator):
             total_seen += 1
-            pid = stable_chunk_id(item.source, item.offset, item.text)
+            pid = stable_chunk_id(item.source, item.offset, item.text, tenant=self.tenant)
             if self.skip_seen and self._seen is not None and pid in self._seen:
                 continue
             buffer.append((pid, item))
@@ -570,6 +592,10 @@ class Ingestor:
             if item.timestamp:
                 payload["timestamp"] = item.timestamp
             apply_enrichment(self.enrich, item, payload)
+            # tenant_id is set only by the store from the Ingestor's `tenant`
+            # (the write-side of the isolation boundary) — never by metadata or
+            # an enrich hook. Drop any planted value so it can't be spoofed.
+            payload.pop("tenant_id", None)
             payload.setdefault("indexed_at", datetime.now(timezone.utc).isoformat())
             tags = _item_tags(item)
             if tags:
@@ -579,14 +605,18 @@ class Ingestor:
         if not points:
             return
         stats.embedded += len(points)
+        # Only pass tenant when set, so a custom store without the parameter
+        # (and the existing single-tenant path) is unaffected.
+        tkw: dict[str, Any] = {"tenant": self.tenant} if self.tenant is not None else {}
         with histogram("mnemostack.ingest.upsert_batch_ms"):
             try:
                 self.store.upsert_batch(
-                    [(pid, vec, payload) for pid, vec, payload, _item in points]
+                    [(pid, vec, payload) for pid, vec, payload, _item in points],
+                    **tkw,
                 )
             except AttributeError:
                 for pid, vec, payload, _item in points:
-                    self.store.upsert(pid, vec, payload)
+                    self.store.upsert(pid, vec, payload, **tkw)
         stats.upserted += len(points)
         stats.ids.extend(p[0] for p in points)
         self._write_wrappers(points, stats)
