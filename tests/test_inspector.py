@@ -216,7 +216,7 @@ def test_inspector_html_has_manual_tenant_and_larger_limit():
 
 
 def test_cmd_inspect_wires_graph_timeout_to_probe(monkeypatch):
-    import uvicorn
+    uvicorn = pytest.importorskip("uvicorn")  # server extra; cmd_inspect imports it
 
     import mnemostack.cli as cli
     import mnemostack.inspector as insp_mod
