@@ -70,6 +70,10 @@ def build_server(
     graph_user: str = "",
     graph_password: str = "",
     graph_database: str | None = None,
+    # service-key auth (multi-tenant): the MCP process runs AS one principal.
+    auth_enabled: bool = False,
+    api_key: str | None = None,
+    keys_file: str | None = None,
 ) -> Any:
     """Build and return a configured FastMCP server.
 
@@ -106,6 +110,43 @@ def build_server(
     # shadows the factory argument; keep the server-wide default reachable.
     # 0 or negative means "no budget" (apply_token_budget requires >= 1).
     default_token_budget = token_budget if token_budget is not None and token_budget > 0 else None
+
+    # ----- Auth (multi-tenant). MCP's stdio transport is one client per process,
+    # so (unlike HTTP) there is no per-request credential — the server is launched
+    # WITH a service key that resolves the tenant + scopes for the whole process.
+    # The key is re-verified on every tool call so a mid-session revocation takes
+    # effect immediately (fail closed). Off by default: byte-identical, unscoped.
+    key_store = None
+    if auth_enabled:
+        from ..auth import FileKeyStore
+
+        key_store = FileKeyStore(keys_file)
+        if not api_key:
+            raise ValueError(
+                "auth enabled but no service key provided (set --api-key or MNEMOSTACK_API_KEY)"
+            )
+        if key_store.verify(api_key) is None:
+            raise ValueError("auth enabled but the provided service key is invalid or revoked")
+
+    class _AuthError(Exception):
+        """Raised inside a tool on an auth failure; the tool's except maps it to a
+        structured {"ok": False, "error": ...} (tools return errors, not raise)."""
+
+    def _authorize(scope: str):
+        """Principal for an authenticated call, or None when auth is off. Re-verifies
+        the bound key each call (revocation takes effect at once); raises _AuthError
+        on a revoked key or insufficient scope."""
+        if not auth_enabled:
+            return None
+        principal = key_store.verify(api_key) if (key_store and api_key) else None
+        if principal is None:
+            raise _AuthError("service key invalid or revoked")
+        if not principal.can(scope):
+            raise _AuthError(f"key lacks '{scope}' scope")
+        return principal
+
+    def _tenant_of(principal: Any) -> str | None:
+        return principal.tenant if principal is not None else None
 
     # Lazy-initialize components so server boots even if e.g. GEMINI_API_KEY missing.
     # Tool calls can run concurrently; the lock makes each component initialize
@@ -181,11 +222,17 @@ def build_server(
         )
 
     def _get_pipeline():
+        # Under auth every call is tenant-scoped, and the graph isn't tenant-scoped
+        # yet, so drop it from the recall pipeline entirely: otherwise the
+        # GraphResurrection stage would still query the shared graph (its results
+        # are dropped by the filter_by_tenant backstop, so no leak — but a slow or
+        # down graph would add graph_timeout latency to tenant-scoped recall).
+        pipeline_graph_uri = None if auth_enabled else memgraph_uri
         return _component(
             "pipeline",
             lambda: build_full_pipeline(
                 state_store=FileStateStore(resolved_state_path),
-                graph_uri=memgraph_uri,
+                graph_uri=pipeline_graph_uri,
                 graph_user=graph_user,
                 graph_password=graph_password,
                 graph_database=graph_database,
@@ -210,6 +257,7 @@ def build_server(
         token_budget_override: int | None = None,
         include_invalidated: bool = False,
         as_of: str | None = None,
+        tenant: str | None = None,
     ) -> tuple[list[Any], RecallTrace]:
         trace = RecallTrace()
         recaller = _get_recaller()
@@ -234,6 +282,7 @@ def build_server(
             ),
             include_invalidated=include_invalidated,
             as_of=as_of,
+            tenant=tenant,
         )
         return results, trace
 
@@ -382,8 +431,10 @@ def build_server(
         hidden by default; use include_invalidated or as_of to see them.
         """
         try:
+            principal = _authorize("read")
             results, trace = _run_recall(
-                query, limit, filters, token_budget, include_invalidated, as_of
+                query, limit, filters, token_budget, include_invalidated, as_of,
+                tenant=_tenant_of(principal),
             )
             response = {
                 "ok": True,
@@ -466,13 +517,16 @@ def build_server(
         """
         effective_budget = token_budget if token_budget is not None else default_token_budget
         try:
+            principal = _authorize("read")
+            tenant = _tenant_of(principal)
             memories, trace = _run_recall(
-                query, limit, filters, effective_budget, include_invalidated, as_of
+                query, limit, filters, effective_budget, include_invalidated, as_of, tenant=tenant
             )
             gen = _get_answer_gen()
             # recall_filters keeps the generator's retry sub-recalls inside
             # the same filtered scope; the budget must reach the generator
-            # too, or those sub-recalls would prompt unbudgeted.
+            # too, or those sub-recalls would prompt unbudgeted. tenant scopes
+            # those retry sub-recalls to the caller's tenant as well.
             answer = gen.generate(
                 query,
                 memories,
@@ -480,6 +534,7 @@ def build_server(
                 token_budget=effective_budget,
                 include_invalidated=include_invalidated,
                 as_of=as_of,
+                tenant=tenant,
             )
             # Prefer the generator's own estimate: its retry paths can swap
             # in a freshly recalled context pool. getattr: custom/duck-typed
@@ -543,14 +598,19 @@ def build_server(
         requested, and invalidated (the number of points actually updated).
         """
         try:
+            tenant = _tenant_of(_authorize("write"))
             # Coerce digit-only ids to int so numeric-id Qdrant collections can
             # be invalidated (UUID strings contain hyphens, so stay strings).
             coerced = [int(x) if isinstance(x, str) and x.isdigit() else x for x in ids]
+            # tenant owner-guard: only pass it when set so a custom store without
+            # the parameter (and the single-tenant path) is unaffected.
+            tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
             updated = _get_vector_payload_only().invalidate(
                 coerced,
                 invalidated_at=invalidated_at,
                 valid_until=valid_until,
                 index_root=index_root,
+                **tkw,
             )
             return {
                 "ok": True,
@@ -587,6 +647,10 @@ def build_server(
         if reward is not None and not 0.0 <= reward <= 1.0:
             return {"ok": False, "error": "reward must be in [0, 1]"}
         try:
+            # write scope gates access. Note: the learning state (Q-learning
+            # weights + IoR) is process-global, not yet partitioned per tenant —
+            # so it isn't tenant-scoped here (tracked follow-up, mirrors HTTP).
+            _authorize("write")
             outcome = apply_feedback(
                 _get_feedback_pipeline(),
                 hit_id=hit_id,
@@ -622,6 +686,14 @@ def build_server(
             returns only facts valid at that date.
             """
             try:
+                # The graph is not tenant-scoped yet, so under an authenticated
+                # tenant it would leak/mix across tenants — fail closed until
+                # graph tenant scoping lands (mirrors recall skipping the graph).
+                if _authorize("read") is not None:
+                    return {
+                        "ok": False,
+                        "error": "graph tools are not tenant-scoped yet; unavailable under authenticated tenant",
+                    }
                 from ..graph.factory import make_graph_store
 
                 gs = make_graph_store(
@@ -670,6 +742,13 @@ def build_server(
             ISO date strings for point-in-time validity.
             """
             try:
+                # Graph writes aren't tenant-scoped yet — fail closed under an
+                # authenticated tenant so a triple can't land in a shared graph.
+                if _authorize("write") is not None:
+                    return {
+                        "ok": False,
+                        "error": "graph tools are not tenant-scoped yet; unavailable under authenticated tenant",
+                    }
                 from ..graph.factory import make_graph_store
 
                 gs = make_graph_store(
@@ -713,6 +792,12 @@ def main() -> None:
         MNEMOSTACK_TOKEN_BUDGET     (default: none — no recall token budget)
     """
     cfg = Config.load()
+    auth_enabled = os.environ.get("MNEMOSTACK_AUTH_ENABLED", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     mcp = build_server(
         collection=cfg.vector.collection,
         embedding_provider=cfg.embedding.provider,
@@ -730,6 +815,9 @@ def main() -> None:
         vector_floor=max(0, int(cfg.recall.vector_floor)),
         rerank_mode=cfg.recall.rerank_mode,
         token_budget=cfg.recall.token_budget,
+        auth_enabled=auth_enabled,
+        api_key=os.environ.get("MNEMOSTACK_API_KEY") or None,
+        keys_file=os.environ.get("MNEMOSTACK_KEYS_FILE") or None,
     )
     mcp.run()
 
