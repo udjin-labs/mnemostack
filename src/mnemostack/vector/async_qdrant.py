@@ -19,6 +19,7 @@ from qdrant_client.models import (
     FieldCondition,
     Filter,
     MatchValue,
+    PayloadSchemaType,
     PointStruct,
     Range,
     VectorParams,
@@ -86,6 +87,16 @@ class AsyncVectorStore:
                 collection_name=self.collection,
                 vectors_config=VectorParams(size=self.dimension, distance=self.distance),
             )
+            # Index tenant_id (the mandatory tenant filter) — mirror of the sync
+            # store, so async-bootstrapped shared collections filter efficiently.
+            try:
+                await self.client.create_payload_index(
+                    collection_name=self.collection,
+                    field_name=TENANT_ID_KEY,
+                    field_schema=PayloadSchemaType.KEYWORD,
+                )
+            except Exception:  # noqa: BLE001
+                pass  # already indexed or local Qdrant (payload indexes are a no-op there)
             return True
         await self._validate_dimension()
         return False

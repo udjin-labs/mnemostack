@@ -396,6 +396,29 @@ def test_stamp_tenant_all_relabels_existing_tenant_id():
     assert store.count(tenant="legacy") == 0
 
 
+async def test_async_ensure_collection_indexes_tenant_id(monkeypatch):
+    from qdrant_client import AsyncQdrantClient
+
+    from mnemostack.vector import AsyncVectorStore
+
+    store = AsyncVectorStore.__new__(AsyncVectorStore)
+    store.collection = "mt_async_idx"
+    store.dimension = 4
+    store.distance = Distance.COSINE
+    store.client = AsyncQdrantClient(":memory:")
+    fields: list[str] = []
+    orig = store.client.create_payload_index
+
+    async def spy(*a, **kw):
+        fields.append(kw.get("field_name"))
+        return await orig(*a, **kw)
+
+    monkeypatch.setattr(store.client, "create_payload_index", spy)
+    await store.ensure_collection()
+    assert TENANT_ID_KEY in fields
+    await store.close()
+
+
 def test_ensure_collection_indexes_tenant_id(monkeypatch):
     # Local Qdrant doesn't report payload indexes, so assert the KEYWORD index on
     # tenant_id is requested when a fresh collection is created.
