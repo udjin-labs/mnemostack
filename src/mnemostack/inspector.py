@@ -34,7 +34,7 @@ except ImportError as e:  # pragma: no cover - import guard
         "`pip install 'mnemostack[server]'`."
     ) from e
 
-from qdrant_client.models import Filter
+from qdrant_client.models import Filter, IsEmptyCondition, PayloadField
 
 from mnemostack import __version__
 from mnemostack.config import model_kwargs
@@ -97,7 +97,7 @@ async function loadTenants(){
   for(const t of d.tenants){const o=document.createElement("option");o.value=t.id;o.textContent=t.id+" ("+t.count+")";sel.appendChild(o);}
 }
 async function loadOverview(){
-  const t=tenant();if(t==="")return;
+  const t=tenant();
   const d=await j("/api/overview?tenant="+encodeURIComponent(t));
   const dep=(ok,label)=>`<div class="card"><b class="${ok===null?'off':ok?'ok':'bad'}">${ok===null?'—':ok?'up':'down'}</b>${label}</div>`;
   $("#cards").innerHTML=
@@ -106,7 +106,8 @@ async function loadOverview(){
     dep(d.qdrant,"qdrant")+dep(d.memgraph,"memgraph (graph)");
 }
 async function loadRecords(){
-  const t=tenant();if(t==="")return;
+  const t=tenant();
+  $("#detail").hidden=true;$("#detail").textContent="";  // clear stale detail on refresh
   $("#status").textContent="loading…";
   const p=new URLSearchParams({tenant:t,limit:"50"});
   if($("#q").value)p.set("q",$("#q").value);
@@ -158,6 +159,17 @@ def _graph_reachable(cfg: ServerConfig) -> bool | None:
         # the driver — a persistent graph failure must not leak driver pools.
         if driver is not None:
             driver.close()
+
+
+def _legacy_only_filter(store: Any, parsed: dict[str, Any] | None) -> Filter:
+    """Filter for legacy/unscoped points — those with NO ``tenant_id`` — AND-combined
+    with any user filters. The inspector's unscoped mode uses this so it shows only
+    untenanted points (a default single-tenant collection), never another tenant's
+    data — upholding the never-cross-tenant contract on a mixed collection too.
+    """
+    must = list(store._build_filter(parsed).must or []) if parsed else []
+    must.append(IsEmptyCondition(is_empty=PayloadField(key=TENANT_ID_KEY)))
+    return Filter(must=must)
 
 
 def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
@@ -273,15 +285,21 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
         invalidated = 0
         if ok:
             try:
-                points = store.count(tenant=scoped)
+                if scoped:
+                    points = store.count(tenant=scoped)
+                    inv_must: list[Any] = [_tenant_condition(scoped)]
+                else:
+                    # unscoped = legacy points only (no tenant_id), never cross-tenant
+                    points = store.client.count(
+                        collection_name=cfg.collection,
+                        count_filter=_legacy_only_filter(store, None),
+                    ).count
+                    inv_must = [IsEmptyCondition(is_empty=PayloadField(key=TENANT_ID_KEY))]
+                # points that DO carry an invalidated_at marker (must_not
+                # "is-current" == has invalidated_at), within the same scope.
                 invalidated = store.client.count(
                     collection_name=cfg.collection,
-                    # points that DO carry an invalidated_at marker (must_not
-                    # "is-current" == has invalidated_at), scoped when a tenant is set.
-                    count_filter=Filter(
-                        must=[_tenant_condition(scoped)] if scoped else [],
-                        must_not=[_hide_invalidated_condition()],
-                    ),
+                    count_filter=Filter(must=inv_must, must_not=[_hide_invalidated_condition()]),
                 ).count
             except Exception as e:  # noqa: BLE001
                 log.warning("overview count failed for tenant=%r: %s", tenant, e)
@@ -326,14 +344,35 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
         try:
             if q:
                 vec = _embed(q)
-                for hit in store.search(vec, limit=limit, filters=parsed, tenant=scoped):
-                    rows.append(_row(hit.id, hit.payload, score=hit.score))
+                if scoped:
+                    for hit in store.search(vec, limit=limit, filters=parsed, tenant=scoped):
+                        rows.append(_row(hit.id, hit.payload, score=hit.score))
+                else:  # unscoped = legacy points only (no tenant_id)
+                    res = store.client.query_points(
+                        collection_name=cfg.collection,
+                        query=vec,
+                        limit=limit,
+                        query_filter=_legacy_only_filter(store, parsed),
+                        with_payload=True,
+                    )
+                    for pt in res.points:
+                        rows.append(_row(pt.id, pt.payload or {}, score=pt.score))
                 mode = "vector search"
             else:
-                for hit in store.scroll(filters=parsed, tenant=scoped):
-                    rows.append(_row(hit.id, hit.payload))
-                    if len(rows) >= limit:
-                        break
+                if scoped:
+                    for hit in store.scroll(filters=parsed, tenant=scoped):
+                        rows.append(_row(hit.id, hit.payload))
+                        if len(rows) >= limit:
+                            break
+                else:  # unscoped browse: legacy points only
+                    points, _ = store.client.scroll(
+                        collection_name=cfg.collection,
+                        scroll_filter=_legacy_only_filter(store, parsed),
+                        with_payload=True,
+                        limit=limit,
+                    )
+                    for rec in points:
+                        rows.append(_row(rec.id, rec.payload or {}))
                 mode = "browse"
         except Exception as e:  # noqa: BLE001 — a malformed filter/embed error is a
             # user/runtime problem, not a server bug: return a clean message like

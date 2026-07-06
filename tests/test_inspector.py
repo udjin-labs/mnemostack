@@ -263,20 +263,56 @@ def test_graph_reachable_closes_driver_on_failure(monkeypatch):
     assert closed["n"] == 1  # driver closed despite the failure
 
 
-def test_unscoped_browse_sees_all_including_legacy(monkeypatch):
-    # A legacy/default single-tenant collection (points without tenant_id) must be
-    # inspectable via the unscoped (tenant="") mode, not blank.
+def test_unscoped_is_legacy_only_never_cross_tenant(monkeypatch):
+    # On a MIXED collection, unscoped (tenant="") shows ONLY untenanted points —
+    # never another tenant's data (upholds the never-cross-tenant contract).
     store = _seeded_store()
-    store.upsert(9, _VEC, {"text": "legacy", "source": "legacy.md"})  # no tenant
+    store.upsert(9, _VEC, {"text": "legacy", "source": "legacy.md"})  # no tenant_id
     monkeypatch.setattr(insp, "get_provider", lambda *a, **k: _FakeProvider())
     monkeypatch.setattr(insp, "VectorStore", lambda **_: store)
     monkeypatch.setattr(insp, "_make_probe_client", lambda *a, **k: store.client)
     c = TestClient(
         insp.build_inspector_app(ServerConfig(provider_name="fake", collection="mt", graph_uri=None))
     )
-    assert c.get("/api/overview").json()["points"] == 4  # alpha 2 + beta 1 + legacy 1
-    sources = {r["source"] for r in c.get("/api/records").json()["records"]}
-    assert {"a1.md", "b1.md", "legacy.md"} <= sources
+    assert c.get("/api/overview").json()["points"] == 1  # only the legacy point
+    assert {r["source"] for r in c.get("/api/records").json()["records"]} == {"legacy.md"}
+    # A vector search under unscoped is legacy-only too (never alpha/beta).
+    assert {r["source"] for r in c.get("/api/records?q=x").json()["records"]} == {"legacy.md"}
+
+
+def test_unscoped_pure_single_tenant_sees_all(monkeypatch):
+    # A default single-tenant collection (no point has tenant_id): unscoped = all.
+    s = VectorStore.__new__(VectorStore)
+    s.collection = "mt2"
+    s.dimension = 4
+    s.distance = Distance.COSINE
+    s.client = QdrantClient(":memory:")
+    s.ensure_collection()
+    s.upsert(1, _VEC, {"text": "a", "source": "a.md"})  # no tenant
+    s.upsert(2, _VEC, {"text": "b", "source": "b.md"})  # no tenant
+    monkeypatch.setattr(insp, "get_provider", lambda *a, **k: _FakeProvider())
+    monkeypatch.setattr(insp, "VectorStore", lambda **_: s)
+    monkeypatch.setattr(insp, "_make_probe_client", lambda *a, **k: s.client)
+    c = TestClient(
+        insp.build_inspector_app(ServerConfig(provider_name="fake", collection="mt2", graph_uri=None))
+    )
+    assert c.get("/api/overview").json()["points"] == 2
+    assert {r["source"] for r in c.get("/api/records").json()["records"]} == {"a.md", "b.md"}
+
+
+def test_cmd_inspect_wires_qdrant_health_timeout(monkeypatch):
+    uvicorn = pytest.importorskip("uvicorn")
+
+    import mnemostack.cli as cli
+    import mnemostack.inspector as insp_mod
+
+    captured = {}
+    monkeypatch.setattr(
+        insp_mod, "build_inspector_app", lambda cfg: (captured.__setitem__("cfg", cfg), object())[1]
+    )
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
+    cli.cmd_inspect(cli.build_parser().parse_args(["inspect", "--qdrant-health-timeout", "9"]))
+    assert captured["cfg"].qdrant_health_timeout == 9
 
 
 def test_data_endpoints_gate_on_unreachable_qdrant(monkeypatch):

@@ -2157,6 +2157,12 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     p_inspect.add_argument(
         "--graph-timeout", type=float, default=cfg.graph.timeout, help="Graph connect timeout (s)"
     )
+    p_inspect.add_argument(
+        "--qdrant-health-timeout",
+        type=int,
+        default=cfg.vector.health_timeout,
+        help="Qdrant reachability-probe timeout (s) for the inspector (default from config)",
+    )
     p_inspect.set_defaults(func=cmd_inspect)
 
     p_graph_migrate = sub.add_parser(
@@ -2310,6 +2316,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         # feed the CLI --graph-timeout into it or a slow/remote graph keeps the 1s
         # default and shows as down.
         graph_health_timeout=args.graph_timeout,
+        qdrant_health_timeout=args.qdrant_health_timeout,
     )
     app = build_inspector_app(cfg)
     if args.host == "0.0.0.0":
