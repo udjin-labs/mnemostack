@@ -2151,8 +2151,8 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     p_inspect.add_argument("--port", type=int, default=8100, help="Port (default 8100)")
     p_inspect.add_argument(
         "--memgraph-uri",
-        default=cfg.graph.uri or "bolt://localhost:7687",
-        help="Memgraph bolt URI (for graph reachability display)",
+        default=cfg.graph.uri,  # None when unconfigured — don't probe a graph that isn't set up
+        help="Memgraph bolt URI (for graph reachability display; omit for no-graph deployments)",
     )
     p_inspect.add_argument(
         "--graph-timeout", type=float, default=cfg.graph.timeout, help="Graph connect timeout (s)"

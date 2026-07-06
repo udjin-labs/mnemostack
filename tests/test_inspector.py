@@ -52,6 +52,8 @@ def client(monkeypatch):
     store = _seeded_store()
     monkeypatch.setattr(insp, "get_provider", lambda *a, **k: _FakeProvider())
     monkeypatch.setattr(insp, "VectorStore", lambda **_: store)
+    # Probe reachability reflects the in-memory store (no real Qdrant to reach).
+    monkeypatch.setattr(insp, "_make_probe_client", lambda *a, **k: store.client)
     app = insp.build_inspector_app(
         ServerConfig(provider_name="fake", collection="mt", graph_uri=None)
     )
@@ -161,19 +163,39 @@ def test_browse_works_without_embedding_provider(monkeypatch):
     assert c.get("/api/records?tenant=alpha").status_code == 200  # scroll — no embed
 
 
-def test_tenants_reports_error_when_facet_fails(monkeypatch):
-    store = _seeded_store()
-
+def _app_no_facet(monkeypatch, store, probe_up: bool):
     def _boom(*a, **k):
-        raise RuntimeError("connection refused")
+        raise RuntimeError("facet not supported")
 
-    monkeypatch.setattr(store.client, "facet", _boom)
-    monkeypatch.setattr(store.client, "get_collections", _boom)  # _qdrant_ok() -> False
+    monkeypatch.setattr(store.client, "facet", _boom)  # simulate old Qdrant / failure
     monkeypatch.setattr(insp, "get_provider", lambda *a, **k: _FakeProvider())
     monkeypatch.setattr(insp, "VectorStore", lambda **_: store)
-    d = TestClient(
-        insp.build_inspector_app(ServerConfig(provider_name="fake", collection="mt", graph_uri=None))
-    ).get("/api/tenants").json()
+
+    class _Probe:
+        def get_collections(self):
+            if not probe_up:
+                raise RuntimeError("connection refused")
+            return store.client.get_collections()
+
+    monkeypatch.setattr(insp, "_make_probe_client", lambda *a, **k: _Probe())
+    app = insp.build_inspector_app(
+        ServerConfig(provider_name="fake", collection="mt", graph_uri=None)
+    )
+    return TestClient(app)
+
+
+def test_tenants_falls_back_to_scroll_when_facet_unavailable(monkeypatch):
+    # Old Qdrant (< 1.12 Facet API) but reachable → scroll-based discovery.
+    store = _seeded_store()
+    d = _app_no_facet(monkeypatch, store, probe_up=True).get("/api/tenants").json()
+    assert d["ok"] is True and d.get("scanned") is True
+    assert {t["id"]: t["count"] for t in d["tenants"]} == {"alpha": 2, "beta": 1}
+
+
+def test_tenants_reports_error_when_qdrant_unreachable(monkeypatch):
+    # Facet fails AND the probe can't reach Qdrant → surface the outage.
+    store = _seeded_store()
+    d = _app_no_facet(monkeypatch, store, probe_up=False).get("/api/tenants").json()
     assert d["ok"] is False and d["tenants"] == []
     assert "Qdrant unreachable" in d["error"]
 

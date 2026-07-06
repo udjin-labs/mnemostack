@@ -39,7 +39,7 @@ from qdrant_client.models import Filter
 from mnemostack import __version__
 from mnemostack.config import model_kwargs
 from mnemostack.embeddings import get_provider
-from mnemostack.server import ServerConfig
+from mnemostack.server import ServerConfig, _make_probe_client
 from mnemostack.vector import VectorStore
 from mnemostack.vector.qdrant import (
     TENANT_ID_KEY,
@@ -162,6 +162,10 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
     # search must embed. The store's dimension is unused for browse/search here
     # (search is handed a precomputed vector), so a placeholder value is fine.
     store = VectorStore(collection=cfg.collection, dimension=1, host=cfg.qdrant_url)
+    # A separate short-timeout client for reachability probes, so a slow or
+    # blackholed Qdrant shows as "down" promptly instead of hanging the console for
+    # the store's full (30s) client timeout.
+    probe_client = _make_probe_client(cfg.qdrant_url, cfg.qdrant_health_timeout)
     _provider: dict[str, Any] = {}
 
     def _embed(text: str) -> list[float]:
@@ -173,10 +177,34 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
 
     def _qdrant_ok() -> bool:
         try:
-            store.client.get_collections()
+            probe_client.get_collections()
             return True
         except Exception:  # noqa: BLE001
             return False
+
+    def _tenants_via_scroll(cap: int = 50000) -> list[dict[str, Any]]:
+        """Distinct tenant_id values by scrolling payloads — the fallback for a
+        Qdrant server older than the Facet API (1.12). Bounded scan (approximate
+        for a very large corpus)."""
+        counts: dict[Any, int] = {}
+        offset: Any = None
+        scanned = 0
+        while scanned < cap:
+            points, offset = store.client.scroll(
+                collection_name=cfg.collection,
+                with_payload=[TENANT_ID_KEY],
+                with_vectors=False,
+                limit=1000,
+                offset=offset,
+            )
+            for p in points:
+                tid = (p.payload or {}).get(TENANT_ID_KEY)
+                if tid is not None:
+                    counts[tid] = counts.get(tid, 0) + 1
+            scanned += len(points)
+            if offset is None or not points:
+                break
+        return [{"id": k, "count": v} for k, v in sorted(counts.items(), key=lambda kv: str(kv[0]))]
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     def index() -> str:
@@ -200,16 +228,29 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
             out = [{"id": h.value, "count": h.count} for h in resp.hits]
             return {"tenants": out, "ok": True, "version": __version__}
         except Exception as e:  # noqa: BLE001
-            # Don't render a facet failure as "no tenants" — distinguish Qdrant
-            # being down from an empty/unsupported facet so the UI shows the truth.
-            reachable = _qdrant_ok()
-            log.info("tenant facet unavailable (qdrant_reachable=%s): %s", reachable, e)
-            return {
-                "tenants": [],
-                "ok": False,
-                "error": "Qdrant unreachable" if not reachable else f"tenant facet unavailable: {e}",
-                "version": __version__,
-            }
+            # Facet failed. If Qdrant is unreachable, surface that (don't render as
+            # "no tenants"). If it's reachable, the Facet API is likely just missing
+            # (server < 1.12) — fall back to a bounded scroll scan so operators on
+            # older Qdrant can still browse.
+            if not _qdrant_ok():
+                log.info("tenant facet failed, qdrant unreachable: %s", e)
+                return {"tenants": [], "ok": False, "error": "Qdrant unreachable", "version": __version__}
+            log.info("tenant facet unavailable, falling back to scroll: %s", e)
+            try:
+                return {
+                    "tenants": _tenants_via_scroll(),
+                    "ok": True,
+                    "scanned": True,
+                    "version": __version__,
+                }
+            except Exception as e2:  # noqa: BLE001
+                log.info("tenant scroll discovery failed: %s", e2)
+                return {
+                    "tenants": [],
+                    "ok": False,
+                    "error": f"tenant discovery failed: {e2}",
+                    "version": __version__,
+                }
 
     @app.get("/api/overview")
     def overview(tenant: str = Query(..., min_length=1)) -> dict[str, Any]:
