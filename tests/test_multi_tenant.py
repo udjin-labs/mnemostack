@@ -340,6 +340,44 @@ def test_unscoped_write_strips_caller_tenant_id():
     assert TENANT_ID_KEY not in store.search(_VEC, limit=1)[0].payload  # not stored
 
 
+def test_unscoped_upsert_preserves_existing_owner():
+    # Migrate-then-reindex: an unscoped re-index (no tenant) of a point already
+    # owned by a tenant must keep that owner, not orphan it.
+    store = _store()
+    store.upsert(1, _VEC, {"text": "v1"}, tenant="alpha")  # owned by alpha
+    store.upsert(1, _VEC, {"text": "v2"})  # unscoped re-index (no tenant)
+    assert store.count(tenant="alpha") == 1  # owner preserved, not orphaned
+    assert store.search(_VEC, limit=1, tenant="alpha")[0].payload["text"] == "v2"
+
+
+def test_unscoped_upsert_batch_preserves_owner_and_leaves_new_unowned():
+    store = _store()
+    store.upsert(1, _VEC, {"text": "a"}, tenant="alpha")
+    store.upsert_batch([(1, _VEC, {"text": "a2"}), (2, _VEC, {"text": "new"})])  # unscoped
+    # point 1 kept its owner; point 2 (brand new) is unowned.
+    assert {h.id for h in store.search(_VEC, limit=10, tenant="alpha")} == {1}
+    assert store.search(_VEC, limit=1, tenant="alpha")[0].payload["text"] == "a2"
+
+
+def test_ensure_collection_indexes_tenant_id(monkeypatch):
+    # Local Qdrant doesn't report payload indexes, so assert the KEYWORD index on
+    # tenant_id is requested when a fresh collection is created.
+    from qdrant_client.models import PayloadSchemaType
+
+    s = VectorStore.__new__(VectorStore)
+    s.collection = "mt_idx"
+    s.dimension = 4
+    s.distance = Distance.COSINE
+    s.client = QdrantClient(":memory:")
+    calls: list[tuple[str, object]] = []
+    orig = s.index_payload_field
+    monkeypatch.setattr(
+        s, "index_payload_field", lambda f, sch: (calls.append((f, sch)), orig(f, sch))[1]
+    )
+    s.ensure_collection()
+    assert (TENANT_ID_KEY, PayloadSchemaType.KEYWORD) in calls
+
+
 def test_delete_payload_keys_tenant_owner_guard():
     store = _store()
     store.upsert(1, _VEC, {"text": "x", "k": "v"}, tenant="alpha")

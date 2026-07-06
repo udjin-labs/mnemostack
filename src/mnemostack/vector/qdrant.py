@@ -150,6 +150,10 @@ class VectorStore:
                 collection_name=self.collection,
                 vectors_config=VectorParams(size=self.dimension, distance=self.distance),
             )
+            # Index tenant_id: it's the mandatory filter on every tenant-scoped
+            # read, so in a large shared collection a small-tenant search/count
+            # would otherwise degrade to collection-wide filtered work.
+            self.index_payload_field(TENANT_ID_KEY, PayloadSchemaType.KEYWORD)
             return True
         self._validate_dimension()
         return False
@@ -284,6 +288,13 @@ class VectorStore:
                 f"(e.g. {conflicts[0]!r}); tenant-scoped upsert will not overwrite them"
             )
 
+    def _existing_tenants(self, ids: list[str | int]) -> dict[Any, str]:
+        """Map ``id -> tenant_id`` for the given ids that exist and carry an owner."""
+        found = self.client.retrieve(
+            collection_name=self.collection, ids=list(ids), with_payload=[TENANT_ID_KEY]
+        )
+        return {p.id: t for p in found if (t := (p.payload or {}).get(TENANT_ID_KEY)) is not None}
+
     def upsert(
         self,
         id: str | int,
@@ -292,11 +303,17 @@ class VectorStore:
         *,
         tenant: str | None = None,
     ) -> None:
+        stamped = _stamp_tenant(payload, tenant)
         if tenant is not None:
             self._assert_tenant_owned([id], tenant)
+        elif (owner := self._existing_tenants([id]).get(id)) is not None:
+            # Unscoped upsert is a full replace: preserve an existing owner so an
+            # unscoped re-index of a migrated point doesn't silently orphan it
+            # (the caller's own tenant_id was already stripped by _stamp_tenant).
+            stamped[TENANT_ID_KEY] = owner
         self.client.upsert(
             collection_name=self.collection,
-            points=[PointStruct(id=id, vector=vector, payload=_stamp_tenant(payload, tenant))],
+            points=[PointStruct(id=id, vector=vector, payload=stamped)],
         )
 
     def upsert_batch(
@@ -311,16 +328,27 @@ class VectorStore:
         With ``tenant`` set, every point's payload is stamped with it (the tenant
         wins over any caller-supplied ``tenant_id``), and any id already owned by
         a different tenant raises ``TenantConflictError`` before the chunk is
-        written (the batch is not partially applied past the offending chunk)."""
+        written (the batch is not partially applied past the offending chunk).
+        Unscoped (``tenant=None``) strips a caller ``tenant_id`` but preserves an
+        existing point's owner (one ownership read per chunk) so an unscoped
+        re-index doesn't orphan migrated points."""
         total = 0
         for i in range(0, len(points), batch_size):
             chunk = points[i : i + batch_size]
             if tenant is not None:
                 self._assert_tenant_owned([pid for pid, _, _ in chunk], tenant)
-            structs = [
-                PointStruct(id=pid, vector=vec, payload=_stamp_tenant(pl, tenant))
-                for pid, vec, pl in chunk
-            ]
+                structs = [
+                    PointStruct(id=pid, vector=vec, payload=_stamp_tenant(pl, tenant))
+                    for pid, vec, pl in chunk
+                ]
+            else:
+                owners = self._existing_tenants([pid for pid, _, _ in chunk])
+                structs = []
+                for pid, vec, pl in chunk:
+                    p = _stamp_tenant(pl, None)
+                    if pid in owners:
+                        p[TENANT_ID_KEY] = owners[pid]
+                    structs.append(PointStruct(id=pid, vector=vec, payload=p))
             self.client.upsert(collection_name=self.collection, points=structs)
             total += len(structs)
         return total
@@ -338,6 +366,9 @@ class VectorStore:
         that tenant — so a caller who knows another tenant's (deterministic)
         point id still can't relabel or overwrite it. ``payload`` also can't
         change ``tenant_id`` under a tenant: the server-owned value is restored.
+        With **no** tenant a caller ``tenant_id`` is dropped from the merge (an
+        unscoped refresh e.g. of markdown frontmatter must not inject an owner);
+        merge semantics leave any existing owner intact.
         """
         if tenant is not None:
             found = self.client.retrieve(
@@ -346,6 +377,8 @@ class VectorStore:
             if not found or (found[0].payload or {}).get(TENANT_ID_KEY) != tenant:
                 return  # point missing or owned by another tenant — never touch it
             payload = {**payload, TENANT_ID_KEY: tenant}  # payload can't reassign tenant
+        else:
+            payload = {k: v for k, v in payload.items() if k != TENANT_ID_KEY}
         self.client.set_payload(
             collection_name=self.collection,
             payload=payload,

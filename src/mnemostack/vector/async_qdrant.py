@@ -128,6 +128,13 @@ class AsyncVectorStore:
                 f"(e.g. {conflicts[0]!r}); tenant-scoped upsert will not overwrite them"
             )
 
+    async def _existing_tenants(self, ids: list[str | int]) -> dict[Any, str]:
+        """Map ``id -> tenant_id`` for the given ids that exist and carry an owner."""
+        found = await self.client.retrieve(
+            collection_name=self.collection, ids=list(ids), with_payload=[TENANT_ID_KEY]
+        )
+        return {p.id: t for p in found if (t := (p.payload or {}).get(TENANT_ID_KEY)) is not None}
+
     async def upsert(
         self,
         id: str | int,
@@ -136,11 +143,14 @@ class AsyncVectorStore:
         *,
         tenant: str | None = None,
     ) -> None:
+        stamped = _stamp_tenant(payload, tenant)
         if tenant is not None:
             await self._assert_tenant_owned([id], tenant)
+        elif (owner := (await self._existing_tenants([id])).get(id)) is not None:
+            stamped[TENANT_ID_KEY] = owner  # preserve existing owner on unscoped replace
         await self.client.upsert(
             collection_name=self.collection,
-            points=[PointStruct(id=id, vector=vector, payload=_stamp_tenant(payload, tenant))],
+            points=[PointStruct(id=id, vector=vector, payload=stamped)],
         )
 
     async def upsert_batch(
@@ -155,10 +165,18 @@ class AsyncVectorStore:
             chunk = points[i : i + batch_size]
             if tenant is not None:
                 await self._assert_tenant_owned([pid for pid, _, _ in chunk], tenant)
-            structs = [
-                PointStruct(id=pid, vector=vec, payload=_stamp_tenant(pl, tenant))
-                for pid, vec, pl in chunk
-            ]
+                structs = [
+                    PointStruct(id=pid, vector=vec, payload=_stamp_tenant(pl, tenant))
+                    for pid, vec, pl in chunk
+                ]
+            else:
+                owners = await self._existing_tenants([pid for pid, _, _ in chunk])
+                structs = []
+                for pid, vec, pl in chunk:
+                    p = _stamp_tenant(pl, None)
+                    if pid in owners:
+                        p[TENANT_ID_KEY] = owners[pid]
+                    structs.append(PointStruct(id=pid, vector=vec, payload=p))
             await self.client.upsert(collection_name=self.collection, points=structs)
             total += len(structs)
         return total
