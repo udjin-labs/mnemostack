@@ -273,6 +273,18 @@ class VectorStore:
         and re-stamp it. Points that don't exist or are unowned (no ``tenant_id``,
         e.g. pre-migration legacy data) are free to write; a point stamped with a
         different tenant raises ``TenantConflictError``.
+
+        Concurrency: this is a check-then-write and Qdrant has no compare-and-swap,
+        so a precisely-timed concurrent write to the *same* id by two tenants can
+        race past the check. The primary defense is the id scheme, not this guard —
+        ``stable_chunk_id(..., tenant=)`` prefixes the tenant, so honest
+        tenant-scoped writers never compute the same id and never collide; the race
+        exists only for an attacker deliberately targeting another tenant's guessed
+        id (a tamper, not a read leak). A per-process lock would not close it for
+        the real multi-tenant deployment (multiple server processes on one Qdrant)
+        and would only add contention — for a hard guarantee under adversarial
+        concurrent writes, serialize writes per collection or front the store with a
+        compare-and-swap-capable layer.
         """
         found = self.client.retrieve(
             collection_name=self.collection, ids=list(ids), with_payload=[TENANT_ID_KEY]
