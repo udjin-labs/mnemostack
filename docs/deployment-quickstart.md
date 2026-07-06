@@ -52,8 +52,12 @@ mnemostack serve --host 127.0.0.1 --port 8000 --memgraph-uri ""
 Applications in any language then call `/recall`, `/answer`, `/feedback`. See
 the [HTTP server section of the README](../README.md#http-server-optional) for request shapes.
 
-> Binding to `0.0.0.0` exposes an **unauthenticated** API — only do it behind
-> your own auth / rate-limit layer or a private network.
+> Binding to `0.0.0.0` exposes an **unauthenticated** API by default — only do it
+> behind your own auth / rate-limit layer or a private network. For built-in,
+> per-tenant auth, add `--auth` and issue a service key
+> (`mnemostack keys add --tenant <t> --scopes read,write`); `/recall` `/answer`
+> `/feedback` then require the key and scope results to its tenant. See
+> [api-stability.md](../docs/api-stability.md#multi-tenancy--authentication).
 
 > `--memgraph-uri ""` keeps graph recall **off** in this minimal setup. Without
 > it, `serve` falls back to the default `bolt://localhost:7687` and every recall
