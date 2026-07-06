@@ -6,8 +6,9 @@ security, backups, monitoring) see [deployment.md](deployment.md).
 
 > Conventions: `mnemostack` is the CLI (`pip install mnemostack`); the HTTP
 > server needs the extra `pip install 'mnemostack[server]'`. All commands read
-> config from a YAML file / `MNEMOSTACK_*` env vars — see
-> [config.md](config.md). Nothing here needs a cloud account.
+> config from a YAML file / `MNEMOSTACK_*` env vars — run `mnemostack init` to
+> generate an example and `mnemostack config` to print the effective config.
+> Nothing here needs a cloud account.
 
 ---
 

@@ -109,5 +109,5 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 asyncio_mode = "auto"
 markers = [
-    "smoke: minimal end-to-end 'does the stack work' checks (pytest -m smoke)",
+    "smoke: minimal end-to-end 'does the stack work' checks (run: pytest tests/test_smoke.py)",
 ]

@@ -46,7 +46,11 @@ leniently. `build_app(config)` and `ServerConfig` are 🟢 stable.
 `feedback`, `serve`, `mcp-serve`, `init`, `config`.
 
 - `doctor` exit codes (`0` healthy / `1` core dependency down / `2` config
-  invalid) are a 🟢 stable contract — safe to gate CI/deploys on.
+  invalid) are a 🟢 stable contract — safe to gate CI/deploys on. Exit `2` covers a
+  config that **loads** but fails `doctor`'s validation; a value that fails to
+  **parse** (e.g. a non-numeric `MNEMOSTACK_TOKEN_BUDGET`) is rejected at CLI
+  startup before any command runs, so treat any nonzero startup failure as
+  "config unusable" in your gate.
 - `--json` output shapes on `search` / `answer` / `invalidate` / `feedback` /
   `doctor` are 🟢 stable (additive fields only).
 
@@ -84,6 +88,11 @@ stable as defaults for the `search` / `answer` CLI (`--limit` / `--min-confidenc
 but the HTTP and MCP surfaces don't read them — `/recall` and the MCP tools take a
 per-request `limit` (default 10) and apply no server-side confidence threshold. Set
 the result count per request there.
+
+`graph.timeout` bounds graph connections for `serve`, `mcp-serve`,
+`index-markdown`, and `graph-migrate-current`; the CLI recall commands (`search` /
+`answer` / `synthesize`) don't thread it into their graph retriever, which uses the
+built-in default.
 
 Env aliases (e.g. `MNEMOSTACK_QDRANT_URL` for `vector.host`,
 `MNEMOSTACK_MEMGRAPH_URI` for `graph.uri`) are 🟢 stable. Defaults won't change
