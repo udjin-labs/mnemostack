@@ -141,8 +141,8 @@ date stays a date) — values written by 0.8.x are already in the expected shape
 and purely additive** — a 0.8.x deployment that ignores them is unchanged, and no
 existing data needs migrating.
 
-- **`tenant_id` payload key** — the partition key. It's absent on collections
-  written by 0.8.x (they read as single-tenant), and it's **server-owned**: only a
+- **`tenant_id` payload key** — the partition key. On a collection that never used
+  it, it's absent (reads as single-tenant), and it's **server-owned**: only a
   write that passes `tenant=` sets it, and no client can assert or overwrite it (a
   cross-tenant `upsert` raises `TenantConflictError`; the id-targeted owner-guards
   `set_payload` / `invalidate` / `delete_*` silently skip a foreign-owned id). To
@@ -151,6 +151,13 @@ existing data needs migrating.
   `--all` to force-relabel) or its library twin
   `VectorStore.stamp_tenant(tenant, only_missing=True)` — both stamp only points
   that lack the key by default, so they're safe to re-run.
+  ⚠️ **If your 0.8.x collection already used `tenant_id` as an ordinary payload
+  field**, it is *not* absent, and the default `only_missing` stamp leaves those
+  values untouched — recall will then treat each pre-existing value as an owner and
+  partition on it, so a collection meant to be single-tenant can fragment or a
+  wrong value can leak. Inspect the existing values first (`mnemostack inspect`),
+  then relabel the whole collection with `tenant-migrate --tenant <id> --all --yes`
+  (force-overwrite) before enabling auth.
 - **Stamping needs no re-index — but a later tenant-aware re-ingest does create new
   ids.** `tenant-migrate` / `stamp_tenant` is a payload-only merge: it scopes
   existing points at query time and changes no chunk id or embedding, so un-stamped
@@ -176,12 +183,15 @@ existing data needs migrating.
   [api-stability.md](api-stability.md#multi-tenancy--authentication).
 - **Graph is not tenant-scoped yet.** Under auth no tenant reads another's graph
   nodes, but the two surfaces differ: `mcp-serve --auth` fails the graph tools
-  closed and builds recall with no graph, while `serve --auth` still queries the
-  configured Memgraph and relies on the `filter_by_tenant` backstop to drop the
-  (tenant-less) graph hits — so an authenticated HTTP recall still contacts the
-  shared graph. If you need per-tenant graph recall, keep each tenant's graph in a
-  separate Memgraph database (or run HTTP with `--memgraph-uri ""`). Full graph
-  tenant scoping is planned follow-up work.
+  closed and builds recall with no graph (so authenticated MCP has **no graph recall
+  at all**), while `serve --auth` still queries the configured Memgraph and relies
+  on the `filter_by_tenant` backstop to drop the (tenant-less) graph hits — so an
+  authenticated HTTP recall still contacts the shared graph. The graph URI/database
+  is a single **process-wide** setting (service keys don't pick one), so per-tenant
+  graph recall means a **separate `serve` process per tenant** (each with its own
+  `--memgraph-uri` / `graph.database`) — not several databases behind one
+  authenticated server. If you don't need it, run HTTP with `--memgraph-uri ""`.
+  Full graph tenant scoping is planned follow-up work.
 
 ## Config & CLI
 

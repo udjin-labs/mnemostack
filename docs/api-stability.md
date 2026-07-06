@@ -315,11 +315,14 @@ and the two surfaces guard it differently:
 
 Either way no tenant can read another's graph nodes. Graph tenant scoping is
 planned follow-up work; until it lands there is no per-key graph selection — the
-graph URI/database is a single process-wide setting, so a per-tenant graph means a
-**separate `serve`/`mcp-serve` process per tenant** (each with its own
-`--memgraph-uri` / `graph.database`), not multiple databases behind one server. For
-HTTP specifically you can instead disable the shared-graph query entirely with
-`--memgraph-uri ""`.
+graph URI/database is a single process-wide setting. Note the workaround differs by
+surface: **authenticated MCP has no graph at all** (`mcp-serve --auth` forces the
+pipeline graph off and fails the graph tools closed), so per-tenant graph recall
+there isn't possible under auth — you'd run a trusted, single-tenant `mcp-serve`
+*without* `--auth` for graph. For **HTTP**, per-tenant graph recall means a
+**separate `serve` process per tenant** (each with its own `--memgraph-uri` /
+`graph.database`), not multiple databases behind one authenticated server; or
+disable the shared-graph query entirely with `--memgraph-uri ""`.
 
 ## On-disk / payload contracts
 
