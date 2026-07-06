@@ -419,6 +419,20 @@ async def test_async_ensure_collection_indexes_tenant_id(monkeypatch):
     await store.close()
 
 
+def test_stamp_tenant_indexes_tenant_id(monkeypatch):
+    from qdrant_client.models import PayloadSchemaType
+
+    store = _store()
+    store.upsert(1, _VEC, {"text": "legacy"})  # no tenant
+    calls: list[tuple[str, object]] = []
+    orig = store.index_payload_field
+    monkeypatch.setattr(
+        store, "index_payload_field", lambda f, sch: (calls.append((f, sch)), orig(f, sch))[1]
+    )
+    store.stamp_tenant("alpha")  # migrating an existing collection
+    assert (TENANT_ID_KEY, PayloadSchemaType.KEYWORD) in calls
+
+
 def test_ensure_collection_indexes_tenant_id(monkeypatch):
     # Local Qdrant doesn't report payload indexes, so assert the KEYWORD index on
     # tenant_id is requested when a fresh collection is created.

@@ -427,6 +427,10 @@ class VectorStore:
                 payload={TENANT_ID_KEY: tenant},
                 points=FilterSelector(filter=sel),
             )
+        # A pre-existing collection was created before tenant_id existed, so
+        # ensure_collection() never indexed it. Add the KEYWORD index here so
+        # post-migration tenant-scoped reads on this large collection stay fast.
+        self.index_payload_field(TENANT_ID_KEY, PayloadSchemaType.KEYWORD)
         return n
 
     def delete_payload_keys(
