@@ -75,10 +75,12 @@ class _FakeRecaller:
     def __init__(self):
         self.calls = []
         self.last_filters = None
+        self.last_tenant = "__unset__"
 
-    def recall(self, query, limit=10, filters=None, **_):
+    def recall(self, query, limit=10, filters=None, tenant=None, **_):
         self.calls.append((query, limit))
         self.last_filters = filters
+        self.last_tenant = tenant
         return [FakeResult(id=str(i), text=f"m{i}") for i in range(min(limit, 3))]
 
     def apply_vector_floor_after_rerank(self, results, recalled_results):
@@ -756,7 +758,120 @@ def test_answer_endpoint_threads_filters_to_recall_and_generator(monkeypatch):
         "token_budget": None,
         "include_invalidated": False,
         "as_of": None,
+        "tenant": None,
     }
+
+
+def _auth_app(monkeypatch, tmp_path, **kw):
+    from mnemostack.auth import FileKeyStore
+
+    ks = FileKeyStore(tmp_path / "keys.json")
+    _, read_key = ks.issue("alpha", ["read"])
+    _, write_key = ks.issue("alpha", ["write"])
+    _, admin_key = ks.issue("alpha", ["admin"])
+    cfg = ServerConfig(
+        provider_name="fake",
+        llm_name="fake",
+        graph_uri=None,
+        auth_enabled=True,
+        keys_file=str(tmp_path / "keys.json"),
+    )
+    app, recaller = _patched_app(monkeypatch, config=cfg, **kw)
+    return app, recaller, read_key, write_key, admin_key
+
+
+def test_recall_requires_key_when_auth_enabled(monkeypatch, tmp_path):
+    app, *_ = _auth_app(monkeypatch, tmp_path)
+    client = TestClient(app)
+    # default-deny: no key -> 401
+    assert client.post("/recall", json={"query": "x"}).status_code == 401
+    # invalid key -> 401
+    r = client.post("/recall", json={"query": "x"}, headers={"X-API-Key": "msk_bogus"})
+    assert r.status_code == 401
+
+
+def test_recall_valid_key_scopes_tenant(monkeypatch, tmp_path):
+    app, recaller, read_key, *_ = _auth_app(monkeypatch, tmp_path)
+    client = TestClient(app)
+    r = client.post("/recall", json={"query": "x"}, headers={"X-API-Key": read_key})
+    assert r.status_code == 200
+    assert recaller.last_tenant == "alpha"  # tenant resolved from the key
+
+
+def test_recall_accepts_bearer_scheme(monkeypatch, tmp_path):
+    app, recaller, read_key, *_ = _auth_app(monkeypatch, tmp_path)
+    client = TestClient(app)
+    r = client.post(
+        "/recall", json={"query": "x"}, headers={"Authorization": f"Bearer {read_key}"}
+    )
+    assert r.status_code == 200
+    assert recaller.last_tenant == "alpha"
+
+
+def test_answer_threads_tenant_from_key(monkeypatch, tmp_path):
+    app, recaller, read_key, *_ = _auth_app(monkeypatch, tmp_path)
+    client = TestClient(app)
+    r = client.post("/answer", json={"query": "x"}, headers={"X-API-Key": read_key})
+    assert r.status_code == 200
+    assert recaller.last_tenant == "alpha"  # /answer's recall is tenant-scoped too
+
+
+def test_write_key_rejected_on_read_endpoint(monkeypatch, tmp_path):
+    app, _rc, _read, write_key, _admin = _auth_app(monkeypatch, tmp_path)
+    client = TestClient(app)
+    # a write-only key lacks `read` -> 403 on /recall
+    r = client.post("/recall", json={"query": "x"}, headers={"X-API-Key": write_key})
+    assert r.status_code == 403
+
+
+def test_admin_key_satisfies_read_and_write(monkeypatch, tmp_path):
+    app, recaller, _read, _write, admin_key = _auth_app(monkeypatch, tmp_path, with_answer=False)
+    client = TestClient(app)
+    assert (
+        client.post("/recall", json={"query": "x"}, headers={"X-API-Key": admin_key}).status_code
+        == 200
+    )
+    fb = client.post(
+        "/feedback", json={"hit_id": "h1", "signal": "useful"}, headers={"X-API-Key": admin_key}
+    )
+    assert fb.status_code == 200
+
+
+def test_feedback_requires_write_scope(monkeypatch, tmp_path):
+    app, _rc, read_key, write_key, _admin = _auth_app(monkeypatch, tmp_path, with_answer=False)
+    client = TestClient(app)
+    body = {"hit_id": "h1", "signal": "useful"}
+    # a read-only key is rejected for a write endpoint (403)
+    assert client.post("/feedback", json=body, headers={"X-API-Key": read_key}).status_code == 403
+    # a write key is accepted
+    assert client.post("/feedback", json=body, headers={"X-API-Key": write_key}).status_code == 200
+
+
+def test_x_api_key_wins_when_both_headers_present(monkeypatch, tmp_path):
+    app, recaller, read_key, *_ = _auth_app(monkeypatch, tmp_path)
+    client = TestClient(app)
+    r = client.post(
+        "/recall",
+        json={"query": "x"},
+        headers={"X-API-Key": read_key, "Authorization": "Bearer msk_garbage"},
+    )
+    assert r.status_code == 200  # X-API-Key (valid) is used, not the bad Bearer
+
+
+def test_probes_stay_public_under_auth(monkeypatch, tmp_path):
+    # Liveness/readiness must not require a key (k8s probes can't auth).
+    app, *_ = _auth_app(monkeypatch, tmp_path)
+    client = TestClient(app)
+    assert client.get("/healthz").status_code == 200
+    assert client.get("/readyz").status_code in (200, 503)  # reachable without a key
+
+
+def test_auth_disabled_is_tenantless_and_open(monkeypatch):
+    # Default (auth off): no key needed, tenant stays None (single-tenant).
+    app, recaller = _patched_app(monkeypatch)
+    r = TestClient(app).post("/recall", json={"query": "x"})
+    assert r.status_code == 200
+    assert recaller.last_tenant is None
 
 
 def test_recall_endpoint_reports_tokens_estimate(monkeypatch):

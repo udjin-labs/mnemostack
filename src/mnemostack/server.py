@@ -28,7 +28,7 @@ from functools import partial
 from typing import Any, Literal
 
 try:
-    from fastapi import FastAPI, HTTPException
+    from fastapi import Depends, FastAPI, Header, HTTPException
     from pydantic import BaseModel, Field
 except ImportError as e:  # pragma: no cover - import guard
     raise ImportError(
@@ -358,6 +358,12 @@ class ServerConfig:
     # Qdrant makes /readyz return 503 promptly instead of tying up a worker
     # thread for the recall client's full timeout. Separate from recall's own.
     qdrant_health_timeout: int = 2
+    # Multi-tenant auth. When enabled, every data endpoint (/recall, /answer,
+    # /feedback) requires a valid service key (default-deny); the key resolves
+    # the tenant and scopes. Off by default — single-tenant deployments serve
+    # unauthenticated, tenant-less recall exactly as before.
+    auth_enabled: bool = False
+    keys_file: str | None = None  # None = FileKeyStore default path
 
     def __post_init__(self) -> None:
         if self.rerank_mode not in RERANK_MODES:
@@ -390,6 +396,8 @@ class ServerConfig:
             rerank_mode=cfg.recall.rerank_mode,
             token_budget=cfg.recall.token_budget,
             auto_record_ior=_env_bool("MNEMOSTACK_AUTO_RECORD_IOR"),
+            auth_enabled=_env_bool("MNEMOSTACK_AUTH_ENABLED"),
+            keys_file=os.environ.get("MNEMOSTACK_KEYS_FILE") or None,
         )
 
 
@@ -659,6 +667,45 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
 
     import asyncio
 
+    # ----- Auth (multi-tenant): resolve the tenant + scopes from a service key.
+    key_store = None
+    if cfg.auth_enabled:
+        from mnemostack.auth import FileKeyStore
+
+        key_store = FileKeyStore(cfg.keys_file)
+
+    def _extract_key(authorization: str | None, x_api_key: str | None) -> str | None:
+        if x_api_key:
+            return x_api_key.strip()
+        if authorization and authorization.lower().startswith("bearer "):
+            return authorization[7:].strip()
+        return None
+
+    def _require(scope: str):
+        """FastAPI dependency: enforce a valid key with `scope` and return the
+        Principal (or None when auth is disabled → single-tenant, tenant=None)."""
+
+        def _dep(
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+        ):
+            if not cfg.auth_enabled:
+                return None  # auth off: unauthenticated, tenant-less (legacy)
+            key = _extract_key(authorization, x_api_key)
+            if not key:
+                raise HTTPException(status_code=401, detail="missing service key")
+            principal = key_store.verify(key) if key_store else None
+            if principal is None:
+                raise HTTPException(status_code=401, detail="invalid service key")
+            if not principal.can(scope):
+                raise HTTPException(status_code=403, detail=f"key lacks '{scope}' scope")
+            return principal
+
+        return _dep
+
+    def _tenant_of(principal) -> str | None:
+        return principal.tenant if principal is not None else None
+
     def _run_recall_sync(
         query: str,
         limit: int,
@@ -667,6 +714,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         token_budget: int | None = None,
         include_invalidated: bool = False,
         as_of: str | None = None,
+        tenant: str | None = None,
     ):
         trace = RecallTrace()
         # Reranking is part of the full pipeline; if it was requested but the
@@ -687,6 +735,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             token_budget=token_budget if token_budget is not None else cfg.token_budget,
             include_invalidated=include_invalidated,
             as_of=as_of,
+            tenant=tenant,
         )
         if cfg.auto_record_ior:
             record_recall_events(pipeline, results)
@@ -700,6 +749,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         token_budget: int | None = None,
         include_invalidated: bool = False,
         as_of: str | None = None,
+        tenant: str | None = None,
     ):
         """Offload the blocking recall stack to a worker thread.
 
@@ -716,6 +766,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             token_budget,
             include_invalidated,
             as_of,
+            tenant,
         )
 
     @app.get("/", include_in_schema=False)
@@ -814,7 +865,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         )
 
     @app.post("/recall", response_model=RecallResponse)
-    async def recall_endpoint(req: RecallRequest):
+    async def recall_endpoint(req: RecallRequest, principal=Depends(_require("read"))):  # noqa: B008 — FastAPI DI pattern
         try:
             results, trace = await _run_recall(
                 req.query,
@@ -824,6 +875,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 req.token_budget,
                 req.include_invalidated,
                 req.as_of,
+                _tenant_of(principal),
             )
         except Exception as exc:
             log.exception("recall endpoint failed")
@@ -837,7 +889,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         )
 
     @app.post("/answer", response_model=AnswerResponse)
-    async def answer_endpoint(req: AnswerRequest):
+    async def answer_endpoint(req: AnswerRequest, principal=Depends(_require("read"))):  # noqa: B008 — FastAPI DI pattern
         if answer_gen is None:
             # Count the outage: this returns before AnswerGenerator.generate()
             # can emit mnemostack.answer.errors, so without this the operator's
@@ -850,6 +902,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         # Resolve the effective budget once: the generator needs it too, or
         # its retry paths would prompt over fresh unbudgeted sub-recalls.
         token_budget = req.token_budget if req.token_budget is not None else cfg.token_budget
+        tenant = _tenant_of(principal)
         try:
             results, trace = await _run_recall(
                 req.query,
@@ -859,10 +912,12 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 token_budget,
                 req.include_invalidated,
                 req.as_of,
+                tenant,
             )
             # recall_filters keeps the answer generator's retry sub-recalls
-            # inside the same filtered scope; the validity view must reach the
-            # generator too, or its retry sub-recalls would ignore as_of.
+            # inside the same filtered scope; the validity view AND the tenant
+            # must reach the generator too, or its retry sub-recalls would ignore
+            # as_of / pull cross-tenant evidence.
             ans = await asyncio.to_thread(
                 partial(
                     answer_gen.generate,
@@ -872,6 +927,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                     token_budget=token_budget,
                     include_invalidated=req.include_invalidated,
                     as_of=req.as_of,
+                    tenant=tenant,
                 )
             )
         except Exception as exc:
@@ -896,11 +952,20 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         )
 
     @app.post("/feedback", response_model=FeedbackResponse)
-    async def feedback_endpoint(req: FeedbackRequest):
+    async def feedback_endpoint(req: FeedbackRequest, principal=Depends(_require("write"))):  # noqa: B008 — FastAPI DI pattern
         """Record explicit feedback for stateful recall stages.
 
         Q-learning updates require retriever/source labels. Pass the `retrievers`
         field returned by /recall or /answer as `sources`.
+
+        Multi-tenant note: the `write` scope gates *access* to this endpoint, but
+        the Q-learning weight and inhibition-of-return state it updates are
+        currently process-global (keyed by source/query_type/hit_id), NOT
+        partitioned per tenant. So one tenant's feedback can influence another
+        tenant's ranking/IoR state. Per-tenant learning state is a tracked
+        follow-up; until then, in a multi-tenant deployment either keep
+        `--auto-record-ior` off and treat feedback as advisory, or run separate
+        state per tenant.
         """
         try:
             outcome = apply_feedback(

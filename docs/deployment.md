@@ -430,7 +430,9 @@ Only do this behind a reverse proxy with:
 
 Treat `/recall`, `/answer`, and `/feedback` as sensitive. They can reveal indexed memory and influence future ranking state.
 
-The `filters` parameter on `/recall` and `/answer` provides data isolation inside the retrievers (no point outside the filtered scope is returned), but it is **caller-supplied — not an authorization boundary**. A client that can reach the endpoint can pass any filter, or none. For multi-tenant deployments, inject the tenant filter in your reverse proxy or API gateway and strip whatever the client sent; never let end clients choose their own scope. Upgrade note: on 0.5.0 and earlier, several retrievers ignored `filters=` entirely — see the Security section of the changelog.
+The `filters` parameter on `/recall` and `/answer` provides data isolation inside the retrievers (no point outside the filtered scope is returned), but it is **caller-supplied — not an authorization boundary**. A client that can reach the endpoint can pass any filter, or none.
+
+For multi-tenant deployments, use the built-in **service-key auth** instead of trusting client filters: start the server with `mnemostack serve --auth`, issue per-tenant keys with `mnemostack keys add --tenant <id> --scopes read,write`, and clients present the key via `Authorization: Bearer <key>` or `X-API-Key`. The **tenant is resolved from the key** (a client can't assert another tenant) and enforced through the vector store's tenant filter plus a post-fusion `filter_by_tenant` backstop, so an authenticated caller only ever sees its own tenant's data. `/recall` and `/answer` require `read`, `/feedback` requires `write`; a missing/invalid key is `401`, an insufficient scope `403` (default-deny). Liveness/readiness probes stay public; protect `/metrics` and `/status` at your proxy if needed. (Auth is off by default — single-tenant deployments are unaffected.) You can still additionally inject a tenant filter at a reverse proxy for defense-in-depth. Upgrade note: on 0.5.0 and earlier, several retrievers ignored `filters=` entirely — see the Security section of the changelog.
 
 ### MCP
 
