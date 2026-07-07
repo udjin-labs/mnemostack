@@ -48,6 +48,14 @@ _MIN_IDLE_TICK = 0.1
 #: for a delete whose graph/vector write failed transiently.
 _RESCAN_EVERY = 30.0
 
+#: Minimum gap between retries of an unchanged OVER-QUOTA file. index_file embeds
+#: before the quota hook can reject, so retrying every poll would re-pay the
+#: embedding cost each tick for a write that can't succeed until the quota
+#: changes. Backing off to the rescan cadence bounds that waste while still
+#: picking up a raised quota promptly. (Transient failures aren't backed off —
+#: they self-heal on the next poll.)
+_QUOTA_RETRY_BACKOFF = _RESCAN_EVERY
+
 
 def _is_markdown(path: str) -> bool:
     return path.lower().endswith(".md")
@@ -139,6 +147,7 @@ class MarkdownWatcher:
         # (accepted as "as fast as possible") don't spin a core on sleep(0).
         self.poll_interval = max(poll_interval, _MIN_IDLE_TICK)
         self._sleep = sleep
+        self._clock = clock
         self._debouncer = _Debouncer(debounce, clock)
         self._on_result = on_result
         self._on_error = on_error
@@ -149,6 +158,11 @@ class MarkdownWatcher:
         #: Over-quota paths already reported, so the periodic retry (which lets a
         #: raised quota take effect) doesn't re-log the same rejection every rescan.
         self._quota_warned: set[str] = set()
+        #: Over-quota path -> earliest clock() at which to re-attempt it, so an
+        #: unchanged over-quota file isn't re-embedded every poll (see
+        #: _QUOTA_RETRY_BACKOFF). Only the poll retry path honors it; a genuine
+        #: edit (mtime change) still retries immediately.
+        self._quota_retry_at: dict[str, float] = {}
 
     # --- event core (filesystem-agnostic, unit-testable) ---
 
@@ -171,13 +185,16 @@ class MarkdownWatcher:
                 res = self.syncer.index_file(path)
             self._failed.discard(path)
             self._quota_warned.discard(path)  # it fit — reset so a future reject re-warns
+            self._quota_retry_at.pop(path, None)
             if self._on_result is not None:
                 self._on_result(res)
         except QuotaExceededError as exc:
             # Over-quota: keep it queued for retry (a `quota set` raising the limit,
             # picked up by the syncer's live resolver, then lets it in on the next
-            # rescan) — but report only ONCE per file so the retries don't spam.
+            # rescan) — but report only ONCE per file so the retries don't spam, and
+            # back off the next retry so we don't re-embed it every poll meanwhile.
             self._failed.add(path)
+            self._quota_retry_at[path] = self._clock() + _QUOTA_RETRY_BACKOFF
             if path not in self._quota_warned:
                 self._quota_warned.add(path)
                 if self._on_error is not None:
@@ -225,12 +242,18 @@ class MarkdownWatcher:
         for path, mtime in cur.items():
             if prev.get(path) != mtime:
                 self.handle_event(path, UPSERT)  # real change: coalesce normally
-            elif path in self._failed and not self._debouncer.is_pending(path):
-                # Retry an unchanged failed/over-quota file, but do NOT re-queue one
-                # already awaiting its window: re-adding every poll would reset the
-                # debounce deadline, so with poll_interval < debounce the flush would
-                # never come due and the retry would starve. Emitting only when not
-                # pending anchors the deadline so flush eventually applies it.
+            elif (
+                path in self._failed
+                and not self._debouncer.is_pending(path)
+                and self._clock() >= self._quota_retry_at.get(path, 0.0)
+            ):
+                # Retry an unchanged failed/over-quota file, but: (1) do NOT re-queue
+                # one already awaiting its window — re-adding every poll would reset
+                # the debounce deadline, so with poll_interval < debounce the flush
+                # would never come due and the retry would starve; emitting only when
+                # not pending anchors the deadline. (2) Honor the over-quota backoff
+                # so an unchanged rejected file isn't re-embedded every poll (a
+                # transient failure has no backoff entry, so it still retries at once).
                 self.handle_event(path, UPSERT)
         for path in prev:
             if path not in cur:

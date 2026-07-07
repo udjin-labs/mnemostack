@@ -742,6 +742,54 @@ def test_failed_retry_not_starved_by_fast_poll(tmp_path):
     assert syncer.indexed == [a]           # applied once, not starved
 
 
+def test_over_quota_watch_retry_backs_off(tmp_path):
+    # index_file embeds before the quota hook rejects, so retrying an unchanged
+    # over-quota file every poll would re-pay the embedding cost each tick. The
+    # retry must back off: run once, then not again until the backoff elapses.
+    from mnemostack.markdown.watch import _QUOTA_RETRY_BACKOFF
+    from mnemostack.quotas import QuotaExceededError
+
+    (tmp_path / "a.md").write_text("# A\n")
+
+    class _QuotaSyncer:
+        index_root = str(tmp_path)
+
+        def __init__(self):
+            self.calls = 0
+
+        def index_file(self, path):
+            self.calls += 1
+            raise QuotaExceededError("acme", 1, 2)  # always over quota
+
+        def remove_file(self, path):
+            pass
+
+    clock = _FakeClock()
+    errors: list = []
+    syncer = _QuotaSyncer()
+    w = MarkdownWatcher(syncer, tmp_path, debounce=0.0, poll_interval=1.0,
+                        clock=clock, on_error=lambda p, k, e: errors.append(p))
+    a = next(iter(w._scan()))
+    w._failed.add(a)  # queued at startup (over quota)
+    snap = w._scan()
+
+    w.poll_once(snap)
+    w.flush(force=True)
+    assert syncer.calls == 1  # first attempt embeds once and backs off
+
+    for t in range(1, 10):  # polls within the backoff window re-embed nothing
+        clock.t = float(t)
+        w.poll_once(snap)
+        w.flush(force=True)
+    assert syncer.calls == 1
+
+    clock.t = _QUOTA_RETRY_BACKOFF + 1.0  # backoff elapsed -> one more attempt
+    w.poll_once(snap)
+    w.flush(force=True)
+    assert syncer.calls == 2
+    assert errors == [a]  # still reported exactly once despite the retries
+
+
 def test_watch_requires_a_directory(tmp_path, capsys):
     import argparse
 
