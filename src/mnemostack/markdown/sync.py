@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ..quotas import enforce_points_quota
 from .indexer import collect_markdown
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -47,6 +48,7 @@ def upsert_markdown_chunks(
     existing_payloads: dict[str, dict],
     *,
     tenant: str | None = None,
+    max_points: int | None = None,
 ) -> ChunkSyncResult:
     """Embed & upsert new chunks; refresh payloads of already-indexed ones.
 
@@ -58,10 +60,17 @@ def upsert_markdown_chunks(
 
     With ``tenant`` set, writes route through the store's tenant boundary
     (``tenant_id`` stamped server-side; a payload can't assert its own tenant,
-    and refresh/delete are owner-guarded) so a markdown corpus is isolated.
+    and refresh/delete are owner-guarded) so a markdown corpus is isolated. With
+    ``max_points`` set too, the whole call is refused (``QuotaExceededError``)
+    before any insert if its NEW chunks would push the tenant over its limit
+    (refreshes of already-indexed chunks don't count — they don't grow the count).
     """
     tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
     existing_ids = set(existing_payloads)
+    if tenant is not None and max_points is not None:
+        num_new = sum(1 for cid, _t, _p in chunks if cid not in existing_ids)
+        if num_new:
+            enforce_points_quota(tenant, store.count(tenant=tenant), num_new, max_points)
     res = ChunkSyncResult()
     for cid, text, payload in chunks:
         if cid in existing_ids:
@@ -133,12 +142,16 @@ class MarkdownSyncer:
         graph: Any = None,
         subtree: str | None = None,
         tenant: str | None = None,
+        max_points: int | None = None,
     ):
         self.store = store
         self.provider = provider
         self.index_root = str(Path(index_root).resolve())
         self.chunk_size = chunk_size
         self.graph = graph
+        # Per-tenant storage quota, enforced on each file's new chunks (see
+        # upsert_markdown_chunks). None = no limit.
+        self.max_points = max_points
         # Scopes every store + graph read/write and the chunk-id derivation to one
         # tenant, so a markdown corpus is isolated (and tenant-scoped graph recall
         # can see its :File link nodes). None = unscoped (single-tenant), unchanged.
@@ -208,7 +221,8 @@ class MarkdownSyncer:
                 existing[str(hit.id)] = hit.payload or {}
 
         cs = upsert_markdown_chunks(
-            self.store, self.provider, chunks, existing, tenant=self.tenant
+            self.store, self.provider, chunks, existing,
+            tenant=self.tenant, max_points=self.max_points,
         )
 
         # Prune chunks this file no longer produces (shrunk / re-chunked). Skip a

@@ -474,6 +474,24 @@ def _keys_store(args: argparse.Namespace):
     return FileKeyStore(getattr(args, "keys_file", None) or None)
 
 
+def _quota_store(args: argparse.Namespace):
+    from mnemostack.quotas import FileQuotaStore
+
+    return FileQuotaStore(getattr(args, "quotas_file", None) or None)
+
+
+def _resolve_max_points(args: argparse.Namespace, tenant: str | None) -> int | None:
+    """The tenant's storage limit from the quota store, or None (no limit).
+
+    Unscoped ingest has no tenant and no quota. A corrupt/unreadable quota store
+    fails open (get() returns None) rather than blocking ingest.
+    """
+    if tenant is None:
+        return None
+    quota = _quota_store(args).get(tenant)
+    return quota.max_points if quota else None
+
+
 def cmd_keys_add(args: argparse.Namespace) -> int:
     """Issue a service key for a tenant. Prints the key once (never stored)."""
     from mnemostack.auth import KeyStoreError
@@ -530,6 +548,59 @@ def cmd_keys_revoke(args: argparse.Namespace) -> int:
         print(f"revoked key {args.id}")
         return 0
     print(f"error: no key with id '{args.id}'", file=sys.stderr)
+    return 1
+
+
+def cmd_quota_set(args: argparse.Namespace) -> int:
+    """Set a tenant's resource quota (currently: max stored points)."""
+    from mnemostack.quotas import QuotaStoreError
+
+    try:
+        quota = _quota_store(args).set(args.tenant, max_points=args.max_points)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    except QuotaStoreError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    limit = "unlimited" if quota.max_points is None else str(quota.max_points)
+    print(f"quota for tenant '{args.tenant}': max_points={limit}")
+    return 0
+
+
+def cmd_quota_list(args: argparse.Namespace) -> int:
+    from mnemostack.quotas import QuotaStoreError
+
+    try:
+        quotas = _quota_store(args).list_quotas()
+    except QuotaStoreError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(quotas, ensure_ascii=False, indent=2))
+        return 0
+    if not quotas:
+        print("(no quotas)")
+        return 0
+    print(f"{'TENANT':<24} MAX_POINTS")
+    for q in quotas:
+        mp = "unlimited" if q.get("max_points") is None else str(q["max_points"])
+        print(f"{q.get('tenant', ''):<24} {mp}")
+    return 0
+
+
+def cmd_quota_rm(args: argparse.Namespace) -> int:
+    from mnemostack.quotas import QuotaStoreError
+
+    try:
+        removed = _quota_store(args).remove(args.tenant)
+    except QuotaStoreError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    if removed:
+        print(f"removed quota for tenant '{args.tenant}'")
+        return 0
+    print(f"error: no quota set for tenant '{args.tenant}'", file=sys.stderr)
     return 1
 
 
@@ -1270,6 +1341,7 @@ def cmd_index(args: argparse.Namespace) -> int:
 def cmd_index_markdown(args: argparse.Namespace) -> int:
     """Index a markdown folder: frontmatter -> payload, links -> graph edges."""
     from .markdown import collect_markdown
+    from .quotas import QuotaExceededError
 
     # Resolve to an absolute path so it's comparable with a resolved --index-root
     # when computing corpus-relative sources (relative_to needs both same-form).
@@ -1354,6 +1426,7 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
     # subtree or single file covers only part of the root and must not.
     full_root_walk = target.is_dir() and str(target) == index_root
     tenant = getattr(args, "tenant", None) or None
+    max_points = _resolve_max_points(args, tenant)
     # Forward tenant= to store/graph calls only when set (unscoped = no kwarg,
     # so a store/graph predating the kwarg still works); our own helpers take it.
     mtkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
@@ -1403,7 +1476,13 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
 
     # Embed new chunks and refresh changed payloads (shared with the watcher's
     # per-file path so a full walk and a single-file update behave identically).
-    cs = upsert_markdown_chunks(store, provider, chunks, existing_payloads, tenant=tenant)
+    try:
+        cs = upsert_markdown_chunks(
+            store, provider, chunks, existing_payloads, tenant=tenant, max_points=max_points
+        )
+    except QuotaExceededError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     inserted, refreshed, failed = cs.inserted, cs.refreshed, cs.failed
     failed_sources = cs.failed_sources
 
@@ -1530,6 +1609,7 @@ def _watch_markdown(
         except Exception as exc:  # noqa: BLE001 — graph optional; watch still syncs vectors
             print(f"warning: graph unavailable, links not watched ({exc})", file=sys.stderr)
 
+    _watch_tenant = getattr(args, "tenant", None) or None
     syncer = MarkdownSyncer(
         store,
         provider,
@@ -1537,7 +1617,8 @@ def _watch_markdown(
         chunk_size=args.chunk_size,
         graph=graph,
         subtree=watch_root,  # keep referrer re-resolution inside the watched tree
-        tenant=getattr(args, "tenant", None) or None,
+        tenant=_watch_tenant,
+        max_points=_resolve_max_points(args, _watch_tenant),
     )
 
     def _on_result(res: Any) -> None:
@@ -1739,6 +1820,40 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     pk_revoke.add_argument("id", help="key id (from `keys list`)")
     pk_revoke.add_argument("--keys-file", default=None, help=_keys_file_help)
     pk_revoke.set_defaults(func=cmd_keys_revoke)
+
+    # ---- quota ----
+    p_quota = sub.add_parser(
+        "quota", help="Manage per-tenant resource quotas (set / list / rm)"
+    )
+    qsub = p_quota.add_subparsers(dest="quota_action")
+
+    def _quota_help(_args: argparse.Namespace) -> int:
+        p_quota.print_help()
+        return 2
+
+    p_quota.set_defaults(func=_quota_help)
+    _quotas_file_help = (
+        "Quota store path (default: $MNEMOSTACK_QUOTAS_FILE or "
+        "~/.config/mnemostack/quotas.json)"
+    )
+    pq_set = qsub.add_parser("set", help="Set a tenant's quota (replaces any existing)")
+    pq_set.add_argument("--tenant", required=True, help="tenant_id to limit")
+    pq_set.add_argument(
+        "--max-points",
+        type=int,
+        default=None,
+        help="Max vector points the tenant may store (omit for unlimited)",
+    )
+    pq_set.add_argument("--quotas-file", default=None, help=_quotas_file_help)
+    pq_set.set_defaults(func=cmd_quota_set)
+    pq_list = qsub.add_parser("list", help="List tenant quotas")
+    pq_list.add_argument("--json", action="store_true", help="JSON output")
+    pq_list.add_argument("--quotas-file", default=None, help=_quotas_file_help)
+    pq_list.set_defaults(func=cmd_quota_list)
+    pq_rm = qsub.add_parser("rm", help="Remove a tenant's quota")
+    pq_rm.add_argument("--tenant", required=True, help="tenant_id whose quota to drop")
+    pq_rm.add_argument("--quotas-file", default=None, help=_quotas_file_help)
+    pq_rm.set_defaults(func=cmd_quota_rm)
 
     p_search = sub.add_parser("search", parents=[common], help="Hybrid recall")
     p_search.add_argument("query", help="Search query text")
@@ -2050,6 +2165,12 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
             "nodes/edges are scoped to it, so authenticated multi-tenant recall "
             "sees only its own markdown (default: unscoped / single-tenant)"
         ),
+    )
+    p_index_md.add_argument(
+        "--quotas-file",
+        default=None,
+        help="Quota store to enforce the tenant's max-points limit (default: "
+        "$MNEMOSTACK_QUOTAS_FILE or ~/.config/mnemostack/quotas.json)",
     )
     p_index_md.add_argument(
         "--index-root",

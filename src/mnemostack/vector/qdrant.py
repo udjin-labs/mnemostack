@@ -189,6 +189,23 @@ class VectorStore:
         info = self.client.get_collection(self.collection)
         return info.points_count or 0
 
+    def retrieve_existing_ids(self, ids: list[str | int]) -> set[str]:
+        """Which of ``ids`` already exist in the collection (as string ids).
+
+        Lets a caller distinguish genuinely-new points from re-upserts of
+        already-stored ones (chunk ids are deterministic, so a re-ingest upserts
+        onto itself and doesn't grow the count) — used by the ingest quota check.
+        """
+        if not ids:
+            return set()
+        found = self.client.retrieve(
+            collection_name=self.collection,
+            ids=ids,
+            with_payload=False,
+            with_vectors=False,
+        )
+        return {str(p.id) for p in found}
+
     def delete(self) -> None:
         self.client.delete_collection(self.collection)
 

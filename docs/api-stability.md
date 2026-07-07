@@ -52,7 +52,7 @@ this is purely additive. See [Multi-tenancy & authentication](#multi-tenancy--au
 
 🟢 **Stable** commands and their documented flags / exit codes:
 `health`, `doctor`, `search`, `answer`, `index`, `index-markdown`, `invalidate`,
-`feedback`, `serve`, `mcp-serve`, `keys`, `tenant-migrate`, `init`, `config`.
+`feedback`, `serve`, `mcp-serve`, `keys`, `quota`, `tenant-migrate`, `init`, `config`.
 
 - `tenant-migrate --tenant <id>` stamps existing points into a tenant (idempotent;
   `--all` to force-relabel, `--dry-run` to preview) — the operator path to adopting
@@ -70,6 +70,13 @@ this is purely additive. See [Multi-tenancy & authentication](#multi-tenancy--au
   Bearer` / `X-API-Key` header (many keys/tenants); `mcp-serve` binds **one**
   process principal from `--api-key` / `MNEMOSTACK_API_KEY`. Default-off; see
   [Multi-tenancy & authentication](#multi-tenancy--authentication).
+- `quota set` / `quota list` / `quota rm` manage per-tenant resource limits (a
+  `max_points` storage cap today) in a per-tenant quota store (`--quotas-file` /
+  `MNEMOSTACK_QUOTAS_FILE`, default `~/.config/mnemostack/quotas.json`). The cap is
+  enforced at ingest — `index-markdown --tenant <id>` (and the library
+  `Ingestor(max_points=)`) refuse a write that would exceed it. A quota is a
+  resource guardrail, not a security boundary, so a corrupt quota store **fails
+  open** (no limit, logged) rather than blocking ingest.
 
 - `doctor` exit codes (`0` healthy / `1` core dependency down / `2` config
   invalid) are a 🟢 stable contract — safe to gate CI/deploys on. Exit `2` covers a
@@ -223,6 +230,11 @@ behave exactly as listed above.
   "admin"}`; `admin` implies the others), `KeyStoreError`, `hash_key`,
   `default_keys_path`. This is the credential surface behind `serve --auth` /
   `mcp-serve --auth`; keys are stored hashed and the plaintext is shown once.
+- **Quotas (per-tenant resource limits)**: `mnemostack.quotas` — `TenantQuota`
+  (`max_points`), `QuotaStore` (Protocol: `.get(tenant) -> TenantQuota | None`),
+  `FileQuotaStore` (`.get` / `.set` / `.remove` / `.list_quotas`), `QuotaExceededError`,
+  `QuotaStoreError`, `enforce_points_quota`, `default_quotas_path`. The storage-cap
+  surface behind `quota` / `Ingestor(max_points=)`; fails open on a broken store.
 - **Markdown**: `collect_markdown`, `MarkdownChunk`, `LinkEdge`,
   `MarkdownCollection`, `parse_frontmatter`, `extract_links`, `MarkdownSyncer`.
 - **Graph**: `GraphStore` (documented methods), `make_graph_store` (the
