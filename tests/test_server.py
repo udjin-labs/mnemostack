@@ -503,7 +503,7 @@ def test_recall_endpoint_can_auto_record_ior(monkeypatch):
         def __init__(self):
             self.recorded = []
 
-        def record_recall(self, memory_id):
+        def record_recall(self, memory_id, tenant=None):
             self.recorded.append(memory_id)
 
     ior = _IorStage()
@@ -528,14 +528,14 @@ def test_feedback_endpoint_records_qlearning_and_clicked_ior(monkeypatch):
         def __init__(self):
             self.recorded = []
 
-        def record_recall(self, memory_id):
+        def record_recall(self, memory_id, tenant=None):
             self.recorded.append(memory_id)
 
     class _QStage:
         def __init__(self):
             self.feedback = []
 
-        def record_feedback(self, source, query_type, reward):
+        def record_feedback(self, source, query_type, reward, tenant=None):
             self.feedback.append((source, query_type, reward))
 
     ior = _IorStage()
@@ -571,7 +571,7 @@ def test_feedback_endpoint_accepts_reward_override(monkeypatch):
         def __init__(self):
             self.feedback = []
 
-        def record_feedback(self, source, query_type, reward):
+        def record_feedback(self, source, query_type, reward, tenant=None):
             self.feedback.append((source, query_type, reward))
 
     qstage = _QStage()
@@ -778,6 +778,31 @@ def _auth_app(monkeypatch, tmp_path, **kw):
     )
     app, recaller = _patched_app(monkeypatch, config=cfg, **kw)
     return app, recaller, read_key, write_key, admin_key
+
+
+def test_feedback_endpoint_threads_tenant_under_auth(monkeypatch, tmp_path):
+    # /feedback records into the key's tenant partition of the learning state.
+    import mnemostack.server as srv
+    from mnemostack.feedback import FeedbackOutcome
+
+    captured: dict[str, object] = {}
+
+    def _spy(_pipeline, **kw):
+        captured.update(kw)
+        return FeedbackOutcome(
+            hit_id=kw["hit_id"], signal=kw["signal"], reward=1.0,
+            query_type="general", ior_recorded=False, q_learning_updates=0,
+        )
+
+    monkeypatch.setattr(srv, "apply_feedback", _spy)
+    app, _rec, _rk, write_key, _ak = _auth_app(monkeypatch, tmp_path)
+    client = TestClient(app)
+    r = client.post(
+        "/feedback", json={"hit_id": "h", "signal": "useful"},
+        headers={"X-API-Key": write_key},
+    )
+    assert r.status_code == 200
+    assert captured["tenant"] == "alpha"  # the key's tenant, threaded into the state
 
 
 def test_recall_requires_key_when_auth_enabled(monkeypatch, tmp_path):

@@ -772,6 +772,23 @@ def test_mcp_auth_scope_enforced(tmp_path, monkeypatch):
     assert f.structured_content["ok"] is False and "scope" in f.structured_content["error"]
 
 
+def test_mcp_auth_threads_tenant_into_feedback(tmp_path, monkeypatch):
+    # mnemostack_feedback records into the key's tenant partition of the learning
+    # state, so one tenant's feedback can't move another's ranking.
+    import mnemostack.mcp.server as srv
+
+    captured: dict[str, object] = {}
+
+    def _spy(_pipeline, **kw):
+        captured.update(kw)
+        return SimpleNamespace(to_dict=lambda: {"ok": True})
+
+    monkeypatch.setattr(srv, "apply_feedback", _spy)
+    mcp = _auth_mcp(tmp_path, monkeypatch, tenant="acme", scopes="write")
+    asyncio.run(mcp.call_tool("mnemostack_feedback", {"hit_id": "h", "signal": "useful"}))
+    assert captured["tenant"] == "acme"
+
+
 def test_mcp_auth_threads_tenant_into_recall(tmp_path, monkeypatch):
     rec = {}
     mcp = _auth_mcp(tmp_path, monkeypatch, tenant="acme", rec=rec)

@@ -1605,6 +1605,7 @@ def cmd_feedback(args: argparse.Namespace) -> int:
             source=args.source,
             sources=list(args.source_list or []),
             reward=args.reward,
+            tenant=getattr(args, "tenant", None) or None,
         )
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
@@ -2147,6 +2148,13 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         "--state-path",
         default=default_state_path(),
         help="Pipeline state file path",
+    )
+    p_feedback.add_argument(
+        "--tenant",
+        default=None,
+        metavar="ID",
+        help="Record the feedback into this tenant's learning-state partition "
+        "(default: unscoped / single-tenant)",
     )
     p_feedback.add_argument("--json", action="store_true", help="JSON output")
     p_feedback.set_defaults(func=cmd_feedback)

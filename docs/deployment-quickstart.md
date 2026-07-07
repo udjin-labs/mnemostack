@@ -56,10 +56,10 @@ the [HTTP server section of the README](../README.md#http-server-optional) for r
 > behind your own auth / rate-limit layer or a private network. For built-in,
 > per-tenant auth, add `--auth` and issue a service key
 > (`mnemostack keys add --tenant <t> --scopes read,write`); `/recall` and `/answer`
-> then require the key and scope results to its tenant. Note `/feedback` is
-> access-gated by the key but **not tenant-scoped** — its learning state is
-> process-global, so don't expose it across mutually-distrusting tenants on one
-> process (see the caveat in
+> then require the key and scope results to its tenant. `/feedback` is
+> tenant-partitioned too — its learning state (Q-table, inhibition-of-return) is
+> keyed by the caller's tenant, so one tenant's feedback can't shift another's
+> ranking (see
 > [api-stability.md](../docs/api-stability.md#multi-tenancy--authentication)).
 >
 > ⚠️ **Stamp your data first.** `mnemostack index` (step 1) writes points with **no
