@@ -1486,6 +1486,7 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
         prune=bool(args.prune and not args.recreate), full_root=full_root_walk,
         md_owned_only=False,  # bulk prune_stale_chunks removes every stale point of the source
     )
+    initial_skipped = False
     try:
         cs = upsert_markdown_chunks(
             store, provider, chunks, existing_payloads, tenant=tenant,
@@ -1500,11 +1501,18 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
             return 2
         print(f"warning: initial index skipped — {e}", file=sys.stderr)
         cs = ChunkSyncResult()
+        initial_skipped = True
     inserted, refreshed, failed = cs.inserted, cs.refreshed, cs.failed
     failed_sources = cs.failed_sources
 
+    # When the initial index was skipped over quota, NOTHING was upserted, so the
+    # prune and graph-link steps below must not run: treating the collected
+    # sources as "freshly refreshed" would delete the tenant's existing chunks
+    # (and full-root edge reconciliation would drop their links) with no
+    # replacement written. The watch loop re-indexes each file under the live
+    # quota instead.
     pruned = 0
-    if args.prune and not args.recreate:
+    if args.prune and not args.recreate and not initial_skipped:
         from .ingest import prune_stale_chunks
 
         # Seed from EVERY visited file, not just files that produced chunks: a
@@ -1538,7 +1546,7 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
     # embeddings failed are skipped so a partial index doesn't rewrite links.
     edges_written = 0
     graph_uri = getattr(args, "memgraph_uri", None) or None
-    if graph_uri:
+    if graph_uri and not initial_skipped:
         from .graph.factory import make_graph_store
 
         # Seed with every indexed source so a file whose links were all removed

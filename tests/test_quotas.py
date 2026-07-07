@@ -375,3 +375,98 @@ def test_cli_resolve_max_points(tmp_path):
     assert cli._resolve_max_points(args, "acme") == 42  # resolved from the store
     assert cli._resolve_max_points(args, "other") is None  # no quota set
     assert cli._resolve_max_points(args, None) is None  # unscoped ingest
+
+
+class _HitId:
+    def __init__(self, id, payload):
+        self.id = id
+        self.payload = payload
+
+
+def test_watch_startup_over_quota_does_not_prune_existing(tmp_path, monkeypatch, capsys):
+    # A watch daemon whose INITIAL scan is over quota must NOT prune: nothing was
+    # upserted, so pruning the tenant's prior chunks (as "replaced") would drop
+    # existing vectors with no replacement written. The watch loop re-indexes each
+    # file under the live quota instead.
+    import argparse
+
+    from mnemostack import cli
+
+    # A larger a.md so the fresh index produces several new chunks (net growth >
+    # the single prior point), pushing the tenant over a cap of 1.
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "a.md").write_text("# A\n\n" + ("word " * 200) + "\n\n## More\n\n" + ("term " * 200))
+    root = str(vault.resolve())
+
+    qf = str(tmp_path / "quotas.json")
+    FileQuotaStore(qf).set("acme", max_points=1)
+
+    class _FakeProvider:
+        dimension = 3
+
+        def embed(self, text):
+            return [0.1, 0.2, 0.3]
+
+    class _Store:
+        def __init__(self, **_):
+            # one prior markdown-owned chunk for a.md, already at the cap
+            self._pts = [(
+                "old-a",
+                {"source": "a.md", "index_root": root, "tenant_id": "acme",
+                 "_md_keys": ["text", "source", "offset"]},
+            )]
+            self.deleted: list[str] = []
+
+        def collection_exists(self):
+            return True
+
+        def ensure_collection(self, recreate=False):
+            return True
+
+        def count(self, tenant=None):
+            return sum(1 for _i, pl in self._pts
+                       if tenant is None or pl.get("tenant_id") == tenant)
+
+        def scroll(self, filters=None, tenant=None):
+            for pid, pl in self._pts:
+                if tenant is not None and pl.get("tenant_id") != tenant:
+                    continue
+                if filters and not all(pl.get(k) == v for k, v in filters.items()):
+                    continue
+                yield _HitId(pid, pl)
+
+        def upsert(self, cid, vec, payload):
+            self._pts.append((cid, payload))
+
+        def set_payload(self, cid, payload):
+            pass
+
+        def delete_payload_keys(self, cid, keys):
+            pass
+
+        def delete_points(self, ids):
+            self.deleted.extend(ids)
+            return len(ids)
+
+    store = _Store()
+    monkeypatch.setattr(cli, "get_provider", lambda *_a, **_k: _FakeProvider())
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    # Don't enter the blocking watch loop — we only care about the initial pass.
+    monkeypatch.setattr(cli, "_watch_markdown", lambda *_a, **_k: 0)
+
+    args = argparse.Namespace(
+        path=str(vault), provider="fake", embedding_model=None,
+        collection="c", qdrant="http://localhost:6333", chunk_size=120,
+        memgraph_uri=None, graph_timeout=5.0, recreate=False, prune=True, yes=True,
+        tenant="acme", quotas_file=qf, index_root=None,
+        watch=True, watch_debounce=1.0, watch_poll_interval=1.0,
+    )
+    rc = cli.cmd_index_markdown(args)
+    assert rc == 0
+    # Guard against a vacuous pass: the initial scan must actually have been
+    # over quota and skipped (otherwise there'd be nothing to wrongly prune).
+    assert "initial index skipped" in capsys.readouterr().err
+    # The prior chunk survived — no prune ran on the skipped initial index.
+    assert store.deleted == []
+    assert store._pts[0][0] == "old-a"  # still present
