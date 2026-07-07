@@ -64,6 +64,26 @@ def test_quota_store_corrupt_file_fails_open(tmp_path, caplog):
         store.set("acme", max_points=1)
 
 
+def test_quota_store_file_is_not_owner_only(tmp_path):
+    # A quota file isn't secret and is often written by an operator but read by a
+    # different service user; mkstemp's 0600 would make get() fail open. A fresh
+    # file lands with the normal umask-derived mode, and a rewrite preserves an
+    # operator-set mode instead of reverting to the temp's restrictive one.
+    import os
+    import stat
+
+    p = tmp_path / "quotas.json"
+    store = FileQuotaStore(p)
+    store.set("acme", max_points=5)
+    prev = os.umask(0)
+    os.umask(prev)
+    assert stat.S_IMODE(os.stat(p).st_mode) == (0o666 & ~prev)  # not 0600
+
+    os.chmod(p, 0o664)  # operator widens it for the service user
+    store.set("beta", max_points=7)  # atomic rewrite must keep that mode
+    assert stat.S_IMODE(os.stat(p).st_mode) == 0o664
+
+
 def test_quota_store_malformed_max_points_ignored(tmp_path):
     p = tmp_path / "q.json"
     p.write_text(json.dumps({"quotas": {"acme": {"max_points": "lots"}}}))

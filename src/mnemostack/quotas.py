@@ -129,6 +129,22 @@ class FileQuotaStore:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump({"quotas": quotas}, f, indent=2)
+            # mkstemp creates the temp at 0600. Unlike the key store, a quota file
+            # is NOT secret, and an operator often writes it as a different user
+            # than the ingest service reads it as — an owner-only file would make
+            # get() hit a permission error and fail open (silently no limit). So
+            # land it with the existing file's mode, or a normal umask-derived mode
+            # for a fresh file, not the restrictive temp mode.
+            try:
+                mode = os.stat(self.path).st_mode & 0o777
+            except FileNotFoundError:
+                prev = os.umask(0)
+                os.umask(prev)
+                mode = 0o666 & ~prev
+            try:
+                os.chmod(tmp, mode)
+            except OSError:
+                pass  # best-effort (e.g. a platform without POSIX chmod)
             os.replace(tmp, self.path)
         except OSError as e:
             try:
