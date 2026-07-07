@@ -110,11 +110,14 @@ def test_revoke_guarded_ignores_malformed_admin_records(tmp_path):
     p = tmp_path / "keys.json"
     ks = FileKeyStore(p)
     real_admin, real_key = ks.issue("ops", ["admin"])
-    # hand-write a malformed admin shell alongside the real one
+    # hand-write malformed admin shells alongside the real one: one with an empty
+    # tenant, one with a well-formed tenant but a hash that isn't a real SHA-256
+    # digest (so no key can ever hash to it). Neither can authenticate as admin.
     data = json.loads(p.read_text())
-    data["keys"].append({"id": "ghost", "hash": "deadbeef", "tenant": "", "scopes": ["admin"]})
+    data["keys"].append({"id": "g1", "hash": "deadbeef", "tenant": "", "scopes": ["admin"]})
+    data["keys"].append({"id": "g2", "hash": "deadbeef", "tenant": "x", "scopes": ["admin"]})
     p.write_text(json.dumps(data))
-    # the malformed record doesn't authenticate, so it can't be the surviving admin
+    # neither ghost authenticates, so the real admin is still the LAST usable admin
     assert ks.revoke_guarded(real_admin, protect_last_admin=True) == "last_admin"
     assert ks.verify(real_key) is not None  # the real admin is still there
 

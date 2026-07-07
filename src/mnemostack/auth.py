@@ -79,14 +79,24 @@ def _normalize_scopes(scopes: list[str] | frozenset[str] | str) -> list[str]:
     return out
 
 
+def _is_well_formed_hash(h: Any) -> bool:
+    """Whether ``h`` has the shape ``hash_key`` produces — a 64-char lowercase hex
+    SHA-256 digest. A record whose hash isn't this can never match any real key
+    (so it can't authenticate), regardless of what ``compare_digest`` is handed."""
+    return (
+        isinstance(h, str)
+        and len(h) == 64
+        and all(c in "0123456789abcdef" for c in h)
+    )
+
+
 def _is_usable_admin(rec: dict[str, Any]) -> bool:
-    """Whether ``rec`` is a record :meth:`FileKeyStore.verify` would accept AND that
-    grants ``admin`` — the SAME validity rules as verify (a usable ascii-str hash,
-    a non-empty string tenant, a scopes list that normalizes and contains admin).
-    A shaped-but-invalid record (empty tenant, non-list scopes, bad hash) is not a
-    real admin, so it must not be counted when protecting the last admin key."""
-    stored = rec.get("hash")
-    if not isinstance(stored, str) or not stored or not stored.isascii():
+    """Whether ``rec`` could actually authenticate (per :meth:`FileKeyStore.verify`)
+    AND grants ``admin`` — a non-empty string tenant, a scopes list that normalizes
+    and contains admin, and a hash of the real digest shape. A shaped-but-invalid
+    record (empty tenant, non-list scopes, bogus/short hash) is not a real admin, so
+    it must not be counted when protecting the last admin key."""
+    if not _is_well_formed_hash(rec.get("hash")):
         return False
     tenant = rec.get("tenant")
     if not isinstance(tenant, str) or not tenant:
