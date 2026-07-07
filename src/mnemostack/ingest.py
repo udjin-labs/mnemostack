@@ -45,6 +45,7 @@ from typing import Any
 
 from mnemostack.embeddings.base import EmbeddingProvider
 from mnemostack.observability.recorder import counter, histogram
+from mnemostack.quotas import enforce_points_quota
 from mnemostack.vector import VectorStore
 
 DEFAULT_WINDOW_SEPARATOR = "\n"
@@ -523,12 +524,23 @@ class Ingestor:
         window_separator: str = DEFAULT_WINDOW_SEPARATOR,
         enrich: Callable[[IngestItem], dict[str, Any]] | None = None,
         tenant: str | None = None,
+        max_points: int | None = None,
     ):
         self.embedding = embedding
         self.store = vector_store
         # When set, every ingested point is stamped with this tenant_id (the
         # write side of the multi-tenant isolation boundary). None = single-tenant.
         self.tenant = tenant
+        # Per-tenant storage quota: refuse to flush a batch whose NEW points would
+        # push this tenant over max_points. Enforced only when both tenant and
+        # max_points are set (single-tenant / no-quota ingest is unaffected).
+        # Precise on re-ingest: each flush checks the tenant's current count plus
+        # only the batch ids not already stored (deterministic ids upsert onto
+        # themselves and don't grow the count), so re-indexing a tenant at its
+        # limit isn't falsely rejected. NOTE: an ingest spanning multiple flushes
+        # commits earlier batches before a later one raises — an over-quota stream
+        # is a partial write, and the caller loses the IngestStats on the raise.
+        self.max_points = max_points
         self.batch_size = batch_size
         self.skip_seen = skip_seen
         self.wrapper_dir = Path(wrapper_dir) if wrapper_dir is not None else None
@@ -620,6 +632,27 @@ class Ingestor:
 
     # ---- Internals ----
 
+    def _check_points_quota(self, point_ids: list[str]) -> None:
+        """Raise QuotaExceededError if this batch's genuinely-new points would push
+        the tenant over its point limit. No-op when unscoped or no limit set.
+
+        Only ids NOT already stored count — a re-ingest upserts deterministic ids
+        onto themselves and doesn't grow the tenant's footprint, so it's never
+        falsely rejected (the store's current count already includes them).
+        """
+        if self.tenant is None or self.max_points is None:
+            return
+        # Tenant-scoped: an unowned/legacy id this tenant is about to adopt counts
+        # as new growth (the scoped count() doesn't include it yet), so it can't
+        # slip past the cap.
+        existing = self.store.retrieve_existing_ids(list(point_ids), tenant=self.tenant)
+        # UNIQUE new ids: a duplicated item in one flush (same id) upserts to one
+        # point, so it must count once, not per occurrence.
+        new = len({str(pid) for pid in point_ids} - existing)
+        enforce_points_quota(
+            self.tenant, self.store.count(tenant=self.tenant), new, self.max_points
+        )
+
     def _flush(self, buffer: list[tuple[str, IngestItem]], stats: IngestStats) -> None:
         texts = [item.text for _, item in buffer]
         with histogram("mnemostack.ingest.embed_batch_ms"):
@@ -659,6 +692,9 @@ class Ingestor:
         if not points:
             return
         stats.embedded += len(points)
+        # Enforce the tenant's storage quota BEFORE upserting: raise (aborting the
+        # ingest) if this batch's NEW points would push the tenant over its limit.
+        self._check_points_quota([p[0] for p in points])
         # Only pass tenant when set, so a custom store without the parameter
         # (and the existing single-tenant path) is unaffected.
         tkw: dict[str, Any] = {"tenant": self.tenant} if self.tenant is not None else {}

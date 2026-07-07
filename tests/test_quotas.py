@@ -1,0 +1,563 @@
+"""Per-tenant storage quotas — store, enforcement helper, and ingest wiring."""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from mnemostack.ingest import IngestItem, Ingestor
+from mnemostack.quotas import (
+    FileQuotaStore,
+    QuotaExceededError,
+    QuotaStoreError,
+    TenantQuota,
+    enforce_points_quota,
+)
+
+# ---------- FileQuotaStore ----------
+
+
+def test_quota_store_roundtrip(tmp_path):
+    store = FileQuotaStore(tmp_path / "quotas.json")
+    assert store.get("acme") is None  # unset
+    store.set("acme", max_points=1000)
+    assert store.get("acme") == TenantQuota(max_points=1000)
+    # list + json shape
+    assert store.list_quotas() == [{"tenant": "acme", "max_points": 1000}]
+    # replace
+    store.set("acme", max_points=500)
+    assert store.get("acme").max_points == 500
+    # remove
+    assert store.remove("acme") is True
+    assert store.get("acme") is None
+    assert store.remove("acme") is False
+
+
+def test_quota_store_set_none_is_unlimited(tmp_path):
+    store = FileQuotaStore(tmp_path / "q.json")
+    store.set("t", max_points=None)
+    assert store.get("t") == TenantQuota(max_points=None)
+
+
+def test_quota_store_rejects_negative(tmp_path):
+    store = FileQuotaStore(tmp_path / "q.json")
+    with pytest.raises(ValueError):
+        store.set("t", max_points=-1)
+
+
+def test_quota_store_rejects_bool(tmp_path):
+    # bool is an int subclass — True must not be stored as max_points=1.
+    store = FileQuotaStore(tmp_path / "q.json")
+    with pytest.raises(ValueError):
+        store.set("t", max_points=True)
+
+
+def test_quota_store_corrupt_file_fails_open(tmp_path, caplog):
+    p = tmp_path / "q.json"
+    p.write_text("{ not json")
+    store = FileQuotaStore(p)
+    # get() fails OPEN (no limit) — a broken quota file must not block ingest.
+    assert store.get("acme") is None
+    # management ops surface the corruption loudly.
+    with pytest.raises(QuotaStoreError):
+        store.set("acme", max_points=1)
+
+
+def test_quota_store_file_is_not_owner_only(tmp_path):
+    # A quota file isn't secret and is often written by an operator but read by a
+    # different service user; mkstemp's 0600 would make get() fail open. A fresh
+    # file lands with the normal umask-derived mode, and a rewrite preserves an
+    # operator-set mode instead of reverting to the temp's restrictive one.
+    import os
+    import stat
+
+    p = tmp_path / "quotas.json"
+    store = FileQuotaStore(p)
+    store.set("acme", max_points=5)
+    prev = os.umask(0)
+    os.umask(prev)
+    assert stat.S_IMODE(os.stat(p).st_mode) == (0o666 & ~prev)  # not 0600
+
+    os.chmod(p, 0o664)  # operator widens it for the service user
+    store.set("beta", max_points=7)  # atomic rewrite must keep that mode
+    assert stat.S_IMODE(os.stat(p).st_mode) == 0o664
+
+
+def test_quota_store_malformed_max_points_ignored(tmp_path):
+    p = tmp_path / "q.json"
+    p.write_text(json.dumps({"quotas": {"acme": {"max_points": "lots"}}}))
+    # a bad max_points is dropped to None (no limit), not raised.
+    assert FileQuotaStore(p).get("acme") == TenantQuota(max_points=None)
+
+
+# ---------- enforce_points_quota ----------
+
+
+def test_enforce_points_quota():
+    # no-op when unscoped or no limit
+    enforce_points_quota(None, 100, 50, 10)  # unscoped
+    enforce_points_quota("t", 100, 50, None)  # no limit
+    # within limit ok
+    enforce_points_quota("t", 90, 10, 100)
+    # exceeding raises
+    with pytest.raises(QuotaExceededError) as ei:
+        enforce_points_quota("t", 95, 10, 100)
+    assert ei.value.tenant == "t" and ei.value.limit == 100 and ei.value.attempted == 105
+
+
+def test_enforce_allows_non_increasing_over_cap():
+    # A tenant lowered below current usage must still be able to PRUNE: a net-
+    # negative (or net-zero) change never grows storage, so it's allowed even
+    # while over the cap — otherwise cleanup after a quota cut is impossible.
+    enforce_points_quota("t", 100, -10, 50)  # 100 -> 90 cleanup, over cap 50: ok
+    enforce_points_quota("t", 100, 0, 50)    # net-zero replace over cap: ok
+    # but genuine growth while over cap is still refused
+    with pytest.raises(QuotaExceededError):
+        enforce_points_quota("t", 100, 1, 50)
+
+
+# ---------- Ingestor enforcement ----------
+
+
+class _Emb:
+    dimension = 3
+
+    def embed(self, text):
+        return [0.1, 0.2, 0.3] if text else []
+
+    def embed_batch(self, texts):
+        return [self.embed(t) for t in texts]
+
+
+class _CountingStore:
+    """Fake store modeling deterministic-id idempotency: re-upserting an existing
+    id doesn't grow the count. ``existing`` is a base of pre-stored points with
+    ids the batch won't collide with."""
+
+    def __init__(self, existing=0):
+        self._base = existing
+        self._ids: set[str] = set()
+        self.upserts: list = []
+
+    def count(self, tenant=None):
+        return self._base + len(self._ids)
+
+    def retrieve_existing_ids(self, ids, *, tenant=None):
+        # Single-tenant fake: every stored id is this tenant's own.
+        return {str(i) for i in ids if str(i) in self._ids}
+
+    def upsert_batch(self, points, tenant=None):
+        for p in points:
+            self.upsert(p[0], p[1], p[2])
+        return len(points)
+
+    def upsert(self, id, vec, payload, tenant=None):
+        self.upserts.append((id, vec, payload))
+        self._ids.add(str(id))  # a set — re-upsert of the same id doesn't grow
+
+    def set_payload(self, cid, payload, tenant=None):
+        pass
+
+    def delete_payload_keys(self, cid, keys, tenant=None):
+        pass
+
+
+def _items(n):
+    return [IngestItem(source=f"s{i}", text=f"text {i}", offset=0) for i in range(n)]
+
+
+def test_ingest_refuses_over_quota():
+    store = _CountingStore(existing=8)  # tenant already has 8 points
+    ing = Ingestor(embedding=_Emb(), vector_store=store, batch_size=5,
+                   tenant="acme", max_points=10)
+    # First flush of 5 would make 8+5=13 > 10 → refused before any upsert.
+    with pytest.raises(QuotaExceededError):
+        ing.ingest(_items(5))
+    assert store.upserts == []  # nothing written
+
+
+def test_ingest_within_quota_succeeds():
+    store = _CountingStore(existing=0)
+    ing = Ingestor(embedding=_Emb(), vector_store=store, batch_size=5,
+                   tenant="acme", max_points=10)
+    stats = ing.ingest(_items(4))
+    assert stats.upserted == 4 and len(store.upserts) == 4
+
+
+def test_reingest_at_limit_is_not_falsely_rejected():
+    # Fill a tenant to its limit, then re-ingest the SAME data with a fresh
+    # Ingestor (bypassing the in-process skip_seen cache): the deterministic ids
+    # already exist, so no NEW points — it must NOT be rejected.
+    store = _CountingStore(existing=0)
+    items = _items(5)
+    Ingestor(embedding=_Emb(), vector_store=store, batch_size=5,
+             tenant="acme", max_points=5).ingest(items)
+    assert store.count(tenant="acme") == 5
+    # fresh Ingestor, same store + same items, at the exact limit
+    stats = Ingestor(embedding=_Emb(), vector_store=store, batch_size=5,
+                     tenant="acme", max_points=5).ingest(items)
+    assert stats.upserted == 5  # re-upserted (idempotent), not rejected
+    assert store.count(tenant="acme") == 5  # count didn't grow
+
+
+def test_ingest_no_quota_when_unscoped_or_unlimited():
+    # unscoped (tenant=None) never checks the quota even if max_points set
+    store = _CountingStore(existing=100)
+    ing = Ingestor(embedding=_Emb(), vector_store=store, batch_size=5,
+                   tenant=None, max_points=10)
+    assert ing.ingest(_items(3)).upserted == 3
+    # scoped but no limit
+    store2 = _CountingStore(existing=100)
+    ing2 = Ingestor(embedding=_Emb(), vector_store=store2, batch_size=5,
+                    tenant="acme", max_points=None)
+    assert ing2.ingest(_items(3)).upserted == 3
+
+
+def test_ingest_quota_end_to_end_inmemory():
+    # Real VectorStore (in-memory Qdrant): exercises retrieve_existing_ids + the
+    # tenant-filtered count, not just the fake.
+    from qdrant_client import QdrantClient
+    from qdrant_client.models import Distance
+
+    from mnemostack.vector import VectorStore
+
+    vs = VectorStore.__new__(VectorStore)
+    vs.collection = "q"
+    vs.dimension = 3
+    vs.distance = Distance.COSINE
+    vs.client = QdrantClient(":memory:")
+    vs.ensure_collection()
+
+    def _ing():
+        return Ingestor(embedding=_Emb(), vector_store=vs, batch_size=3,
+                        tenant="acme", max_points=4)
+
+    _ing().ingest(_items(4))  # exactly at the limit
+    assert vs.count(tenant="acme") == 4
+    _ing().ingest(_items(4))  # re-ingest same data — no new points → allowed
+    assert vs.count(tenant="acme") == 4
+    with pytest.raises(QuotaExceededError):  # one genuinely-new item → exceeds
+        _ing().ingest(_items(5))
+
+
+def test_ingest_adopting_unowned_id_counts_as_growth():
+    # A legacy UNOWNED point sharing the id a tenant is about to write must count
+    # as growth: the tenant-scoped upsert adopts it (stamps tenant_id), but the
+    # tenant-scoped count() doesn't include it yet — so a collection-wide "already
+    # exists" probe would let it slip past the cap uncounted.
+    from qdrant_client import QdrantClient
+    from qdrant_client.models import Distance
+
+    from mnemostack.ingest import stable_chunk_id
+    from mnemostack.vector import VectorStore
+
+    vs = VectorStore.__new__(VectorStore)
+    vs.collection = "q"
+    vs.dimension = 3
+    vs.distance = Distance.COSINE
+    vs.client = QdrantClient(":memory:")
+    vs.ensure_collection()
+
+    item = _items(1)[0]  # source="s0", text="text 0", offset=0
+    pid = stable_chunk_id(item.source, item.offset, item.text, tenant="acme")
+    vs.upsert(pid, [0.1, 0.2, 0.3], {"text": "legacy"})  # unowned (no tenant_id)
+    assert vs.count(tenant="acme") == 0  # not the tenant's yet
+
+    ing = Ingestor(embedding=_Emb(), vector_store=vs, batch_size=3,
+                   tenant="acme", max_points=0)
+    with pytest.raises(QuotaExceededError):  # adopting it would exceed the cap of 0
+        ing.ingest([item])
+
+
+# ---------- markdown enforcement ----------
+
+
+def _md_upsert(store, provider, chunks, existing, *, max_points, prune=False,
+               full_root=False, tenant="acme", visited=None, md_owned_only=False):
+    from mnemostack.markdown.sync import markdown_quota_check, upsert_markdown_chunks
+
+    if visited is None:
+        visited = {p.get("source") for _c, _t, p in chunks}
+    check = markdown_quota_check(store, tenant, max_points, existing, chunks, visited,
+                                 prune=prune, full_root=full_root, md_owned_only=md_owned_only)
+    return upsert_markdown_chunks(store, provider, chunks, existing,
+                                  tenant=tenant, before_upsert=check)
+
+
+def _md(source):
+    return {"source": source, "_md_keys": ["text", "source", "offset"]}
+
+
+def test_markdown_upsert_streams_without_hook():
+    # No quota hook (the common unscoped path): embed+upsert must interleave so a
+    # large corpus isn't fully buffered in memory before the first write.
+    from mnemostack.markdown.sync import upsert_markdown_chunks
+
+    upserted: list[str] = []
+    embed_saw: list[int] = []
+
+    class _Store:
+        def upsert(self, cid, vec, payload, **kw):
+            upserted.append(cid)
+
+        def set_payload(self, *a, **k):
+            pass
+
+        def delete_payload_keys(self, *a, **k):
+            pass
+
+    class _Prov:
+        def embed(self, text):
+            embed_saw.append(len(upserted))  # writes completed before this embed
+            return [0.1]
+
+    chunks = [(f"id{i}", f"t{i}", _md("a.md")) for i in range(3)]
+    res = upsert_markdown_chunks(_Store(), _Prov(), chunks, {})
+    assert res.inserted == 3
+    assert embed_saw == [0, 1, 2]  # streamed: each embed sees the prior upsert
+    # (a buffered path would embed all three before any upsert -> [0, 0, 0])
+
+
+def test_markdown_upsert_refuses_over_quota():
+    store = _CountingStore(existing=9)
+    chunks = [(f"id{i}", f"t{i}", _md("a.md")) for i in range(5)]
+    with pytest.raises(QuotaExceededError):
+        _md_upsert(store, _Emb(), chunks, {}, max_points=10)
+    assert store.upserts == []
+
+
+def test_markdown_edit_at_cap_counts_net_not_gross():
+    store = _CountingStore(existing=0)
+    v1 = [("id1", "t", _md("a.md")), ("id2", "t", _md("a.md"))]
+    _md_upsert(store, _Emb(), v1, {}, max_points=2, prune=True)
+    assert store.count(tenant="acme") == 2  # at cap
+    # edit a.md → 2 chunks with NEW ids; the old 2 will be pruned (net 0).
+    existing = {"id1": _md("a.md"), "id2": _md("a.md")}
+    v2 = [("id3", "t", _md("a.md")), ("id4", "t", _md("a.md"))]
+    res = _md_upsert(store, _Emb(), v2, existing, max_points=2, prune=True)
+    assert res.inserted == 2  # allowed — net change is 0 (old chunks pruned), not +2
+
+
+def test_markdown_no_prune_counts_gross_not_net():
+    # Without prune the old chunks stay, so an edit at the cap genuinely grows the
+    # count and must be rejected (no false offset).
+    store = _CountingStore(existing=2)
+    existing = {"id1": _md("a.md"), "id2": _md("a.md")}
+    v2 = [("id3", "t", _md("a.md")), ("id4", "t", _md("a.md"))]
+    with pytest.raises(QuotaExceededError):
+        _md_upsert(store, _Emb(), v2, existing, max_points=2, prune=False)
+
+
+def test_markdown_full_root_deletion_frees_room():
+    # A full-root --prune walk that DELETES b.md (2 chunks) and edits a.md (2 new
+    # chunks) is net-0 at the cap: the deleted file's chunks are pruned too.
+    store = _CountingStore(existing=4)  # a.md(2) + b.md(2)
+    existing = {"a1": _md("a.md"), "a2": _md("a.md"),  # a.md's current chunks
+                "b1": _md("b.md"), "b2": _md("b.md")}  # b.md — no longer on disk
+    # the walk only produces a.md's new chunks (b.md is gone)
+    chunks = [("a3", "t", _md("a.md")), ("a4", "t", _md("a.md"))]
+    res = _md_upsert(store, _Emb(), chunks, existing, max_points=4,
+                     prune=True, full_root=True)
+    assert res.inserted == 2  # allowed: +2 a.md, -2 a.md old, -2 b.md deleted = net -2
+
+
+def test_markdown_failed_source_not_offset():
+    # A source whose embedding fails isn't pruned, so its stale chunks must NOT
+    # offset the inserts. Editing a.md at the cap where BOTH new chunks fail to
+    # embed stores nothing (fine); but a mix must not free room from a's un-pruned
+    # old chunks.
+    class _EmbFails:
+        def embed(self, text):
+            return []  # every embed fails
+
+    store = _CountingStore(existing=2)
+    existing = {"a1": _md("a.md"), "a2": _md("a.md")}
+    chunks = [("a3", "t", _md("a.md")), ("a4", "t", _md("a.md"))]
+    # inserts=0 (all fail), removed=0 (a.md is a failed source, not pruned) → net 0
+    res = _md_upsert(store, _EmbFails(), chunks, existing, max_points=2,
+                     prune=True, full_root=False)
+    assert res.inserted == 0 and res.failed == 2  # nothing stored, no false offset
+
+
+def test_markdown_quota_counts_only_embedded_chunks():
+    # A chunk whose embedding fails isn't stored, so it must not count against the
+    # quota: a 2-chunk file with 1 failure fits a tenant with room for 1.
+    class _EmbOneFails:
+        def embed(self, text):
+            return [] if text == "bad" else [0.1, 0.2, 0.3]
+
+    store = _CountingStore(existing=0)
+    chunks = [("id1", "good", _md("a.md")), ("id2", "bad", _md("a.md"))]
+    res = _md_upsert(store, _EmbOneFails(), chunks, {}, max_points=1)
+    assert res.inserted == 1 and res.failed == 1  # only the embedded one stored
+
+
+def test_ingest_dedup_within_flush_counts_once():
+    # A duplicated item (same source/offset/text → same id) in one flush stores
+    # one point, so it must count once — a tenant with room for 1 accepts it.
+    store = _CountingStore(existing=0)
+    ing = Ingestor(embedding=_Emb(), vector_store=store, batch_size=10,
+                   tenant="acme", max_points=1)
+    item = IngestItem(source="s", text="dup", offset=0)
+    ing.ingest([item, item])  # must not raise
+    assert store.count(tenant="acme") == 1
+
+
+def test_watch_over_quota_file_retries_but_warns_once():
+    # An over-quota file is queued for retry (so a raised quota takes effect on the
+    # next rescan via the live resolver) but reported only ONCE, not every rescan.
+    from mnemostack.markdown.watch import MarkdownWatcher
+
+    class _Syncer:
+        index_root = "/root"
+
+        def index_file(self, path):
+            raise QuotaExceededError("acme", 10, 11)
+
+        def remove_file(self, path):
+            pass
+
+    errors: list = []
+    w = MarkdownWatcher(_Syncer(), "/root", on_error=lambda p, k, e: errors.append((p, e)))
+    w._apply("/root/big.md", "modify")
+    w._apply("/root/big.md", "modify")  # a rescan retries it
+    assert "/root/big.md" in w._failed  # kept for retry (picks up a raised quota)
+    assert len(errors) == 1  # but reported only once, not per retry
+
+
+def test_markdown_upsert_refresh_does_not_count():
+    store = _CountingStore(existing=10)  # already at limit
+    # all chunks already indexed → refreshes only, no NEW points → allowed
+    chunks = [("id0", "t0", _md("a.md"))]
+    existing = {"id0": _md("a.md")}
+    res = _md_upsert(store, _Emb(), chunks, existing, max_points=10, prune=True)
+    assert res.refreshed == 1 and res.inserted == 0
+
+
+# ---------- CLI ----------
+
+
+def test_cli_quota_set_list_rm_roundtrip(tmp_path, capsys):
+    import argparse
+
+    from mnemostack import cli
+
+    qf = str(tmp_path / "quotas.json")
+    assert cli.cmd_quota_set(
+        argparse.Namespace(tenant="acme", max_points=5000, quotas_file=qf)
+    ) == 0
+    capsys.readouterr()  # discard the set output
+    assert cli.cmd_quota_list(argparse.Namespace(quotas_file=qf, json=True)) == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert listed == [{"tenant": "acme", "max_points": 5000}]
+    assert cli.cmd_quota_rm(argparse.Namespace(tenant="acme", quotas_file=qf)) == 0
+    assert cli.cmd_quota_rm(argparse.Namespace(tenant="acme", quotas_file=qf)) == 1  # gone
+
+
+def test_cli_resolve_max_points(tmp_path):
+    import argparse
+
+    from mnemostack import cli
+
+    qf = str(tmp_path / "quotas.json")
+    FileQuotaStore(qf).set("acme", max_points=42)
+    args = argparse.Namespace(quotas_file=qf)
+    assert cli._resolve_max_points(args, "acme") == 42  # resolved from the store
+    assert cli._resolve_max_points(args, "other") is None  # no quota set
+    assert cli._resolve_max_points(args, None) is None  # unscoped ingest
+
+
+class _HitId:
+    def __init__(self, id, payload):
+        self.id = id
+        self.payload = payload
+
+
+def test_watch_startup_over_quota_does_not_prune_existing(tmp_path, monkeypatch, capsys):
+    # A watch daemon whose INITIAL scan is over quota must NOT prune: nothing was
+    # upserted, so pruning the tenant's prior chunks (as "replaced") would drop
+    # existing vectors with no replacement written. The watch loop re-indexes each
+    # file under the live quota instead.
+    import argparse
+
+    from mnemostack import cli
+
+    # A larger a.md so the fresh index produces several new chunks (net growth >
+    # the single prior point), pushing the tenant over a cap of 1.
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "a.md").write_text("# A\n\n" + ("word " * 200) + "\n\n## More\n\n" + ("term " * 200))
+    root = str(vault.resolve())
+
+    qf = str(tmp_path / "quotas.json")
+    FileQuotaStore(qf).set("acme", max_points=1)
+
+    class _FakeProvider:
+        dimension = 3
+
+        def embed(self, text):
+            return [0.1, 0.2, 0.3]
+
+    class _Store:
+        def __init__(self, **_):
+            # one prior markdown-owned chunk for a.md, already at the cap
+            self._pts = [(
+                "old-a",
+                {"source": "a.md", "index_root": root, "tenant_id": "acme",
+                 "_md_keys": ["text", "source", "offset"]},
+            )]
+            self.deleted: list[str] = []
+
+        def collection_exists(self):
+            return True
+
+        def ensure_collection(self, recreate=False):
+            return True
+
+        def count(self, tenant=None):
+            return sum(1 for _i, pl in self._pts
+                       if tenant is None or pl.get("tenant_id") == tenant)
+
+        def scroll(self, filters=None, tenant=None):
+            for pid, pl in self._pts:
+                if tenant is not None and pl.get("tenant_id") != tenant:
+                    continue
+                if filters and not all(pl.get(k) == v for k, v in filters.items()):
+                    continue
+                yield _HitId(pid, pl)
+
+        def upsert(self, cid, vec, payload):
+            self._pts.append((cid, payload))
+
+        def set_payload(self, cid, payload):
+            pass
+
+        def delete_payload_keys(self, cid, keys):
+            pass
+
+        def delete_points(self, ids):
+            self.deleted.extend(ids)
+            return len(ids)
+
+    store = _Store()
+    monkeypatch.setattr(cli, "get_provider", lambda *_a, **_k: _FakeProvider())
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    # Don't enter the blocking watch loop — we only care about the initial pass.
+    monkeypatch.setattr(cli, "_watch_markdown", lambda *_a, **_k: 0)
+
+    args = argparse.Namespace(
+        path=str(vault), provider="fake", embedding_model=None,
+        collection="c", qdrant="http://localhost:6333", chunk_size=120,
+        memgraph_uri=None, graph_timeout=5.0, recreate=False, prune=True, yes=True,
+        tenant="acme", quotas_file=qf, index_root=None,
+        watch=True, watch_debounce=1.0, watch_poll_interval=1.0,
+    )
+    rc = cli.cmd_index_markdown(args)
+    assert rc == 0
+    # Guard against a vacuous pass: the initial scan must actually have been
+    # over quota and skipped (otherwise there'd be nothing to wrongly prune).
+    assert "initial index skipped" in capsys.readouterr().err
+    # The prior chunk survived — no prune ran on the skipped initial index.
+    assert store.deleted == []
+    assert store._pts[0][0] == "old-a"  # still present
