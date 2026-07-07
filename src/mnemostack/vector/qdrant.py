@@ -189,6 +189,36 @@ class VectorStore:
         info = self.client.get_collection(self.collection)
         return info.points_count or 0
 
+    def retrieve_existing_ids(
+        self, ids: list[str | int], *, tenant: str | None = None
+    ) -> set[str]:
+        """Which of ``ids`` already exist (as string ids), for re-upsert detection.
+
+        Lets a caller distinguish genuinely-new points from re-upserts of
+        already-stored ones (chunk ids are deterministic, so a re-ingest upserts
+        onto itself and doesn't grow the count) — used by the ingest quota check.
+
+        With ``tenant`` set, only ids **already owned by that tenant** count as
+        existing: an unowned/legacy or other-tenant point sharing an id is treated
+        as new, because a tenant-scoped upsert adopts an unowned id (stamping
+        ``tenant_id``) and so grows the tenant's count. This keeps the "new" tally
+        consistent with the tenant-scoped ``count()`` the quota checks against —
+        otherwise adopting an unowned point would slip past the cap uncounted.
+        """
+        if not ids:
+            return set()
+        found = self.client.retrieve(
+            collection_name=self.collection,
+            ids=ids,
+            with_payload=[TENANT_ID_KEY] if tenant is not None else False,
+            with_vectors=False,
+        )
+        if tenant is None:
+            return {str(p.id) for p in found}
+        return {
+            str(p.id) for p in found if (p.payload or {}).get(TENANT_ID_KEY) == tenant
+        }
+
     def delete(self) -> None:
         self.client.delete_collection(self.collection)
 
