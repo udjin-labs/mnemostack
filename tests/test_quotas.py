@@ -236,8 +236,44 @@ def test_markdown_edit_at_cap_counts_net_not_gross():
                 "id2": {"source": "a.md", "_md_keys": _md}}
     v2 = [("id3", "t", {"source": "a.md", "_md_keys": _md}),
           ("id4", "t", {"source": "a.md", "_md_keys": _md})]
-    res = upsert_markdown_chunks(store, _Emb(), v2, existing, tenant="acme", max_points=2)
-    assert res.inserted == 2  # allowed — net change is 0, not +2
+    res = upsert_markdown_chunks(
+        store, _Emb(), v2, existing, tenant="acme", max_points=2, prune=True
+    )
+    assert res.inserted == 2  # allowed — net change is 0 (old chunks pruned), not +2
+
+
+def test_markdown_no_prune_counts_gross_not_net():
+    # Without prune the old chunks stay, so an edit at the cap genuinely grows the
+    # count and must be rejected (no false offset).
+    from mnemostack.markdown.sync import upsert_markdown_chunks
+
+    _md = ["text", "source"]
+    store = _CountingStore(existing=2)
+    existing = {"id1": {"source": "a.md", "_md_keys": _md},
+                "id2": {"source": "a.md", "_md_keys": _md}}
+    v2 = [("id3", "t", {"source": "a.md", "_md_keys": _md}),
+          ("id4", "t", {"source": "a.md", "_md_keys": _md})]
+    with pytest.raises(QuotaExceededError):
+        upsert_markdown_chunks(
+            store, _Emb(), v2, existing, tenant="acme", max_points=2, prune=False
+        )
+
+
+def test_markdown_quota_counts_only_embedded_chunks():
+    # A chunk whose embedding fails isn't stored, so it must not count against the
+    # quota: a 2-chunk file with 1 failure fits a tenant with room for 1.
+    from mnemostack.markdown.sync import upsert_markdown_chunks
+
+    class _EmbOneFails:
+        def embed(self, text):
+            return [] if text == "bad" else [0.1, 0.2, 0.3]
+
+    store = _CountingStore(existing=0)
+    chunks = [("id1", "good", {"source": "a.md"}), ("id2", "bad", {"source": "a.md"})]
+    res = upsert_markdown_chunks(
+        store, _EmbOneFails(), chunks, {}, tenant="acme", max_points=1
+    )
+    assert res.inserted == 1 and res.failed == 1  # only the embedded one stored
 
 
 def test_ingest_dedup_within_flush_counts_once():

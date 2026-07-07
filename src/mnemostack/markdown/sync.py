@@ -14,6 +14,7 @@ source(s) it was given, never siblings (mirroring the one-shot command's
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -49,6 +50,7 @@ def upsert_markdown_chunks(
     *,
     tenant: str | None = None,
     max_points: int | None = None,
+    prune: bool = False,
 ) -> ChunkSyncResult:
     """Embed & upsert new chunks; refresh payloads of already-indexed ones.
 
@@ -61,29 +63,20 @@ def upsert_markdown_chunks(
     With ``tenant`` set, writes route through the store's tenant boundary
     (``tenant_id`` stamped server-side; a payload can't assert its own tenant,
     and refresh/delete are owner-guarded) so a markdown corpus is isolated. With
-    ``max_points`` set too, the whole call is refused (``QuotaExceededError``)
-    before any insert if its NEW chunks would push the tenant over its limit
-    (refreshes of already-indexed chunks don't count — they don't grow the count).
+    ``max_points`` set too, the call is refused (``QuotaExceededError``) before
+    any insert if the points it would actually STORE push the tenant over its
+    limit. The quota counts only successfully-embedded new chunks (a chunk whose
+    embedding fails is never stored). When ``prune=True`` — the caller will remove
+    the re-indexed sources' stale chunks — the replaced chunks offset the inserts,
+    so editing a file at the cap is net-neutral. With ``prune=False`` the old
+    chunks stay, so every new chunk counts as growth.
     """
     tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
     existing_ids = set(existing_payloads)
-    if tenant is not None and max_points is not None:
-        new_ids = {cid for cid, _t, _p in chunks}
-        new_sources = {p.get("source") for _c, _t, p in chunks}
-        num_new = len(new_ids - existing_ids)
-        # A re-index REPLACES a source's chunks: existing markdown-owned chunks of
-        # the sources being indexed that aren't in the new set get pruned, so they
-        # offset the inserts. Count the NET change, or editing a file at the cap
-        # (same chunk count, new ids) would be wrongly rejected as a pure add.
-        num_replaced = sum(
-            1
-            for cid, pl in existing_payloads.items()
-            if cid not in new_ids and pl.get("source") in new_sources and pl.get("_md_keys")
-        )
-        net = num_new - num_replaced
-        if net > 0:
-            enforce_points_quota(tenant, store.count(tenant=tenant), net, max_points)
     res = ChunkSyncResult()
+    # Phase 1: embed the NEW chunks and keep only the ones that produced a vector
+    # (a failed embedding is never stored, so it must not count against the quota).
+    to_upsert: list[tuple[str, list, dict]] = []
     for cid, text, payload in chunks:
         if cid in existing_ids:
             continue
@@ -92,6 +85,29 @@ def upsert_markdown_chunks(
             res.failed += 1
             res.failed_sources.add(payload["source"])
             continue
+        to_upsert.append((cid, vec, payload))
+    # Phase 2: enforce the quota on what will actually be stored, BEFORE upserting.
+    if tenant is not None and max_points is not None:
+        num_new = len(to_upsert)
+        num_replaced = 0
+        if prune:
+            # A re-index removes the re-indexed sources' stale chunks, so they
+            # offset the inserts (an edit is net-neutral). Only valid when the
+            # caller actually prunes — otherwise the old chunks remain stored.
+            new_ids = {cid for cid, _t, _p in chunks}
+            new_sources = {p.get("source") for _c, _t, p in chunks}
+            num_replaced = sum(
+                1
+                for cid, pl in existing_payloads.items()
+                if cid not in new_ids
+                and pl.get("source") in new_sources
+                and pl.get("_md_keys")
+            )
+        net = num_new - num_replaced
+        if net > 0:
+            enforce_points_quota(tenant, store.count(tenant=tenant), net, max_points)
+    # Phase 3: upsert the embedded new chunks.
+    for cid, vec, payload in to_upsert:
         store.upsert(cid, vec, payload, **tkw)
         res.inserted += 1
     for cid, _text, payload in chunks:
@@ -154,16 +170,17 @@ class MarkdownSyncer:
         graph: Any = None,
         subtree: str | None = None,
         tenant: str | None = None,
-        max_points: int | None = None,
+        max_points_resolver: Callable[[], int | None] | None = None,
     ):
         self.store = store
         self.provider = provider
         self.index_root = str(Path(index_root).resolve())
         self.chunk_size = chunk_size
         self.graph = graph
-        # Per-tenant storage quota, enforced on each file's new chunks (see
-        # upsert_markdown_chunks). None = no limit.
-        self.max_points = max_points
+        # Per-tenant storage quota, resolved FRESH on each file so a `quota set/rm`
+        # while the watch is running takes effect without a restart. None = no
+        # resolver (no limit). Enforced per file in upsert_markdown_chunks.
+        self.max_points_resolver = max_points_resolver
         # Scopes every store + graph read/write and the chunk-id derivation to one
         # tenant, so a markdown corpus is isolated (and tenant-scoped graph recall
         # can see its :File link nodes). None = unscoped (single-tenant), unchanged.
@@ -232,9 +249,12 @@ class MarkdownSyncer:
             ):
                 existing[str(hit.id)] = hit.payload or {}
 
+        # Re-resolve the quota per file (picks up a mid-watch quota change) and
+        # prune=True since index_file always prunes this file's stale chunks below.
+        mp = self.max_points_resolver() if self.max_points_resolver is not None else None
         cs = upsert_markdown_chunks(
             self.store, self.provider, chunks, existing,
-            tenant=self.tenant, max_points=self.max_points,
+            tenant=self.tenant, max_points=mp, prune=True,
         )
 
         # Prune chunks this file no longer produces (shrunk / re-chunked). Skip a

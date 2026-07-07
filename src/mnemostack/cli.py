@@ -1478,7 +1478,10 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
     # per-file path so a full walk and a single-file update behave identically).
     try:
         cs = upsert_markdown_chunks(
-            store, provider, chunks, existing_payloads, tenant=tenant, max_points=max_points
+            store, provider, chunks, existing_payloads, tenant=tenant,
+            max_points=max_points,
+            # Offset replaced chunks only when this run will actually prune them.
+            prune=bool(args.prune and not args.recreate),
         )
     except QuotaExceededError as e:
         print(f"error: {e}", file=sys.stderr)
@@ -1618,7 +1621,8 @@ def _watch_markdown(
         graph=graph,
         subtree=watch_root,  # keep referrer re-resolution inside the watched tree
         tenant=_watch_tenant,
-        max_points=_resolve_max_points(args, _watch_tenant),
+        # A resolver (not a fixed value) so `quota set/rm` takes effect mid-watch.
+        max_points_resolver=lambda: _resolve_max_points(args, _watch_tenant),
     )
 
     def _on_result(res: Any) -> None:
