@@ -141,6 +141,9 @@ class MarkdownWatcher:
         #: emitted on the next poll/rescan so a temporary failure self-heals
         #: instead of leaving vectors and links diverged until the next edit.
         self._failed: set[str] = set()
+        #: Over-quota paths already reported, so the periodic retry (which lets a
+        #: raised quota take effect) doesn't re-log the same rejection every rescan.
+        self._quota_warned: set[str] = set()
 
     # --- event core (filesystem-agnostic, unit-testable) ---
 
@@ -162,15 +165,18 @@ class MarkdownWatcher:
             else:
                 res = self.syncer.index_file(path)
             self._failed.discard(path)
+            self._quota_warned.discard(path)  # it fit — reset so a future reject re-warns
             if self._on_result is not None:
                 self._on_result(res)
         except QuotaExceededError as exc:
-            # An over-quota file can't fit the tenant's limit — don't queue it for
-            # retry (it would just fail again on every flush/rescan and spam). Report
-            # once and move on; it re-indexes if it changes or the quota is raised.
-            self._failed.discard(path)
-            if self._on_error is not None:
-                self._on_error(path, kind, exc)
+            # Over-quota: keep it queued for retry (a `quota set` raising the limit,
+            # picked up by the syncer's live resolver, then lets it in on the next
+            # rescan) — but report only ONCE per file so the retries don't spam.
+            self._failed.add(path)
+            if path not in self._quota_warned:
+                self._quota_warned.add(path)
+                if self._on_error is not None:
+                    self._on_error(path, kind, exc)
         except Exception as exc:  # noqa: BLE001 — one bad file must not stop the watch
             if kind != REMOVE:  # a failed delete is retried by reconcile_deletions
                 self._failed.add(path)

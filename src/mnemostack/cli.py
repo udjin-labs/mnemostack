@@ -1476,12 +1476,19 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
 
     # Embed new chunks and refresh changed payloads (shared with the watcher's
     # per-file path so a full walk and a single-file update behave identically).
+    from .markdown.sync import markdown_quota_check
+
+    # Enforce the tenant's storage quota on the exact NET change (inserts minus
+    # what the prune step will remove — per-source replacements plus full-root
+    # deletions), checked after embedding but before any write.
+    _quota_check = markdown_quota_check(
+        store, tenant, max_points, existing_payloads, chunks,
+        prune=bool(args.prune and not args.recreate), full_root=full_root_walk,
+    )
     try:
         cs = upsert_markdown_chunks(
             store, provider, chunks, existing_payloads, tenant=tenant,
-            max_points=max_points,
-            # Offset replaced chunks only when this run will actually prune them.
-            prune=bool(args.prune and not args.recreate),
+            before_upsert=_quota_check,
         )
     except QuotaExceededError as e:
         print(f"error: {e}", file=sys.stderr)

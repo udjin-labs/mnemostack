@@ -42,6 +42,70 @@ class ChunkSyncResult:
     failed_sources: set[str] = field(default_factory=set)
 
 
+def markdown_prune_count(
+    existing_payloads: dict[str, dict],
+    chunks: list[tuple[str, str, dict]],
+    *,
+    prune: bool,
+    full_root: bool,
+    failed_sources: set[str],
+) -> int:
+    """How many existing points a re-index will PRUNE — mirrors prune_stale_chunks.
+
+    A markdown re-index removes stale chunks: the re-indexed sources' chunks no
+    longer produced, plus (on a full-root walk) chunks of sources removed from the
+    corpus entirely. Only markdown-owned chunks (``_md_keys``) are prunable, and a
+    source whose embedding failed is skipped (its prune is deferred). Returns 0
+    when the caller won't prune, so the quota then counts inserts as pure growth.
+    """
+    if not prune:
+        return 0
+    new_ids = {cid for cid, _t, _p in chunks}
+    live_sources = {p.get("source") for _c, _t, p in chunks}
+    count = 0
+    for cid, pl in existing_payloads.items():
+        if not pl.get("_md_keys") or cid in new_ids:
+            continue  # not markdown-owned, or still present (not stale)
+        src = pl.get("source")
+        if src in failed_sources:
+            continue  # a failed source isn't pruned this run
+        if src in live_sources or full_root:  # re-indexed source, or full-root deletion
+            count += 1
+    return count
+
+
+def markdown_quota_check(
+    store: Any,
+    tenant: str | None,
+    max_points: int | None,
+    existing_payloads: dict[str, dict],
+    chunks: list[tuple[str, str, dict]],
+    *,
+    prune: bool,
+    full_root: bool,
+) -> Callable[[int, set[str]], None] | None:
+    """A ``before_upsert`` hook enforcing the storage quota on the NET change.
+
+    Returns None (no check) when unscoped or no limit. The hook receives the count
+    of successfully-embedded NEW inserts and the set of failed sources, computes
+    the exact net change (inserts minus the points this run will prune), and
+    raises ``QuotaExceededError`` if the resulting stored count would exceed the
+    cap — so an edit that replaces content is net-neutral, a deletion frees room,
+    and a failed embedding neither inserts nor blocks its source's prune.
+    """
+    if tenant is None or max_points is None:
+        return None
+
+    def _check(inserts: int, failed_sources: set[str]) -> None:
+        removed = markdown_prune_count(
+            existing_payloads, chunks, prune=prune, full_root=full_root,
+            failed_sources=failed_sources,
+        )
+        enforce_points_quota(tenant, store.count(tenant=tenant), inserts - removed, max_points)
+
+    return _check
+
+
 def upsert_markdown_chunks(
     store: Any,
     provider: Any,
@@ -49,8 +113,7 @@ def upsert_markdown_chunks(
     existing_payloads: dict[str, dict],
     *,
     tenant: str | None = None,
-    max_points: int | None = None,
-    prune: bool = False,
+    before_upsert: Callable[[int, set[str]], None] | None = None,
 ) -> ChunkSyncResult:
     """Embed & upsert new chunks; refresh payloads of already-indexed ones.
 
@@ -60,22 +123,16 @@ def upsert_markdown_chunks(
     no longer produces — foreign payload fields (enrichment, validity markers)
     are preserved.
 
-    With ``tenant`` set, writes route through the store's tenant boundary
-    (``tenant_id`` stamped server-side; a payload can't assert its own tenant,
-    and refresh/delete are owner-guarded) so a markdown corpus is isolated. With
-    ``max_points`` set too, the call is refused (``QuotaExceededError``) before
-    any insert if the points it would actually STORE push the tenant over its
-    limit. The quota counts only successfully-embedded new chunks (a chunk whose
-    embedding fails is never stored). When ``prune=True`` — the caller will remove
-    the re-indexed sources' stale chunks — the replaced chunks offset the inserts,
-    so editing a file at the cap is net-neutral. With ``prune=False`` the old
-    chunks stay, so every new chunk counts as growth.
+    With ``tenant`` set, writes route through the store's tenant boundary so a
+    markdown corpus is isolated. ``before_upsert(inserts, failed_sources)`` — if
+    given — runs AFTER embedding but BEFORE any upsert, with the count of
+    successfully-embedded new chunks and the failed sources; it may raise (e.g.
+    ``QuotaExceededError`` from :func:`markdown_quota_check`) to abort the write.
     """
     tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
     existing_ids = set(existing_payloads)
     res = ChunkSyncResult()
-    # Phase 1: embed the NEW chunks and keep only the ones that produced a vector
-    # (a failed embedding is never stored, so it must not count against the quota).
+    # Phase 1: embed the NEW chunks; a failed embedding is never stored.
     to_upsert: list[tuple[str, list, dict]] = []
     for cid, text, payload in chunks:
         if cid in existing_ids:
@@ -86,26 +143,9 @@ def upsert_markdown_chunks(
             res.failed_sources.add(payload["source"])
             continue
         to_upsert.append((cid, vec, payload))
-    # Phase 2: enforce the quota on what will actually be stored, BEFORE upserting.
-    if tenant is not None and max_points is not None:
-        num_new = len(to_upsert)
-        num_replaced = 0
-        if prune:
-            # A re-index removes the re-indexed sources' stale chunks, so they
-            # offset the inserts (an edit is net-neutral). Only valid when the
-            # caller actually prunes — otherwise the old chunks remain stored.
-            new_ids = {cid for cid, _t, _p in chunks}
-            new_sources = {p.get("source") for _c, _t, p in chunks}
-            num_replaced = sum(
-                1
-                for cid, pl in existing_payloads.items()
-                if cid not in new_ids
-                and pl.get("source") in new_sources
-                and pl.get("_md_keys")
-            )
-        net = num_new - num_replaced
-        if net > 0:
-            enforce_points_quota(tenant, store.count(tenant=tenant), net, max_points)
+    # Phase 2: caller hook (quota) — enforced on the real stored count, pre-write.
+    if before_upsert is not None:
+        before_upsert(len(to_upsert), res.failed_sources)
     # Phase 3: upsert the embedded new chunks.
     for cid, vec, payload in to_upsert:
         store.upsert(cid, vec, payload, **tkw)
@@ -249,12 +289,16 @@ class MarkdownSyncer:
             ):
                 existing[str(hit.id)] = hit.payload or {}
 
-        # Re-resolve the quota per file (picks up a mid-watch quota change) and
-        # prune=True since index_file always prunes this file's stale chunks below.
+        # Re-resolve the quota per file (picks up a mid-watch quota change);
+        # prune=True since index_file always prunes this file's stale chunks below,
+        # full_root=False since a single file can't observe corpus-wide deletions.
         mp = self.max_points_resolver() if self.max_points_resolver is not None else None
+        check = markdown_quota_check(
+            self.store, self.tenant, mp, existing, chunks, prune=True, full_root=False
+        )
         cs = upsert_markdown_chunks(
             self.store, self.provider, chunks, existing,
-            tenant=self.tenant, max_points=mp, prune=True,
+            tenant=self.tenant, before_upsert=check,
         )
 
         # Prune chunks this file no longer produces (shrunk / re-chunked). Skip a

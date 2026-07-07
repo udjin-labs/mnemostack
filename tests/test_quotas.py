@@ -212,67 +212,91 @@ def test_ingest_quota_end_to_end_inmemory():
 # ---------- markdown enforcement ----------
 
 
-def test_markdown_upsert_refuses_over_quota():
-    from mnemostack.markdown.sync import upsert_markdown_chunks
+def _md_upsert(store, provider, chunks, existing, *, max_points, prune=False,
+               full_root=False, tenant="acme"):
+    from mnemostack.markdown.sync import markdown_quota_check, upsert_markdown_chunks
 
+    check = markdown_quota_check(store, tenant, max_points, existing, chunks,
+                                 prune=prune, full_root=full_root)
+    return upsert_markdown_chunks(store, provider, chunks, existing,
+                                  tenant=tenant, before_upsert=check)
+
+
+def _md(source):
+    return {"source": source, "_md_keys": ["text", "source", "offset"]}
+
+
+def test_markdown_upsert_refuses_over_quota():
     store = _CountingStore(existing=9)
-    chunks = [(f"id{i}", f"t{i}", {"source": "a.md"}) for i in range(5)]
+    chunks = [(f"id{i}", f"t{i}", _md("a.md")) for i in range(5)]
     with pytest.raises(QuotaExceededError):
-        upsert_markdown_chunks(store, _Emb(), chunks, {}, tenant="acme", max_points=10)
+        _md_upsert(store, _Emb(), chunks, {}, max_points=10)
     assert store.upserts == []
 
 
 def test_markdown_edit_at_cap_counts_net_not_gross():
-    from mnemostack.markdown.sync import upsert_markdown_chunks
-
-    _md = ["text", "source", "offset"]  # a real markdown chunk always has these
     store = _CountingStore(existing=0)
-    v1 = [("id1", "t", {"source": "a.md", "_md_keys": _md}),
-          ("id2", "t", {"source": "a.md", "_md_keys": _md})]
-    upsert_markdown_chunks(store, _Emb(), v1, {}, tenant="acme", max_points=2)
+    v1 = [("id1", "t", _md("a.md")), ("id2", "t", _md("a.md"))]
+    _md_upsert(store, _Emb(), v1, {}, max_points=2, prune=True)
     assert store.count(tenant="acme") == 2  # at cap
     # edit a.md → 2 chunks with NEW ids; the old 2 will be pruned (net 0).
-    existing = {"id1": {"source": "a.md", "_md_keys": _md},
-                "id2": {"source": "a.md", "_md_keys": _md}}
-    v2 = [("id3", "t", {"source": "a.md", "_md_keys": _md}),
-          ("id4", "t", {"source": "a.md", "_md_keys": _md})]
-    res = upsert_markdown_chunks(
-        store, _Emb(), v2, existing, tenant="acme", max_points=2, prune=True
-    )
+    existing = {"id1": _md("a.md"), "id2": _md("a.md")}
+    v2 = [("id3", "t", _md("a.md")), ("id4", "t", _md("a.md"))]
+    res = _md_upsert(store, _Emb(), v2, existing, max_points=2, prune=True)
     assert res.inserted == 2  # allowed — net change is 0 (old chunks pruned), not +2
 
 
 def test_markdown_no_prune_counts_gross_not_net():
     # Without prune the old chunks stay, so an edit at the cap genuinely grows the
     # count and must be rejected (no false offset).
-    from mnemostack.markdown.sync import upsert_markdown_chunks
-
-    _md = ["text", "source"]
     store = _CountingStore(existing=2)
-    existing = {"id1": {"source": "a.md", "_md_keys": _md},
-                "id2": {"source": "a.md", "_md_keys": _md}}
-    v2 = [("id3", "t", {"source": "a.md", "_md_keys": _md}),
-          ("id4", "t", {"source": "a.md", "_md_keys": _md})]
+    existing = {"id1": _md("a.md"), "id2": _md("a.md")}
+    v2 = [("id3", "t", _md("a.md")), ("id4", "t", _md("a.md"))]
     with pytest.raises(QuotaExceededError):
-        upsert_markdown_chunks(
-            store, _Emb(), v2, existing, tenant="acme", max_points=2, prune=False
-        )
+        _md_upsert(store, _Emb(), v2, existing, max_points=2, prune=False)
+
+
+def test_markdown_full_root_deletion_frees_room():
+    # A full-root --prune walk that DELETES b.md (2 chunks) and edits a.md (2 new
+    # chunks) is net-0 at the cap: the deleted file's chunks are pruned too.
+    store = _CountingStore(existing=4)  # a.md(2) + b.md(2)
+    existing = {"a1": _md("a.md"), "a2": _md("a.md"),  # a.md's current chunks
+                "b1": _md("b.md"), "b2": _md("b.md")}  # b.md — no longer on disk
+    # the walk only produces a.md's new chunks (b.md is gone)
+    chunks = [("a3", "t", _md("a.md")), ("a4", "t", _md("a.md"))]
+    res = _md_upsert(store, _Emb(), chunks, existing, max_points=4,
+                     prune=True, full_root=True)
+    assert res.inserted == 2  # allowed: +2 a.md, -2 a.md old, -2 b.md deleted = net -2
+
+
+def test_markdown_failed_source_not_offset():
+    # A source whose embedding fails isn't pruned, so its stale chunks must NOT
+    # offset the inserts. Editing a.md at the cap where BOTH new chunks fail to
+    # embed stores nothing (fine); but a mix must not free room from a's un-pruned
+    # old chunks.
+    class _EmbFails:
+        def embed(self, text):
+            return []  # every embed fails
+
+    store = _CountingStore(existing=2)
+    existing = {"a1": _md("a.md"), "a2": _md("a.md")}
+    chunks = [("a3", "t", _md("a.md")), ("a4", "t", _md("a.md"))]
+    # inserts=0 (all fail), removed=0 (a.md is a failed source, not pruned) → net 0
+    res = _md_upsert(store, _EmbFails(), chunks, existing, max_points=2,
+                     prune=True, full_root=False)
+    assert res.inserted == 0 and res.failed == 2  # nothing stored, no false offset
 
 
 def test_markdown_quota_counts_only_embedded_chunks():
     # A chunk whose embedding fails isn't stored, so it must not count against the
     # quota: a 2-chunk file with 1 failure fits a tenant with room for 1.
-    from mnemostack.markdown.sync import upsert_markdown_chunks
-
     class _EmbOneFails:
         def embed(self, text):
             return [] if text == "bad" else [0.1, 0.2, 0.3]
 
     store = _CountingStore(existing=0)
-    chunks = [("id1", "good", {"source": "a.md"}), ("id2", "bad", {"source": "a.md"})]
-    res = upsert_markdown_chunks(
-        store, _EmbOneFails(), chunks, {}, tenant="acme", max_points=1
-    )
+    chunks = [("id1", "good", _md("a.md")), ("id2", "bad", _md("a.md"))]
+    res = _md_upsert(store, _EmbOneFails(), chunks, {}, max_points=1)
     assert res.inserted == 1 and res.failed == 1  # only the embedded one stored
 
 
@@ -287,7 +311,9 @@ def test_ingest_dedup_within_flush_counts_once():
     assert store.count(tenant="acme") == 1
 
 
-def test_watch_skips_over_quota_file_without_retry():
+def test_watch_over_quota_file_retries_but_warns_once():
+    # An over-quota file is queued for retry (so a raised quota takes effect on the
+    # next rescan via the live resolver) but reported only ONCE, not every rescan.
     from mnemostack.markdown.watch import MarkdownWatcher
 
     class _Syncer:
@@ -302,18 +328,17 @@ def test_watch_skips_over_quota_file_without_retry():
     errors: list = []
     w = MarkdownWatcher(_Syncer(), "/root", on_error=lambda p, k, e: errors.append((p, e)))
     w._apply("/root/big.md", "modify")
-    assert "/root/big.md" not in w._failed  # not queued for retry
-    assert errors and isinstance(errors[0][1], QuotaExceededError)  # reported once
+    w._apply("/root/big.md", "modify")  # a rescan retries it
+    assert "/root/big.md" in w._failed  # kept for retry (picks up a raised quota)
+    assert len(errors) == 1  # but reported only once, not per retry
 
 
 def test_markdown_upsert_refresh_does_not_count():
-    from mnemostack.markdown.sync import upsert_markdown_chunks
-
     store = _CountingStore(existing=10)  # already at limit
     # all chunks already indexed → refreshes only, no NEW points → allowed
-    chunks = [("id0", "t0", {"source": "a.md"})]
-    existing = {"id0": {"_md_keys": []}}
-    res = upsert_markdown_chunks(store, _Emb(), chunks, existing, tenant="acme", max_points=10)
+    chunks = [("id0", "t0", _md("a.md"))]
+    existing = {"id0": _md("a.md")}
+    res = _md_upsert(store, _Emb(), chunks, existing, max_points=10, prune=True)
     assert res.refreshed == 1 and res.inserted == 0
 
 
