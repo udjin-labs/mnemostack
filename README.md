@@ -103,7 +103,7 @@ Vector search answers "what sounds similar?" Real retrieval over a growing corpu
 
 - A searchable knowledge base in memory: ingest your docs/notes/FAQ once, then serve hybrid search or grounded `answer()` (with confidence and source citations) over it from the CLI, HTTP, or library.
 - RAG over mixed corpora (code, docs, transcripts) where exact-token and temporal recall beat pure vector similarity.
-- Multi-tenant or per-user knowledge stores — payload `filters` isolate each tenant's data inside every retriever (see the [HTTP API](#http-server-optional)).
+- Multi-tenant or per-user knowledge stores — payload `filters` isolate each tenant's data inside every retriever, or enable **service-key auth** (`serve --auth`) for a hard, key-resolved tenant boundary with optional per-tenant quotas (see the [HTTP API](#http-server-optional)).
 - Time-aware search and knowledge bases — "what changed last week", point-in-time graph facts, freshness-weighted ranking.
 - Team or project knowledge recall across docs, notes, tickets, and chat history.
 
@@ -294,7 +294,7 @@ Not the best fit if you only need a single call to `text-embedding-3-small` + co
 - ⚙ **Consolidation runtime** — phase orchestrator for nightly memory lifecycle
 - 🔌 **MCP server** — expose memory tools to Claude Desktop, ChatGPT, Cursor, etc.
 - 🛡 **Graceful degradation** — retrieval keeps working if graph or any retriever is down
-- 🔐 **Multi-tenant filters** — `filters={"tenant": "a"}` applies inside *every* retriever (exact match + ranges) on HTTP/MCP/CLI/library; results never include points outside the scope, verified by adversarial isolation tests. See the HTTP API section.
+- 🔐 **Multi-tenancy — soft filters or a hard auth boundary** — `filters={"tenant": "a"}` applies inside *every* retriever (exact match + ranges) on HTTP/MCP/CLI/library; results never include points outside the scope, verified by adversarial isolation tests. Filters are **caller-supplied**, so for a real trust boundary run the server with **service-key auth** (`serve --auth` / `mcp-serve --auth`): the tenant is resolved from the key (a client can't assert another's), enforced across the vector store, the knowledge graph, and per-tenant learning state. Optional per-tenant **storage quotas** apply at ingest, and **request-rate quotas** on the authenticated **HTTP** surface (`serve --auth`). Off by default. See the HTTP API section.
 - 🧩 **Ingest enrichment + answer projection** — `Ingestor(enrich=callable)` extracts structured facts into payloads at ingest (fail-open, `--refresh-payloads` updates existing collections without re-embedding); `context_fields=[...]` shows them to the answer LLM; `rewrite_followup()` resolves conversational follow-ups before recall.
 - 🧠 **Reasoning-model friendly** — Ollama `think` is off by default (reasoning models otherwise burn the whole token budget on thoughts and return empty text); `options={...}` passes any generation option through.
 
@@ -761,7 +761,17 @@ curl -s http://localhost:8000/feedback \
 `signal` is one of `useful`, `clicked`, or `irrelevant`; pass the `retrievers` list returned by `/recall` as `sources` so Q-learning can update the right source weights.
 The same state update is available from CLI as `mnemostack feedback ...` and from MCP as `mnemostack_feedback`.
 
-For production, front this with whichever reverse proxy you already use (nginx, Caddy, Traefik) and set an auth layer — mnemostack's server does not do auth itself on purpose; the goal is to plug into whatever you already have.
+**Multi-tenant auth.** By default the server is unauthenticated (single-tenant; put it behind your own auth layer). For a hard, per-tenant boundary, start it with `--auth` and issue service keys:
+
+```bash
+mnemostack keys add --tenant acme --scopes read,write   # prints the key once
+mnemostack serve --auth                                  # default-deny on every data endpoint
+curl -s http://localhost:8000/recall \
+    -H 'X-API-Key: msk_...' -H 'content-type: application/json' \
+    -d '{"query":"..."}'                                  # or: Authorization: Bearer msk_...
+```
+
+The **tenant is resolved from the key** (a client can't assert another's), enforced across the vector store, the tenant-scoped knowledge graph, and per-tenant learning state — so it's a real authorization boundary, unlike the caller-supplied `filters` above. `/recall` and `/answer` require `read`, `/feedback` requires `write`; a missing/invalid key is `401`, insufficient scope `403`. Cap each tenant with `mnemostack quota set --tenant <id> --max-points N --max-rps R` (storage enforced at ingest, rate on the HTTP surface → `429`). The operator endpoints (`/health`, `/healthz`, `/readyz`, `/status`, `/metrics`) stay unauthenticated — protect them at your proxy if sensitive. Auth is **off by default**; you can still front the server with your own reverse proxy (nginx, Caddy, Traefik) either way. See [`docs/deployment.md`](docs/deployment.md) and [`docs/api-stability.md`](docs/api-stability.md).
 
 ### Knowledge graph (optional)
 

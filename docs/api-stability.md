@@ -83,6 +83,11 @@ this is purely additive. See [Multi-tenancy & authentication](#multi-tenancy--au
   quota is a resource guardrail, not a security boundary, so a corrupt quota store
   **fails open** (no limit, logged) rather than blocking traffic.
 
+- `inspect` runs an operator web console (default `127.0.0.1:8100`): read-only
+  data browsing by default, or a tenant-administration console (issue/revoke keys,
+  manage quotas) with `inspect --auth` (admin-scoped key required). The **CLI flags**
+  are stable; the console's **HTML/JSON `/api` surface is 🟡 experimental** — it's an
+  operator tool, not a programmatic API, so don't build automation against it.
 - `doctor` exit codes (`0` healthy / `1` core dependency down / `2` config
   invalid) are a 🟢 stable contract — safe to gate CI/deploys on. Exit `2` covers a
   config that **loads** but fails `doctor`'s validation; a value that fails to
