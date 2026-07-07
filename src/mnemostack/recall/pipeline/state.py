@@ -10,6 +10,20 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from threading import Lock
 from typing import Any
+from urllib.parse import quote
+
+
+def tenant_state_key(base: str, tenant: str | None) -> str:
+    """Namespace a state-store key by tenant.
+
+    The learning-state blobs (``q_table``, ``ior_log``) are shared across tenants
+    when keyed by the bare stage name — one tenant's feedback then shifts the
+    Q-values and IoR log every other tenant reads. Namespacing the key per tenant
+    isolates them. The tenant is percent-encoded (arbitrary string) so it can't
+    forge another tenant's key via a ``:``. ``tenant=None`` keeps the bare key, so
+    an existing single-tenant state file is read/written unchanged.
+    """
+    return base if tenant is None else f"{base}:{quote(tenant, safe='')}"
 
 
 class StateStore(ABC):

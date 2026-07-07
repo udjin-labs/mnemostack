@@ -14,7 +14,7 @@ from typing import Any
 
 from ..mca_prefilter import extract_exact_tokens
 from .base import Stage
-from .state import StateStore
+from .state import StateStore, tenant_state_key
 
 # ---------- defaults / stopwords ----------
 
@@ -450,7 +450,10 @@ class InhibitionOfReturn(Stage):
         self.keep_last = keep_last
 
     def apply(self, context, results):
-        log = self.store.get(self.STATE_KEY) or []
+        # Read the tenant's own IoR log (partitioned key), so another tenant's
+        # recalls never penalize this tenant's results. Unscoped keeps "ior_log".
+        tenant = context.extras.get("tenant")
+        log = self.store.get(tenant_state_key(self.STATE_KEY, tenant)) or []
         now = datetime.now(timezone.utc)
         window = timedelta(hours=self.window_hours)
         counts: dict[str, int] = defaultdict(int)
@@ -470,8 +473,13 @@ class InhibitionOfReturn(Stage):
         results.sort(key=lambda x: -x.score)
         return results
 
-    def record_recall(self, memory_id: Any) -> None:
-        """Append a recall event for memory_id (call after emitting results)."""
+    def record_recall(self, memory_id: Any, tenant: str | None = None) -> None:
+        """Append a recall event for memory_id (call after emitting results).
+
+        With ``tenant`` set, the event lands in that tenant's own log (partitioned
+        key), so the ``keep_last`` cap is per-tenant and a high-volume tenant can't
+        evict another's IoR entries.
+        """
         ts = datetime.now(timezone.utc).isoformat()
 
         def _update(current):
@@ -479,7 +487,7 @@ class InhibitionOfReturn(Stage):
             log.append({"id": memory_id, "timestamp": ts})
             return log[-self.keep_last :]
 
-        self.store.update(self.STATE_KEY, _update)
+        self.store.update(tenant_state_key(self.STATE_KEY, tenant), _update)
 
 
 class CuriosityBoost(Stage):
@@ -504,7 +512,8 @@ class CuriosityBoost(Stage):
         self.max_recalls = max_recalls
 
     def apply(self, context, results):
-        log = self.store.get(self.IOR_KEY) or []
+        tenant = context.extras.get("tenant")
+        log = self.store.get(tenant_state_key(self.IOR_KEY, tenant)) or []
         counts: dict[str, int] = defaultdict(int)
         for entry in log:
             counts[str(entry.get("id", ""))] += 1
@@ -599,7 +608,11 @@ class QLearningReranker(Stage):
         return q
 
     def apply(self, context, results):
-        q_table = self.store.get(self.STATE_KEY) or {}
+        # Read the tenant's own Q-table (partitioned key). The table is keyed by
+        # (source, query_type) — labels shared across tenants — so WITHOUT this a
+        # tenant reranks off every other tenant's feedback. Unscoped keeps "q_table".
+        tenant = context.extras.get("tenant")
+        q_table = self.store.get(tenant_state_key(self.STATE_KEY, tenant)) or {}
         for r in results:
             # Q can mix multiple sources (Vector + BM25 etc.) for one item.
             source_qs = []
@@ -622,8 +635,14 @@ class QLearningReranker(Stage):
         source: str,
         query_type: str,
         reward: float,
+        tenant: str | None = None,
     ) -> None:
-        """Update Q-table based on observed reward (1.0 = user used this result)."""
+        """Update Q-table based on observed reward (1.0 = user used this result).
+
+        With ``tenant`` set, the update lands in that tenant's own Q-table
+        (partitioned key), so one tenant's feedback can't move the (source,
+        query_type) Q-value every other tenant reranks against.
+        """
 
         def _update(current):
             table = dict(current or {})
@@ -639,4 +658,4 @@ class QLearningReranker(Stage):
             table[source] = src_table
             return table
 
-        self.store.update(self.STATE_KEY, _update)
+        self.store.update(tenant_state_key(self.STATE_KEY, tenant), _update)
