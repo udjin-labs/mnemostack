@@ -82,6 +82,16 @@ export MNEMOSTACK_STATE_PATH=~/.local/state/mnemostack/server-state.json
 export MNEMOSTACK_RERANK_MODE=relevant_only
 ```
 
+### Multi-tenant auth (optional)
+
+For a multi-tenant deployment, run the server as one authenticated tenant with `--auth` and a service key:
+
+```bash
+mnemostack mcp-serve --auth --api-key "$MNEMOSTACK_API_KEY" --collection my-memory
+```
+
+The key (`--api-key` or `MNEMOSTACK_API_KEY`) resolves the tenant + scopes for the whole process — the natural fit for how an MCP client passes secrets in its server config. It is **re-verified on every tool call**, so revoking it stops the session immediately (fail closed). Tools are scope-gated — `mnemostack_search` / `mnemostack_answer` need `read`, `mnemostack_invalidate` / `mnemostack_feedback` need `write` — and every call, **including the graph tools**, is confined to the key's tenant. Issue keys with `mnemostack keys add --tenant <id> --scopes read,write` (and set per-tenant quotas with `mnemostack quota set`). Auth is **off by default** — an unauthenticated `mcp-serve` behaves exactly as before.
+
 ## Client configuration
 
 ### Claude Desktop

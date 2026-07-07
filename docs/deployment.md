@@ -412,7 +412,7 @@ If your Memgraph edition/version supports authentication, enable it and create a
 
 ### HTTP server
 
-`mnemostack serve` intentionally does not implement authentication. It is meant to sit behind your existing auth layer.
+`mnemostack serve` does not require authentication **by default** — a single-tenant deployment is meant to sit behind your existing auth layer. For multi-tenant deployments it has a built-in **service-key auth** mode (`--auth`, described below); enable it, or keep the server behind your own auth layer, before exposing it.
 
 By default it binds to `127.0.0.1`. Binding to all interfaces prints a warning:
 
@@ -434,6 +434,15 @@ The `filters` parameter on `/recall` and `/answer` provides data isolation insid
 
 For multi-tenant deployments, use the built-in **service-key auth** instead of trusting client filters: start the server with `mnemostack serve --auth`, issue per-tenant keys with `mnemostack keys add --tenant <id> --scopes read,write`, and clients present the key via `Authorization: Bearer <key>` or `X-API-Key`. The **tenant is resolved from the key** (a client can't assert another tenant) and enforced through the vector store's tenant filter plus a post-fusion `filter_by_tenant` backstop, so an authenticated caller only ever sees its own tenant's data. `/recall` and `/answer` require `read`, `/feedback` requires `write`; a missing/invalid key is `401`, an insufficient scope `403` (default-deny). Liveness/readiness probes stay public; protect `/metrics` and `/status` at your proxy if needed. (Auth is off by default — single-tenant deployments are unaffected.) You can still additionally inject a tenant filter at a reverse proxy for defense-in-depth. Upgrade note: on 0.5.0 and earlier, several retrievers ignored `filters=` entirely — see the Security section of the changelog.
 
+### Per-tenant quotas and rate limits
+
+Under `--auth` you can cap each tenant's resource use from a small per-tenant quota store (`mnemostack quota set --tenant <id> …`; JSON file at `MNEMOSTACK_QUOTAS_FILE`, default `~/.config/mnemostack/quotas.json`):
+
+- **Storage** — `--max-points N` caps how many vector points a tenant may store; enforced at ingest (`Ingestor` / `index-markdown --tenant <id>`), which refuses a write that would exceed the cap. The quota store **fails open**: a corrupt/unreadable file logs loudly and imposes no limit rather than blocking ingest, so monitor the log if you rely on it.
+- **Request rate** — `--max-rps R` (with an optional `--burst N`) throttles a tenant's requests on the authenticated HTTP surface; over the rate the server returns **`429`** with a `Retry-After` header. The limiter is **per-process** (a token bucket), so with N workers the effective ceiling is N×`max_rps`; for a hard global limit, enforce it at your reverse proxy instead. Tenants without a rate quota, and unauthenticated single-tenant deployments, are never throttled.
+
+`quota set` is a partial update (only the fields you pass change; pass `none` to clear one), and `quota list` / `quota rm` round it out.
+
 ### MCP
 
 The MCP server is stdio-based:
@@ -443,6 +452,14 @@ mnemostack mcp-serve --provider gemini --collection production-memory
 ```
 
 It should be launched by the local MCP client. It does not need a listening TCP port. Do not wrap MCP stdio in a network service unless you add a proper transport security and auth model.
+
+For multi-tenant use, `mcp-serve --auth` runs the process as one authenticated tenant: launch it with a service key (`--api-key` / `MNEMOSTACK_API_KEY`) that resolves the tenant + scopes for the whole process (the natural fit for how an MCP client passes secrets in its server config). The key is **re-verified on every tool call**, so revoking it stops the session immediately; tools are scope-gated (`search`/`answer` need `read`, `invalidate`/`feedback` need `write`), and every call is confined to the key's tenant — including the tenant-scoped graph tools.
+
+### Web inspector / admin console
+
+`mnemostack inspect` serves a small **read-only** operator console (default `127.0.0.1:8100`) for browsing tenants, per-tenant size, records, and dependency reachability. It never writes to the data, so it's safe to point at production — but it exposes memory contents, so bind it to a trusted interface (localhost or a proxy).
+
+`mnemostack inspect --auth` turns it into a **tenant-administration console**: every `/api` call then requires an **admin**-scoped service key, and management panels appear for issuing/revoking service keys (a new key's plaintext is shown once) and setting/removing quotas. Auth is by header (no cookies, so no CSRF); revoking the last admin key is refused so the console can't lock itself out. Because it now exposes key metadata and mutation, keep it on a trusted interface / behind TLS. Without `--auth` the management endpoints return `403` and the console stays the read-only browser.
 
 ### `GEMINI_API_KEY` handling
 

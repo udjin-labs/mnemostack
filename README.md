@@ -103,7 +103,7 @@ Vector search answers "what sounds similar?" Real retrieval over a growing corpu
 
 - A searchable knowledge base in memory: ingest your docs/notes/FAQ once, then serve hybrid search or grounded `answer()` (with confidence and source citations) over it from the CLI, HTTP, or library.
 - RAG over mixed corpora (code, docs, transcripts) where exact-token and temporal recall beat pure vector similarity.
-- Multi-tenant or per-user knowledge stores — payload `filters` isolate each tenant's data inside every retriever (see the [HTTP API](#http-server-optional)).
+- Multi-tenant or per-user knowledge stores — payload `filters` isolate each tenant's data inside every retriever, or enable **service-key auth** (`serve --auth`) for a hard, key-resolved tenant boundary with optional per-tenant quotas (see the [HTTP API](#http-server-optional)).
 - Time-aware search and knowledge bases — "what changed last week", point-in-time graph facts, freshness-weighted ranking.
 - Team or project knowledge recall across docs, notes, tickets, and chat history.
 
@@ -294,7 +294,7 @@ Not the best fit if you only need a single call to `text-embedding-3-small` + co
 - ⚙ **Consolidation runtime** — phase orchestrator for nightly memory lifecycle
 - 🔌 **MCP server** — expose memory tools to Claude Desktop, ChatGPT, Cursor, etc.
 - 🛡 **Graceful degradation** — retrieval keeps working if graph or any retriever is down
-- 🔐 **Multi-tenant filters** — `filters={"tenant": "a"}` applies inside *every* retriever (exact match + ranges) on HTTP/MCP/CLI/library; results never include points outside the scope, verified by adversarial isolation tests. See the HTTP API section.
+- 🔐 **Multi-tenancy — soft filters or a hard auth boundary** — `filters={"tenant": "a"}` applies inside *every* retriever (exact match + ranges) on HTTP/MCP/CLI/library; results never include points outside the scope, verified by adversarial isolation tests. Filters are **caller-supplied**, so for a real trust boundary run the server with **service-key auth** (`serve --auth` / `mcp-serve --auth`): the tenant is resolved from the key (a client can't assert another's), enforced across the vector store, the knowledge graph, and per-tenant learning state, with optional per-tenant **storage/rate quotas**. Off by default. See the HTTP API section.
 - 🧩 **Ingest enrichment + answer projection** — `Ingestor(enrich=callable)` extracts structured facts into payloads at ingest (fail-open, `--refresh-payloads` updates existing collections without re-embedding); `context_fields=[...]` shows them to the answer LLM; `rewrite_followup()` resolves conversational follow-ups before recall.
 - 🧠 **Reasoning-model friendly** — Ollama `think` is off by default (reasoning models otherwise burn the whole token budget on thoughts and return empty text); `options={...}` passes any generation option through.
 
