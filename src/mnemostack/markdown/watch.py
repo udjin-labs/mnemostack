@@ -196,6 +196,19 @@ class MarkdownWatcher:
     def _scan(self) -> dict[str, float]:
         return _scan_mtimes(self.root)
 
+    def queue_all_for_retry(self) -> int:
+        """Mark every markdown file currently under the root for retry.
+
+        Used when a startup index was skipped wholesale (e.g. the initial scan
+        was over quota, so nothing was written): the corpus is unchanged on disk,
+        so ``poll_once`` would not re-emit it, and the daemon would leave it
+        unindexed until each file is touched. Seeding ``_failed`` makes the next
+        poll re-index every file under the *live* quota, so raising the quota
+        later heals the corpus without a restart. Returns the number queued.
+        """
+        self._failed.update(self._scan())
+        return len(self._failed)
+
     def poll_once(self, prev: dict[str, float]) -> dict[str, float]:
         """One mtime scan: emit upsert for new/changed, remove for vanished.
 

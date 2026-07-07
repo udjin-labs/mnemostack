@@ -693,6 +693,30 @@ def test_syncer_syncs_and_clears_graph_links(tmp_path):
 # ---------- CLI wiring ----------
 
 
+def test_queue_all_for_retry_reindexes_unchanged_corpus(tmp_path):
+    # A startup skipped wholesale (over quota) leaves the corpus unchanged on
+    # disk, so an ordinary poll re-emits nothing. queue_all_for_retry seeds every
+    # current file so the next poll re-indexes it under the live quota — this is
+    # how a later `quota set` heals the corpus without touching files.
+    (tmp_path / "a.md").write_text("# A\n")
+    (tmp_path / "b.md").write_text("# B\n")
+    clock = _FakeClock()
+    syncer = _FakeSyncer()
+    w = _watcher(tmp_path, syncer, clock)
+
+    snap = w._scan()  # nothing changed since this snapshot
+    assert w.poll_once(snap) == snap  # unchanged corpus emits nothing...
+    clock.t = 1.0
+    assert w.flush(force=True) == 0
+    assert syncer.indexed == []
+
+    assert w.queue_all_for_retry() == 2  # ...until every file is queued for retry
+    w.poll_once(snap)
+    clock.t = 2.0
+    w.flush(force=True)
+    assert sorted(syncer.indexed) == sorted(snap)  # both re-indexed despite no edit
+
+
 def test_watch_requires_a_directory(tmp_path, capsys):
     import argparse
 

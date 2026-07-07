@@ -228,10 +228,16 @@ class FileQuotaStore:
 def enforce_points_quota(
     tenant: str | None, current: int, adding: int, max_points: int | None
 ) -> None:
-    """Raise ``QuotaExceededError`` if ``current + adding`` exceeds ``max_points``.
+    """Raise ``QuotaExceededError`` if a net-positive change would exceed ``max_points``.
 
     A no-op when the tenant is unscoped (``None``) or the limit is unset — so a
     single-tenant deployment and any tenant without a quota are unaffected.
+
+    Only genuine growth is rejected: a non-increasing change (``adding <= 0`` — a
+    markdown ``--prune`` that removes at least as many points as it adds) always
+    passes, even for a tenant already over its cap. Otherwise lowering a quota
+    below current usage would block the very ``--prune`` cleanup that brings the
+    tenant back under the limit.
 
     Best-effort: ``current`` is read before the write, so two ingesters flushing
     the same tenant concurrently can both pass this check and land the tenant a
@@ -241,5 +247,5 @@ def enforce_points_quota(
     """
     if tenant is None or max_points is None:
         return
-    if current + adding > max_points:
+    if adding > 0 and current + adding > max_points:
         raise QuotaExceededError(tenant, max_points, current + adding)

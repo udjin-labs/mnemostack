@@ -86,6 +86,17 @@ def test_enforce_points_quota():
     assert ei.value.tenant == "t" and ei.value.limit == 100 and ei.value.attempted == 105
 
 
+def test_enforce_allows_non_increasing_over_cap():
+    # A tenant lowered below current usage must still be able to PRUNE: a net-
+    # negative (or net-zero) change never grows storage, so it's allowed even
+    # while over the cap — otherwise cleanup after a quota cut is impossible.
+    enforce_points_quota("t", 100, -10, 50)  # 100 -> 90 cleanup, over cap 50: ok
+    enforce_points_quota("t", 100, 0, 50)    # net-zero replace over cap: ok
+    # but genuine growth while over cap is still refused
+    with pytest.raises(QuotaExceededError):
+        enforce_points_quota("t", 100, 1, 50)
+
+
 # ---------- Ingestor enforcement ----------
 
 

@@ -1598,7 +1598,8 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
 
     if getattr(args, "watch", False):
         return _watch_markdown(
-            args, store, provider, index_root, str(target), graph_uri, watch_baseline
+            args, store, provider, index_root, str(target), graph_uri, watch_baseline,
+            retry_all=initial_skipped,
         )
     return 0
 
@@ -1611,12 +1612,18 @@ def _watch_markdown(
     watch_root: str,
     graph_uri: str | None,
     baseline: dict[str, float] | None = None,
+    *,
+    retry_all: bool = False,
 ) -> int:
     """Run the incremental file-watch loop after the initial index (blocking).
 
     ``watch_root`` is the folder to observe (what was indexed); ``index_root`` is
     the corpus root the syncer scopes ids/sources/graph nodes to — identical in
     the common case, but distinct when ``--index-root`` pins a nested subtree.
+
+    ``retry_all`` seeds every current file for retry — set when the initial index
+    was skipped wholesale (over quota), so the watcher re-indexes the existing
+    corpus under the live quota instead of leaving it unindexed until touched.
     """
     from .markdown.sync import MarkdownSyncer
     from .markdown.watch import _WATCHDOG, MarkdownWatcher
@@ -1681,6 +1688,11 @@ def _watch_markdown(
         on_result=_on_result,
         on_error=_on_error,
     )
+    if retry_all:
+        # The initial index was skipped over quota; queue the existing corpus so
+        # a later `quota set` re-indexes it without waiting for each file's mtime
+        # to change (poll_once only re-emits changed or already-failed paths).
+        watcher.queue_all_for_retry()
     backend = "watchdog" if _WATCHDOG else f"polling every {args.watch_poll_interval}s"
     print(f"Watching {watch_root} for changes ({backend}) — Ctrl+C to stop.")
     try:
