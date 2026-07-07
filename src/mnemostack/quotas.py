@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import tempfile
 from collections.abc import Iterator
@@ -25,6 +26,14 @@ from pathlib import Path
 from typing import Any, Protocol
 
 log = logging.getLogger(__name__)
+
+
+class _Unset:
+    """Sentinel type for "argument not provided" (distinct from an explicit None)."""
+
+
+#: Singleton sentinel — see :meth:`FileQuotaStore.set`.
+_UNSET = _Unset()
 
 
 class QuotaStoreError(RuntimeError):
@@ -44,17 +53,57 @@ class QuotaExceededError(RuntimeError):
         )
 
 
+class RateLimitExceededError(RuntimeError):
+    """A tenant exceeded its request-rate quota; ``retry_after`` is seconds to wait."""
+
+    def __init__(self, tenant: str, limit: float, retry_after: float):
+        self.tenant = tenant
+        self.limit = limit
+        self.retry_after = retry_after
+        super().__init__(
+            f"tenant '{tenant}' rate limit exceeded: over {limit} req/s "
+            f"(retry after {retry_after:.2f}s)"
+        )
+
+
 @dataclass(frozen=True)
 class TenantQuota:
     """Resource limits for one tenant. ``None`` means unlimited for that field."""
 
     #: Maximum number of vector points the tenant may store (None = unlimited).
     max_points: int | None = None
+    #: Max sustained request rate in requests/second at the authenticated HTTP
+    #: surface (None = unlimited). Enforced by a token bucket per process.
+    max_rps: float | None = None
+    #: Token-bucket burst capacity — how many requests may arrive at once before
+    #: the sustained rate applies. Defaults to ``max_rps`` (rounded up, min 1) when
+    #: a rate is set but no burst is given.
+    burst: int | None = None
+
+    def __post_init__(self) -> None:
+        # Invariant: burst is meaningless without a rate. Drop a burst left over
+        # from a cleared/absent max_rps so it can't silently resurrect (and over-
+        # ride the derived ceil) the next time a rate is set, and so a listing
+        # never shows a burst next to an unlimited rate.
+        if self.max_rps is None and self.burst is not None:
+            object.__setattr__(self, "burst", None)
+
+    def effective_burst(self) -> int | None:
+        """Bucket capacity to use: explicit ``burst``, else derived from ``max_rps``."""
+        if self.max_rps is None:
+            return None
+        if self.burst is not None:
+            return self.burst
+        return max(1, math.ceil(self.max_rps))
 
     def to_record(self) -> dict[str, Any]:
         rec: dict[str, Any] = {}
         if self.max_points is not None:
             rec["max_points"] = self.max_points
+        if self.max_rps is not None:
+            rec["max_rps"] = self.max_rps
+        if self.burst is not None:
+            rec["burst"] = self.burst
         return rec
 
 
@@ -73,18 +122,51 @@ class QuotaStore(Protocol):
     def get(self, tenant: str) -> TenantQuota | None: ...
 
 
+def _usable_number(x: Any) -> bool:
+    """True if ``x`` is a real (non-bool) number representable as a finite float.
+
+    Rejects ``inf``/``nan`` and — crucially — an ``int`` too large to convert to
+    float (argparse and JSON both admit unbounded ints), which would otherwise
+    raise ``OverflowError`` deep in the token bucket (``float(capacity)``,
+    ``1/rate``) and turn a rate-limited request into a 500.
+    """
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(x))
+    except OverflowError:
+        return False
+
+
 def _coerce_quota(rec: Any) -> TenantQuota:
     """Build a TenantQuota from a stored record, tolerating a malformed field.
 
-    A bad ``max_points`` (non-int, negative) is dropped to ``None`` (no limit) with
-    a warning rather than raising — one broken record must not block a tenant's
-    ingest (quotas fail open).
+    A bad field (wrong type, negative) is dropped to ``None`` (no limit for that
+    dimension) with a warning rather than raising — one broken record must not
+    block a tenant's ingest or requests (quotas fail open).
     """
-    mp = rec.get("max_points") if isinstance(rec, dict) else None
+    d = rec if isinstance(rec, dict) else {}
+    mp = d.get("max_points")
     if mp is not None and not (isinstance(mp, int) and not isinstance(mp, bool) and mp >= 0):
         log.warning("ignoring malformed max_points %r in quota store", mp)
         mp = None
-    return TenantQuota(max_points=mp)
+    rps = d.get("max_rps")
+    # Drop a non-usable rate (bool, non-number, non-positive, inf/nan, or an
+    # oversized int that overflows float) to None — fail open, never raise.
+    # _usable_number is checked FIRST so an oversized int never reaches ``<= 0``.
+    if rps is not None and (not _usable_number(rps) or rps <= 0):
+        log.warning("ignoring malformed max_rps %r in quota store", rps)
+        rps = None
+    burst = d.get("burst")
+    if burst is not None and (
+        isinstance(burst, bool) or not isinstance(burst, int) or burst < 1
+        or not _usable_number(burst)
+    ):
+        log.warning("ignoring malformed burst %r in quota store", burst)
+        burst = None
+    return TenantQuota(
+        max_points=mp, max_rps=float(rps) if rps is not None else None, burst=burst
+    )
 
 
 class FileQuotaStore:
@@ -205,18 +287,48 @@ class FileQuotaStore:
 
     # ---- management ----
 
-    def set(self, tenant: str, *, max_points: int | None = None) -> TenantQuota:
-        """Set (replace) a tenant's quota. Returns the stored quota."""
+    def set(
+        self,
+        tenant: str,
+        *,
+        max_points: int | None | _Unset = _UNSET,
+        max_rps: float | None | _Unset = _UNSET,
+        burst: int | None | _Unset = _UNSET,
+    ) -> TenantQuota:
+        """Update a tenant's quota, changing only the fields you pass.
+
+        Each field defaults to a sentinel meaning "leave unchanged" — so setting a
+        rate limit doesn't wipe a previously-set size cap, and vice versa. Pass an
+        explicit ``None`` to clear a field (make that dimension unlimited). The
+        read-modify-write is done under the store lock, so a concurrent ``set`` on
+        another field can't clobber it. Returns the resulting quota.
+        """
         if not tenant:
             raise ValueError("tenant is required")
-        # bool is an int subclass — reject it explicitly so True isn't stored as 1.
-        if max_points is not None and (
+        if not isinstance(max_points, _Unset) and max_points is not None and (
             not isinstance(max_points, int) or isinstance(max_points, bool) or max_points < 0
         ):
             raise ValueError("max_points must be a non-negative integer")
-        quota = TenantQuota(max_points=max_points)
+        if not isinstance(max_rps, _Unset) and max_rps is not None and (
+            not _usable_number(max_rps) or max_rps <= 0
+        ):
+            raise ValueError("max_rps must be a positive, finite number")
+        if not isinstance(burst, _Unset) and burst is not None and (
+            isinstance(burst, bool) or not isinstance(burst, int) or burst < 1
+            or not _usable_number(burst)
+        ):
+            raise ValueError("burst must be a positive integer the bucket can represent")
         with self._locked():
             quotas = self._load()
+            cur = _coerce_quota(quotas.get(tenant, {}))
+            quota = TenantQuota(
+                max_points=cur.max_points if isinstance(max_points, _Unset) else max_points,
+                max_rps=(
+                    cur.max_rps if isinstance(max_rps, _Unset)
+                    else (float(max_rps) if max_rps is not None else None)
+                ),
+                burst=cur.burst if isinstance(burst, _Unset) else burst,
+            )
             quotas[tenant] = quota.to_record()
             self._save(quotas)
         return quota
@@ -232,12 +344,17 @@ class FileQuotaStore:
         return True
 
     def list_quotas(self) -> list[dict[str, Any]]:
-        """List quotas as ``[{tenant, max_points}]``, sorted by tenant."""
+        """List quotas as ``[{tenant, max_points, max_rps, burst}]``, sorted by tenant."""
         quotas = self._load()  # load once — a second load could race a concurrent rm
         out: list[dict[str, Any]] = []
         for tenant in sorted(quotas):
             q = _coerce_quota(quotas[tenant])
-            out.append({"tenant": tenant, "max_points": q.max_points})
+            out.append({
+                "tenant": tenant,
+                "max_points": q.max_points,
+                "max_rps": q.max_rps,
+                "burst": q.burst,
+            })
         return out
 
 
