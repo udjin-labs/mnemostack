@@ -17,7 +17,7 @@ import logging
 from typing import Any
 
 from ..recaller import RecallResult
-from ..retrievers import graph_valid_clause
+from ..retrievers import graph_result_id, graph_valid_clause
 from ..validity import to_utc_instant
 from .base import PipelineContext, Stage
 from .stages import STOPWORDS
@@ -123,7 +123,19 @@ class GraphResurrection(Stage):
         n_valid = graph_valid_clause("n", as_of, include_invalidated)
         m_valid = graph_valid_clause("m", as_of, include_invalidated)
         r_valid = graph_valid_clause("r1", as_of, include_invalidated)
-        extra_params = {"as_of": as_of} if as_of is not None else {}
+        extra_params: dict[str, Any] = {"as_of": as_of} if as_of is not None else {}
+        # Tenant scope (rides in via context.extras, like as_of): confine the
+        # seed, the neighbor, and the edge to the tenant so a resurrected node
+        # can never come from another tenant's subgraph. Unscoped (tenant=None)
+        # adds nothing — a single-tenant graph walk is unchanged.
+        tenant = context.extras.get("tenant")
+        tpred = (
+            " AND n.tenant = $tenant AND m.tenant = $tenant AND r1.tenant = $tenant"
+            if tenant is not None
+            else ""
+        )
+        if tenant is not None:
+            extra_params["tenant"] = tenant
 
         existing = " ".join(
             (r.text or "") + " " + (r.payload.get("text", "") if r.payload else "") for r in results
@@ -142,7 +154,7 @@ class GraphResurrection(Stage):
                         WHERE toLower(n.name) = $seed
                           AND {n_valid}
                           AND {m_valid}
-                          AND {r_valid}
+                          AND {r_valid}{tpred}
                         RETURN DISTINCT m.name AS name, labels(m)[0] AS type,
                                m.memory_class AS mc, type(r1) AS rel
                         LIMIT $lim
@@ -178,17 +190,28 @@ class GraphResurrection(Stage):
             score = min(0.10 + 0.15 * overlap, 0.30)
             rels = ", ".join(sorted(r for r in info["rels"] if r))
             text = f"[Graph] {nb.get('type', '')}: {name} (rel: {rels})"
+            payload: dict[str, Any] = {
+                "text": text,
+                "source": "memgraph",
+                "resurrected": True,
+                "resurrection_seed": ",".join(sorted(info["seeds"])),
+                "memory_class": nb.get("mc") or "",
+            }
+            # Stamp the tenant so the resurrected node survives the recall
+            # `filter_by_tenant` backstop (which drops any result lacking a
+            # matching tenant_id). The seed walk above already confined every
+            # neighbor to this tenant. Namespace the id by tenant too, so two
+            # tenants' same-named graph nodes don't collide in the stateful
+            # pipeline's IoR/feedback state (keyed on str(result.id)) — matching
+            # the retriever and the already-tenant-scoped vector ids.
+            if tenant is not None:
+                payload["tenant_id"] = tenant
+            result_id = graph_result_id(name, tenant)
             rr = RecallResult(
-                id=f"graph:{name}",
+                id=result_id,
                 text=text,
                 score=score,
-                payload={
-                    "text": text,
-                    "source": "memgraph",
-                    "resurrected": True,
-                    "resurrection_seed": ",".join(sorted(info["seeds"])),
-                    "memory_class": nb.get("mc") or "",
-                },
+                payload=payload,
                 sources=["memgraph"],
             )
             resurrected.append((rr, score))

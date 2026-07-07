@@ -800,16 +800,60 @@ def test_mcp_auth_revoked_key_denies_mid_session(tmp_path, monkeypatch):
     assert r.structured_content["ok"] is False and "revoked" in r.structured_content["error"]
 
 
-def test_mcp_graph_tools_fail_closed_under_tenant(tmp_path, monkeypatch):
-    mcp = _auth_mcp(tmp_path, monkeypatch, memgraph="bolt://x")
-    r = asyncio.run(mcp.call_tool("mnemostack_graph_query", {}))
-    assert r.structured_content["ok"] is False
-    assert "not tenant-scoped" in r.structured_content["error"]
+def test_mcp_graph_tools_scoped_under_tenant(tmp_path, monkeypatch):
+    # Graph tools are tenant-scoped now (not fail-closed): the caller's tenant is
+    # threaded into the structured query/write so it only ever touches its own
+    # tenant's subgraph.
+    import mnemostack.graph.factory as gf
+
+    rec: dict[str, str | None] = {}
+
+    class _FakeGS:
+        def query_triples(self, **kw):
+            rec["q_tenant"] = kw.get("tenant")
+            return []
+
+        def add_triple(self, **kw):
+            rec["w_tenant"] = kw.get("tenant")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(gf, "make_graph_store", lambda *a, **k: _FakeGS())
+    # admin implies read + write, so one key exercises both tools.
+    mcp = _auth_mcp(tmp_path, monkeypatch, tenant="acme", scopes="admin", memgraph="bolt://x")
+
+    q = asyncio.run(mcp.call_tool("mnemostack_graph_query", {}))
+    assert q.structured_content["ok"] is True
+    assert rec["q_tenant"] == "acme"  # read query confined to the key's tenant
+
+    w = asyncio.run(
+        mcp.call_tool(
+            "mnemostack_graph_add_triple", {"subject": "a", "predicate": "KNOWS", "obj": "b"}
+        )
+    )
+    assert w.structured_content["ok"] is True
+    assert rec["w_tenant"] == "acme"  # write stamped with the key's tenant
 
 
-def test_mcp_auth_recall_pipeline_drops_graph(tmp_path, monkeypatch):
-    # Under auth (always tenant-scoped), the recall pipeline must be built with no
-    # graph so GraphResurrection can't query the shared, non-tenant-scoped graph.
+def test_mcp_graph_add_triple_needs_write_scope(tmp_path, monkeypatch):
+    # A read-only key can't write graph facts even though the tool is un-gated.
+    import mnemostack.graph.factory as gf
+
+    monkeypatch.setattr(gf, "make_graph_store", lambda *a, **k: MagicMock())
+    mcp = _auth_mcp(tmp_path, monkeypatch, tenant="acme", scopes="read", memgraph="bolt://x")
+    w = asyncio.run(
+        mcp.call_tool(
+            "mnemostack_graph_add_triple", {"subject": "a", "predicate": "KNOWS", "obj": "b"}
+        )
+    )
+    assert w.structured_content["ok"] is False and "scope" in w.structured_content["error"]
+
+
+def test_mcp_auth_recall_pipeline_keeps_scoped_graph(tmp_path, monkeypatch):
+    # The graph is tenant-scoped now, so under auth the recall pipeline KEEPS the
+    # graph: GraphResurrection confines its walk to the caller's tenant (via the
+    # pipeline context) rather than being dropped entirely.
     import mnemostack.mcp.server as srv
 
     real = srv.build_full_pipeline
@@ -822,4 +866,4 @@ def test_mcp_auth_recall_pipeline_drops_graph(tmp_path, monkeypatch):
     monkeypatch.setattr(srv, "build_full_pipeline", _spy)
     mcp = _auth_mcp(tmp_path, monkeypatch, memgraph="bolt://x")
     asyncio.run(mcp.call_tool("mnemostack_search", {"query": "q", "limit": 1}))
-    assert captured["graph_uri"] is None
+    assert captured["graph_uri"] == "bolt://x"

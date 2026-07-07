@@ -68,7 +68,11 @@ def recall_flow(
     results = recalled
     if pipeline is not None:
         results = pipeline.apply(
-            query, results, as_of=as_of, include_invalidated=include_invalidated
+            query,
+            results,
+            as_of=as_of,
+            include_invalidated=include_invalidated,
+            tenant=tenant,
         )
         if filters:
             # Pipeline stages may append candidates that never passed the

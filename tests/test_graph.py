@@ -196,3 +196,26 @@ def test_backfill_current_markers_uses_explicit_current_marker():
     cypher = " ".join(call.args[0] for call in session.run.call_args_list)
     assert "SET n.valid_until = 'current'" in cypher
     assert "SET r.valid_until = 'current'" in cypher
+
+
+def test_tenant_isolation_live(store):
+    """Two tenants writing the same (s,p,o) stay isolated on real Memgraph."""
+    s, ns = store
+    subj = f"{ns}-shared"
+    obj = f"{ns}-thing"
+    for t in (f"{ns}-A", f"{ns}-B"):
+        s.add_triple(
+            subj, "OWNS", obj, subject_label=TEST_LABEL, obj_label=TEST_LABEL, tenant=t
+        )
+    # A scoped read sees only its own tenant's fact...
+    a = s.query_triples(subject=subj, tenant=f"{ns}-A")
+    assert len(a) == 1
+    # ...an unrelated tenant sees nothing...
+    assert s.query_triples(subject=subj, tenant=f"{ns}-C") == []
+    # ...and an unscoped read sees both distinct (name, tenant) nodes.
+    assert len(s.query_triples(subject=subj)) == 2
+
+    # invalidate is tenant-guarded: closing A's edge leaves B's open.
+    assert s.invalidate(subj, "OWNS", obj, ended="2024-06-30", tenant=f"{ns}-A") == 1
+    assert s.query_triples(subject=subj, tenant=f"{ns}-A")[0].valid_until == "2024-06-30"
+    assert s.query_triples(subject=subj, tenant=f"{ns}-B")[0].valid_until == "current"

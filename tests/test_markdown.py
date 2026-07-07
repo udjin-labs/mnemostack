@@ -532,6 +532,18 @@ def test_collect_ids_scoped_by_index_root(tmp_path):
     assert ids_a.isdisjoint(ids_b)
 
 
+def test_collect_ids_scoped_by_tenant(tmp_path):
+    # The same corpus indexed under two tenants must get distinct chunk ids, so
+    # one tenant's re-index can't clobber another's point (mirrors index_root).
+    (tmp_path / "note.md").write_text("# T\n\nsame body text here")
+    root = str(tmp_path)
+    unscoped = {c.id for c in collect_markdown(tmp_path, index_root=root).chunks}
+    ten_a = {c.id for c in collect_markdown(tmp_path, index_root=root, tenant="a").chunks}
+    ten_b = {c.id for c in collect_markdown(tmp_path, index_root=root, tenant="b").chunks}
+    assert unscoped and ten_a and ten_b
+    assert unscoped.isdisjoint(ten_a) and ten_a.isdisjoint(ten_b)
+
+
 def test_collect_sources_include_empty_files(tmp_path):
     # A frontmatter-only / empty file produces no chunks but must appear in
     # sources so the caller can prune its old points and re-sync its links.
@@ -758,6 +770,39 @@ def test_cmd_index_markdown_rejects_non_positive_chunk_size(tmp_path, capsys):
     # bad --chunk-size fails fast (exit 2) before touching the provider/store
     assert cli.cmd_index_markdown(args) == 2
     assert "chunk-size" in capsys.readouterr().err
+
+
+def test_cmd_index_markdown_rejects_recreate_under_tenant(tmp_path, capsys):
+    import argparse
+
+    import mnemostack.cli as cli
+
+    args = argparse.Namespace(
+        path=str(_vault(tmp_path)), provider="fake", embedding_model=None,
+        collection="c", qdrant="http://localhost:6333",
+        chunk_size=1200, memgraph_uri=None, index_root=None,
+        graph_timeout=5.0, recreate=True, prune=False, yes=True, tenant="acme",
+    )
+    # --recreate would drop the whole shared collection — refuse it under --tenant.
+    assert cli.cmd_index_markdown(args) == 2
+    assert "recreate" in capsys.readouterr().err.lower()
+
+
+def test_cmd_index_markdown_rejects_empty_tenant(tmp_path, capsys):
+    import argparse
+
+    import mnemostack.cli as cli
+
+    args = argparse.Namespace(
+        path=str(_vault(tmp_path)), provider="fake", embedding_model=None,
+        collection="c", qdrant="http://localhost:6333",
+        chunk_size=1200, memgraph_uri=None, index_root=None,
+        graph_timeout=5.0, recreate=True, prune=False, yes=True, tenant="",
+    )
+    # An empty --tenant must fail closed (not slip past the --recreate guard as
+    # an unscoped destructive run).
+    assert cli.cmd_index_markdown(args) == 2
+    assert "tenant" in capsys.readouterr().err.lower()
 
 
 def test_cmd_index_markdown_graph_write_failure_does_not_fail_run(

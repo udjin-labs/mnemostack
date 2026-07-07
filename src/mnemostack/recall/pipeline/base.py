@@ -63,14 +63,17 @@ class Pipeline:
         *,
         as_of: str | None = None,
         include_invalidated: bool = False,
+        tenant: str | None = None,
     ) -> list[RecallResult]:
         context = PipelineContext(query=query)
-        # Validity context for stages that reach back to the graph
-        # (GraphResurrection) so they match the recall's view.
+        # Validity + tenant context for stages that reach back to the graph
+        # (GraphResurrection) so they match the recall's view and scope.
         if as_of is not None:
             context.extras["as_of"] = as_of
         if include_invalidated:
             context.extras["include_invalidated"] = True
+        if tenant is not None:
+            context.extras["tenant"] = tenant
         for stage in self.stages:
             if self.stop_on_empty and not results:
                 break

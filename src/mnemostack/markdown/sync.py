@@ -45,6 +45,8 @@ def upsert_markdown_chunks(
     provider: Any,
     chunks: list[tuple[str, str, dict]],
     existing_payloads: dict[str, dict],
+    *,
+    tenant: str | None = None,
 ) -> ChunkSyncResult:
     """Embed & upsert new chunks; refresh payloads of already-indexed ones.
 
@@ -53,7 +55,12 @@ def upsert_markdown_chunks(
     deleting only keys this indexer owned last run (``_md_keys``) that the file
     no longer produces — foreign payload fields (enrichment, validity markers)
     are preserved.
+
+    With ``tenant`` set, writes route through the store's tenant boundary
+    (``tenant_id`` stamped server-side; a payload can't assert its own tenant,
+    and refresh/delete are owner-guarded) so a markdown corpus is isolated.
     """
+    tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
     existing_ids = set(existing_payloads)
     res = ChunkSyncResult()
     for cid, text, payload in chunks:
@@ -64,7 +71,7 @@ def upsert_markdown_chunks(
             res.failed += 1
             res.failed_sources.add(payload["source"])
             continue
-        store.upsert(cid, vec, payload)
+        store.upsert(cid, vec, payload, **tkw)
         res.inserted += 1
     for cid, _text, payload in chunks:
         if cid not in existing_ids:
@@ -73,8 +80,8 @@ def upsert_markdown_chunks(
         owned = old.get("_md_keys") or []
         stale = [k for k in owned if k not in payload]
         if stale:
-            store.delete_payload_keys(cid, stale)
-        store.set_payload(cid, payload)
+            store.delete_payload_keys(cid, stale, **tkw)
+        store.set_payload(cid, payload, **tkw)
         res.refreshed += 1
     return res
 
@@ -125,12 +132,20 @@ class MarkdownSyncer:
         chunk_size: int,
         graph: Any = None,
         subtree: str | None = None,
+        tenant: str | None = None,
     ):
         self.store = store
         self.provider = provider
         self.index_root = str(Path(index_root).resolve())
         self.chunk_size = chunk_size
         self.graph = graph
+        # Scopes every store + graph read/write and the chunk-id derivation to one
+        # tenant, so a markdown corpus is isolated (and tenant-scoped graph recall
+        # can see its :File link nodes). None = unscoped (single-tenant), unchanged.
+        self.tenant = tenant
+        # Only forward tenant= to store/graph calls when set, so an unscoped
+        # syncer stays byte-compatible with a store/graph that predates the kwarg.
+        self._tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
         # The watched subtree (may be narrower than index_root under a nested
         # --index-root watch). Referrer re-resolution stays inside it so a
         # sibling outside the watched tree is never rewritten.
@@ -147,13 +162,14 @@ class MarkdownSyncer:
         for source, fresh_ids in fresh_by_source.items():
             stale: list[Any] = []
             for hit in self.store.scroll(
-                filters={"source": source, "index_root": self.index_root}
+                filters={"source": source, "index_root": self.index_root},
+                **self._tkw,
             ):
                 payload = hit.payload or {}
                 if payload.get("_md_keys") and str(hit.id) not in fresh_ids:
                     stale.append(hit.id)
             if stale:
-                removed += self.store.delete_points(stale)
+                removed += self.store.delete_points(stale, **self._tkw)
         return removed
 
     def source_for(self, path: str | Path) -> str:
@@ -177,6 +193,7 @@ class MarkdownSyncer:
             chunk_size=self.chunk_size,
             index_root=self.index_root,
             root_dir=self.index_root,
+            tenant=self.tenant,
         )
         if col.files == 0:
             return FileSyncResult()  # not a .md file / vanished before we read it
@@ -185,11 +202,14 @@ class MarkdownSyncer:
         existing: dict[str, dict] = {}
         for source in col.sources:
             for hit in self.store.scroll(
-                filters={"index_root": self.index_root, "source": source}
+                filters={"index_root": self.index_root, "source": source},
+                **self._tkw,
             ):
                 existing[str(hit.id)] = hit.payload or {}
 
-        cs = upsert_markdown_chunks(self.store, self.provider, chunks, existing)
+        cs = upsert_markdown_chunks(
+            self.store, self.provider, chunks, existing, tenant=self.tenant
+        )
 
         # Prune chunks this file no longer produces (shrunk / re-chunked). Skip a
         # source whose embeddings failed — its fresh ids never landed, so pruning
@@ -208,7 +228,7 @@ class MarkdownSyncer:
             by_source = build_link_map(col, cs.failed_sources)
             for src, targets in by_source.items():
                 edges += self.graph.sync_file_links(
-                    src, targets, index_root=self.index_root
+                    src, targets, index_root=self.index_root, **self._tkw
                 )
             # A note can satisfy a dangling [[wikilink]] in another note; re-
             # resolve those referrers so their edge points at this note (a full
@@ -256,7 +276,7 @@ class MarkdownSyncer:
                 continue
             try:
                 found = self.graph.referrers_of_dangling(
-                    self._name_keys(src), index_root=self.index_root
+                    self._name_keys(src), index_root=self.index_root, **self._tkw
                 )
             except Exception:  # noqa: BLE001 — best-effort; never fail the index
                 continue
@@ -283,9 +303,12 @@ class MarkdownSyncer:
             chunk_size=self.chunk_size,
             index_root=self.index_root,
             root_dir=self.index_root,
+            tenant=self.tenant,
         )
         for src, targets in build_link_map(col, set()).items():
-            self.graph.sync_file_links(src, targets, index_root=self.index_root)
+            self.graph.sync_file_links(
+                src, targets, index_root=self.index_root, **self._tkw
+            )
 
     def remove_file(self, path: str | Path) -> FileSyncResult:
         """Drop a deleted file's chunks and clear its outgoing graph links."""
@@ -296,7 +319,9 @@ class MarkdownSyncer:
         # source again and retries — pruning the vector first would orphan the
         # graph edges with no record left to retry from.
         if self.graph is not None:
-            self.graph.sync_file_links(source, [], index_root=self.index_root)
+            self.graph.sync_file_links(
+                source, [], index_root=self.index_root, **self._tkw
+            )
         pruned = self._prune_markdown_stale({source: set()})
         return FileSyncResult(source=source, pruned=pruned)
 
@@ -317,7 +342,9 @@ class MarkdownSyncer:
         # record) are eligible, so a markdown watcher never prunes chunks the
         # generic `index` command wrote under the same collection/root.
         sources: set[str] = set()
-        for hit in self.store.scroll(filters={"index_root": self.index_root}):
+        for hit in self.store.scroll(
+            filters={"index_root": self.index_root}, **self._tkw
+        ):
             payload = hit.payload or {}
             source = payload.get("source")
             if source and payload.get("_md_keys"):

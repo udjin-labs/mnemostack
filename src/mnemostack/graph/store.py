@@ -35,6 +35,12 @@ class Triple:
     properties: dict[str, Any] = field(default_factory=dict)
 
 
+#: Server-owned graph property carrying the tenant a node/edge belongs to.
+#: Mirrors the vector store's ``tenant_id`` payload key so a graph result can be
+#: stamped and survive the recall ``filter_by_tenant`` backstop.
+TENANT_KEY = "tenant"
+
+
 def _to_iso(value: str | date | datetime | None) -> str | None:
     """ISO-8601 string for a validity bound, UTC-normalized.
 
@@ -104,8 +110,18 @@ class GraphStore:
         subject_label: str = "Entity",
         obj_label: str = "Entity",
         properties: dict[str, Any] | None = None,
+        *,
+        tenant: str | None = None,
     ) -> None:
-        """Add a temporal fact. Nodes are created on demand."""
+        """Add a temporal fact. Nodes are created on demand.
+
+        With ``tenant`` set, the ``tenant`` property is folded into the node
+        MERGE key and stamped on both nodes and the edge, so two tenants writing
+        the same ``(subject, predicate, obj)`` get distinct, isolated nodes — a
+        scoped read (``tenant=`` on the query side) can never reach another
+        tenant's node. With ``tenant=None`` the Cypher is byte-for-byte the
+        legacy single-tenant form, so existing graphs are untouched.
+        """
         props = {
             "valid_from": _to_iso(valid_from),
             "valid_until": _to_iso(valid_until) or "current",
@@ -117,19 +133,48 @@ class GraphStore:
         s_label = self._safe_label(subject_label)
         o_label = self._safe_label(obj_label)
         rel = self._safe_rel(predicate)
+        tk = self._tenant_key_frag(tenant)  # ", tenant: $tenant" when scoped
+        params: dict[str, Any] = {"subject": subject, "obj": obj, "props": props}
+        if tenant is not None:
+            props[TENANT_KEY] = tenant  # stamp the edge too
+            params["tenant"] = tenant
+            set_tenant = ", s.tenant = $tenant, o.tenant = $tenant"
+            # Scoped: fold the tenant into the relationship MERGE key so a scoped
+            # write only ever matches/creates ITS OWN edge — it never reuses (and
+            # then relabels) a foreign-tenant/untenanted edge that happens to sit
+            # between these nodes in a partially migrated or hand-edited graph.
+            edge_merge = f"MERGE (s)-[r:{rel} {{tenant: $tenant}}]->(o) "
+            edge_set = "SET r += $props"
+        else:
+            set_tenant = ""
+            # Unscoped: a name-only MERGE can subset-match a tenant-owned node and
+            # its edge, so only write props on a tenant-LESS edge — an unscoped
+            # add_triple must never overwrite a tenant's edge validity/properties.
+            # On a single-tenant graph every edge is tenant-less, so this always
+            # runs (equivalent to the legacy unconditional SET). The node SETs use
+            # coalesce, so they're idempotent even if they bind a tenant node.
+            edge_merge = f"MERGE (s)-[r:{rel}]->(o) "
+            edge_set = (
+                "FOREACH (_ IN CASE WHEN r.tenant IS NULL THEN [1] ELSE [] END | SET r += $props)"
+            )
         query = (
-            f"MERGE (s:{s_label} {{name: $subject}}) "
-            f"MERGE (o:{o_label} {{name: $obj}}) "
+            f"MERGE (s:{s_label} {{name: $subject{tk}}}) "
+            f"MERGE (o:{o_label} {{name: $obj{tk}}}) "
             f"SET s.valid_until = coalesce(s.valid_until, 'current'), "
-            f"    o.valid_until = coalesce(o.valid_until, 'current') "
-            f"MERGE (s)-[r:{rel}]->(o) "
-            f"SET r += $props"
+            f"    o.valid_until = coalesce(o.valid_until, 'current'){set_tenant} "
+            f"{edge_merge}"
+            f"{edge_set}"
         )
         with self.driver.session(database=self.database) as session:
-            session.run(query, subject=subject, obj=obj, props=props)
+            session.run(query, **params)
 
     def sync_file_links(
-        self, source: str, targets: list[str], *, index_root: str | None = None
+        self,
+        source: str,
+        targets: list[str],
+        *,
+        index_root: str | None = None,
+        tenant: str | None = None,
     ) -> int:
         """Replace a file's outgoing ``LINKS_TO`` edges with ``targets``.
 
@@ -152,34 +197,74 @@ class GraphStore:
         # with its edges deleted-but-not-recreated (silent link loss). The driver
         # also auto-retries the whole transaction on a transient error.
         with self.driver.session(database=self.database) as session:
-            session.execute_write(self._sync_file_links_tx, source, list(targets), root)
+            session.execute_write(
+                self._sync_file_links_tx, source, list(targets), root, tenant
+            )
         return len(targets)
 
     @staticmethod
-    def _sync_file_links_tx(tx: Any, source: str, targets: list[str], root: str) -> None:
+    def _sync_file_links_tx(
+        tx: Any, source: str, targets: list[str], root: str, tenant: str | None
+    ) -> None:
+        # The ``tenant`` property joins ``(name, index_root)`` in the :File key
+        # when scoped, so a tenant's link graph is isolated exactly like its
+        # nodes. Unscoped (tenant=None) keeps the legacy key untouched.
+        tk = GraphStore._tenant_key_frag(tenant)
+        set_tenant = ", s.tenant = $tenant, o.tenant = $tenant" if tenant is not None else ""
+        common = {"root": root}
+        if tenant is not None:
+            common["tenant"] = tenant
+        # Confine the edge-clearing DELETE. When scoped, pin the far end AND the
+        # edge to the tenant. When UNSCOPED, gate on the SOURCE NODE's tenant
+        # (`s.tenant IS NULL`), not the edge's: a :File property map subset-matches
+        # a tenant-stamped node, so an unscoped re-index (index-markdown, no
+        # --tenant) must not clear a *migrated* file's edges — but it must still
+        # clear a genuine single-tenant file's stale links even if those edges
+        # carry a legacy `tenant` property of their own. On an unmigrated graph the
+        # source node has no tenant, so this deletes exactly as before.
+        if tenant is not None:
+            del_target = "{tenant: $tenant}"
+            del_where = " WHERE r.tenant = $tenant"
+        else:
+            del_target = ""
+            del_where = " WHERE s.tenant IS NULL"
         tx.run(
-            "MATCH (:File {name: $src, index_root: $root})-[r:LINKS_TO]->() DELETE r",
+            f"MATCH (s:File {{name: $src, index_root: $root{tk}}})"
+            f"-[r:LINKS_TO]->({del_target}){del_where} DELETE r",
             src=source,
-            root=root,
+            **common,
+        )
+        # Fold the tenant into the LINKS_TO MERGE key when scoped, so a scoped
+        # resync only matches/creates its own edge and never reuses (then relabels)
+        # a foreign-tenant/untenanted edge between these nodes — mirroring the DELETE
+        # guard above, which deliberately leaves such an edge alone.
+        rel_merge = (
+            "MERGE (s)-[r:LINKS_TO {tenant: $tenant}]->(o) "
+            if tenant is not None
+            else "MERGE (s)-[r:LINKS_TO]->(o) "
         )
         for target in targets:
             tx.run(
-                "MERGE (s:File {name: $src, index_root: $root}) "
-                "MERGE (o:File {name: $dst, index_root: $root}) "
-                "SET s.valid_until = coalesce(s.valid_until, 'current'), "
-                "    o.valid_until = coalesce(o.valid_until, 'current'), "
-                "    s.name_lower = $src_lower, o.name_lower = $dst_lower "
-                "MERGE (s)-[r:LINKS_TO]->(o) "
-                "SET r.valid_until = coalesce(r.valid_until, 'current')",
+                f"MERGE (s:File {{name: $src, index_root: $root{tk}}}) "
+                f"MERGE (o:File {{name: $dst, index_root: $root{tk}}}) "
+                f"SET s.valid_until = coalesce(s.valid_until, 'current'), "
+                f"    o.valid_until = coalesce(o.valid_until, 'current'), "
+                f"    s.name_lower = $src_lower, o.name_lower = $dst_lower{set_tenant} "
+                f"{rel_merge}"
+                f"SET r.valid_until = coalesce(r.valid_until, 'current')",
                 src=source,
                 dst=target,
-                root=root,
                 src_lower=source.lower(),
                 dst_lower=target.lower(),
+                **common,
             )
 
     def referrers_of_dangling(
-        self, name_keys: list[str], *, index_root: str | None = None
+        self,
+        name_keys: list[str],
+        *,
+        index_root: str | None = None,
+        tenant: str | None = None,
     ) -> list[str]:
         """Sources linking to a dangling ``:File`` node a new note now satisfies.
 
@@ -194,17 +279,26 @@ class GraphStore:
         """
         root = index_root or ""
         keys = [k.lower() for k in name_keys]
+        tk = self._tenant_key_frag(tenant)
+        # Bind the edge and require r.tenant when scoped, so this lookup honors the
+        # same nodes-AND-edges boundary as the other scoped reads.
+        rel = "[r:LINKS_TO]" if tenant is not None else "[:LINKS_TO]"
+        rtenant = " AND r.tenant = $tenant" if tenant is not None else ""
+        params: dict[str, Any] = {"root": root, "keys": keys}
+        if tenant is not None:
+            params["tenant"] = tenant
         with self.driver.session(database=self.database) as session:
             result = session.run(
-                "MATCH (x:File {index_root: $root})-[:LINKS_TO]->(d:File {index_root: $root}) "
-                "WHERE d.name_lower IN $keys "
+                f"MATCH (x:File {{index_root: $root{tk}}})-{rel}->(d:File {{index_root: $root{tk}}}) "
+                f"WHERE d.name_lower IN $keys{rtenant} "
                 "RETURN DISTINCT x.name AS name",
-                root=root,
-                keys=keys,
+                **params,
             )
             return [rec["name"] for rec in result if rec["name"] is not None]
 
-    def file_link_sources(self, *, index_root: str | None = None) -> list[str]:
+    def file_link_sources(
+        self, *, index_root: str | None = None, tenant: str | None = None
+    ) -> list[str]:
         """Names of ``:File`` nodes with outgoing ``LINKS_TO`` edges in a root.
 
         Lets a re-index discover files it linked from previously: any source no
@@ -212,11 +306,24 @@ class GraphStore:
         ``sync_file_links(name, [])``.
         """
         root = index_root or ""
+        tk = self._tenant_key_frag(tenant)
+        # Require the edge to be tenant-owned when scoped, so this list (which
+        # drives stale-link cleanup) only reports files with an owned LINKS_TO
+        # edge — honoring the same nodes-AND-edges boundary as the other reads.
+        rel = "[r:LINKS_TO]" if tenant is not None else "[:LINKS_TO]"
+        # Bind the edge AND the target to the tenant when scoped, so a source is
+        # only reported when it owns the whole link (source, edge, target) — a
+        # stale-link reconcile must not act on a link the tenant doesn't own.
+        target = "(d:File {tenant: $tenant})" if tenant is not None else "()"
+        rwhere = " WHERE r.tenant = $tenant" if tenant is not None else ""
+        params: dict[str, Any] = {"root": root}
+        if tenant is not None:
+            params["tenant"] = tenant
         with self.driver.session(database=self.database) as session:
             result = session.run(
-                "MATCH (f:File {index_root: $root})-[:LINKS_TO]->() "
+                f"MATCH (f:File {{index_root: $root{tk}}})-{rel}->{target}{rwhere} "
                 "RETURN DISTINCT f.name AS name",
-                root=root,
+                **params,
             )
             return [rec["name"] for rec in result if rec["name"] is not None]
 
@@ -226,17 +333,35 @@ class GraphStore:
         predicate: str,
         obj: str,
         ended: str | date | datetime,
+        *,
+        tenant: str | None = None,
     ) -> int:
-        """Mark a fact as no longer valid. Returns number of edges updated."""
+        """Mark a fact as no longer valid. Returns number of edges updated.
+
+        With ``tenant`` set, both endpoints are pinned to that tenant, so a
+        caller can only close its own tenant's edges — never another's.
+        """
         rel = self._safe_rel(predicate)
+        tk = self._tenant_key_frag(tenant)
+        params: dict[str, Any] = {"subject": subject, "obj": obj, "ended": _to_iso(ended)}
+        # Confine the closed edge by tenant. Scoped: only this tenant's edge.
+        # Unscoped: only tenant-LESS edges (`r.tenant IS NULL`), so an unscoped
+        # invalidate can't close a tenant-owned edge after the graph was migrated
+        # (the name-only match subset-binds tenant endpoints). On a single-tenant
+        # graph every edge is tenant-less, so it behaves as before.
+        if tenant is not None:
+            rtenant = " AND r.tenant = $tenant"
+            params["tenant"] = tenant
+        else:
+            rtenant = " AND r.tenant IS NULL"
         query = (
-            f"MATCH (s {{name: $subject}})-[r:{rel}]->(o {{name: $obj}}) "
-            f"WHERE r.valid_until = 'current' OR r.valid_until IS NULL "
+            f"MATCH (s {{name: $subject{tk}}})-[r:{rel}]->(o {{name: $obj{tk}}}) "
+            f"WHERE (r.valid_until = 'current' OR r.valid_until IS NULL){rtenant} "
             f"SET r.valid_until = $ended "
             f"RETURN count(r) AS n"
         )
         with self.driver.session(database=self.database) as session:
-            rec = session.run(query, subject=subject, obj=obj, ended=_to_iso(ended)).single()
+            rec = session.run(query, **params).single()
             return rec["n"] if rec else 0
 
     # ---------- read ----------
@@ -248,12 +373,18 @@ class GraphStore:
         obj: str | None = None,
         as_of: str | date | datetime | None = None,
         limit: int = 100,
+        *,
+        tenant: str | None = None,
     ) -> list[Triple]:
         """Query triples with optional SPO filters and point-in-time constraint.
 
         If `as_of` is provided, returns only facts valid at that date
         (valid_from <= as_of < valid_until, with valid_until "current" treated
         as indefinite future). Legacy NULL markers are also treated as current.
+
+        With ``tenant`` set, both endpoints are confined to that tenant
+        (``s.tenant = $tenant AND o.tenant = $tenant``), so a scoped query can
+        never read across the tenant boundary.
         """
         where_parts = []
         params: dict[str, Any] = {"limit": limit}
@@ -263,6 +394,14 @@ class GraphStore:
         if obj:
             where_parts.append("o.name = $obj")
             params["obj"] = obj
+        if tenant is not None:
+            # Confine both endpoints AND the relationship to the tenant — the
+            # boundary lives on nodes and edges, so an edge missing/mismatched on
+            # tenant (partial or hand-edited migration) is excluded, not returned.
+            where_parts.append(
+                "s.tenant = $tenant AND o.tenant = $tenant AND r.tenant = $tenant"
+            )
+            params["tenant"] = tenant
         if as_of:
             # Expand a bare-date as_of to a full midnight-UTC instant, then
             # compare bounds as PARSED instants (datetime(...)) so mixed
@@ -305,9 +444,11 @@ class GraphStore:
         node: str,
         as_of: str | date | datetime | None = None,
         limit: int = 50,
+        *,
+        tenant: str | None = None,
     ) -> list[Triple]:
         """All outgoing edges from a node, optionally filtered by point-in-time."""
-        return self.query_triples(subject=node, as_of=as_of, limit=limit)
+        return self.query_triples(subject=node, as_of=as_of, limit=limit, tenant=tenant)
 
     def count_nodes(self) -> int:
         with self.driver.session(database=self.database) as session:
@@ -343,7 +484,57 @@ class GraphStore:
             "relationships": int(rels["n"] if rels else 0),
         }
 
+    def stamp_tenant(
+        self, tenant: str, *, only_missing: bool = True, dry_run: bool = False
+    ) -> dict[str, int]:
+        """Assign the ``tenant`` property to graph nodes/edges (multi-tenant migration).
+
+        The graph twin of ``VectorStore.stamp_tenant``: adopt tenancy on an
+        existing single-tenant graph by stamping every node and relationship with
+        ``tenant``. With ``only_missing`` (default) only records lacking a
+        ``tenant`` are touched, so it's idempotent and safe to re-run; pass
+        ``only_missing=False`` to force-relabel (the cleanup path for a graph that
+        already used ``tenant`` for something else). ``dry_run`` counts without
+        writing. Returns ``{"nodes": n, "relationships": m}``.
+
+        Like the ``:File`` ``index_root`` migration, this is unscoped over the
+        whole database — point it at a graph mnemostack owns.
+        """
+        node_where = "WHERE n.tenant IS NULL" if only_missing else ""
+        rel_where = "WHERE r.tenant IS NULL" if only_missing else ""
+        with self.driver.session(database=self.database) as session:
+            if dry_run:
+                nodes = session.run(
+                    f"MATCH (n) {node_where} RETURN count(n) AS n"
+                ).single()
+                rels = session.run(
+                    f"MATCH ()-[r]->() {rel_where} RETURN count(r) AS n"
+                ).single()
+            else:
+                nodes = session.run(
+                    f"MATCH (n) {node_where} SET n.tenant = $tenant RETURN count(n) AS n",
+                    tenant=tenant,
+                ).single()
+                rels = session.run(
+                    f"MATCH ()-[r]->() {rel_where} SET r.tenant = $tenant RETURN count(r) AS n",
+                    tenant=tenant,
+                ).single()
+        return {
+            "nodes": int(nodes["n"] if nodes else 0),
+            "relationships": int(rels["n"] if rels else 0),
+        }
+
     # ---------- helpers ----------
+
+    @staticmethod
+    def _tenant_key_frag(tenant: str | None) -> str:
+        """MERGE/MATCH node-key fragment pinning a node to ``tenant``.
+
+        Returns ``", tenant: $tenant"`` for a scoped write/read (folds the tenant
+        into the node identity) or ``""`` when unscoped — so ``tenant=None`` keeps
+        the exact legacy Cypher and never rekeys an existing single-tenant graph.
+        """
+        return ", tenant: $tenant" if tenant is not None else ""
 
     @staticmethod
     def _safe_rel(predicate: str) -> str:

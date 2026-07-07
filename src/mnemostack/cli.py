@@ -360,17 +360,111 @@ def cmd_tenant_migrate(args: argparse.Namespace) -> int:
         )
         return 2
 
+    # Preflight the GRAPH --all relabel gate BEFORE mutating Qdrant, so a graph
+    # that already carries tenants can't force the command to stamp the vectors
+    # and then abort — leaving the collection migrated but the graph untouched.
+    if args.all and not args.dry_run and not args.yes:
+        rc = _graph_relabel_preflight(args)
+        if rc != 0:
+            return rc
+
     pending = missing if only_missing else total
     scope = "without a tenant_id" if only_missing else "in the collection"
     if args.dry_run:
         print(f"dry-run: would stamp tenant_id='{args.tenant}' onto {pending} point(s) {scope}")
-        return 0
+        return _graph_stamp_tenant(args, only_missing, dry_run=True)
     try:
         stamped = store.stamp_tenant(args.tenant, only_missing=only_missing)
     except Exception as e:  # noqa: BLE001
         print(f"error: cannot reach Qdrant at {args.qdrant}: {e}", file=sys.stderr)
         return 1
     print(f"stamped tenant_id='{args.tenant}' onto {stamped} point(s) {scope}")
+    return _graph_stamp_tenant(args, only_missing, dry_run=False)
+
+
+def _graph_stamp_tenant(args: argparse.Namespace, only_missing: bool, *, dry_run: bool) -> int:
+    """Stamp the tenant onto the graph too, when ``--memgraph-uri`` is given.
+
+    The graph twin of the vector stamp above: adopts tenancy on an existing
+    single-tenant graph so tenant-scoped graph recall (which filters on the
+    node/edge ``tenant`` property) can see the migrated facts. Opt-in — a
+    vector-only deployment passes no ``--memgraph-uri`` and this is a no-op.
+    Returns an exit code (0 ok, 1 graph unreachable) so a graph failure surfaces.
+    """
+    memgraph_uri = getattr(args, "memgraph_uri", None) or None
+    if not memgraph_uri:
+        return 0
+    from .graph.factory import make_graph_store
+
+    try:
+        gs = make_graph_store(
+            memgraph_uri,
+            timeout=getattr(args, "graph_timeout", 5.0),
+            **_graph_auth(args),
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"error: cannot reach graph at {memgraph_uri}: {e}", file=sys.stderr)
+        return 1
+    try:
+        counts = gs.stamp_tenant(args.tenant, only_missing=only_missing, dry_run=dry_run)
+    except Exception as e:  # noqa: BLE001
+        print(f"error: graph tenant stamp failed: {e}", file=sys.stderr)
+        return 1
+    finally:
+        gs.close()
+    action = "would stamp" if dry_run else "stamped"
+    print(
+        f"graph: {action} tenant='{args.tenant}' onto {counts['nodes']} node(s) "
+        f"and {counts['relationships']} relationship(s)"
+    )
+    return 0
+
+
+def _graph_relabel_preflight(args: argparse.Namespace) -> int:
+    """Gate a graph ``--all`` force-relabel behind ``--yes`` when the graph already
+    carries tenants — run *before* any store is mutated (see ``cmd_tenant_migrate``).
+
+    The vector ``--yes`` gate only inspects Qdrant, so a graph that already holds
+    tenant values (a real multi-tenant graph) could otherwise be collapsed into one
+    tenant. Counts both **nodes and relationships** carrying a tenant, since the
+    relabel rewrites edges too. Returns 0 (ok / no graph), 1 (unreachable), or 2
+    (refused — needs ``--yes``).
+    """
+    if getattr(args, "yes", False):
+        return 0  # operator confirmed the relabel
+    memgraph_uri = getattr(args, "memgraph_uri", None) or None
+    if not memgraph_uri:
+        return 0
+    from .graph.factory import make_graph_store
+
+    try:
+        gs = make_graph_store(
+            memgraph_uri,
+            timeout=getattr(args, "graph_timeout", 5.0),
+            **_graph_auth(args),
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"error: cannot reach graph at {memgraph_uri}: {e}", file=sys.stderr)
+        return 1
+    try:
+        total = gs.stamp_tenant(args.tenant, only_missing=False, dry_run=True)
+        missing = gs.stamp_tenant(args.tenant, only_missing=True, dry_run=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"error: graph tenant check failed: {e}", file=sys.stderr)
+        return 1
+    finally:
+        gs.close()
+    already = (total["nodes"] - missing["nodes"]) + (
+        total["relationships"] - missing["relationships"]
+    )
+    if already > 0:
+        print(
+            f"error: {already} graph record(s) (nodes + edges) already carry a tenant; "
+            f"--all would relabel every node/edge to '{args.tenant}'. Pass --yes to "
+            "confirm, or run without --all to stamp only untenanted records.",
+            file=sys.stderr,
+        )
+        return 2
     return 0
 
 
@@ -1193,6 +1287,29 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
     if watching and not target.is_dir():
         print("error: --watch requires a directory to watch", file=sys.stderr)
         return 2
+    _raw_tenant = getattr(args, "tenant", None)
+    if _raw_tenant is not None and not str(_raw_tenant).strip():
+        # An explicitly empty --tenant (e.g. `--tenant "$UNSET_VAR"`) must fail
+        # closed, not silently normalize to an unscoped run — otherwise
+        # `--tenant "" --recreate` would slip past the guard below and drop the
+        # whole shared collection. Omit --tenant entirely for an unscoped index.
+        print(
+            "error: --tenant was given an empty value; omit --tenant for an unscoped "
+            "index, or pass a non-empty tenant id",
+            file=sys.stderr,
+        )
+        return 2
+    if (getattr(args, "tenant", None) or None) is not None and args.recreate:
+        # --recreate drops and rebuilds the WHOLE Qdrant collection, which in a
+        # shared multi-tenant collection would delete every other tenant's points.
+        # Refuse the combination — rebuild a single tenant with --prune instead.
+        print(
+            "error: --recreate drops the entire collection (all tenants); it can't be "
+            "scoped to --tenant. Re-index the tenant with --prune, or recreate without "
+            "--tenant.",
+            file=sys.stderr,
+        )
+        return 2
     # Snapshot mtimes BEFORE the initial index so the watcher can reconcile any
     # file that changes during the (possibly long) collect/embed pass — closing
     # the gap between "indexed" and "observing".
@@ -1236,8 +1353,16 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
     # reconcile missing sources globally (prune / clear graph links); a nested
     # subtree or single file covers only part of the root and must not.
     full_root_walk = target.is_dir() and str(target) == index_root
+    tenant = getattr(args, "tenant", None) or None
+    # Forward tenant= to store/graph calls only when set (unscoped = no kwarg,
+    # so a store/graph predating the kwarg still works); our own helpers take it.
+    mtkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
     col = collect_markdown(
-        target, chunk_size=args.chunk_size, index_root=index_root, root_dir=root_dir
+        target,
+        chunk_size=args.chunk_size,
+        index_root=index_root,
+        root_dir=root_dir,
+        tenant=tenant,
     )
     if col.files == 0:
         print(f"error: no .md files found under {target}", file=sys.stderr)
@@ -1265,7 +1390,7 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
     # metadata, so a tag/date edit would otherwise leave stale filters in Qdrant.
     existing_payloads: dict[str, dict] = {}
     if not args.recreate and store.collection_exists():
-        for hit in store.scroll(filters={"index_root": index_root}):
+        for hit in store.scroll(filters={"index_root": index_root}, **mtkw):
             existing_payloads[str(hit.id)] = hit.payload or {}
     from .markdown.sync import build_link_map, upsert_markdown_chunks
 
@@ -1278,7 +1403,7 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
 
     # Embed new chunks and refresh changed payloads (shared with the watcher's
     # per-file path so a full walk and a single-file update behave identically).
-    cs = upsert_markdown_chunks(store, provider, chunks, existing_payloads)
+    cs = upsert_markdown_chunks(store, provider, chunks, existing_payloads, tenant=tenant)
     inserted, refreshed, failed = cs.inserted, cs.refreshed, cs.failed
     failed_sources = cs.failed_sources
 
@@ -1299,7 +1424,7 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
         # a single file or a nested subtree covers only part of the index_root,
         # so reconciling here would wrongly prune untouched siblings.
         if full_root_walk:
-            for hit in store.scroll(filters={"index_root": index_root}):
+            for hit in store.scroll(filters={"index_root": index_root}, **mtkw):
                 prior = (hit.payload or {}).get("source")
                 if prior and prior not in fresh_by_source:
                     fresh_by_source[prior] = set()
@@ -1311,7 +1436,7 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
                 "with failed embeddings; re-run after the provider recovers",
                 file=sys.stderr,
             )
-        pruned = prune_stale_chunks(store, fresh_by_source, index_root=index_root)
+        pruned = prune_stale_chunks(store, fresh_by_source, index_root=index_root, tenant=tenant)
 
     # Links -> graph edges. Only when a graph is configured; sources whose
     # embeddings failed are skipped so a partial index doesn't rewrite links.
@@ -1340,12 +1465,12 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
                 # file or nested subtree covers only part of the index_root, so
                 # this would wrongly clear untouched siblings' edges.
                 if full_root_walk:
-                    for prior in graph.file_link_sources(index_root=index_root):
+                    for prior in graph.file_link_sources(index_root=index_root, **mtkw):
                         if prior not in by_source and prior not in failed_sources:
                             by_source[prior] = []
                 for source, targets in by_source.items():
                     edges_written += graph.sync_file_links(
-                        source, targets, index_root=index_root
+                        source, targets, index_root=index_root, **mtkw
                     )
             except Exception as exc:  # noqa: BLE001 — graph optional; vectors already upserted
                 # A mid-run graph outage (e.g. Memgraph disconnects while
@@ -1412,6 +1537,7 @@ def _watch_markdown(
         chunk_size=args.chunk_size,
         graph=graph,
         subtree=watch_root,  # keep referrer re-resolution inside the watched tree
+        tenant=getattr(args, "tenant", None) or None,
     )
 
     def _on_result(res: Any) -> None:
@@ -1568,6 +1694,18 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         "-y",
         action="store_true",
         help="Confirm --all when points already carry a tenant_id (relabels them)",
+    )
+    p_tenant_migrate.add_argument(
+        "--memgraph-uri",
+        default=None,
+        help="Also stamp the tenant onto the graph at this bolt URI (nodes + edges). "
+        "Omit to migrate the vector store only.",
+    )
+    p_tenant_migrate.add_argument(
+        "--graph-timeout",
+        type=float,
+        default=cfg.graph.timeout,
+        help="Memgraph connection timeout in seconds (default 5.0)",
     )
     p_tenant_migrate.set_defaults(func=cmd_tenant_migrate)
 
@@ -1902,6 +2040,16 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         help="Index a markdown folder: frontmatter -> filters, links -> graph edges",
     )
     p_index_md.add_argument("path", help="Markdown file or directory to index")
+    p_index_md.add_argument(
+        "--tenant",
+        default=None,
+        metavar="ID",
+        help=(
+            "Index this corpus under a tenant: chunk ids, payloads, and graph "
+            "nodes/edges are scoped to it, so authenticated multi-tenant recall "
+            "sees only its own markdown (default: unscoped / single-tenant)"
+        ),
+    )
     p_index_md.add_argument(
         "--index-root",
         default=None,

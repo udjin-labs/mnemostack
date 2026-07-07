@@ -24,6 +24,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, cast
+from urllib.parse import quote
 
 from ..embeddings.base import EmbeddingProvider
 from ..llm.base import LLMProvider
@@ -461,6 +462,21 @@ def graph_valid_clause(var: str, as_of: str | None, include_invalidated: bool = 
     return graph_as_of_predicate(var)
 
 
+def graph_result_id(node_id: str, tenant: str | None) -> str:
+    """Stable id for a graph hit, tenant-namespaced (collision-free) when scoped.
+
+    The stateful pipeline (IoR / Q-learning / feedback) keys on ``str(result.id)``,
+    so two tenants' same-named graph nodes must not share an id. Tenants and node
+    names are arbitrary strings that can contain ``:``, so the tenant is
+    percent-encoded (``safe=""``) — otherwise tenant ``a:b`` + node ``c`` and
+    tenant ``a`` + node ``b:c`` would both render ``graph:a:b:c``. Unscoped
+    (``tenant is None``) keeps the historical ``graph:<node_id>`` form unchanged.
+    """
+    if tenant is None:
+        return f"graph:{node_id}"
+    return f"graph:{quote(tenant, safe='')}:{node_id}"
+
+
 class MemgraphRetriever(Retriever):
     """Knowledge-graph retriever — exact/contains match on node names.
 
@@ -476,6 +492,10 @@ class MemgraphRetriever(Retriever):
     #: facts carry no validity payload, so both are filtered at query time.
     accepts_as_of = True
     accepts_include_invalidated = True
+    #: Graph nodes/edges now carry a server-owned ``tenant`` property (see
+    #: ``GraphStore``), so the retriever can honor a tenant scope — the recall
+    #: path pushes ``tenant`` here instead of skipping the graph under auth.
+    accepts_tenant = True
 
     def __init__(
         self,
@@ -530,12 +550,15 @@ class MemgraphRetriever(Retriever):
 
     _valid_clause = staticmethod(graph_valid_clause)
 
-    def search(self, query, limit=20, filters=None, as_of=None, include_invalidated=False):
+    def search(
+        self, query, limit=20, filters=None, as_of=None, include_invalidated=False, tenant=None
+    ):
         if filters:
-            # Graph nodes carry no chunk payload, so a result here cannot be
-            # proven to belong to the filtered scope (tenant, source, time
-            # range). Under the isolation contract anything unattributable
-            # is excluded rather than leaked.
+            # Caller payload `filters` (source, arbitrary keys, time range) can't
+            # be proven against graph nodes, which carry no chunk payload — under
+            # the isolation contract anything unattributable is excluded, not
+            # leaked. The dedicated `tenant` scope below is different: it's a
+            # server-owned graph property, so it IS honored (not via `filters`).
             return []
         driver = self._get_driver()
         if driver is None:
@@ -543,6 +566,15 @@ class MemgraphRetriever(Retriever):
         words = [w.lower() for w in query.split() if len(w) >= self.min_word]
         if not words:
             return []
+        # Tenant scope: confine every probe/relationship match to nodes+edges
+        # carrying `tenant`. Unscoped (tenant=None) adds nothing, so a legacy
+        # single-tenant graph is queried exactly as before.
+        tnode = " AND n.tenant = $tenant" if tenant is not None else ""
+        trel = (
+            " AND n.tenant = $tenant AND m.tenant = $tenant AND r.tenant = $tenant"
+            if tenant is not None
+            else ""
+        )
         # Normalize `as_of` to a full UTC instant (expanding a bare date to
         # midnight-Z) so it parses via Cypher datetime() in the point-in-time
         # predicate (see graph_as_of_predicate).
@@ -560,6 +592,8 @@ class MemgraphRetriever(Retriever):
         extra: dict[str, Any] = {"probe_lim": node_budget}
         if as_of is not None:
             extra["as_of"] = as_of
+        if tenant is not None:
+            extra["tenant"] = tenant
         counts: dict[tuple[str, str], dict[str, Any]] = defaultdict(
             lambda: {"count": 0, "type": "", "mc": ""}
         )
@@ -577,7 +611,7 @@ class MemgraphRetriever(Retriever):
                     if w.isdigit() and len(w) >= 6:
                         rows = session.run(
                             "MATCH (n) WHERE (n.telegram_id = $w OR n.contact_id = $w) "
-                            f"AND {node_valid} "
+                            f"AND {node_valid}{tnode} "
                             "RETURN n.name AS name, labels(n)[0] AS type, "
                             "n.memory_class AS mc, n.index_root AS index_root "
                             "LIMIT $probe_lim",
@@ -594,7 +628,7 @@ class MemgraphRetriever(Retriever):
                     if not rows:
                         rows = session.run(
                             "MATCH (n) WHERE coalesce(n.name_lower, toLower(n.name)) = $w "
-                            f"AND {node_valid} "
+                            f"AND {node_valid}{tnode} "
                             "RETURN n.name AS name, labels(n)[0] AS type, "
                             "n.memory_class AS mc, n.index_root AS index_root "
                             "LIMIT $probe_lim",
@@ -605,7 +639,7 @@ class MemgraphRetriever(Retriever):
                     if not rows and len(w) >= 3:
                         rows = session.run(
                             "MATCH (n) WHERE toLower(coalesce(n.telegram_username, '')) = $w "
-                            f"AND {node_valid} "
+                            f"AND {node_valid}{tnode} "
                             "RETURN n.name AS name, labels(n)[0] AS type, "
                             "n.memory_class AS mc, n.index_root AS index_root "
                             "LIMIT $probe_lim",
@@ -616,7 +650,7 @@ class MemgraphRetriever(Retriever):
                     if not rows and len(w) >= self.contains_min:
                         rows = session.run(
                             "MATCH (n) WHERE coalesce(n.name_lower, toLower(n.name)) CONTAINS $w "
-                            f"AND {node_valid} "
+                            f"AND {node_valid}{tnode} "
                             "RETURN n.name AS name, labels(n)[0] AS type, "
                             "n.memory_class AS mc, n.index_root AS index_root "
                             "LIMIT $probe_lim",
@@ -657,7 +691,7 @@ class MemgraphRetriever(Retriever):
                         # matches :Entity nodes (no index_root) when root_key="".
                         "MATCH (n {name: $name})-[r]-(m) "
                         f"WHERE coalesce(n.index_root, '') = $root_key "
-                        f"AND {node_valid} AND {rel_valid} AND {target_valid} "
+                        f"AND {node_valid} AND {rel_valid} AND {target_valid}{trel} "
                         "RETURN startNode(r).name AS from_n, type(r) AS rel, "
                         "endNode(r).name AS to_n LIMIT $lim",
                         name=name,
@@ -683,19 +717,33 @@ class MemgraphRetriever(Retriever):
                     # different roots don't collide into one result. :Entity nodes
                     # (and files with no index_root) keep the plain graph:<name> id.
                     node_id = f"{root_key}:{name}" if root_key else name
+                    payload: dict[str, Any] = {
+                        "text": content[:300],
+                        "source": "memgraph",
+                        "memory_class": info.get("mc", ""),
+                        "name": name,
+                        "type": info["type"],
+                        "index_root": root_key or None,
+                    }
+                    # Stamp the tenant so this graph hit carries the same
+                    # `tenant_id` the vector hits do and survives the recall
+                    # `filter_by_tenant` backstop (which drops any result lacking
+                    # a matching tenant_id). Only every node we matched is already
+                    # tenant-scoped by the probes above.
+                    # Namespace the id by tenant when scoped so two tenants with the
+                    # same graph node don't share an id — the stateful pipeline
+                    # (IoR / Q-learning / feedback) keys on str(result.id), so a
+                    # shared id would let one tenant's clicks move the other's
+                    # ranking. Vector ids are already tenant-scoped (stable_chunk_id).
+                    if tenant is not None:
+                        payload["tenant_id"] = tenant
+                    result_id = graph_result_id(node_id, tenant)
                     results.append(
                         RecallResult(
-                            id=f"graph:{node_id}",
+                            id=result_id,
                             text=content[:300],
                             score=float(info["count"]),
-                            payload={
-                                "text": content[:300],
-                                "source": "memgraph",
-                                "memory_class": info.get("mc", ""),
-                                "name": name,
-                                "type": info["type"],
-                                "index_root": root_key or None,
-                            },
+                            payload=payload,
                             sources=["memgraph"],
                         )
                     )
