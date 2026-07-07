@@ -1287,6 +1287,18 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
     if watching and not target.is_dir():
         print("error: --watch requires a directory to watch", file=sys.stderr)
         return 2
+    _raw_tenant = getattr(args, "tenant", None)
+    if _raw_tenant is not None and not str(_raw_tenant).strip():
+        # An explicitly empty --tenant (e.g. `--tenant "$UNSET_VAR"`) must fail
+        # closed, not silently normalize to an unscoped run — otherwise
+        # `--tenant "" --recreate` would slip past the guard below and drop the
+        # whole shared collection. Omit --tenant entirely for an unscoped index.
+        print(
+            "error: --tenant was given an empty value; omit --tenant for an unscoped "
+            "index, or pass a non-empty tenant id",
+            file=sys.stderr,
+        )
+        return 2
     if (getattr(args, "tenant", None) or None) is not None and args.recreate:
         # --recreate drops and rebuilds the WHOLE Qdrant collection, which in a
         # shared multi-tenant collection would delete every other tenant's points.

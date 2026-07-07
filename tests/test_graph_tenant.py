@@ -345,7 +345,9 @@ def test_wrapper_graph_scoped_folds_tenant_into_keys():
     cypher, params = session.calls[0]
     assert "path: $path, tenant: $tenant" in cypher  # File key folds tenant
     assert "name: tag, tenant: $tenant" in cypher  # Tag key folds tenant
-    assert "SET r.tenant = $tenant" in cypher  # TAGGED edge stamped
+    # TAGGED edge folds tenant into its MERGE key (not a post-hoc SET), so a
+    # scoped wrapper write can't claim a foreign TAGGED edge.
+    assert "[r:TAGGED {tenant: $tenant}]" in cypher
     assert params["tenant"] == "acme"
 
 

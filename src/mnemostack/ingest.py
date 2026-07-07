@@ -308,7 +308,10 @@ def _sync_wrapper_graph(
                 "SET f.name = $name, f.indexed_date = $indexed_date, "
                 "f.point_id = $point_id, f.tenant = $tenant "
             )
-            set_rel_tenant = " SET r.tenant = $tenant"
+            # Fold the tenant into the TAGGED MERGE key so a scoped wrapper write
+            # only matches/creates its own edge — never claims a foreign-tenant
+            # TAGGED edge between these nodes (round-7 relationship-key pattern).
+            tagged = "MERGE (f)-[r:TAGGED {tenant: $tenant}]->(t)"
         else:
             # Unscoped: the path-key subset-matches a tenant-owned :File node after
             # migration, so only write metadata when the node is tenant-less — an
@@ -318,14 +321,14 @@ def _sync_wrapper_graph(
                 "FOREACH (_ IN CASE WHEN f.tenant IS NULL THEN [1] ELSE [] END | "
                 "SET f.name = $name, f.indexed_date = $indexed_date, f.point_id = $point_id) "
             )
-            set_rel_tenant = ""
+            tagged = "MERGE (f)-[r:TAGGED]->(t)"
         query = (
             f"MERGE (f:File {{path: $path{tk}}}) "
             f"{file_set}"
             "WITH f "
             "UNWIND $tags AS tag "
             f"MERGE (t:Tag {{name: tag{tk}}}) "
-            f"MERGE (f)-[r:TAGGED]->(t){set_rel_tenant}"
+            f"{tagged}"
         )
         params: dict[str, Any] = {
             "name": name,
