@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-mnemostack is pre-1.0 and actively developed. Only the latest minor release
+mnemostack is stable and actively developed. Only the latest minor release
 receives security fixes.
 
 | Version | Supported |
