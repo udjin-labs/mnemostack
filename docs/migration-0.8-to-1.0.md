@@ -1,8 +1,8 @@
 # Migration notes: 0.8.x → 1.0
 
-mnemostack is on the road to 1.0. This page tracks the on-disk and interface
-contracts that a 0.8.x deployment relies on, what 1.0 will preserve, and the one
-migration that exists today. It's kept current as 1.0 work lands.
+mnemostack 1.0 preserves the on-disk and interface contracts that a 0.8.x
+deployment relies on. This page tracks the upgrade path and the one migration
+that exists today.
 
 **TL;DR** — 0.8.x data (Qdrant collections and Memgraph graphs) is expected to
 carry forward to 1.0 **without re-indexing**. The only active migration is a
@@ -202,7 +202,7 @@ existing data needs migrating.
 
 ## Config & CLI
 
-No config keys or CLI commands are being **removed** on the way to 1.0. Env
+No config keys or CLI commands are **removed** in 1.0. Env
 aliases (`MNEMOSTACK_QDRANT_URL`, `MNEMOSTACK_MEMGRAPH_URI`, …) are stable. New in
 1.0 and additive: the `keys` command, the `quota` command (per-tenant `max_points`
 storage cap + `max_rps` request-rate cap; `MNEMOSTACK_QUOTAS_FILE`), the `--auth`
@@ -219,12 +219,11 @@ package `__all__` (`make_graph_store`, `InMemoryRecorder`, `synthesize_async`) �
 additive, not breaking. See [api-stability.md](api-stability.md) for the full
 stable/experimental split; anything marked 🟡 experimental there (pipeline
 internals, `synthesize`, alternate rerankers) may change in a minor release
-before 1.0.
+after 1.0.
 
 ## Upgrade checklist
 
-1. Read the [CHANGELOG](../CHANGELOG.md) `[Unreleased]` / release section for the
-   target version.
+1. Read the [CHANGELOG](../CHANGELOG.md) release section for the target version.
 2. Upgrade the package; keep your existing config file.
 3. `mnemostack doctor` — must exit `0`. A `disabled` (unconfigured) or `warn`
    (configured-but-unreachable) graph line is expected and does **not** affect

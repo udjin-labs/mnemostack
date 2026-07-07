@@ -21,4 +21,4 @@ are not enough for anything that talks to Qdrant, Memgraph, or an LLM.
 - [ ] No hard-coded API keys, personal paths, or workspace-specific names
 - [ ] Backward-compatible, or breaking change called out explicitly
 - [ ] Follows the architecture in `ARCHITECTURE.md` (retrievers, pipeline, etc.)
-- [ ] Alpha API: if public API changes, bump `CHANGELOG.md` and add a migration note
+- [ ] Public API: if public API changes, bump `CHANGELOG.md` and add a migration note
