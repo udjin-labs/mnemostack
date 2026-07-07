@@ -89,6 +89,9 @@ def test_add_triple_scoped_folds_tenant_into_key_and_stamps():
     assert "{name: $subject, tenant: $tenant}" in cypher
     assert "{name: $obj, tenant: $tenant}" in cypher
     assert "s.tenant = $tenant, o.tenant = $tenant" in cypher
+    # The relationship MERGE folds tenant into its key, so a scoped write can't
+    # reuse/claim a foreign edge between owned nodes.
+    assert "[r:KNOWS {tenant: $tenant}]" in cypher
     assert params["tenant"] == "acme"
     assert params["props"]["tenant"] == "acme"  # edge stamped too
 
@@ -155,10 +158,10 @@ def test_sync_file_links_scoped_keys_file_nodes_by_tenant():
     joined = " ".join(cyphers)
     assert "index_root: $root, tenant: $tenant" in joined
     assert "s.tenant = $tenant, o.tenant = $tenant" in joined
-    # The LINKS_TO edge itself is stamped, so scoped recall (which requires
-    # r.tenant = $tenant) can traverse links written through this scoped API.
-    merge_cypher = next(c for c in cyphers if "MERGE (s)-[r:LINKS_TO]->(o)" in c)
-    assert "r.tenant = $tenant" in merge_cypher
+    # The LINKS_TO edge folds tenant into its MERGE key, so scoped recall (which
+    # requires r.tenant) traverses it AND a scoped resync can't claim a foreign edge.
+    merge_cypher = next(c for c in cyphers if "MERGE (s)-[r:LINKS_TO" in c)
+    assert "[r:LINKS_TO {tenant: $tenant}]" in merge_cypher
     # The edge-clearing DELETE pins the far end AND the edge to the tenant.
     del_cypher = next(c for c in cyphers if "DELETE r" in c)
     assert "-[r:LINKS_TO]->({tenant: $tenant})" in del_cypher
@@ -258,6 +261,7 @@ def test_file_link_sources_scoped_requires_owned_edge():
     store.file_link_sources(index_root="/root", tenant="acme")
     cypher, params = session.calls[0]
     assert "[r:LINKS_TO]" in cypher and "WHERE r.tenant = $tenant" in cypher
+    assert "(d:File {tenant: $tenant})" in cypher  # target bound to the tenant too
     assert params["tenant"] == "acme"
 
 

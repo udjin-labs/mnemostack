@@ -139,8 +139,11 @@ class GraphStore:
             props[TENANT_KEY] = tenant  # stamp the edge too
             params["tenant"] = tenant
             set_tenant = ", s.tenant = $tenant, o.tenant = $tenant"
-            # Scoped: the edge is this tenant's own (its key is name+tenant), so
-            # write props directly.
+            # Scoped: fold the tenant into the relationship MERGE key so a scoped
+            # write only ever matches/creates ITS OWN edge — it never reuses (and
+            # then relabels) a foreign-tenant/untenanted edge that happens to sit
+            # between these nodes in a partially migrated or hand-edited graph.
+            edge_merge = f"MERGE (s)-[r:{rel} {{tenant: $tenant}}]->(o) "
             edge_set = "SET r += $props"
         else:
             set_tenant = ""
@@ -150,6 +153,7 @@ class GraphStore:
             # On a single-tenant graph every edge is tenant-less, so this always
             # runs (equivalent to the legacy unconditional SET). The node SETs use
             # coalesce, so they're idempotent even if they bind a tenant node.
+            edge_merge = f"MERGE (s)-[r:{rel}]->(o) "
             edge_set = (
                 "FOREACH (_ IN CASE WHEN r.tenant IS NULL THEN [1] ELSE [] END | SET r += $props)"
             )
@@ -158,7 +162,7 @@ class GraphStore:
             f"MERGE (o:{o_label} {{name: $obj{tk}}}) "
             f"SET s.valid_until = coalesce(s.valid_until, 'current'), "
             f"    o.valid_until = coalesce(o.valid_until, 'current'){set_tenant} "
-            f"MERGE (s)-[r:{rel}]->(o) "
+            f"{edge_merge}"
             f"{edge_set}"
         )
         with self.driver.session(database=self.database) as session:
@@ -230,7 +234,15 @@ class GraphStore:
             src=source,
             **common,
         )
-        set_rel_tenant = ", r.tenant = $tenant" if tenant is not None else ""
+        # Fold the tenant into the LINKS_TO MERGE key when scoped, so a scoped
+        # resync only matches/creates its own edge and never reuses (then relabels)
+        # a foreign-tenant/untenanted edge between these nodes — mirroring the DELETE
+        # guard above, which deliberately leaves such an edge alone.
+        rel_merge = (
+            "MERGE (s)-[r:LINKS_TO {tenant: $tenant}]->(o) "
+            if tenant is not None
+            else "MERGE (s)-[r:LINKS_TO]->(o) "
+        )
         for target in targets:
             tx.run(
                 f"MERGE (s:File {{name: $src, index_root: $root{tk}}}) "
@@ -238,8 +250,8 @@ class GraphStore:
                 f"SET s.valid_until = coalesce(s.valid_until, 'current'), "
                 f"    o.valid_until = coalesce(o.valid_until, 'current'), "
                 f"    s.name_lower = $src_lower, o.name_lower = $dst_lower{set_tenant} "
-                f"MERGE (s)-[r:LINKS_TO]->(o) "
-                f"SET r.valid_until = coalesce(r.valid_until, 'current'){set_rel_tenant}",
+                f"{rel_merge}"
+                f"SET r.valid_until = coalesce(r.valid_until, 'current')",
                 src=source,
                 dst=target,
                 src_lower=source.lower(),
@@ -299,13 +311,17 @@ class GraphStore:
         # drives stale-link cleanup) only reports files with an owned LINKS_TO
         # edge — honoring the same nodes-AND-edges boundary as the other reads.
         rel = "[r:LINKS_TO]" if tenant is not None else "[:LINKS_TO]"
+        # Bind the edge AND the target to the tenant when scoped, so a source is
+        # only reported when it owns the whole link (source, edge, target) — a
+        # stale-link reconcile must not act on a link the tenant doesn't own.
+        target = "(d:File {tenant: $tenant})" if tenant is not None else "()"
         rwhere = " WHERE r.tenant = $tenant" if tenant is not None else ""
         params: dict[str, Any] = {"root": root}
         if tenant is not None:
             params["tenant"] = tenant
         with self.driver.session(database=self.database) as session:
             result = session.run(
-                f"MATCH (f:File {{index_root: $root{tk}}})-{rel}->(){rwhere} "
+                f"MATCH (f:File {{index_root: $root{tk}}})-{rel}->{target}{rwhere} "
                 "RETURN DISTINCT f.name AS name",
                 **params,
             )
