@@ -82,14 +82,19 @@ def feedback_sources(
     return out
 
 
-def record_recall_events(pipeline, results) -> bool:
+def record_recall_events(pipeline, results, tenant: str | None = None) -> bool:
+    # Pass tenant only when set, so a custom stage with the legacy
+    # record_recall(memory_id) signature still works in a single-tenant deployment
+    # (mirrors the graph-adapter back-compat pattern). A tenant-scoped deployment
+    # requires tenant-aware stages, which the built-in ones are.
+    tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
     recorded = False
     for stage in pipeline:
         record_recall = getattr(stage, "record_recall", None)
         if record_recall is None:
             continue
         for result in results:
-            record_recall(str(result.id))
+            record_recall(str(result.id), **tkw)
             recorded = True
     return recorded
 
@@ -99,14 +104,16 @@ def record_feedback_events(
     sources: list[str],
     query_type: str,
     reward: float,
+    tenant: str | None = None,
 ) -> int:
+    tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
     updates = 0
     for stage in pipeline:
         record_feedback = getattr(stage, "record_feedback", None)
         if record_feedback is None:
             continue
         for source in sources:
-            record_feedback(source, query_type, reward)
+            record_feedback(source, query_type, reward, **tkw)
             updates += 1
     return updates
 
@@ -120,7 +127,14 @@ def apply_feedback(
     source: str | None = None,
     sources: list[str] | tuple[str, ...] | None = None,
     reward: float | None = None,
+    tenant: str | None = None,
 ) -> FeedbackOutcome:
+    """Record feedback into the pipeline's learning state.
+
+    With ``tenant`` set, the Q-table and IoR updates land in that tenant's own
+    partition of the shared state store, so one tenant's feedback can't shift
+    another's ranking. ``tenant=None`` writes the unscoped (single-tenant) state.
+    """
     resolved_reward = feedback_reward(signal, reward)
     resolved_query_type = feedback_query_type(query=query, query_type=query_type)
     resolved_sources = feedback_sources(source=source, sources=sources)
@@ -129,10 +143,11 @@ def apply_feedback(
         resolved_sources,
         resolved_query_type,
         resolved_reward,
+        tenant,
     )
     ior_recorded = False
     if signal == "clicked":
-        ior_recorded = record_recall_events(pipeline, [FeedbackHit(hit_id)])
+        ior_recorded = record_recall_events(pipeline, [FeedbackHit(hit_id)], tenant)
     return FeedbackOutcome(
         hit_id=hit_id,
         signal=signal,

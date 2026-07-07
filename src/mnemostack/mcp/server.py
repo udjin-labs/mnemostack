@@ -645,10 +645,10 @@ def build_server(
         if reward is not None and not 0.0 <= reward <= 1.0:
             return {"ok": False, "error": "reward must be in [0, 1]"}
         try:
-            # write scope gates access. Note: the learning state (Q-learning
-            # weights + IoR) is process-global, not yet partitioned per tenant —
-            # so it isn't tenant-scoped here (tracked follow-up, mirrors HTTP).
-            _authorize("write")
+            # write scope gates access; the learning state (Q-table + IoR) is
+            # partitioned by the key's tenant, so feedback only ever moves this
+            # tenant's own ranking state.
+            tenant = _tenant_of(_authorize("write"))
             outcome = apply_feedback(
                 _get_feedback_pipeline(),
                 hit_id=hit_id,
@@ -658,6 +658,7 @@ def build_server(
                 source=source,
                 sources=sources or [],
                 reward=reward,
+                tenant=tenant,
             )
             return outcome.to_dict()
         except Exception as e:  # noqa: BLE001

@@ -738,7 +738,8 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             tenant=tenant,
         )
         if cfg.auto_record_ior:
-            record_recall_events(pipeline, results)
+            # Record into the caller's tenant partition so auto-IoR is per-tenant.
+            record_recall_events(pipeline, results, tenant)
         return results, trace
 
     async def _run_recall(
@@ -958,14 +959,9 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         Q-learning updates require retriever/source labels. Pass the `retrievers`
         field returned by /recall or /answer as `sources`.
 
-        Multi-tenant note: the `write` scope gates *access* to this endpoint, but
-        the Q-learning weight and inhibition-of-return state it updates are
-        currently process-global (keyed by source/query_type/hit_id), NOT
-        partitioned per tenant. So one tenant's feedback can influence another
-        tenant's ranking/IoR state. Per-tenant learning state is a tracked
-        follow-up; until then, in a multi-tenant deployment either keep
-        `--auto-record-ior` off and treat feedback as advisory, or run separate
-        state per tenant.
+        Multi-tenant: under `--auth` the `write` scope gates access AND the
+        learning state (Q-table, IoR log) it updates is partitioned by the key's
+        tenant, so one tenant's feedback can't shift another tenant's ranking.
         """
         try:
             outcome = apply_feedback(
@@ -977,6 +973,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 source=req.source,
                 sources=req.sources,
                 reward=req.reward,
+                tenant=_tenant_of(principal),
             )
         except Exception as exc:
             log.exception("feedback endpoint failed")

@@ -294,14 +294,13 @@ request body:
 1. Issue a key: `mnemostack keys add --tenant acme --scopes read,write`
    (plaintext shown once; stored SHA-256-hashed in the keys file).
 2. Scopes gate operations: `read` → recall/answer, `write` → invalidate/feedback,
-   `admin` implies all. **Caveat — `feedback` is access-gated but not
-   tenant-partitioned:** its Q-learning / inhibition-of-return learning state is
-   process-global, so a `write`-scoped tenant's feedback can shift ranking state
-   shared with other tenants on the same process. Until per-tenant state lands
-   (planned follow-up), don't expose `feedback` across mutually-distrusting tenants
-   on one process — run a **separate process with its own `--state-path`** per trust
-   boundary (separate processes sharing the default state file still share the
-   Q-learning/IoR state), or leave feedback to a trusted operator.
+   `admin` implies all. **`feedback` is tenant-partitioned:** its Q-learning /
+   inhibition-of-return learning state is keyed by the caller's tenant in the
+   shared state store (the Q-table, the IoR log, and its cap are all per-tenant),
+   so a `write`-scoped tenant's feedback — and auto-recorded IoR from its
+   recalls — only ever move its own ranking, never another tenant's. Recall reads
+   the tenant's own partition too. (`tenant=None` uses the unscoped, single-tenant
+   state, so a non-auth deployment is unchanged.)
 3. Run the surface with auth on:
    - HTTP: `mnemostack serve --auth` — clients present the key as a bearer token;
      `/recall` `/answer` `/feedback` are default-deny, health/status/metrics stay
