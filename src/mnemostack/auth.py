@@ -282,6 +282,35 @@ class FileKeyStore:
             self._save(kept)
         return True
 
+    def revoke_guarded(self, key_id: str, *, protect_last_admin: bool = False) -> str:
+        """Atomically revoke a key. Returns ``"revoked"``, ``"not_found"``, or
+        ``"last_admin"``.
+
+        With ``protect_last_admin`` the whole check-and-remove runs under one lock,
+        so it refuses (``"last_admin"``) to remove the only key still carrying the
+        ``admin`` scope — and two concurrent revokes of *different* admin keys can't
+        both pass the check and leave zero admins (the TOCTOU a check-then-``revoke``
+        would have). Used by the inspector admin console so it can't lock itself out.
+        """
+
+        def _is_admin(r: dict[str, Any]) -> bool:
+            sc = r.get("scopes")
+            return isinstance(sc, list) and "admin" in sc
+
+        with self._locked():
+            records = self._load()
+            target = next((r for r in records if r.get("id") == key_id), None)
+            if target is None:
+                return "not_found"
+            if (
+                protect_last_admin
+                and _is_admin(target)
+                and sum(1 for r in records if _is_admin(r)) <= 1
+            ):
+                return "last_admin"
+            self._save([r for r in records if r.get("id") != key_id])
+        return "revoked"
+
     def list_keys(self) -> list[dict[str, Any]]:
         """List keys WITHOUT their hashes (safe to print).
 

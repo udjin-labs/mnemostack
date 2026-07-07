@@ -2574,6 +2574,25 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         default=cfg.vector.health_timeout,
         help="Qdrant reachability-probe timeout (s) for the inspector (default from config)",
     )
+    p_inspect.add_argument(
+        "--auth",
+        action="store_true",
+        help=(
+            "Admin console: require an admin service key on every /api call and "
+            "unlock key/quota management (issue/revoke keys, set/remove quotas). "
+            "Without it the inspector is a read-only data browser."
+        ),
+    )
+    p_inspect.add_argument(
+        "--keys-file",
+        default=None,
+        help="Service-key store path (default: $MNEMOSTACK_KEYS_FILE or ~/.config/mnemostack/keys.json)",
+    )
+    p_inspect.add_argument(
+        "--quotas-file",
+        default=None,
+        help="Quota store path (default: $MNEMOSTACK_QUOTAS_FILE or ~/.config/mnemostack/quotas.json)",
+    )
     p_inspect.set_defaults(func=cmd_inspect)
 
     p_graph_migrate = sub.add_parser(
@@ -2710,7 +2729,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         import uvicorn
 
         from mnemostack.inspector import build_inspector_app
-        from mnemostack.server import ServerConfig
+        from mnemostack.server import ServerConfig, _env_bool
     except ImportError as exc:
         print(
             f"error: server extra not installed ({exc}). Install with: "
@@ -2734,15 +2753,25 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         # default and shows as down.
         graph_health_timeout=args.graph_timeout,
         qdrant_health_timeout=args.qdrant_health_timeout,
+        # --auth turns the inspector into an admin console (key/quota management),
+        # requiring an admin key on every /api call. Honor the env toggle too, for
+        # parity with serve / mcp-serve.
+        auth_enabled=getattr(args, "auth", False) or _env_bool("MNEMOSTACK_AUTH_ENABLED"),
+        keys_file=getattr(args, "keys_file", None),
+        quotas_file=getattr(args, "quotas_file", None),
     )
     app = build_inspector_app(cfg)
+    admin = cfg.auth_enabled
     if args.host == "0.0.0.0":
         print(
-            "warning: the inspector exposes read-only memory contents; binding to "
-            "0.0.0.0 makes them reachable on all interfaces — keep it behind auth",
+            "warning: the inspector exposes memory contents"
+            + (" and tenant administration (key/quota management)" if admin else "")
+            + "; binding to 0.0.0.0 makes it reachable on all interfaces — keep it "
+            "behind auth/TLS or bound to localhost",
             file=sys.stderr,
         )
-    print(f"mnemostack inspect: http://{args.host}:{args.port}  (read-only)")
+    mode = "admin console — admin key required" if admin else "read-only"
+    print(f"mnemostack inspect: http://{args.host}:{args.port}  ({mode})")
     print(f"  collection: {cfg.collection}")
     print(f"  qdrant:     {cfg.qdrant_url}")
     print(f"  memgraph:   {cfg.graph_uri}")

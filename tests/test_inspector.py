@@ -331,3 +331,159 @@ def test_data_endpoints_gate_on_unreachable_qdrant(monkeypatch):
     assert c.get("/api/tenants").json()["error"] == "Qdrant unreachable"
     assert c.get("/api/overview").json()["qdrant"] is False
     assert c.get("/api/records").json()["error"] == "Qdrant unreachable"
+
+
+# ---------- admin console (--auth): key + quota management ----------
+
+
+def _admin_client(monkeypatch, tmp_path):
+    """Inspector built with --auth: real key/quota stores + the seeded data store.
+    Returns (client, admin_key, read_key, keys_file, quotas_file)."""
+    from mnemostack.auth import FileKeyStore
+
+    store = _seeded_store()
+    monkeypatch.setattr(insp, "get_provider", lambda *a, **k: _FakeProvider())
+    monkeypatch.setattr(insp, "VectorStore", lambda **_: store)
+    monkeypatch.setattr(insp, "_make_probe_client", lambda *a, **k: store.client)
+    kf, qf = str(tmp_path / "keys.json"), str(tmp_path / "quotas.json")
+    ks = FileKeyStore(kf)
+    _, admin_key = ks.issue("ops", ["admin"])
+    _, read_key = ks.issue("acme", ["read"])
+    app = insp.build_inspector_app(
+        ServerConfig(
+            provider_name="fake", collection="mt", graph_uri=None,
+            auth_enabled=True, keys_file=kf, quotas_file=qf,
+        )
+    )
+    return TestClient(app), admin_key, read_key, kf, qf
+
+
+def _hdr(key):
+    return {"X-API-Key": key}
+
+
+def test_admin_console_requires_a_key(monkeypatch, tmp_path):
+    c, *_ = _admin_client(monkeypatch, tmp_path)
+    # under --auth EVERY /api call needs an admin key (the whole console is admin-only)
+    assert c.get("/api/tenants").status_code == 401
+    assert c.get("/api/keys").status_code == 401
+    assert c.get("/api/quotas").status_code == 401
+
+
+def test_non_admin_key_is_forbidden(monkeypatch, tmp_path):
+    c, _admin, read_key, *_ = _admin_client(monkeypatch, tmp_path)
+    assert c.get("/api/tenants", headers=_hdr(read_key)).status_code == 403
+    assert c.get("/api/keys", headers=_hdr(read_key)).status_code == 403
+
+
+def test_admin_key_unlocks_browse_and_management(monkeypatch, tmp_path):
+    c, admin_key, *_ = _admin_client(monkeypatch, tmp_path)
+    assert c.get("/api/tenants", headers=_hdr(admin_key)).status_code == 200
+    assert c.get("/api/keys", headers=_hdr(admin_key)).status_code == 200
+    assert c.get("/api/quotas", headers=_hdr(admin_key)).status_code == 200
+
+
+def test_management_forbidden_without_auth(monkeypatch):
+    # the default read-only inspector: browse open, management endpoints 403
+    store = _seeded_store()
+    monkeypatch.setattr(insp, "get_provider", lambda *a, **k: _FakeProvider())
+    monkeypatch.setattr(insp, "VectorStore", lambda **_: store)
+    monkeypatch.setattr(insp, "_make_probe_client", lambda *a, **k: store.client)
+    c = TestClient(insp.build_inspector_app(
+        ServerConfig(provider_name="fake", collection="mt", graph_uri=None)
+    ))
+    assert c.get("/api/tenants").status_code == 200  # browse open, no key
+    assert c.get("/api/keys").status_code == 403      # management needs --auth
+    assert c.post("/api/keys", json={"tenant": "x", "scopes": ["read"]}).status_code == 403
+    assert c.put("/api/quotas/x", json={"max_points": 1}).status_code == 403
+
+
+def test_issue_key_returns_plaintext_once_and_lists_redacted(monkeypatch, tmp_path):
+    from mnemostack.auth import FileKeyStore
+
+    c, admin_key, _read, kf, _qf = _admin_client(monkeypatch, tmp_path)
+    r = c.post(
+        "/api/keys", headers=_hdr(admin_key),
+        json={"tenant": "acme", "scopes": ["read", "write"], "label": "svc"},
+    )
+    assert r.status_code == 201
+    plaintext = r.json()["key"]
+    # the issued key actually authenticates as that tenant/scopes
+    p = FileKeyStore(kf).verify(plaintext)
+    assert p is not None and p.tenant == "acme" and p.can("write")
+    # the listing never leaks a plaintext or hash
+    listed = c.get("/api/keys", headers=_hdr(admin_key)).json()["keys"]
+    row = next(k for k in listed if k["id"] == r.json()["id"])
+    assert row["tenant"] == "acme" and set(row["scopes"]) == {"read", "write"}
+    assert "key" not in row and "hash" not in row
+
+
+def test_issue_key_rejects_unknown_scope(monkeypatch, tmp_path):
+    c, admin_key, *_ = _admin_client(monkeypatch, tmp_path)
+    r = c.post("/api/keys", headers=_hdr(admin_key),
+               json={"tenant": "acme", "scopes": ["root"]})
+    assert r.status_code == 400 and "scope" in r.json()["detail"].lower()
+
+
+def test_revoke_key(monkeypatch, tmp_path):
+    c, admin_key, *_ = _admin_client(monkeypatch, tmp_path)
+    kid = c.post("/api/keys", headers=_hdr(admin_key),
+                 json={"tenant": "acme", "scopes": ["read"]}).json()["id"]
+    assert c.delete(f"/api/keys/{kid}", headers=_hdr(admin_key)).json()["revoked"] is True
+    ids = [k["id"] for k in c.get("/api/keys", headers=_hdr(admin_key)).json()["keys"]]
+    assert kid not in ids
+    assert c.delete("/api/keys/nope", headers=_hdr(admin_key)).status_code == 404
+
+
+def test_revoke_last_admin_key_refused(monkeypatch, tmp_path):
+    # the seeded store has exactly one admin key ("ops"); revoking it would lock out
+    c, admin_key, *_ = _admin_client(monkeypatch, tmp_path)
+    keys = c.get("/api/keys", headers=_hdr(admin_key)).json()["keys"]
+    admin_id = next(k["id"] for k in keys if "admin" in k["scopes"])
+    r = c.delete(f"/api/keys/{admin_id}", headers=_hdr(admin_key))
+    assert r.status_code == 409 and "last admin" in r.json()["detail"]
+    # a SECOND admin key makes the first revocable again
+    c.post("/api/keys", headers=_hdr(admin_key),
+           json={"tenant": "ops2", "scopes": ["admin"]})
+    assert c.delete(f"/api/keys/{admin_id}", headers=_hdr(admin_key)).json()["revoked"] is True
+
+
+def test_set_quota_is_partial_and_validated(monkeypatch, tmp_path):
+    c, admin_key, *_ = _admin_client(monkeypatch, tmp_path)
+    assert c.put("/api/quotas/acme", headers=_hdr(admin_key),
+                 json={"max_points": 1000}).status_code == 200
+    # setting the rate must NOT wipe the size cap (partial update)
+    q = c.put("/api/quotas/acme", headers=_hdr(admin_key),
+              json={"max_rps": 5}).json()
+    assert q["max_points"] == 1000 and q["max_rps"] == 5.0 and q["burst"] == 5
+    # a bad value is a clean 400, not a 500
+    assert c.put("/api/quotas/acme", headers=_hdr(admin_key),
+                 json={"max_rps": -1}).status_code == 400
+    listed = c.get("/api/quotas", headers=_hdr(admin_key)).json()["quotas"]
+    assert any(x["tenant"] == "acme" and x["max_points"] == 1000 for x in listed)
+
+
+def test_set_quota_empty_body_does_not_provision(monkeypatch, tmp_path):
+    # a no-op PUT (no fields) must 400, not create an empty quota row for a new tenant
+    c, admin_key, *_ = _admin_client(monkeypatch, tmp_path)
+    assert c.put("/api/quotas/ghost", headers=_hdr(admin_key), json={}).status_code == 400
+    listed = c.get("/api/quotas", headers=_hdr(admin_key)).json()["quotas"]
+    assert not any(x["tenant"] == "ghost" for x in listed)
+
+
+def test_remove_quota(monkeypatch, tmp_path):
+    c, admin_key, *_ = _admin_client(monkeypatch, tmp_path)
+    c.put("/api/quotas/acme", headers=_hdr(admin_key), json={"max_points": 5})
+    assert c.delete("/api/quotas/acme", headers=_hdr(admin_key)).json()["removed"] is True
+    assert c.delete("/api/quotas/acme", headers=_hdr(admin_key)).json()["removed"] is False
+
+
+def test_tenant_list_unions_config_tenants(monkeypatch, tmp_path):
+    # a tenant that has a key but no data still shows up (count 0)
+    c, admin_key, *_ = _admin_client(monkeypatch, tmp_path)
+    c.post("/api/keys", headers=_hdr(admin_key),
+           json={"tenant": "gamma", "scopes": ["read"]})
+    tenants = {t["id"]: t["count"] for t in
+               c.get("/api/tenants", headers=_hdr(admin_key)).json()["tenants"]}
+    assert tenants.get("alpha") == 2       # from data
+    assert tenants.get("gamma") == 0       # config-only (keystore), no data yet

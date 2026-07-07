@@ -209,7 +209,11 @@ storage cap + `max_rps` request-rate cap; `MNEMOSTACK_QUOTAS_FILE`), the `--auth
 mode on `serve` / `mcp-serve`, and the `MNEMOSTACK_AUTH_ENABLED` /
 `MNEMOSTACK_API_KEY` / `MNEMOSTACK_KEYS_FILE` env vars (all off by default — see the
 multi-tenancy section above). Under `serve --auth`, a tenant with a `max_rps` quota
-is rate-limited (HTTP `429` + `Retry-After`); tenants without a quota are unaffected. The only
+is rate-limited (HTTP `429` + `Retry-After`); tenants without a quota are unaffected.
+`mnemostack inspect` also gains an optional admin console: `inspect --auth` (with
+`--keys-file`/`--quotas-file`) requires an admin service key and unlocks key/quota
+management in the web UI; without it the inspector is the same read-only browser as
+before. The only
 planned interface change is promoting a few de-facto-public names into their
 package `__all__` (`make_graph_store`, `InMemoryRecorder`, `synthesize_async`) —
 additive, not breaking. See [api-stability.md](api-stability.md) for the full

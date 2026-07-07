@@ -82,6 +82,25 @@ def test_revoke_removes_key(tmp_path):
     assert ks.revoke(key_id) is False  # already gone
 
 
+def test_revoke_guarded_statuses_and_last_admin(tmp_path):
+    ks = _store(tmp_path)
+    read_id, _ = ks.issue("acme", ["read"])
+    admin1, _ = ks.issue("ops", ["admin"])
+
+    # a non-admin key is always revocable
+    assert ks.revoke_guarded(read_id, protect_last_admin=True) == "revoked"
+    assert ks.revoke_guarded("missing", protect_last_admin=True) == "not_found"
+    # the only admin key is protected...
+    assert ks.revoke_guarded(admin1, protect_last_admin=True) == "last_admin"
+    # ...until a second admin exists, then either is revocable
+    admin2, _ = ks.issue("ops2", ["admin"])
+    assert ks.revoke_guarded(admin1, protect_last_admin=True) == "revoked"
+    # now admin2 is the last one again -> protected
+    assert ks.revoke_guarded(admin2, protect_last_admin=True) == "last_admin"
+    # without the guard, even the last admin goes
+    assert ks.revoke_guarded(admin2) == "revoked"
+
+
 def test_invalid_scope_rejected(tmp_path):
     ks = _store(tmp_path)
     with pytest.raises(ValueError, match="unknown scope"):
