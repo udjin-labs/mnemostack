@@ -108,27 +108,33 @@ def test_quota_set_partial_update_preserves_other_fields(tmp_path):
 
 def test_quota_set_rejects_bad_rate_and_burst(tmp_path):
     store = FileQuotaStore(tmp_path / "q.json")
-    # non-positive, bool, and NON-FINITE (inf/nan round-trip through JSON) all rejected
-    for bad in (0, -1, True, float("inf"), float("nan"), float("-inf")):
+    # non-positive, bool, non-finite (inf/nan), AND an oversized int that overflows
+    # float (argparse yields unbounded ints) — all rejected before persisting.
+    for bad in (0, -1, True, float("inf"), float("nan"), float("-inf"), 10 ** 400):
         with pytest.raises(ValueError):
             store.set("t", max_rps=bad)
-    for bad in (0, -3, True):
+    for bad in (0, -3, True, 10 ** 400):
         with pytest.raises(ValueError):
             store.set("t", burst=bad)
+    # a rejected write persists nothing
+    assert store.get("t") is None
 
 
 def test_quota_coerce_drops_malformed_rate_fields(tmp_path):
     p = tmp_path / "q.json"
-    # inf/nan can be written by json.dump and read back — must fail open to None,
-    # not poison the rate limiter (nan rate would silently disable the limit).
+    # inf/nan/oversized-int can appear via json.dump or a manual edit — must fail
+    # open to None, not raise (an OverflowError in get() would 500 the tenant).
     p.write_text(
         '{"quotas": {"acme": {"max_rps": Infinity, "burst": -2}, '
-        '"beta": {"max_rps": NaN}}}'
+        '"beta": {"max_rps": NaN}, '
+        '"gamma": {"max_rps": 1e400, "burst": 1' + "0" * 400 + '}}}'
     )
     store = FileQuotaStore(p)
     a = store.get("acme")
     assert a.max_rps is None and a.burst is None
     assert store.get("beta").max_rps is None
+    g = store.get("gamma")  # oversized int rate + burst both dropped, no raise
+    assert g.max_rps is None and g.burst is None
 
 
 def test_effective_burst_defaults_to_ceil_rps():

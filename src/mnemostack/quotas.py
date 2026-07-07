@@ -122,6 +122,22 @@ class QuotaStore(Protocol):
     def get(self, tenant: str) -> TenantQuota | None: ...
 
 
+def _usable_number(x: Any) -> bool:
+    """True if ``x`` is a real (non-bool) number representable as a finite float.
+
+    Rejects ``inf``/``nan`` and — crucially — an ``int`` too large to convert to
+    float (argparse and JSON both admit unbounded ints), which would otherwise
+    raise ``OverflowError`` deep in the token bucket (``float(capacity)``,
+    ``1/rate``) and turn a rate-limited request into a 500.
+    """
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(x))
+    except OverflowError:
+        return False
+
+
 def _coerce_quota(rec: Any) -> TenantQuota:
     """Build a TenantQuota from a stored record, tolerating a malformed field.
 
@@ -135,19 +151,16 @@ def _coerce_quota(rec: Any) -> TenantQuota:
         log.warning("ignoring malformed max_points %r in quota store", mp)
         mp = None
     rps = d.get("max_rps")
-    # bool is an int/float subclass — reject it; also non-positive and non-finite
-    # (inf/nan, which JSON round-trips) so a poisoned value can't disable the limit.
-    if rps is not None and (
-        isinstance(rps, bool)
-        or not isinstance(rps, (int, float))
-        or rps <= 0
-        or not math.isfinite(rps)
-    ):
+    # Drop a non-usable rate (bool, non-number, non-positive, inf/nan, or an
+    # oversized int that overflows float) to None — fail open, never raise.
+    # _usable_number is checked FIRST so an oversized int never reaches ``<= 0``.
+    if rps is not None and (not _usable_number(rps) or rps <= 0):
         log.warning("ignoring malformed max_rps %r in quota store", rps)
         rps = None
     burst = d.get("burst")
     if burst is not None and (
-        not isinstance(burst, int) or isinstance(burst, bool) or burst < 1
+        isinstance(burst, bool) or not isinstance(burst, int) or burst < 1
+        or not _usable_number(burst)
     ):
         log.warning("ignoring malformed burst %r in quota store", burst)
         burst = None
@@ -297,16 +310,14 @@ class FileQuotaStore:
         ):
             raise ValueError("max_points must be a non-negative integer")
         if not isinstance(max_rps, _Unset) and max_rps is not None and (
-            isinstance(max_rps, bool)
-            or not isinstance(max_rps, (int, float))
-            or max_rps <= 0
-            or not math.isfinite(max_rps)
+            not _usable_number(max_rps) or max_rps <= 0
         ):
             raise ValueError("max_rps must be a positive, finite number")
         if not isinstance(burst, _Unset) and burst is not None and (
-            not isinstance(burst, int) or isinstance(burst, bool) or burst < 1
+            isinstance(burst, bool) or not isinstance(burst, int) or burst < 1
+            or not _usable_number(burst)
         ):
-            raise ValueError("burst must be a positive integer")
+            raise ValueError("burst must be a positive integer the bucket can represent")
         with self._locked():
             quotas = self._load()
             cur = _coerce_quota(quotas.get(tenant, {}))

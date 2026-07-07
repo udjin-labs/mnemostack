@@ -313,6 +313,9 @@ _DEGRADED_METRICS = frozenset(
 # every probe (embeddings are billed/rate-limited for hosted providers) and so
 # a slow/hung provider can't add latency to the probe.
 _EMBED_HEALTH_TTL_S = 30.0  # refresh the cached result in the background this often
+#: Ceiling for a rate-limit Retry-After header (seconds). Caps an absurdly large
+#: (or non-finite) computed backoff so a tiny rate can't crash header building.
+_MAX_RETRY_AFTER = 86400  # 1 day
 
 
 def _make_probe_client(url: str, timeout: int) -> Any:
@@ -717,10 +720,17 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 try:
                     rate_limiter.check(principal.tenant)
                 except RateLimitExceededError as exc:
+                    # A vanishingly small (but valid) rate makes 1/rate overflow to
+                    # inf, so guard/cap retry_after — never ceil(inf) → 500. A day is
+                    # a sane ceiling for "come back later".
+                    ra = exc.retry_after
+                    secs = _MAX_RETRY_AFTER if not math.isfinite(ra) else max(
+                        1, min(_MAX_RETRY_AFTER, math.ceil(ra))
+                    )
                     raise HTTPException(
                         status_code=429,
                         detail=str(exc),
-                        headers={"Retry-After": str(max(1, math.ceil(exc.retry_after)))},
+                        headers={"Retry-After": str(secs)},
                     ) from exc
             return principal
 

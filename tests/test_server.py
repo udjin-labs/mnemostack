@@ -849,6 +849,32 @@ def test_recall_rate_limited_returns_429(monkeypatch, tmp_path):
     assert int(r.headers["Retry-After"]) >= 1
 
 
+def test_recall_tiny_rate_returns_429_not_500(monkeypatch, tmp_path):
+    # A vanishingly small but valid max_rps makes 1/rate overflow to inf; the
+    # Retry-After header must be capped, not crash header building (500).
+    from mnemostack.auth import FileKeyStore
+    from mnemostack.quotas import FileQuotaStore
+
+    ks = FileKeyStore(tmp_path / "keys.json")
+    _, read_key = ks.issue("alpha", ["read"])
+    FileQuotaStore(tmp_path / "quotas.json").set("alpha", max_rps=1e-309)  # burst -> 1
+    cfg = ServerConfig(
+        provider_name="fake",
+        llm_name="fake",
+        graph_uri=None,
+        auth_enabled=True,
+        keys_file=str(tmp_path / "keys.json"),
+        quotas_file=str(tmp_path / "quotas.json"),
+    )
+    app, _rec = _patched_app(monkeypatch, config=cfg)
+    client = TestClient(app)
+    h = {"X-API-Key": read_key}
+    assert client.post("/recall", json={"query": "x"}, headers=h).status_code == 200
+    r = client.post("/recall", json={"query": "x"}, headers=h)
+    assert r.status_code == 429  # not 500
+    assert int(r.headers["Retry-After"]) >= 1  # finite, capped
+
+
 def test_recall_not_rate_limited_without_quota(monkeypatch, tmp_path):
     # A tenant with no rate quota is never throttled, even under a burst.
     from mnemostack.auth import FileKeyStore
