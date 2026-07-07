@@ -471,6 +471,17 @@ def test_set_quota_empty_body_does_not_provision(monkeypatch, tmp_path):
     assert not any(x["tenant"] == "ghost" for x in listed)
 
 
+def test_quota_tenant_with_slash(monkeypatch, tmp_path):
+    # tenant ids may contain '/', which the stores accept — the quota route must
+    # handle them (path converter), or such a tenant is unmanageable via the API.
+    c, admin_key, *_ = _admin_client(monkeypatch, tmp_path)
+    r = c.put("/api/quotas/team%2Facme", headers=_hdr(admin_key), json={"max_points": 7})
+    assert r.status_code == 200 and r.json()["tenant"] == "team/acme"
+    listed = c.get("/api/quotas", headers=_hdr(admin_key)).json()["quotas"]
+    assert any(x["tenant"] == "team/acme" and x["max_points"] == 7 for x in listed)
+    assert c.delete("/api/quotas/team%2Facme", headers=_hdr(admin_key)).json()["removed"] is True
+
+
 def test_remove_quota(monkeypatch, tmp_path):
     c, admin_key, *_ = _admin_client(monkeypatch, tmp_path)
     c.put("/api/quotas/acme", headers=_hdr(admin_key), json={"max_points": 5})

@@ -287,12 +287,15 @@ $("#q-rows").addEventListener("click",async e=>{
 // ---- boot / auth ----
 async function loadBrowse(){await loadTenants();await loadOverview();await loadRecords();}
 async function probeManage(){
-  // /api/keys is admin-only; 200 => reveal management, 403 => read-only/no-auth mode.
-  try{await loadKeys();await loadQuotas();
-    $('nav.tabs button[data-tab="keys"]').hidden=false;
-    $('nav.tabs button[data-tab="quotas"]').hidden=false;
-    $("#mode").textContent="admin";
-  }catch(e){if(e.status!==403)throw e;}  // 403 = not an admin console; stay read-only
+  // /api/keys is admin-only; 200 => admin console, 403 => read-only/no-auth mode.
+  try{await loadKeys();}
+  catch(e){if(e.status===403)return; throw e;}  // 403 = not admin; 401 -> boot() keybar
+  $('nav.tabs button[data-tab="keys"]').hidden=false;
+  $("#mode").textContent="admin";
+  // Quotas independently: a broken/unreadable quota store (503) must not hide the
+  // otherwise-usable keys panel.
+  try{await loadQuotas();$('nav.tabs button[data-tab="quotas"]').hidden=false;}
+  catch(e){/* leave the quotas tab hidden; keys management still works */}
 }
 async function boot(){
   try{await loadBrowse();$("#keybar").hidden=true;await probeManage();}
@@ -712,7 +715,7 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
         except QuotaStoreError as e:
             raise HTTPException(status_code=503, detail=f"quota store unreadable: {e}") from e
 
-    @app.put("/api/quotas/{tenant}")
+    @app.put("/api/quotas/{tenant:path}")
     def set_quota(
         tenant: str,
         body: dict[str, Any] = Body(default_factory=dict),  # noqa: B008 — FastAPI DI
@@ -746,7 +749,7 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
             "burst": quota.effective_burst(),
         }
 
-    @app.delete("/api/quotas/{tenant}")
+    @app.delete("/api/quotas/{tenant:path}")
     def remove_quota(tenant: str, _p=_admin) -> dict[str, Any]:
         from mnemostack.quotas import QuotaStoreError
 

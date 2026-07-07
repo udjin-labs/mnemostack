@@ -79,6 +79,27 @@ def _normalize_scopes(scopes: list[str] | frozenset[str] | str) -> list[str]:
     return out
 
 
+def _is_usable_admin(rec: dict[str, Any]) -> bool:
+    """Whether ``rec`` is a record :meth:`FileKeyStore.verify` would accept AND that
+    grants ``admin`` — the SAME validity rules as verify (a usable ascii-str hash,
+    a non-empty string tenant, a scopes list that normalizes and contains admin).
+    A shaped-but-invalid record (empty tenant, non-list scopes, bad hash) is not a
+    real admin, so it must not be counted when protecting the last admin key."""
+    stored = rec.get("hash")
+    if not isinstance(stored, str) or not stored or not stored.isascii():
+        return False
+    tenant = rec.get("tenant")
+    if not isinstance(tenant, str) or not tenant:
+        return False
+    raw_scopes = rec.get("scopes")
+    if not isinstance(raw_scopes, list):
+        return False
+    try:
+        return "admin" in _normalize_scopes(raw_scopes)
+    except (ValueError, TypeError):
+        return False
+
+
 def default_keys_path() -> Path:
     """Where FileKeyStore lives by default (override with MNEMOSTACK_KEYS_FILE)."""
     env = os.environ.get("MNEMOSTACK_KEYS_FILE")
@@ -287,16 +308,15 @@ class FileKeyStore:
         ``"last_admin"``.
 
         With ``protect_last_admin`` the whole check-and-remove runs under one lock,
-        so it refuses (``"last_admin"``) to remove the only key still carrying the
-        ``admin`` scope — and two concurrent revokes of *different* admin keys can't
-        both pass the check and leave zero admins (the TOCTOU a check-then-``revoke``
-        would have). Used by the inspector admin console so it can't lock itself out.
+        so it refuses (``"last_admin"``) to remove the only key that would still
+        authenticate as an admin — and two concurrent revokes of *different* admin
+        keys can't both pass the check and leave zero admins (the TOCTOU a
+        check-then-``revoke`` would have). Only records that :meth:`verify` would
+        actually accept as admins count, so a malformed shell record (empty tenant,
+        non-list scopes, bad hash) can't be mistaken for the surviving admin and let
+        the real last admin be revoked. Used by the inspector admin console so it
+        can't lock itself out.
         """
-
-        def _is_admin(r: dict[str, Any]) -> bool:
-            sc = r.get("scopes")
-            return isinstance(sc, list) and "admin" in sc
-
         with self._locked():
             records = self._load()
             target = next((r for r in records if r.get("id") == key_id), None)
@@ -304,8 +324,8 @@ class FileKeyStore:
                 return "not_found"
             if (
                 protect_last_admin
-                and _is_admin(target)
-                and sum(1 for r in records if _is_admin(r)) <= 1
+                and _is_usable_admin(target)
+                and sum(1 for r in records if _is_usable_admin(r)) <= 1
             ):
                 return "last_admin"
             self._save([r for r in records if r.get("id") != key_id])

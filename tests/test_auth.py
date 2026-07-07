@@ -101,6 +101,24 @@ def test_revoke_guarded_statuses_and_last_admin(tmp_path):
     assert ks.revoke_guarded(admin2) == "revoked"
 
 
+def test_revoke_guarded_ignores_malformed_admin_records(tmp_path):
+    # A shaped-but-invalid "admin" record (empty tenant -> verify() would deny it)
+    # must NOT count as a surviving admin, or the last *usable* admin could be
+    # revoked, locking everyone out.
+    import json
+
+    p = tmp_path / "keys.json"
+    ks = FileKeyStore(p)
+    real_admin, real_key = ks.issue("ops", ["admin"])
+    # hand-write a malformed admin shell alongside the real one
+    data = json.loads(p.read_text())
+    data["keys"].append({"id": "ghost", "hash": "deadbeef", "tenant": "", "scopes": ["admin"]})
+    p.write_text(json.dumps(data))
+    # the malformed record doesn't authenticate, so it can't be the surviving admin
+    assert ks.revoke_guarded(real_admin, protect_last_admin=True) == "last_admin"
+    assert ks.verify(real_key) is not None  # the real admin is still there
+
+
 def test_invalid_scope_rejected(tmp_path):
     ks = _store(tmp_path)
     with pytest.raises(ValueError, match="unknown scope"):
