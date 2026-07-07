@@ -144,28 +144,49 @@ def upsert_markdown_chunks(
     given — runs AFTER embedding but BEFORE any upsert, with the count of
     successfully-embedded new chunks and the failed sources; it may raise (e.g.
     ``QuotaExceededError`` from :func:`markdown_quota_check`) to abort the write.
+
+    Memory: with no hook (the common unscoped/no-quota case) new chunks are
+    embedded and upserted one at a time, so a large corpus keeps a constant
+    footprint. The hook needs the total insert count before any write and is
+    all-or-nothing, so *that* path must embed the whole batch before writing —
+    bounded in practice by the tenant's cap, since a run past it is rejected.
     """
     tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
     existing_ids = set(existing_payloads)
     res = ChunkSyncResult()
-    # Phase 1: embed the NEW chunks; a failed embedding is never stored.
-    to_upsert: list[tuple[str, list, dict]] = []
-    for cid, text, payload in chunks:
-        if cid in existing_ids:
-            continue
+    new_chunks = [c for c in chunks if c[0] not in existing_ids]
+
+    def _embed(text: str, source: str) -> list | None:
         vec = provider.embed(text)
         if not vec:
             res.failed += 1
-            res.failed_sources.add(payload["source"])
-            continue
-        to_upsert.append((cid, vec, payload))
-    # Phase 2: caller hook (quota) — enforced on the real stored count, pre-write.
-    if before_upsert is not None:
+            res.failed_sources.add(source)
+            return None
+        return vec
+
+    if before_upsert is None:
+        # No quota hook: stream embed+upsert per chunk so indexing a large corpus
+        # doesn't hold every vector in memory at once.
+        for cid, text, payload in new_chunks:
+            vec = _embed(text, payload["source"])
+            if vec is None:
+                continue
+            store.upsert(cid, vec, payload, **tkw)
+            res.inserted += 1
+    else:
+        # Quota hook: it enforces on the total insert count and is all-or-nothing,
+        # so embed the whole batch first, run the check, then write only if it passes.
+        to_upsert: list[tuple[str, list, dict]] = []
+        for cid, text, payload in new_chunks:
+            vec = _embed(text, payload["source"])
+            if vec is None:
+                continue
+            to_upsert.append((cid, vec, payload))
         before_upsert(len(to_upsert), res.failed_sources)
-    # Phase 3: upsert the embedded new chunks.
-    for cid, vec, payload in to_upsert:
-        store.upsert(cid, vec, payload, **tkw)
-        res.inserted += 1
+        for cid, vec, payload in to_upsert:
+            store.upsert(cid, vec, payload, **tkw)
+            res.inserted += 1
+
     for cid, _text, payload in chunks:
         if cid not in existing_ids:
             continue

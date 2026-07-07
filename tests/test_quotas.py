@@ -269,6 +269,36 @@ def _md(source):
     return {"source": source, "_md_keys": ["text", "source", "offset"]}
 
 
+def test_markdown_upsert_streams_without_hook():
+    # No quota hook (the common unscoped path): embed+upsert must interleave so a
+    # large corpus isn't fully buffered in memory before the first write.
+    from mnemostack.markdown.sync import upsert_markdown_chunks
+
+    upserted: list[str] = []
+    embed_saw: list[int] = []
+
+    class _Store:
+        def upsert(self, cid, vec, payload, **kw):
+            upserted.append(cid)
+
+        def set_payload(self, *a, **k):
+            pass
+
+        def delete_payload_keys(self, *a, **k):
+            pass
+
+    class _Prov:
+        def embed(self, text):
+            embed_saw.append(len(upserted))  # writes completed before this embed
+            return [0.1]
+
+    chunks = [(f"id{i}", f"t{i}", _md("a.md")) for i in range(3)]
+    res = upsert_markdown_chunks(_Store(), _Prov(), chunks, {})
+    assert res.inserted == 3
+    assert embed_saw == [0, 1, 2]  # streamed: each embed sees the prior upsert
+    # (a buffered path would embed all three before any upsert -> [0, 0, 0])
+
+
 def test_markdown_upsert_refuses_over_quota():
     store = _CountingStore(existing=9)
     chunks = [(f"id{i}", f"t{i}", _md("a.md")) for i in range(5)]
