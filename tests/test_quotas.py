@@ -213,11 +213,13 @@ def test_ingest_quota_end_to_end_inmemory():
 
 
 def _md_upsert(store, provider, chunks, existing, *, max_points, prune=False,
-               full_root=False, tenant="acme"):
+               full_root=False, tenant="acme", visited=None, md_owned_only=False):
     from mnemostack.markdown.sync import markdown_quota_check, upsert_markdown_chunks
 
-    check = markdown_quota_check(store, tenant, max_points, existing, chunks,
-                                 prune=prune, full_root=full_root)
+    if visited is None:
+        visited = {p.get("source") for _c, _t, p in chunks}
+    check = markdown_quota_check(store, tenant, max_points, existing, chunks, visited,
+                                 prune=prune, full_root=full_root, md_owned_only=md_owned_only)
     return upsert_markdown_chunks(store, provider, chunks, existing,
                                   tenant=tenant, before_upsert=check)
 

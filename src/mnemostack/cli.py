@@ -1465,7 +1465,7 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
     if not args.recreate and store.collection_exists():
         for hit in store.scroll(filters={"index_root": index_root}, **mtkw):
             existing_payloads[str(hit.id)] = hit.payload or {}
-    from .markdown.sync import build_link_map, upsert_markdown_chunks
+    from .markdown.sync import ChunkSyncResult, build_link_map, upsert_markdown_chunks
 
     existing_ids = set(existing_payloads)
     skipped = sum(1 for c in chunks if c[0] in existing_ids)
@@ -1482,8 +1482,9 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
     # what the prune step will remove — per-source replacements plus full-root
     # deletions), checked after embedding but before any write.
     _quota_check = markdown_quota_check(
-        store, tenant, max_points, existing_payloads, chunks,
+        store, tenant, max_points, existing_payloads, chunks, set(col.sources),
         prune=bool(args.prune and not args.recreate), full_root=full_root_walk,
+        md_owned_only=False,  # bulk prune_stale_chunks removes every stale point of the source
     )
     try:
         cs = upsert_markdown_chunks(
@@ -1491,8 +1492,14 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
             before_upsert=_quota_check,
         )
     except QuotaExceededError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 2
+        # In --watch mode, a startup corpus over quota must NOT kill the daemon:
+        # nothing was written (the check runs before any upsert), so warn and fall
+        # through to the watch loop, which skips/retries files per the live quota.
+        if not watching:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+        print(f"warning: initial index skipped — {e}", file=sys.stderr)
+        cs = ChunkSyncResult()
     inserted, refreshed, failed = cs.inserted, cs.refreshed, cs.failed
     failed_sources = cs.failed_sources
 
@@ -2698,10 +2705,10 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     raw = sys.argv[1:] if argv is None else argv
-    # `keys` manages the auth store and needs no stack config, so a malformed
-    # unrelated config/env must not block adding or revoking a service key.
+    # `keys` and `quota` manage their own stores and need no stack config, so a
+    # malformed unrelated config/env must not block managing a key or a quota.
     subcmd = next((a for a in raw if not a.startswith("-")), None)
-    parser = build_parser(config_light=subcmd == "keys")
+    parser = build_parser(config_light=subcmd in {"keys", "quota"})
     args = parser.parse_args(argv)
     return args.func(args)
 

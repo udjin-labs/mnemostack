@@ -45,32 +45,47 @@ class ChunkSyncResult:
 def markdown_prune_count(
     existing_payloads: dict[str, dict],
     chunks: list[tuple[str, str, dict]],
+    visited_sources: set[str],
     *,
     prune: bool,
     full_root: bool,
     failed_sources: set[str],
+    md_owned_only: bool,
 ) -> int:
-    """How many existing points a re-index will PRUNE — mirrors prune_stale_chunks.
+    """How many existing points a re-index will PRUNE — mirrors the actual prune.
 
-    A markdown re-index removes stale chunks: the re-indexed sources' chunks no
-    longer produced, plus (on a full-root walk) chunks of sources removed from the
-    corpus entirely. Only markdown-owned chunks (``_md_keys``) are prunable, and a
-    source whose embedding failed is skipped (its prune is deferred). Returns 0
-    when the caller won't prune, so the quota then counts inserts as pure growth.
+    Rebuilds the same ``fresh_by_source`` the prune uses: every VISITED source
+    (from ``col.sources`` — includes a file edited to empty, which produces no
+    chunks but still has its stale points removed) mapped to its fresh chunk ids,
+    plus (on a full-root walk) every source that vanished from the corpus mapped
+    to an empty set; a source whose embedding failed is dropped (its prune is
+    deferred). A point is pruned when its source is in that map but its id isn't
+    fresh. ``md_owned_only`` matches the caller's prune: the per-file watch prune
+    removes only ``_md_keys``-owned points, while the bulk ``prune_stale_chunks``
+    removes every stale point of the source. Returns 0 when the caller won't prune.
     """
     if not prune:
         return 0
-    new_ids = {cid for cid, _t, _p in chunks}
-    live_sources = {p.get("source") for _c, _t, p in chunks}
+    fresh: dict[str, set[str]] = {s: set() for s in visited_sources}
+    for cid, _t, p in chunks:
+        src = p.get("source")
+        if src is not None:
+            fresh.setdefault(src, set()).add(cid)
+    if full_root:
+        for pl in existing_payloads.values():  # sources removed from the corpus
+            src = pl.get("source")
+            if src is not None:
+                fresh.setdefault(src, set())
+    for src in failed_sources:
+        fresh.pop(src, None)
     count = 0
     for cid, pl in existing_payloads.items():
-        if not pl.get("_md_keys") or cid in new_ids:
-            continue  # not markdown-owned, or still present (not stale)
         src = pl.get("source")
-        if src in failed_sources:
-            continue  # a failed source isn't pruned this run
-        if src in live_sources or full_root:  # re-indexed source, or full-root deletion
-            count += 1
+        if src not in fresh or cid in fresh[src]:
+            continue  # not a pruned source, or still a fresh id
+        if md_owned_only and not pl.get("_md_keys"):
+            continue
+        count += 1
     return count
 
 
@@ -80,26 +95,27 @@ def markdown_quota_check(
     max_points: int | None,
     existing_payloads: dict[str, dict],
     chunks: list[tuple[str, str, dict]],
+    visited_sources: set[str],
     *,
     prune: bool,
     full_root: bool,
+    md_owned_only: bool,
 ) -> Callable[[int, set[str]], None] | None:
     """A ``before_upsert`` hook enforcing the storage quota on the NET change.
 
     Returns None (no check) when unscoped or no limit. The hook receives the count
     of successfully-embedded NEW inserts and the set of failed sources, computes
-    the exact net change (inserts minus the points this run will prune), and
-    raises ``QuotaExceededError`` if the resulting stored count would exceed the
-    cap — so an edit that replaces content is net-neutral, a deletion frees room,
-    and a failed embedding neither inserts nor blocks its source's prune.
+    the exact net change (inserts minus the points this run will prune — see
+    :func:`markdown_prune_count`), and raises ``QuotaExceededError`` if the
+    resulting stored count would exceed the cap.
     """
     if tenant is None or max_points is None:
         return None
 
     def _check(inserts: int, failed_sources: set[str]) -> None:
         removed = markdown_prune_count(
-            existing_payloads, chunks, prune=prune, full_root=full_root,
-            failed_sources=failed_sources,
+            existing_payloads, chunks, visited_sources, prune=prune, full_root=full_root,
+            failed_sources=failed_sources, md_owned_only=md_owned_only,
         )
         enforce_points_quota(tenant, store.count(tenant=tenant), inserts - removed, max_points)
 
@@ -294,7 +310,8 @@ class MarkdownSyncer:
         # full_root=False since a single file can't observe corpus-wide deletions.
         mp = self.max_points_resolver() if self.max_points_resolver is not None else None
         check = markdown_quota_check(
-            self.store, self.tenant, mp, existing, chunks, prune=True, full_root=False
+            self.store, self.tenant, mp, existing, chunks, set(col.sources),
+            prune=True, full_root=False, md_owned_only=True,  # _prune_markdown_stale filters _md_keys
         )
         cs = upsert_markdown_chunks(
             self.store, self.provider, chunks, existing,
