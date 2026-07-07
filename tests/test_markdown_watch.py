@@ -717,6 +717,31 @@ def test_queue_all_for_retry_reindexes_unchanged_corpus(tmp_path):
     assert sorted(syncer.indexed) == sorted(snap)  # both re-indexed despite no edit
 
 
+def test_failed_retry_not_starved_by_fast_poll(tmp_path):
+    # poll_interval < debounce: a failed file kept in _failed is re-emitted every
+    # poll. Re-adding to the debouncer each time would reset its deadline so flush
+    # never comes due (starvation). poll_once must anchor the deadline so the retry
+    # eventually applies.
+    (tmp_path / "a.md").write_text("# A\n")
+    clock = _FakeClock()
+    syncer = _FakeSyncer()
+    w = MarkdownWatcher(syncer, tmp_path, debounce=1.0, clock=clock)
+    a = next(iter(w._scan()))
+    w._failed.add(a)
+    snap = w._scan()
+
+    w.poll_once(snap)                      # t=0: queue retry, deadline 1.0
+    for t in (0.4, 0.8):                   # fast polls inside the debounce window
+        clock.t = t
+        w.poll_once(snap)                  # must NOT reset the deadline
+        assert w.flush() == 0              # not due yet
+    assert syncer.indexed == []
+    clock.t = 1.2                          # past the anchored deadline
+    w.poll_once(snap)
+    w.flush()
+    assert syncer.indexed == [a]           # applied once, not starved
+
+
 def test_watch_requires_a_directory(tmp_path, capsys):
     import argparse
 

@@ -642,7 +642,10 @@ class Ingestor:
         """
         if self.tenant is None or self.max_points is None:
             return
-        existing = self.store.retrieve_existing_ids(list(point_ids))
+        # Tenant-scoped: an unowned/legacy id this tenant is about to adopt counts
+        # as new growth (the scoped count() doesn't include it yet), so it can't
+        # slip past the cap.
+        existing = self.store.retrieve_existing_ids(list(point_ids), tenant=self.tenant)
         # UNIQUE new ids: a duplicated item in one flush (same id) upserts to one
         # point, so it must count once, not per occurrence.
         new = len({str(pid) for pid in point_ids} - existing)

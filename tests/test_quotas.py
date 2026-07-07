@@ -123,7 +123,8 @@ class _CountingStore:
     def count(self, tenant=None):
         return self._base + len(self._ids)
 
-    def retrieve_existing_ids(self, ids):
+    def retrieve_existing_ids(self, ids, *, tenant=None):
+        # Single-tenant fake: every stored id is this tenant's own.
         return {str(i) for i in ids if str(i) in self._ids}
 
     def upsert_batch(self, points, tenant=None):
@@ -218,6 +219,35 @@ def test_ingest_quota_end_to_end_inmemory():
     assert vs.count(tenant="acme") == 4
     with pytest.raises(QuotaExceededError):  # one genuinely-new item → exceeds
         _ing().ingest(_items(5))
+
+
+def test_ingest_adopting_unowned_id_counts_as_growth():
+    # A legacy UNOWNED point sharing the id a tenant is about to write must count
+    # as growth: the tenant-scoped upsert adopts it (stamps tenant_id), but the
+    # tenant-scoped count() doesn't include it yet — so a collection-wide "already
+    # exists" probe would let it slip past the cap uncounted.
+    from qdrant_client import QdrantClient
+    from qdrant_client.models import Distance
+
+    from mnemostack.ingest import stable_chunk_id
+    from mnemostack.vector import VectorStore
+
+    vs = VectorStore.__new__(VectorStore)
+    vs.collection = "q"
+    vs.dimension = 3
+    vs.distance = Distance.COSINE
+    vs.client = QdrantClient(":memory:")
+    vs.ensure_collection()
+
+    item = _items(1)[0]  # source="s0", text="text 0", offset=0
+    pid = stable_chunk_id(item.source, item.offset, item.text, tenant="acme")
+    vs.upsert(pid, [0.1, 0.2, 0.3], {"text": "legacy"})  # unowned (no tenant_id)
+    assert vs.count(tenant="acme") == 0  # not the tenant's yet
+
+    ing = Ingestor(embedding=_Emb(), vector_store=vs, batch_size=3,
+                   tenant="acme", max_points=0)
+    with pytest.raises(QuotaExceededError):  # adopting it would exceed the cap of 0
+        ing.ingest([item])
 
 
 # ---------- markdown enforcement ----------

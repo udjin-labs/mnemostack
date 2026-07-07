@@ -96,6 +96,11 @@ class _Debouncer:
         with self._lock:
             self._pending[path] = [kind, self.clock() + self.delay]
 
+    def is_pending(self, path: str) -> bool:
+        """Whether ``path`` already has a queued change awaiting its window."""
+        with self._lock:
+            return path in self._pending
+
     def drain(self, *, force: bool = False) -> list[tuple[str, str]]:
         """Pop (path, kind) whose quiet window elapsed (or everything if force)."""
         now = self.clock()
@@ -218,7 +223,14 @@ class MarkdownWatcher:
         """
         cur = self._scan()
         for path, mtime in cur.items():
-            if prev.get(path) != mtime or path in self._failed:
+            if prev.get(path) != mtime:
+                self.handle_event(path, UPSERT)  # real change: coalesce normally
+            elif path in self._failed and not self._debouncer.is_pending(path):
+                # Retry an unchanged failed/over-quota file, but do NOT re-queue one
+                # already awaiting its window: re-adding every poll would reset the
+                # debounce deadline, so with poll_interval < debounce the flush would
+                # never come due and the retry would starve. Emitting only when not
+                # pending anchors the deadline so flush eventually applies it.
                 self.handle_event(path, UPSERT)
         for path in prev:
             if path not in cur:
