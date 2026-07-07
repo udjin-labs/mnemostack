@@ -113,6 +113,7 @@ def collect_markdown(
     chunk_size: int = 1200,
     index_root: str | None = None,
     root_dir: str | Path | None = None,
+    tenant: str | None = None,
 ) -> MarkdownCollection:
     """Walk ``root`` for ``*.md`` files and return their chunks + link edges.
 
@@ -224,7 +225,7 @@ def collect_markdown(
             id_source = f"{index_root}\x00{rel}" if index_root is not None else rel
             out.chunks.append(
                 MarkdownChunk(
-                    id=stable_chunk_id(id_source, chunk.offset, chunk.text),
+                    id=stable_chunk_id(id_source, chunk.offset, chunk.text, tenant=tenant),
                     text=chunk.text,
                     payload=payload,
                 )

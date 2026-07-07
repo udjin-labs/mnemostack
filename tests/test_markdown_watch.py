@@ -535,6 +535,72 @@ def test_name_keys_are_stem_and_relpath_without_ext():
     assert set(MarkdownSyncer._name_keys("sub/b.md")) == {"b", "sub/b"}
 
 
+class _TenantRecordingGraph:
+    """Fake graph recording the tenant each call received."""
+
+    def __init__(self):
+        self.tenants: list[str | None] = []
+        self.edges: dict[str, list[str]] = {}
+
+    def sync_file_links(self, source, targets, *, index_root=None, tenant=None):
+        self.tenants.append(tenant)
+        self.edges[source] = list(targets)
+        return len(targets)
+
+    def referrers_of_dangling(self, name_keys, *, index_root=None, tenant=None):
+        self.tenants.append(tenant)
+        return []
+
+    def file_link_sources(self, *, index_root=None, tenant=None):
+        return list(self.edges)
+
+    def close(self):
+        pass
+
+
+def test_syncer_scopes_vector_writes_by_tenant(tmp_path):
+    # A tenant-scoped MarkdownSyncer stamps tenant_id on its chunks; a scoped read
+    # sees them and another tenant sees nothing.
+    store = _mem_store()
+    root = str(tmp_path.resolve())
+    syncer = MarkdownSyncer(
+        store, _FakeProvider(), index_root=root, chunk_size=10000, tenant="acme"
+    )
+    (tmp_path / "a.md").write_text("# Title\n\nHello world.\n")
+    syncer.index_file(tmp_path / "a.md")
+
+    scoped = list(store.scroll(filters={"index_root": root}, tenant="acme"))
+    assert scoped and all((h.payload or {}).get("tenant_id") == "acme" for h in scoped)
+    assert list(store.scroll(filters={"index_root": root}, tenant="other")) == []
+
+
+def test_syncer_threads_tenant_to_graph(tmp_path):
+    store = _mem_store()
+    root = str(tmp_path.resolve())
+    graph = _TenantRecordingGraph()
+    syncer = MarkdownSyncer(
+        store, _FakeProvider(), index_root=root, chunk_size=10000, graph=graph, tenant="acme"
+    )
+    (tmp_path / "a.md").write_text("# Title\n\n[[b]] link.\n")
+    syncer.index_file(tmp_path / "a.md")
+    # Every graph call the syncer made carried the tenant.
+    assert graph.tenants and all(t == "acme" for t in graph.tenants)
+
+
+def test_unscoped_syncer_omits_tenant_kwarg(tmp_path):
+    # Back-compat: an unscoped syncer never passes tenant= (a legacy graph fake
+    # without the kwarg keeps working — mirrors the _ReverseGraph used elsewhere).
+    store = _mem_store()
+    root = str(tmp_path.resolve())
+    graph = _ReverseGraph()  # its sync_file_links has NO tenant kwarg
+    syncer = MarkdownSyncer(
+        store, _FakeProvider(), index_root=root, chunk_size=10000, graph=graph
+    )
+    (tmp_path / "a.md").write_text("# Title\n\n[[b]] link.\n")
+    res = syncer.index_file(tmp_path / "a.md")  # must not raise
+    assert res.source == "a.md"
+
+
 def test_creating_a_note_reresolves_referring_dangling_wikilink(tmp_path):
     # a.md links [[B]] before b.md exists -> dangling edge a.md -> B. Creating
     # b.md must re-resolve a.md's link to b.md (what a full walk would do).

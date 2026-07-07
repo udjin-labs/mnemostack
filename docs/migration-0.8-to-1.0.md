@@ -164,11 +164,11 @@ existing data needs migrating.
   points simply stay outside every tenant's view until stamped. However, chunk ids
   are **tenant-scoped** (`stable_chunk_id(..., tenant=)`), so once you re-ingest the
   same source *under a tenant* the new points get different ids and land **beside**
-  the stamped legacy points — recall then sees duplicates. Note that tenant-aware
-  ingest is a **library** operation (`Ingestor(tenant=...)`): the `mnemostack index`
-  / `index-markdown` CLI has no `--tenant`, and its `--prune` is `index_root`-scoped
-  (not tenant-scoped), so it computes the *legacy* ids and would prune the wrong
-  set. Reconcile the first tenant re-ingest with the library
+  the stamped legacy points — recall then sees duplicates. `mnemostack index-markdown
+  --tenant <id>` is tenant-scoped (ids, payloads, and graph nodes); the generic
+  `mnemostack index` CLI has no `--tenant` (that path is library-only via
+  `Ingestor(tenant=...)`). Since `--prune` on the *unscoped* generic `index` is
+  `index_root`-scoped (not tenant-scoped), reconcile a tenant re-ingest with the library
   `prune_stale_chunks(store, fresh, tenant=<t>)` (tenant-scoped), or — simplest —
   ingest each tenant into a **fresh collection** and cut over. Stamping alone (no
   re-ingest) has no such duplication.
@@ -181,17 +181,24 @@ existing data needs migrating.
   per-request bearer / `X-API-Key` header; `mcp-serve` binds one process key via
   `--api-key` / `MNEMOSTACK_API_KEY`. See
   [api-stability.md](api-stability.md#multi-tenancy--authentication).
-- **Graph is not tenant-scoped yet.** Under auth no tenant reads another's graph
-  nodes, but the two surfaces differ: `mcp-serve --auth` fails the graph tools
-  closed and builds recall with no graph (so authenticated MCP has **no graph recall
-  at all**), while `serve --auth` still queries the configured Memgraph and relies
-  on the `filter_by_tenant` backstop to drop the (tenant-less) graph hits — so an
-  authenticated HTTP recall still contacts the shared graph. The graph URI/database
-  is a single **process-wide** setting (service keys don't pick one), so per-tenant
-  graph recall means a **separate `serve` process per tenant** (each with its own
-  `--memgraph-uri` / `graph.database`) — not several databases behind one
-  authenticated server. If you don't need it, run HTTP with `--memgraph-uri ""`.
-  Full graph tenant scoping is planned follow-up work.
+- **Graph is tenant-scoped.** The graph now carries a server-owned `tenant`
+  property on every node and edge (the twin of the vector store's `tenant_id`), so
+  graph recall works under auth on both surfaces — one shared graph, isolated by
+  the property. Scoped writes fold `tenant` into the node key and scoped reads
+  (`query_triples`, `MemgraphRetriever`, `GraphResurrection`, and the MCP graph
+  tools) confine every match to it. **No re-index and no change for single-tenant
+  graphs**: an unscoped write/read emits the exact legacy Cypher, and a graph with
+  no `tenant` property reads as single-tenant. To adopt tenancy on an existing
+  graph, stamp it alongside the vector store:
+  `mnemostack tenant-migrate --tenant <id> --memgraph-uri <bolt>` (stamps nodes +
+  edges; `--dry-run` / `--all` mirror the vector stamp), or
+  `GraphStore.stamp_tenant(...)` in the library. The markdown indexer is
+  tenant-aware too — `index-markdown --tenant <id>` scopes its `:File` link
+  nodes/edges, so a multi-tenant deployment has **no unscoped graph write path**
+  (index each tenant's corpus with its own `--tenant`). Unscoped writes are
+  hardened against corrupting a migrated graph anyway: an unscoped `add_triple`
+  won't overwrite a tenant edge, and an unscoped markdown re-index won't delete a
+  tenant file's links.
 
 ## Config & CLI
 

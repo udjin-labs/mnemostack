@@ -272,7 +272,26 @@ def _write_wrapper_file(wrapper_dir: Path, item: IngestItem, point_id: str) -> b
     return existed
 
 
-def _sync_wrapper_graph(graph: Any, item: IngestItem, point_id: str) -> None:
+def _accepts_kw(fn: Any, name: str) -> bool:
+    """Whether ``fn`` accepts a keyword arg ``name`` (or **kwargs).
+
+    Lets us thread ``tenant`` into a duck-typed graph adapter only when its
+    signature supports it, so a legacy adapter isn't broken by an unexpected kwarg.
+    """
+    import inspect
+
+    try:
+        params = inspect.signature(fn).parameters
+    except (ValueError, TypeError):
+        return False
+    if name in params:
+        return True
+    return any(p.kind is p.VAR_KEYWORD for p in params.values())
+
+
+def _sync_wrapper_graph(
+    graph: Any, item: IngestItem, point_id: str, *, tenant: str | None = None
+) -> None:
     tags = _item_tags(item)
     if not tags:
         return
@@ -280,27 +299,61 @@ def _sync_wrapper_graph(graph: Any, item: IngestItem, point_id: str) -> None:
     name = Path(item.source).name or item.source or point_id
     if hasattr(graph, "driver"):
         database = getattr(graph, "database", None)
+        # Fold the tenant into the File/Tag node key and stamp it on the TAGGED
+        # edge, so a scoped graph recall (which pins nodes AND edges to `tenant`)
+        # traverses these. Unscoped keeps the legacy path-keyed write untouched.
+        tk = ", tenant: $tenant" if tenant is not None else ""
+        if tenant is not None:
+            file_set = (
+                "SET f.name = $name, f.indexed_date = $indexed_date, "
+                "f.point_id = $point_id, f.tenant = $tenant "
+            )
+            # Fold the tenant into the TAGGED MERGE key so a scoped wrapper write
+            # only matches/creates its own edge — never claims a foreign-tenant
+            # TAGGED edge between these nodes (round-7 relationship-key pattern).
+            tagged = "MERGE (f)-[r:TAGGED {tenant: $tenant}]->(t)"
+        else:
+            # Unscoped: the path-key subset-matches a tenant-owned :File node after
+            # migration, so only write metadata when the node is tenant-less — an
+            # unscoped wrapper ingest must not overwrite a tenant's point_id/date.
+            # On a single-tenant graph the node has no tenant, so this always runs.
+            file_set = (
+                "FOREACH (_ IN CASE WHEN f.tenant IS NULL THEN [1] ELSE [] END | "
+                "SET f.name = $name, f.indexed_date = $indexed_date, f.point_id = $point_id) "
+            )
+            tagged = "MERGE (f)-[r:TAGGED]->(t)"
         query = (
-            "MERGE (f:File {path: $path}) "
-            "SET f.name = $name, f.indexed_date = $indexed_date, f.point_id = $point_id "
+            f"MERGE (f:File {{path: $path{tk}}}) "
+            f"{file_set}"
             "WITH f "
             "UNWIND $tags AS tag "
-            "MERGE (t:Tag {name: tag}) "
-            "MERGE (f)-[:TAGGED]->(t)"
+            f"MERGE (t:Tag {{name: tag{tk}}}) "
+            f"{tagged}"
         )
+        params: dict[str, Any] = {
+            "name": name,
+            "path": item.source,
+            "indexed_date": indexed_date,
+            "point_id": point_id,
+            "tags": tags,
+        }
+        if tenant is not None:
+            params["tenant"] = tenant
         with graph.driver.session(database=database) as session:
-            session.run(
-                query,
-                name=name,
-                path=item.source,
-                indexed_date=indexed_date,
-                point_id=point_id,
-                tags=tags,
-            )
+            session.run(query, **params)
         return
-    if hasattr(graph, "add_file_tags"):
-        graph.add_file_tags(name=name, path=item.source, indexed_date=indexed_date, tags=tags)
+    if hasattr(graph, "add_file_tags") and (tenant is None or _accepts_kw(graph.add_file_tags, "tenant")):
+        # Use the adapter's own hook, threading tenant only when it accepts it.
+        fkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
+        graph.add_file_tags(
+            name=name, path=item.source, indexed_date=indexed_date, tags=tags, **fkw
+        )
         return
+    # Fallback (and: tenant set but add_file_tags can't scope it) → add_triple,
+    # which threads tenant, so the tags land in the tenant's subgraph rather than
+    # unscoped. Only pass tenant= when set, so a legacy add_triple signature (no
+    # tenant kwarg) doesn't TypeError and silently drop tags in single-tenant use.
+    tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
     for tag in tags:
         graph.add_triple(
             name,
@@ -309,6 +362,7 @@ def _sync_wrapper_graph(graph: Any, item: IngestItem, point_id: str) -> None:
             subject_label="File",
             obj_label="Tag",
             properties={"path": item.source, "indexed_date": indexed_date, "point_id": point_id},
+            **tkw,
         )
 
 
@@ -648,7 +702,7 @@ class Ingestor:
                     log.warning("failed to write markdown wrapper for %s: %s", item.source, exc)
             if self.graph is not None:
                 try:
-                    _sync_wrapper_graph(self.graph, item, pid)
+                    _sync_wrapper_graph(self.graph, item, pid, tenant=self.tenant)
                 except Exception as exc:  # noqa: BLE001
                     log.warning("failed to sync wrapper graph for %s: %s", item.source, exc)
 
