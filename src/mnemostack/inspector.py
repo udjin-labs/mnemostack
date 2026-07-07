@@ -1,21 +1,30 @@
-"""Read-only web inspector — a memory operations console (not a marketing app).
+"""Web inspector — a memory operations & tenant-administration console.
 
-A small, dependency-light, **read-only** operator UI for looking at what's in a
-mnemostack deployment: tenants, per-tenant collection/graph size, stored records
-(with filters), stale/invalidated facts, dependency reachability, and a quick
-smoke query. It never writes — no ingest, no invalidate, no delete — so it's
-safe to point at production.
+A small, dependency-light operator UI for a mnemostack deployment. It has two
+modes:
 
-Tenant-aware from day one: every data read is scoped by the selected tenant via
-the vector store's tenant boundary, so one tenant's view can't show another's
-records. The tenant list is derived from the data (distinct `tenant_id` values)
-for now; once service keys land it will come from the key store instead, and the
-selected tenant will be resolved from the caller's key rather than chosen freely.
+- **Read-only browse (default, no auth).** ``mnemostack inspect`` — look at what's
+  stored: tenants, per-tenant collection/graph size, records (with filters),
+  stale/invalidated facts, dependency reachability, and a smoke query. It never
+  writes to the data, so it's safe to point at production. Data reads are always
+  tenant-scoped by the vector store's boundary, so one tenant's view can't show
+  another's records.
+
+- **Admin console (``--auth``).** ``mnemostack inspect --auth`` requires an
+  **admin**-scoped service key for every ``/api`` call and unlocks tenant
+  administration: issue/revoke service keys and set/remove per-tenant quotas
+  (storage + rate), on top of the browse views. Auth is by header
+  (``X-API-Key`` / ``Authorization: Bearer``) supplied by the page's JS after the
+  operator enters the key — never a cookie, so there is no CSRF surface. A freshly
+  issued key's plaintext is shown **once** and never stored. Revoking the last
+  admin key is refused, so the console can't lock itself out.
 
 Run it separately from the serving API (it is an operator tool, not the public
-recall surface):
+recall surface). Bind to a trusted interface; even under ``--auth`` an admin
+console warrants a localhost bind or a TLS-terminating proxy:
 
-    mnemostack inspect --host 127.0.0.1 --port 8100
+    mnemostack inspect --host 127.0.0.1 --port 8100          # read-only
+    mnemostack inspect --auth --port 8100                    # admin console
 
 Install the server extra: ``pip install 'mnemostack[server]'``.
 """
@@ -26,8 +35,9 @@ import logging
 from typing import Any
 
 try:
-    from fastapi import FastAPI, Query
+    from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query
     from fastapi.responses import HTMLResponse
+    from pydantic import BaseModel, Field
 except ImportError as e:  # pragma: no cover - import guard
     raise ImportError(
         "FastAPI is not installed. Install the optional server extra: "
@@ -49,8 +59,9 @@ from mnemostack.vector.qdrant import (
 
 log = logging.getLogger(__name__)
 
-# One self-contained page: no external scripts/styles/fonts (CSP-safe), plain
-# and functional. Vanilla JS talks to the read-only /api/* endpoints below.
+# One self-contained page: no external scripts/styles/fonts (CSP-safe), plain and
+# functional. Vanilla JS talks to the /api/* endpoints. Auth (admin console) is by
+# header the JS sets from an in-memory key — never a cookie, so no CSRF surface.
 INSPECTOR_HTML = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -62,7 +73,8 @@ INSPECTOR_HTML = """<!doctype html>
  .muted{opacity:.65} .mono{font-family:ui-monospace,monospace}
  .bar{display:flex;gap:.6rem;align-items:center;flex-wrap:wrap;margin-bottom:1rem}
  select,input,button{font:inherit;padding:.35rem .5rem;border:1px solid #8886;border-radius:6px;background:transparent;color:inherit}
- input[type=text]{min-width:16rem}
+ input[type=text],input[type=password]{min-width:14rem}
+ button{cursor:pointer}
  .cards{display:flex;gap:.6rem;flex-wrap:wrap;margin-bottom:1rem}
  .card{border:1px solid #8884;border-radius:8px;padding:.6rem .9rem;min-width:8rem}
  .card b{font-size:1.4rem;display:block}
@@ -73,23 +85,101 @@ INSPECTOR_HTML = """<!doctype html>
  tr.stale{opacity:.55}
  .pill{font-size:.75rem;border:1px solid #8886;border-radius:999px;padding:0 .5rem}
  pre{white-space:pre-wrap;word-break:break-word;background:#8881;padding:.6rem;border-radius:6px}
+ nav.tabs{display:flex;gap:.3rem;margin:.4rem 0 1rem;border-bottom:1px solid #8883}
+ nav.tabs button{border:0;border-bottom:2px solid transparent;border-radius:0;background:transparent;padding:.4rem .8rem}
+ nav.tabs button.active{border-bottom-color:currentColor;font-weight:600}
+ .panel{border:1px solid #8884;border-radius:8px;padding:.8rem;margin-bottom:1rem}
+ .plaintext{background:#2a81;border:1px solid #2a8;border-radius:6px;padding:.6rem;margin:.6rem 0}
+ .err{color:#c44}
+ label.chk{border:0;padding:0;display:inline-flex;gap:.2rem;align-items:center}
 </style></head><body>
-<h1>mnemostack inspector <span class="muted mono" id="ver"></span> <span class="pill">read-only</span></h1>
-<div class="bar">
- <label>tenant <select id="tenant"></select></label> <input id="tenant-manual" placeholder="or type a tenant id" size="16">
- <input type="text" id="q" placeholder="smoke query (vector search) — empty = browse records">
- <input type="text" id="filters" placeholder='filters JSON e.g. {"source":"notes.md"}' style="min-width:20rem">
- <button id="go">Search</button>
- <span class="muted" id="status"></span>
+<h1>mnemostack inspector <span class="muted mono" id="ver"></span> <span class="pill" id="mode">read-only</span></h1>
+<div class="bar" id="keybar" hidden>
+ <b>admin key required</b>
+ <input type="password" id="key" placeholder="admin service key (msk_…)" autocomplete="off">
+ <button id="keygo">Unlock</button>
+ <span class="err" id="keyerr"></span>
 </div>
-<div class="cards" id="cards"></div>
-<table><thead><tr><th>id</th><th>source</th><th>text</th><th>state</th></tr></thead>
-<tbody id="rows"></tbody></table>
-<pre id="detail" hidden></pre>
+<nav class="tabs">
+ <button data-tab="browse" class="active">Browse</button>
+ <button data-tab="keys" hidden>Keys</button>
+ <button data-tab="quotas" hidden>Quotas</button>
+</nav>
+
+<section id="tab-browse">
+ <div class="bar">
+  <label>tenant <select id="tenant"></select></label> <input id="tenant-manual" placeholder="or type a tenant id" size="16">
+  <input type="text" id="q" placeholder="smoke query (vector search) — empty = browse records">
+  <input type="text" id="filters" placeholder='filters JSON e.g. {"source":"notes.md"}' style="min-width:20rem">
+  <button id="go">Search</button>
+  <span class="muted" id="status"></span>
+ </div>
+ <div class="cards" id="cards"></div>
+ <table><thead><tr><th>id</th><th>source</th><th>text</th><th>state</th></tr></thead>
+ <tbody id="rows"></tbody></table>
+ <pre id="detail" hidden></pre>
+</section>
+
+<section id="tab-keys" hidden>
+ <div class="panel">
+  <b>Issue a service key</b>
+  <div class="bar">
+   <input type="text" id="k-tenant" placeholder="tenant id">
+   <label class="chk"><input type="checkbox" class="k-scope" value="read" checked>read</label>
+   <label class="chk"><input type="checkbox" class="k-scope" value="write">write</label>
+   <label class="chk"><input type="checkbox" class="k-scope" value="admin">admin</label>
+   <input type="text" id="k-label" placeholder="label (optional)">
+   <button id="k-issue">Issue</button>
+   <span class="err" id="k-err"></span>
+  </div>
+  <div class="muted">admin is a <b>global</b> operator scope — full access to every tenant's
+   keys and quotas, not just the tenant above.</div>
+  <div class="plaintext" id="k-plain" hidden></div>
+ </div>
+ <table><thead><tr><th>id</th><th>tenant</th><th>scopes</th><th>label</th><th>created</th><th></th></tr></thead>
+ <tbody id="k-rows"></tbody></table>
+</section>
+
+<section id="tab-quotas" hidden>
+ <div class="panel">
+  <b>Set a tenant quota</b> <span class="muted">(blank = leave unchanged; sets only what you fill)</span>
+  <div class="bar">
+   <input type="text" id="q-tenant" placeholder="tenant id">
+   <input type="text" id="q-points" placeholder="max_points" size="10">
+   <input type="text" id="q-rps" placeholder="max_rps" size="8">
+   <input type="text" id="q-burst" placeholder="burst" size="6">
+   <button id="q-set">Set</button>
+   <span class="err" id="q-err"></span>
+  </div>
+ </div>
+ <table><thead><tr><th>tenant</th><th>max_points</th><th>max_rps</th><th>burst</th><th></th></tr></thead>
+ <tbody id="q-rows"></tbody></table>
+</section>
+
 <script>
-const $=s=>document.querySelector(s), esc=t=>String(t??"").replace(/[<&>"']/g,c=>({"<":"&lt;","&":"&amp;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-async function j(u){const r=await fetch(u);if(!r.ok)throw new Error(r.status+" "+await r.text());return r.json();}
+const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+const esc=t=>String(t??"").replace(/[<&>"']/g,c=>({"<":"&lt;","&":"&amp;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+let KEY="";  // admin key, in-memory only (never persisted) — lost on reload by design
+async function j(u,opts){
+  opts=opts||{}; opts.headers=Object.assign({},opts.headers);
+  if(KEY) opts.headers["X-API-Key"]=KEY;
+  if(opts.body){opts.headers["Content-Type"]="application/json";}
+  const r=await fetch(u,opts);
+  const body=await r.text();
+  if(!r.ok){let d;try{d=JSON.parse(body).detail}catch(e){d=body}
+    const err=new Error((d||r.statusText)); err.status=r.status; throw err;}
+  return body?JSON.parse(body):{};
+}
 function tenant(){return $("#tenant-manual").value.trim()||$("#tenant").value;}
+function effBurst(q){return q.burst!=null?q.burst:(q.max_rps!=null?Math.max(1,Math.ceil(q.max_rps)):null);}
+
+// ---- tabs ----
+$$("nav.tabs button").forEach(b=>b.addEventListener("click",()=>{
+  $$("nav.tabs button").forEach(x=>x.classList.remove("active"));b.classList.add("active");
+  for(const t of ["browse","keys","quotas"])$("#tab-"+t).hidden=(t!==b.dataset.tab);
+}));
+
+// ---- browse ----
 async function loadTenants(){
   const d=await j("/api/tenants?limit=1000");$("#ver").textContent="v"+d.version;
   const sel=$("#tenant");sel.innerHTML='<option value="">(all / unscoped)</option>';
@@ -97,8 +187,7 @@ async function loadTenants(){
   for(const t of d.tenants){const o=document.createElement("option");o.value=t.id;o.textContent=t.id+" ("+t.count+")";sel.appendChild(o);}
 }
 async function loadOverview(){
-  const t=tenant();
-  const d=await j("/api/overview?tenant="+encodeURIComponent(t));
+  const d=await j("/api/overview?tenant="+encodeURIComponent(tenant()));
   const dep=(ok,label)=>`<div class="card"><b class="${ok===null?'off':ok?'ok':'bad'}">${ok===null?'—':ok?'up':'down'}</b>${label}</div>`;
   $("#cards").innerHTML=
     `<div class="card"><b>${d.points}</b>points</div>`+
@@ -106,10 +195,8 @@ async function loadOverview(){
     dep(d.qdrant,"qdrant")+dep(d.memgraph,"memgraph (graph)");
 }
 async function loadRecords(){
-  const t=tenant();
-  $("#detail").hidden=true;$("#detail").textContent="";  // clear stale detail on refresh
-  $("#status").textContent="loading…";
-  const p=new URLSearchParams({tenant:t,limit:"50"});
+  $("#detail").hidden=true;$("#detail").textContent="";$("#status").textContent="loading…";
+  const p=new URLSearchParams({tenant:tenant(),limit:"50"});
   if($("#q").value)p.set("q",$("#q").value);
   if($("#filters").value)p.set("filters",$("#filters").value);
   let d;try{d=await j("/api/records?"+p);}catch(e){$("#status").textContent=e.message;return;}
@@ -129,7 +216,98 @@ $("#tenant").addEventListener("change",()=>{loadOverview();loadRecords();});
 $("#tenant-manual").addEventListener("change",()=>{loadOverview();loadRecords();});
 $("#go").addEventListener("click",loadRecords);
 $("#q").addEventListener("keydown",e=>{if(e.key==="Enter")loadRecords();});
-(async()=>{try{await loadTenants();await loadOverview();await loadRecords();}catch(e){$("#status").textContent=e.message;}})();
+
+// ---- keys management ----
+async function loadKeys(){
+  const d=await j("/api/keys");
+  $("#k-rows").innerHTML=d.keys.map(k=>
+    `<tr><td class="mono">${esc(k.id)}</td><td>${esc(k.tenant)}</td>
+      <td>${(k.scopes||[]).map(s=>'<span class="pill">'+esc(s)+'</span>').join(" ")}</td>
+      <td>${esc(k.label||"")}</td><td class="muted">${esc(k.created_at||"")}</td>
+      <td><button data-revoke="${esc(k.id)}">revoke</button></td></tr>`).join("")
+    ||'<tr><td colspan="6" class="muted">no keys</td></tr>';
+}
+$("#k-issue").addEventListener("click",async()=>{
+  $("#k-err").textContent="";$("#k-plain").hidden=true;
+  const scopes=$$(".k-scope").filter(c=>c.checked).map(c=>c.value);
+  if(scopes.includes("admin")&&!confirm(
+    "An admin key has FULL access to ALL tenants (their keys and quotas), not just "
+    +"the tenant you entered. Issue this admin key?"))return;
+  try{
+    const d=await j("/api/keys",{method:"POST",body:JSON.stringify(
+      {tenant:$("#k-tenant").value.trim(),scopes,label:$("#k-label").value})});
+    $("#k-plain").hidden=false;
+    $("#k-plain").innerHTML="key <b class='mono'>"+esc(d.key)+"</b> for <b>"+esc(d.tenant)+
+      "</b> — <b>copy now, it is not shown again</b>";
+    $("#k-tenant").value="";$("#k-label").value="";await loadKeys();
+  }catch(e){$("#k-err").textContent=e.message;}
+});
+$("#k-rows").addEventListener("click",async e=>{
+  const id=e.target.dataset.revoke;if(!id)return;
+  if(!confirm("Revoke key "+id+"?"))return;
+  try{await j("/api/keys/"+encodeURIComponent(id),{method:"DELETE"});await loadKeys();}
+  catch(err){alert(err.message);}
+});
+
+// ---- quotas management ----
+async function loadQuotas(){
+  const d=await j("/api/quotas");
+  const fmt=v=>v==null?'<span class="muted">—</span>':esc(v);
+  $("#q-rows").innerHTML=d.quotas.map(q=>
+    `<tr><td>${esc(q.tenant)}</td><td>${fmt(q.max_points)}</td><td>${fmt(q.max_rps)}</td>
+      <td>${fmt(effBurst(q))}</td>
+      <td><button data-rmq="${esc(q.tenant)}">remove</button></td></tr>`).join("")
+    ||'<tr><td colspan="5" class="muted">no quotas</td></tr>';
+}
+$("#q-set").addEventListener("click",async()=>{
+  $("#q-err").textContent="";
+  const t=$("#q-tenant").value.trim();if(!t){$("#q-err").textContent="tenant required";return;}
+  // Only include a field the operator actually typed (partial update). Validate
+  // numerics client-side: a non-numeric typo must be an error, NOT silently sent
+  // as null (which the server would read as "clear this cap").
+  const body={};
+  for(const [id,key,int] of [["#q-points","max_points",1],["#q-rps","max_rps",0],["#q-burst","burst",1]]){
+    const s=$(id).value.trim(); if(s==="")continue;
+    const re=int?/^\\d+$/:/^\\d*\\.?\\d+$/;
+    if(!re.test(s)){$("#q-err").textContent=key+(int?" must be a whole number":" must be a number");return;}
+    body[key]=int?parseInt(s,10):parseFloat(s);
+  }
+  if(!Object.keys(body).length){$("#q-err").textContent="fill at least one field";return;}
+  try{await j("/api/quotas/"+encodeURIComponent(t),{method:"PUT",body:JSON.stringify(body)});
+    $("#q-points").value=$("#q-rps").value=$("#q-burst").value="";await loadQuotas();}
+  catch(e){$("#q-err").textContent=e.message;}
+});
+$("#q-rows").addEventListener("click",async e=>{
+  const t=e.target.dataset.rmq;if(!t)return;
+  if(!confirm("Remove quota for "+t+"?"))return;
+  try{await j("/api/quotas/"+encodeURIComponent(t),{method:"DELETE"});await loadQuotas();}
+  catch(err){alert(err.message);}
+});
+
+// ---- boot / auth ----
+async function loadBrowse(){await loadTenants();await loadOverview();await loadRecords();}
+async function probeManage(){
+  // /api/keys is admin-only; 200 => admin console, 403 => read-only/no-auth mode.
+  try{await loadKeys();}
+  catch(e){if(e.status===403)return; throw e;}  // 403 = not admin; 401 -> boot() keybar
+  $('nav.tabs button[data-tab="keys"]').hidden=false;
+  $("#mode").textContent="admin";
+  // Quotas independently: a broken/unreadable quota store (503) must not hide the
+  // otherwise-usable keys panel.
+  try{await loadQuotas();$('nav.tabs button[data-tab="quotas"]').hidden=false;}
+  catch(e){/* leave the quotas tab hidden; keys management still works */}
+}
+async function boot(){
+  try{await loadBrowse();$("#keybar").hidden=true;await probeManage();}
+  catch(e){
+    if(e.status===401){$("#keybar").hidden=false;$("#mode").textContent="auth required";
+      if(KEY)$("#keyerr").textContent="invalid or non-admin key";}
+    else $("#status").textContent=e.message;
+  }
+}
+$("#keygo").addEventListener("click",()=>{KEY=$("#key").value.trim();$("#keyerr").textContent="";boot();});
+$("#key").addEventListener("keydown",e=>{if(e.key==="Enter")$("#keygo").click();});
+boot();
 </script></body></html>"""
 
 
@@ -172,8 +350,25 @@ def _legacy_only_filter(store: Any, parsed: dict[str, Any] | None) -> Filter:
     return Filter(must=must)
 
 
+class _KeyCreate(BaseModel):
+    tenant: str = Field(..., min_length=1, max_length=200)
+    scopes: list[str] = Field(..., min_length=1)
+    label: str = Field("", max_length=200)
+
+
 def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
     cfg = config or ServerConfig.from_env()
+    # Admin console (issue/revoke keys, manage quotas) is unlocked by `--auth`,
+    # which then requires an admin key on every /api call. Without --auth the
+    # management stores aren't even opened — the console is a read-only browser.
+    key_store = None
+    quota_store = None
+    if cfg.auth_enabled:
+        from mnemostack.auth import FileKeyStore
+        from mnemostack.quotas import FileQuotaStore
+
+        key_store = FileKeyStore(cfg.keys_file)
+        quota_store = FileQuotaStore(cfg.quotas_file)
     # Browse views (tenants / overview / records scroll) use count / scroll / facet
     # and need no embeddings, so don't construct the provider eagerly — that would
     # make `mnemostack inspect` require GEMINI_API_KEY (or the HF model/deps) just to
@@ -193,6 +388,44 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
         return _provider["p"].embed(text)
 
     app = FastAPI(title="mnemostack inspector", version=__version__)
+
+    def _extract_key(authorization: str | None, x_api_key: str | None) -> str | None:
+        if x_api_key:
+            return x_api_key.strip()
+        if authorization and authorization.lower().startswith("bearer "):
+            return authorization[7:].strip()
+        return None
+
+    def _require(*, manage: bool):
+        """Dependency: admin key required. ``manage`` endpoints (keys/quotas) also
+        require ``--auth`` to be on at all — they're never reachable unauthenticated.
+        Browse endpoints are open in the default (no-auth) read-only mode."""
+
+        def _dep(
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+        ):
+            if not cfg.auth_enabled:
+                if manage:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="key/quota management requires `mnemostack inspect --auth`",
+                    )
+                return None  # read-only browse is open without --auth (legacy)
+            key = _extract_key(authorization, x_api_key)
+            if not key:
+                raise HTTPException(status_code=401, detail="missing admin key")
+            principal = key_store.verify(key) if key_store else None
+            if principal is None:
+                raise HTTPException(status_code=401, detail="invalid admin key")
+            if not principal.can("admin"):
+                raise HTTPException(status_code=403, detail="admin scope required")
+            return principal
+
+        return _dep
+
+    _browse = Depends(_require(manage=False))
+    _admin = Depends(_require(manage=True))
 
     def _qdrant_ok() -> bool:
         try:
@@ -233,23 +466,55 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
     def healthz() -> dict[str, Any]:
         return {"status": "ok", "version": __version__}
 
-    @app.get("/api/tenants")
-    def tenants(limit: int = Query(200, ge=1, le=1000)) -> dict[str, Any]:
-        """Distinct tenant_id values (from the data) with per-tenant counts.
+    def _admin_tenants() -> set[str]:
+        """Tenants known to the operator's config (key store ∪ quota store), so a
+        tenant that has a key or a quota but no data yet still appears in the list.
+        Empty (and silent) in read-only mode or if a store is unreadable."""
+        names: set[str] = set()
+        if key_store is not None:
+            try:
+                names.update(k["tenant"] for k in key_store.list_keys())
+            except Exception as e:  # noqa: BLE001 — never fail the tenant list on this
+                log.info("key store tenant merge failed: %s", e)
+        if quota_store is not None:
+            try:
+                names.update(q["tenant"] for q in quota_store.list_quotas())
+            except Exception as e:  # noqa: BLE001
+                log.info("quota store tenant merge failed: %s", e)
+        return names
 
-        Facet-based — cheap and approximate for very large corpora. When service
-        keys land, the tenant list moves to the key store.
+    def _merge_config_tenants(data_tenants: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Union the data-derived tenants with config tenants (count 0 for the latter)."""
+        extra = _admin_tenants() - {str(t["id"]) for t in data_tenants}
+        merged = list(data_tenants) + [{"id": t, "count": 0} for t in extra]
+        return sorted(merged, key=lambda t: str(t["id"]))
+
+    @app.get("/api/tenants")
+    def tenants(limit: int = Query(200, ge=1, le=1000), _p=_browse) -> dict[str, Any]:
+        """Distinct tenants with per-tenant point counts.
+
+        Under ``--auth`` the list is the union of tenants seen in the data and
+        tenants known to the key/quota stores (the latter with count 0), so a
+        provisioned-but-empty tenant is visible. Facet-based for the data side —
+        cheap and approximate for very large corpora.
         """
         # Short-timeout reachability first: the data client (facet below) has a 30s
         # timeout, so a blackholed Qdrant would otherwise hang the initial load.
         if not _qdrant_ok():
-            return {"tenants": [], "ok": False, "error": "Qdrant unreachable", "version": __version__}
+            # Qdrant down, but config tenants (keys/quotas) are still worth showing.
+            cfg_only = [{"id": t, "count": 0} for t in sorted(_admin_tenants())]
+            return {
+                "tenants": cfg_only,
+                "ok": bool(cfg_only),
+                "error": "Qdrant unreachable",
+                "version": __version__,
+            }
         try:
             resp = store.client.facet(
                 collection_name=cfg.collection, key=TENANT_ID_KEY, limit=limit
             )
             out = [{"id": h.value, "count": h.count} for h in resp.hits]
-            return {"tenants": out, "ok": True, "version": __version__}
+            return {"tenants": _merge_config_tenants(out), "ok": True, "version": __version__}
         except Exception as e:  # noqa: BLE001
             # Facet failed. If Qdrant is unreachable, surface that (don't render as
             # "no tenants"). If it's reachable, the Facet API is likely just missing
@@ -261,7 +526,7 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
             log.info("tenant facet unavailable, falling back to scroll: %s", e)
             try:
                 return {
-                    "tenants": _tenants_via_scroll(),
+                    "tenants": _merge_config_tenants(_tenants_via_scroll()),
                     "ok": True,
                     "scanned": True,
                     "version": __version__,
@@ -276,7 +541,7 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
                 }
 
     @app.get("/api/overview")
-    def overview(tenant: str = Query("")) -> dict[str, Any]:
+    def overview(tenant: str = Query(""), _p=_browse) -> dict[str, Any]:
         # tenant="" browses unscoped: all points, including a legacy single-tenant
         # collection whose points carry no tenant_id. A named tenant scopes counts.
         scoped = tenant or None
@@ -319,6 +584,7 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
         q: str | None = Query(None),
         filters: str | None = Query(None),
         limit: int = Query(50, ge=1, le=200),
+        _p=_browse,
     ) -> dict[str, Any]:
         """Records for a tenant. `tenant=""` browses unscoped (all points, incl. a
         legacy single-tenant collection with no tenant_id); a named tenant scopes
@@ -380,6 +646,119 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
             log.info("records query failed for tenant=%r: %s", tenant, e)
             return {"records": [], "error": f"query failed: {e}", "tenant": tenant}
         return {"records": rows, "mode": mode, "tenant": tenant}
+
+    # ----- Admin console: service keys + quotas (--auth only, admin scope) -----
+
+    @app.get("/api/keys")
+    def list_keys(_p=_admin) -> dict[str, Any]:
+        """Service keys (redacted — id/tenant/scopes/label/created; never a plaintext
+        or hash). The key store fails closed, so a broken store surfaces as an error."""
+        from mnemostack.auth import KeyStoreError
+
+        assert key_store is not None  # guaranteed by _admin (auth on)
+        try:
+            return {"keys": key_store.list_keys()}
+        except KeyStoreError as e:
+            raise HTTPException(status_code=503, detail=f"key store unreadable: {e}") from e
+
+    @app.post("/api/keys", status_code=201)
+    def create_key(body: _KeyCreate, _p=_admin) -> dict[str, Any]:
+        """Issue a service key. The plaintext is returned ONCE (never stored) — the
+        caller must copy it now."""
+        from mnemostack.auth import SCOPES, KeyStoreError
+
+        assert key_store is not None  # guaranteed by _admin (auth on)
+        bad = [s for s in body.scopes if s not in SCOPES]
+        if bad:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown scope(s) {bad}; valid: {sorted(SCOPES)}",
+            )
+        try:
+            key_id, plaintext = key_store.issue(
+                body.tenant.strip(), body.scopes, label=body.label
+            )
+        except ValueError as e:  # bad tenant/scope input → client error
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except KeyStoreError as e:  # unreadable/corrupt store → server error (like the rest)
+            raise HTTPException(status_code=503, detail=f"key store error: {e}") from e
+        return {"id": key_id, "key": plaintext, "tenant": body.tenant.strip(),
+                "scopes": body.scopes, "label": body.label}
+
+    @app.delete("/api/keys/{key_id}")
+    def revoke_key(key_id: str, _p=_admin) -> dict[str, Any]:
+        """Revoke a key. Refuses to revoke the LAST admin key (atomically) so the
+        console can't lock itself (and every other admin) out."""
+        from mnemostack.auth import KeyStoreError
+
+        assert key_store is not None  # guaranteed by _admin (auth on)
+        try:
+            status = key_store.revoke_guarded(key_id, protect_last_admin=True)
+        except KeyStoreError as e:
+            raise HTTPException(status_code=503, detail=f"key store error: {e}") from e
+        if status == "not_found":
+            raise HTTPException(status_code=404, detail="key not found")
+        if status == "last_admin":
+            raise HTTPException(
+                status_code=409,
+                detail="refusing to revoke the last admin key (would lock out admin)",
+            )
+        return {"revoked": True, "id": key_id}
+
+    @app.get("/api/quotas")
+    def list_quotas(_p=_admin) -> dict[str, Any]:
+        from mnemostack.quotas import QuotaStoreError
+
+        assert quota_store is not None  # guaranteed by _admin (auth on)
+        try:
+            return {"quotas": quota_store.list_quotas()}
+        except QuotaStoreError as e:
+            raise HTTPException(status_code=503, detail=f"quota store unreadable: {e}") from e
+
+    @app.put("/api/quotas/{tenant:path}")
+    def set_quota(
+        tenant: str,
+        body: dict[str, Any] = Body(default_factory=dict),  # noqa: B008 — FastAPI DI
+        _p=_admin,
+    ) -> dict[str, Any]:
+        """Set a tenant's quota (partial update). A field PRESENT in the body is
+        applied (``null`` clears it); an ABSENT field is left unchanged."""
+        from mnemostack.quotas import _UNSET, QuotaStoreError
+
+        assert quota_store is not None  # guaranteed by _admin (auth on)
+        if not tenant.strip():
+            raise HTTPException(status_code=400, detail="tenant is required")
+        fields = ("max_points", "max_rps", "burst")
+        if not any(f in body for f in fields):
+            # An empty body would provision an all-unset ({}) record for a new
+            # tenant — a no-op PUT shouldn't create one. Require at least one field.
+            raise HTTPException(
+                status_code=400, detail=f"provide at least one of: {', '.join(fields)}"
+            )
+        kw = {field: body[field] if field in body else _UNSET for field in fields}
+        try:
+            quota = quota_store.set(tenant.strip(), **kw)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except QuotaStoreError as e:
+            raise HTTPException(status_code=503, detail=f"quota store error: {e}") from e
+        return {
+            "tenant": tenant.strip(),
+            "max_points": quota.max_points,
+            "max_rps": quota.max_rps,
+            "burst": quota.effective_burst(),
+        }
+
+    @app.delete("/api/quotas/{tenant:path}")
+    def remove_quota(tenant: str, _p=_admin) -> dict[str, Any]:
+        from mnemostack.quotas import QuotaStoreError
+
+        assert quota_store is not None  # guaranteed by _admin (auth on)
+        try:
+            removed = quota_store.remove(tenant)
+        except QuotaStoreError as e:
+            raise HTTPException(status_code=503, detail=f"quota store error: {e}") from e
+        return {"removed": bool(removed), "tenant": tenant}
 
     return app
 
