@@ -232,6 +232,12 @@ def enforce_points_quota(
 
     A no-op when the tenant is unscoped (``None``) or the limit is unset — so a
     single-tenant deployment and any tenant without a quota are unaffected.
+
+    Best-effort: ``current`` is read before the write, so two ingesters flushing
+    the same tenant concurrently can both pass this check and land the tenant a
+    little over the cap (there's no cross-writer reservation/lock). The cap holds
+    exactly for the common single-writer ingest; concurrent ingest can overshoot
+    by roughly one batch per extra writer, then self-corrects on the next flush.
     """
     if tenant is None or max_points is None:
         return

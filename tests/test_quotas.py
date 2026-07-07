@@ -222,6 +222,54 @@ def test_markdown_upsert_refuses_over_quota():
     assert store.upserts == []
 
 
+def test_markdown_edit_at_cap_counts_net_not_gross():
+    from mnemostack.markdown.sync import upsert_markdown_chunks
+
+    _md = ["text", "source", "offset"]  # a real markdown chunk always has these
+    store = _CountingStore(existing=0)
+    v1 = [("id1", "t", {"source": "a.md", "_md_keys": _md}),
+          ("id2", "t", {"source": "a.md", "_md_keys": _md})]
+    upsert_markdown_chunks(store, _Emb(), v1, {}, tenant="acme", max_points=2)
+    assert store.count(tenant="acme") == 2  # at cap
+    # edit a.md → 2 chunks with NEW ids; the old 2 will be pruned (net 0).
+    existing = {"id1": {"source": "a.md", "_md_keys": _md},
+                "id2": {"source": "a.md", "_md_keys": _md}}
+    v2 = [("id3", "t", {"source": "a.md", "_md_keys": _md}),
+          ("id4", "t", {"source": "a.md", "_md_keys": _md})]
+    res = upsert_markdown_chunks(store, _Emb(), v2, existing, tenant="acme", max_points=2)
+    assert res.inserted == 2  # allowed — net change is 0, not +2
+
+
+def test_ingest_dedup_within_flush_counts_once():
+    # A duplicated item (same source/offset/text → same id) in one flush stores
+    # one point, so it must count once — a tenant with room for 1 accepts it.
+    store = _CountingStore(existing=0)
+    ing = Ingestor(embedding=_Emb(), vector_store=store, batch_size=10,
+                   tenant="acme", max_points=1)
+    item = IngestItem(source="s", text="dup", offset=0)
+    ing.ingest([item, item])  # must not raise
+    assert store.count(tenant="acme") == 1
+
+
+def test_watch_skips_over_quota_file_without_retry():
+    from mnemostack.markdown.watch import MarkdownWatcher
+
+    class _Syncer:
+        index_root = "/root"
+
+        def index_file(self, path):
+            raise QuotaExceededError("acme", 10, 11)
+
+        def remove_file(self, path):
+            pass
+
+    errors: list = []
+    w = MarkdownWatcher(_Syncer(), "/root", on_error=lambda p, k, e: errors.append((p, e)))
+    w._apply("/root/big.md", "modify")
+    assert "/root/big.md" not in w._failed  # not queued for retry
+    assert errors and isinstance(errors[0][1], QuotaExceededError)  # reported once
+
+
 def test_markdown_upsert_refresh_does_not_count():
     from mnemostack.markdown.sync import upsert_markdown_chunks
 

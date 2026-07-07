@@ -643,7 +643,9 @@ class Ingestor:
         if self.tenant is None or self.max_points is None:
             return
         existing = self.store.retrieve_existing_ids(list(point_ids))
-        new = sum(1 for pid in point_ids if str(pid) not in existing)
+        # UNIQUE new ids: a duplicated item in one flush (same id) upserts to one
+        # point, so it must count once, not per occurrence.
+        new = len({str(pid) for pid in point_ids} - existing)
         enforce_points_quota(
             self.tenant, self.store.count(tenant=self.tenant), new, self.max_points
         )

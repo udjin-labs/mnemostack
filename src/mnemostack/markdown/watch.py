@@ -154,6 +154,8 @@ class MarkdownWatcher:
         self._debouncer.add(rpath, kind)
 
     def _apply(self, path: str, kind: str) -> None:
+        from ..quotas import QuotaExceededError
+
         try:
             if kind == REMOVE:
                 res = self.syncer.remove_file(path)
@@ -162,6 +164,13 @@ class MarkdownWatcher:
             self._failed.discard(path)
             if self._on_result is not None:
                 self._on_result(res)
+        except QuotaExceededError as exc:
+            # An over-quota file can't fit the tenant's limit — don't queue it for
+            # retry (it would just fail again on every flush/rescan and spam). Report
+            # once and move on; it re-indexes if it changes or the quota is raised.
+            self._failed.discard(path)
+            if self._on_error is not None:
+                self._on_error(path, kind, exc)
         except Exception as exc:  # noqa: BLE001 — one bad file must not stop the watch
             if kind != REMOVE:  # a failed delete is retried by reconcile_deletions
                 self._failed.add(path)

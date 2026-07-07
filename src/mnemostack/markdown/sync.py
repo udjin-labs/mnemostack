@@ -68,9 +68,21 @@ def upsert_markdown_chunks(
     tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
     existing_ids = set(existing_payloads)
     if tenant is not None and max_points is not None:
-        num_new = sum(1 for cid, _t, _p in chunks if cid not in existing_ids)
-        if num_new:
-            enforce_points_quota(tenant, store.count(tenant=tenant), num_new, max_points)
+        new_ids = {cid for cid, _t, _p in chunks}
+        new_sources = {p.get("source") for _c, _t, p in chunks}
+        num_new = len(new_ids - existing_ids)
+        # A re-index REPLACES a source's chunks: existing markdown-owned chunks of
+        # the sources being indexed that aren't in the new set get pruned, so they
+        # offset the inserts. Count the NET change, or editing a file at the cap
+        # (same chunk count, new ids) would be wrongly rejected as a pure add.
+        num_replaced = sum(
+            1
+            for cid, pl in existing_payloads.items()
+            if cid not in new_ids and pl.get("source") in new_sources and pl.get("_md_keys")
+        )
+        net = num_new - num_replaced
+        if net > 0:
+            enforce_points_quota(tenant, store.count(tenant=tenant), net, max_points)
     res = ChunkSyncResult()
     for cid, text, payload in chunks:
         if cid in existing_ids:
