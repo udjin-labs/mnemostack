@@ -204,9 +204,12 @@ existing data needs migrating.
 
 No config keys or CLI commands are being **removed** on the way to 1.0. Env
 aliases (`MNEMOSTACK_QDRANT_URL`, `MNEMOSTACK_MEMGRAPH_URI`, …) are stable. New in
-1.0 and additive: the `keys` command, the `--auth` mode on `serve` / `mcp-serve`,
-and the `MNEMOSTACK_AUTH_ENABLED` / `MNEMOSTACK_API_KEY` / `MNEMOSTACK_KEYS_FILE`
-env vars (all off by default — see the multi-tenancy section above). The only
+1.0 and additive: the `keys` command, the `quota` command (per-tenant `max_points`
+storage cap + `max_rps` request-rate cap; `MNEMOSTACK_QUOTAS_FILE`), the `--auth`
+mode on `serve` / `mcp-serve`, and the `MNEMOSTACK_AUTH_ENABLED` /
+`MNEMOSTACK_API_KEY` / `MNEMOSTACK_KEYS_FILE` env vars (all off by default — see the
+multi-tenancy section above). Under `serve --auth`, a tenant with a `max_rps` quota
+is rate-limited (HTTP `429` + `Retry-After`); tenants without a quota are unaffected. The only
 planned interface change is promoting a few de-facto-public names into their
 package `__all__` (`make_graph_store`, `InMemoryRecorder`, `synthesize_async`) —
 additive, not breaking. See [api-stability.md](api-stability.md) for the full

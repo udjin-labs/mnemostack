@@ -70,13 +70,18 @@ this is purely additive. See [Multi-tenancy & authentication](#multi-tenancy--au
   Bearer` / `X-API-Key` header (many keys/tenants); `mcp-serve` binds **one**
   process principal from `--api-key` / `MNEMOSTACK_API_KEY`. Default-off; see
   [Multi-tenancy & authentication](#multi-tenancy--authentication).
-- `quota set` / `quota list` / `quota rm` manage per-tenant resource limits (a
-  `max_points` storage cap today) in a per-tenant quota store (`--quotas-file` /
-  `MNEMOSTACK_QUOTAS_FILE`, default `~/.config/mnemostack/quotas.json`). The cap is
-  enforced at ingest — `index-markdown --tenant <id>` (and the library
-  `Ingestor(max_points=)`) refuse a write that would exceed it. A quota is a
-  resource guardrail, not a security boundary, so a corrupt quota store **fails
-  open** (no limit, logged) rather than blocking ingest.
+- `quota set` / `quota list` / `quota rm` manage per-tenant resource limits — a
+  `max_points` storage cap and a `max_rps` request-rate cap (with optional
+  `--burst`) — in a per-tenant quota store (`--quotas-file` /
+  `MNEMOSTACK_QUOTAS_FILE`, default `~/.config/mnemostack/quotas.json`). `quota set`
+  is a **partial update** (only the fields you pass change; `none` clears one). The
+  storage cap is enforced at ingest — `index-markdown --tenant <id>` (and the
+  library `Ingestor(max_points=)`) refuse a write that would exceed it. The rate
+  cap is enforced at the authenticated HTTP surface — `serve --auth` returns **429**
+  (with `Retry-After`) when a tenant exceeds its `max_rps` (a per-process token
+  bucket; see [Multi-tenancy & authentication](#multi-tenancy--authentication)). A
+  quota is a resource guardrail, not a security boundary, so a corrupt quota store
+  **fails open** (no limit, logged) rather than blocking traffic.
 
 - `doctor` exit codes (`0` healthy / `1` core dependency down / `2` config
   invalid) are a 🟢 stable contract — safe to gate CI/deploys on. Exit `2` covers a
@@ -231,10 +236,15 @@ behave exactly as listed above.
   `default_keys_path`. This is the credential surface behind `serve --auth` /
   `mcp-serve --auth`; keys are stored hashed and the plaintext is shown once.
 - **Quotas (per-tenant resource limits)**: `mnemostack.quotas` — `TenantQuota`
-  (`max_points`), `QuotaStore` (Protocol: `.get(tenant) -> TenantQuota | None`),
-  `FileQuotaStore` (`.get` / `.set` / `.remove` / `.list_quotas`), `QuotaExceededError`,
-  `QuotaStoreError`, `enforce_points_quota`, `default_quotas_path`. The storage-cap
-  surface behind `quota` / `Ingestor(max_points=)`; fails open on a broken store.
+  (`max_points`, `max_rps`, `burst`, `.effective_burst()`), `QuotaStore` (Protocol:
+  `.get(tenant) -> TenantQuota | None`), `FileQuotaStore` (`.get` / `.set` /
+  `.remove` / `.list_quotas`; `.set` is a partial update), `QuotaExceededError`,
+  `RateLimitExceededError`, `QuotaStoreError`, `enforce_points_quota`,
+  `default_quotas_path`. The storage-cap surface behind `quota` /
+  `Ingestor(max_points=)`, and the rate-cap config behind `serve --auth`; fails open
+  on a broken store. Rate-limit mechanics live in `mnemostack.ratelimit`
+  (`RateLimiter`, `TokenBucket`) — 🟡 experimental (the enforcement is the stable
+  contract, not the class shapes).
 - **Markdown**: `collect_markdown`, `MarkdownChunk`, `LinkEdge`,
   `MarkdownCollection`, `parse_frontmatter`, `extract_links`, `MarkdownSyncer`.
 - **Graph**: `GraphStore` (documented methods), `make_graph_store` (the

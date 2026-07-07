@@ -480,6 +480,20 @@ def _quota_store(args: argparse.Namespace):
     return FileQuotaStore(getattr(args, "quotas_file", None) or None)
 
 
+def _int_or_none(s: str) -> int | None:
+    """argparse type: an int, or None for the literal 'none'/'unlimited' (clears)."""
+    if s.strip().lower() in ("none", "unlimited"):
+        return None
+    return int(s)
+
+
+def _float_or_none(s: str) -> float | None:
+    """argparse type: a float, or None for the literal 'none'/'unlimited' (clears)."""
+    if s.strip().lower() in ("none", "unlimited"):
+        return None
+    return float(s)
+
+
 def _resolve_max_points(args: argparse.Namespace, tenant: str | None) -> int | None:
     """The tenant's storage limit from the quota store, or None (no limit).
 
@@ -552,19 +566,33 @@ def cmd_keys_revoke(args: argparse.Namespace) -> int:
 
 
 def cmd_quota_set(args: argparse.Namespace) -> int:
-    """Set a tenant's resource quota (currently: max stored points)."""
-    from mnemostack.quotas import QuotaStoreError
+    """Set a tenant's resource quota (storage size and/or request rate).
+
+    Only the fields passed on the command line change; the rest are left as they
+    were (so setting a rate limit doesn't wipe a size cap). Pass ``none`` to clear.
+    """
+    from mnemostack.quotas import _UNSET, QuotaStoreError
 
     try:
-        quota = _quota_store(args).set(args.tenant, max_points=args.max_points)
+        quota = _quota_store(args).set(
+            args.tenant,
+            max_points=getattr(args, "max_points", _UNSET),
+            max_rps=getattr(args, "max_rps", _UNSET),
+            burst=getattr(args, "burst", _UNSET),
+        )
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
     except QuotaStoreError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
-    limit = "unlimited" if quota.max_points is None else str(quota.max_points)
-    print(f"quota for tenant '{args.tenant}': max_points={limit}")
+    mp = "unlimited" if quota.max_points is None else str(quota.max_points)
+    rps = "unlimited" if quota.max_rps is None else f"{quota.max_rps:g}"
+    burst = "-" if quota.effective_burst() is None else str(quota.effective_burst())
+    print(
+        f"quota for tenant '{args.tenant}': "
+        f"max_points={mp}, max_rps={rps}, burst={burst}"
+    )
     return 0
 
 
@@ -582,10 +610,17 @@ def cmd_quota_list(args: argparse.Namespace) -> int:
     if not quotas:
         print("(no quotas)")
         return 0
-    print(f"{'TENANT':<24} MAX_POINTS")
+    from mnemostack.quotas import TenantQuota
+
+    print(f"{'TENANT':<24} {'MAX_POINTS':<12} {'MAX_RPS':<10} BURST")
     for q in quotas:
         mp = "unlimited" if q.get("max_points") is None else str(q["max_points"])
-        print(f"{q.get('tenant', ''):<24} {mp}")
+        rps = "unlimited" if q.get("max_rps") is None else f"{q['max_rps']:g}"
+        # Show the burst that actually applies (explicit, else derived from the
+        # rate), matching `quota set`'s output — '-' when there's no rate.
+        eff = TenantQuota(max_rps=q.get("max_rps"), burst=q.get("burst")).effective_burst()
+        burst = "-" if eff is None else str(eff)
+        print(f"{q.get('tenant', ''):<24} {mp:<12} {rps:<10} {burst}")
     return 0
 
 
@@ -1870,17 +1905,37 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         return 2
 
     p_quota.set_defaults(func=_quota_help)
+    from mnemostack.quotas import _UNSET
     _quotas_file_help = (
         "Quota store path (default: $MNEMOSTACK_QUOTAS_FILE or "
         "~/.config/mnemostack/quotas.json)"
     )
-    pq_set = qsub.add_parser("set", help="Set a tenant's quota (replaces any existing)")
+    pq_set = qsub.add_parser(
+        "set",
+        help="Set a tenant's quota (changes only the fields you pass)",
+    )
     pq_set.add_argument("--tenant", required=True, help="tenant_id to limit")
     pq_set.add_argument(
         "--max-points",
-        type=int,
-        default=None,
-        help="Max vector points the tenant may store (omit for unlimited)",
+        type=_int_or_none,
+        default=_UNSET,
+        metavar="N|none",
+        help="Max vector points the tenant may store ('none' to clear the limit)",
+    )
+    pq_set.add_argument(
+        "--max-rps",
+        type=_float_or_none,
+        default=_UNSET,
+        metavar="R|none",
+        help="Max sustained requests/sec at the authenticated HTTP surface "
+        "('none' to clear)",
+    )
+    pq_set.add_argument(
+        "--burst",
+        type=_int_or_none,
+        default=_UNSET,
+        metavar="N|none",
+        help="Rate-limit burst capacity (defaults to max-rps rounded up; 'none' to clear)",
     )
     pq_set.add_argument("--quotas-file", default=None, help=_quotas_file_help)
     pq_set.set_defaults(func=cmd_quota_set)
@@ -2467,6 +2522,15 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         help="Service-key store path (default: $MNEMOSTACK_KEYS_FILE or ~/.config/mnemostack/keys.json)",
     )
     p_serve.add_argument(
+        "--quotas-file",
+        default=None,
+        help=(
+            "Quota store for per-tenant request rate limits (--auth only; a tenant's "
+            "max_rps is enforced). Default: $MNEMOSTACK_QUOTAS_FILE or "
+            "~/.config/mnemostack/quotas.json"
+        ),
+    )
+    p_serve.add_argument(
         "--vector-floor",
         type=int,
         default=cfg.recall.vector_floor,
@@ -2575,6 +2639,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         # would silently leave the endpoints unauthenticated.
         auth_enabled=args.auth or _env_bool("MNEMOSTACK_AUTH_ENABLED"),
         keys_file=args.keys_file,
+        quotas_file=getattr(args, "quotas_file", None),
     )
     app = build_app(cfg)
 

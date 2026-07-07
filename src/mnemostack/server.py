@@ -20,6 +20,7 @@ The server is opt-in: install with `pip install 'mnemostack[server]'`.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
 import time
@@ -364,6 +365,9 @@ class ServerConfig:
     # unauthenticated, tenant-less recall exactly as before.
     auth_enabled: bool = False
     keys_file: str | None = None  # None = FileKeyStore default path
+    # Per-tenant request rate limiting (only meaningful under auth, which resolves
+    # the tenant). A tenant with a `max_rps` quota is throttled; others are not.
+    quotas_file: str | None = None  # None = FileQuotaStore default path
 
     def __post_init__(self) -> None:
         if self.rerank_mode not in RERANK_MODES:
@@ -398,6 +402,7 @@ class ServerConfig:
             auto_record_ior=_env_bool("MNEMOSTACK_AUTO_RECORD_IOR"),
             auth_enabled=_env_bool("MNEMOSTACK_AUTH_ENABLED"),
             keys_file=os.environ.get("MNEMOSTACK_KEYS_FILE") or None,
+            quotas_file=os.environ.get("MNEMOSTACK_QUOTAS_FILE") or None,
         )
 
 
@@ -669,10 +674,17 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
 
     # ----- Auth (multi-tenant): resolve the tenant + scopes from a service key.
     key_store = None
+    rate_limiter = None
     if cfg.auth_enabled:
         from mnemostack.auth import FileKeyStore
+        from mnemostack.quotas import FileQuotaStore, RateLimitExceededError
+        from mnemostack.ratelimit import RateLimiter
 
         key_store = FileKeyStore(cfg.keys_file)
+        # Per-tenant request rate limiting reads each tenant's max_rps from the
+        # quota store (shared with the storage quota). Only tenants with a rate
+        # quota are throttled; a live `quota set` is picked up within the cache TTL.
+        rate_limiter = RateLimiter(FileQuotaStore(cfg.quotas_file))
 
     def _extract_key(authorization: str | None, x_api_key: str | None) -> str | None:
         if x_api_key:
@@ -699,6 +711,17 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 raise HTTPException(status_code=401, detail="invalid service key")
             if not principal.can(scope):
                 raise HTTPException(status_code=403, detail=f"key lacks '{scope}' scope")
+            # Rate limit AFTER auth/authz so an unauthenticated flood can't
+            # consume a tenant's tokens (an invalid key is rejected above, free).
+            if rate_limiter is not None:
+                try:
+                    rate_limiter.check(principal.tenant)
+                except RateLimitExceededError as exc:
+                    raise HTTPException(
+                        status_code=429,
+                        detail=str(exc),
+                        headers={"Retry-After": str(max(1, math.ceil(exc.retry_after)))},
+                    ) from exc
             return principal
 
         return _dep

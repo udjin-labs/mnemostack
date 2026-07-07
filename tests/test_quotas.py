@@ -24,7 +24,9 @@ def test_quota_store_roundtrip(tmp_path):
     store.set("acme", max_points=1000)
     assert store.get("acme") == TenantQuota(max_points=1000)
     # list + json shape
-    assert store.list_quotas() == [{"tenant": "acme", "max_points": 1000}]
+    assert store.list_quotas() == [
+        {"tenant": "acme", "max_points": 1000, "max_rps": None, "burst": None}
+    ]
     # replace
     store.set("acme", max_points=500)
     assert store.get("acme").max_points == 500
@@ -89,6 +91,63 @@ def test_quota_store_malformed_max_points_ignored(tmp_path):
     p.write_text(json.dumps({"quotas": {"acme": {"max_points": "lots"}}}))
     # a bad max_points is dropped to None (no limit), not raised.
     assert FileQuotaStore(p).get("acme") == TenantQuota(max_points=None)
+
+
+def test_quota_set_partial_update_preserves_other_fields(tmp_path):
+    # Setting one dimension must not wipe another (setting a rate keeps the size
+    # cap); an explicit None clears just that field.
+    store = FileQuotaStore(tmp_path / "q.json")
+    store.set("acme", max_points=100)
+    store.set("acme", max_rps=5.0)  # leaves max_points intact
+    q = store.get("acme")
+    assert q.max_points == 100 and q.max_rps == 5.0
+    store.set("acme", max_points=None)  # clear only the size cap
+    q = store.get("acme")
+    assert q.max_points is None and q.max_rps == 5.0
+
+
+def test_quota_set_rejects_bad_rate_and_burst(tmp_path):
+    store = FileQuotaStore(tmp_path / "q.json")
+    # non-positive, bool, and NON-FINITE (inf/nan round-trip through JSON) all rejected
+    for bad in (0, -1, True, float("inf"), float("nan"), float("-inf")):
+        with pytest.raises(ValueError):
+            store.set("t", max_rps=bad)
+    for bad in (0, -3, True):
+        with pytest.raises(ValueError):
+            store.set("t", burst=bad)
+
+
+def test_quota_coerce_drops_malformed_rate_fields(tmp_path):
+    p = tmp_path / "q.json"
+    # inf/nan can be written by json.dump and read back — must fail open to None,
+    # not poison the rate limiter (nan rate would silently disable the limit).
+    p.write_text(
+        '{"quotas": {"acme": {"max_rps": Infinity, "burst": -2}, '
+        '"beta": {"max_rps": NaN}}}'
+    )
+    store = FileQuotaStore(p)
+    a = store.get("acme")
+    assert a.max_rps is None and a.burst is None
+    assert store.get("beta").max_rps is None
+
+
+def test_effective_burst_defaults_to_ceil_rps():
+    assert TenantQuota(max_rps=3.2).effective_burst() == 4
+    assert TenantQuota(max_rps=3.2, burst=10).effective_burst() == 10
+    assert TenantQuota(max_rps=0.5).effective_burst() == 1  # floor of 1
+    assert TenantQuota().effective_burst() is None
+
+
+def test_burst_requires_a_rate_no_stale_resurrection(tmp_path):
+    # Clearing max_rps must drop a stored burst so it can't resurrect (with a stale
+    # value) the next time a rate is set — burst is meaningless without a rate.
+    assert TenantQuota(max_rps=None, burst=50).burst is None  # invariant at construction
+    store = FileQuotaStore(tmp_path / "q.json")
+    store.set("acme", max_rps=10.0, burst=50)
+    store.set("acme", max_rps=None)  # clear the rate
+    assert store.get("acme").burst is None  # burst gone, not lingering
+    store.set("acme", max_rps=5.0)  # re-enable without --burst
+    assert store.get("acme").effective_burst() == 5  # derived, not the stale 50
 
 
 # ---------- enforce_points_quota ----------
@@ -450,9 +509,38 @@ def test_cli_quota_set_list_rm_roundtrip(tmp_path, capsys):
     capsys.readouterr()  # discard the set output
     assert cli.cmd_quota_list(argparse.Namespace(quotas_file=qf, json=True)) == 0
     listed = json.loads(capsys.readouterr().out)
-    assert listed == [{"tenant": "acme", "max_points": 5000}]
+    assert listed == [{"tenant": "acme", "max_points": 5000, "max_rps": None, "burst": None}]
     assert cli.cmd_quota_rm(argparse.Namespace(tenant="acme", quotas_file=qf)) == 0
     assert cli.cmd_quota_rm(argparse.Namespace(tenant="acme", quotas_file=qf)) == 1  # gone
+
+
+def test_cli_quota_set_rate_partial_via_parser(tmp_path, capsys):
+    # Through the real argparse: --max-rps/--burst set independently of --max-points,
+    # and 'none' clears just that field (partial update, not full replace).
+    from mnemostack import cli
+
+    qf = str(tmp_path / "q.json")
+    p = cli.build_parser(config_light=True)
+
+    def run(*argv):
+        a = p.parse_args(list(argv) + ["--quotas-file", qf])
+        return a.func(a)
+
+    assert run("quota", "set", "--tenant", "acme", "--max-points", "1000") == 0
+    assert run("quota", "set", "--tenant", "acme", "--max-rps", "10", "--burst", "5") == 0
+    capsys.readouterr()
+    a = p.parse_args(["quota", "list", "--json", "--quotas-file", qf])
+    a.func(a)
+    assert json.loads(capsys.readouterr().out) == [
+        {"tenant": "acme", "max_points": 1000, "max_rps": 10.0, "burst": 5}
+    ]
+    # clear only the rate; the size cap survives
+    assert run("quota", "set", "--tenant", "acme", "--max-rps", "none") == 0
+    capsys.readouterr()
+    a = p.parse_args(["quota", "list", "--json", "--quotas-file", qf])
+    a.func(a)
+    got = json.loads(capsys.readouterr().out)[0]
+    assert got["max_points"] == 1000 and got["max_rps"] is None
 
 
 def test_cli_resolve_max_points(tmp_path):

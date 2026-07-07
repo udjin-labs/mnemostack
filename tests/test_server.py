@@ -823,6 +823,55 @@ def test_recall_valid_key_scopes_tenant(monkeypatch, tmp_path):
     assert recaller.last_tenant == "alpha"  # tenant resolved from the key
 
 
+def test_recall_rate_limited_returns_429(monkeypatch, tmp_path):
+    # A tenant with a max_rps quota is throttled: burst of 1, so the second
+    # request in the same instant gets 429 with a Retry-After header.
+    from mnemostack.auth import FileKeyStore
+    from mnemostack.quotas import FileQuotaStore
+
+    ks = FileKeyStore(tmp_path / "keys.json")
+    _, read_key = ks.issue("alpha", ["read"])
+    FileQuotaStore(tmp_path / "quotas.json").set("alpha", max_rps=1.0, burst=1)
+    cfg = ServerConfig(
+        provider_name="fake",
+        llm_name="fake",
+        graph_uri=None,
+        auth_enabled=True,
+        keys_file=str(tmp_path / "keys.json"),
+        quotas_file=str(tmp_path / "quotas.json"),
+    )
+    app, _rec = _patched_app(monkeypatch, config=cfg)
+    client = TestClient(app)
+    h = {"X-API-Key": read_key}
+    assert client.post("/recall", json={"query": "x"}, headers=h).status_code == 200
+    r = client.post("/recall", json={"query": "x"}, headers=h)
+    assert r.status_code == 429
+    assert int(r.headers["Retry-After"]) >= 1
+
+
+def test_recall_not_rate_limited_without_quota(monkeypatch, tmp_path):
+    # A tenant with no rate quota is never throttled, even under a burst.
+    from mnemostack.auth import FileKeyStore
+    from mnemostack.quotas import FileQuotaStore
+
+    ks = FileKeyStore(tmp_path / "keys.json")
+    _, read_key = ks.issue("alpha", ["read"])
+    FileQuotaStore(tmp_path / "quotas.json").set("alpha", max_points=10)  # size only
+    cfg = ServerConfig(
+        provider_name="fake",
+        llm_name="fake",
+        graph_uri=None,
+        auth_enabled=True,
+        keys_file=str(tmp_path / "keys.json"),
+        quotas_file=str(tmp_path / "quotas.json"),
+    )
+    app, _rec = _patched_app(monkeypatch, config=cfg)
+    client = TestClient(app)
+    h = {"X-API-Key": read_key}
+    for _ in range(5):
+        assert client.post("/recall", json={"query": "x"}, headers=h).status_code == 200
+
+
 def test_recall_accepts_bearer_scheme(monkeypatch, tmp_path):
     app, recaller, read_key, *_ = _auth_app(monkeypatch, tmp_path)
     client = TestClient(app)
