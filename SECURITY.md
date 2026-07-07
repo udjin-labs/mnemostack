@@ -43,14 +43,29 @@ Relevant attack surfaces:
 - Dependency vulnerabilities in `qdrant-client`, `neo4j`, `fastapi`, etc.
 - Secrets leaking into logs, responses, prompts, or third-party provider traffic.
 
-The HTTP server has no built-in authentication or rate limiting. It binds to
-`127.0.0.1` by default; if you expose it with `--host 0.0.0.0`, put it behind
-your own auth, TLS, and rate-limit layer.
+The HTTP server is **unauthenticated by default** (single-tenant): it binds to
+`127.0.0.1`, and if you expose it with `--host 0.0.0.0` you must put it behind
+your own TLS, auth, and rate-limit layer. For multi-tenant deployments it also
+has an opt-in, built-in **service-key auth** mode: `mnemostack serve --auth`
+requires a per-tenant service key on every data endpoint (default-deny — `401`
+without a valid key, `403` for an insufficient scope), resolves the tenant from
+the key rather than the request, and enforces that boundary across the vector
+store, the tenant-scoped knowledge graph, and per-tenant learning state. Each
+tenant can be capped with `mnemostack quota set` — storage (`--max-points`,
+enforced at ingest) and request rate (`--max-rps`, enforced on the authenticated
+HTTP surface, returning `429`). The MCP server has an equivalent process-bound
+`mcp-serve --auth`. Caveats: the operator endpoints (`/health`, `/healthz`,
+`/readyz`, `/status`, `/metrics`) stay unauthenticated **even under `--auth`** and
+expose version/reachability/counters — protect them at your proxy if sensitive;
+and the rate limiter is **per-process** (N workers multiply the effective ceiling
+by N), so use a reverse proxy for a hard global limit. Auth is off by default —
+single-tenant deployments are unaffected.
 
 Recall `filters=` provide data isolation inside the retrievers, but they are
-caller-supplied — **not an authorization boundary**. In multi-tenant
-deployments, inject the tenant filter at your proxy/gateway and ignore
-client-supplied scopes.
+caller-supplied — **not an authorization boundary**: a client that can reach the
+endpoint can pass any filter, or none. For a real trust boundary in multi-tenant
+deployments, use `--auth` (above) instead of trusting client filters; a
+proxy/gateway-injected filter is still useful as defense-in-depth.
 
 LLM-backed features (`/answer`, LLM reranking, HyDE, triple extraction, query
 expansion) send retrieved memory text and/or user queries to the configured LLM
