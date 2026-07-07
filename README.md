@@ -761,7 +761,17 @@ curl -s http://localhost:8000/feedback \
 `signal` is one of `useful`, `clicked`, or `irrelevant`; pass the `retrievers` list returned by `/recall` as `sources` so Q-learning can update the right source weights.
 The same state update is available from CLI as `mnemostack feedback ...` and from MCP as `mnemostack_feedback`.
 
-For production, front this with whichever reverse proxy you already use (nginx, Caddy, Traefik) and set an auth layer — mnemostack's server does not do auth itself on purpose; the goal is to plug into whatever you already have.
+**Multi-tenant auth.** By default the server is unauthenticated (single-tenant; put it behind your own auth layer). For a hard, per-tenant boundary, start it with `--auth` and issue service keys:
+
+```bash
+mnemostack keys add --tenant acme --scopes read,write   # prints the key once
+mnemostack serve --auth                                  # default-deny on every data endpoint
+curl -s http://localhost:8000/recall \
+    -H 'X-API-Key: msk_...' -H 'content-type: application/json' \
+    -d '{"query":"..."}'                                  # or: Authorization: Bearer msk_...
+```
+
+The **tenant is resolved from the key** (a client can't assert another's), enforced across the vector store, the tenant-scoped knowledge graph, and per-tenant learning state — so it's a real authorization boundary, unlike the caller-supplied `filters` above. `/recall` and `/answer` require `read`, `/feedback` requires `write`; a missing/invalid key is `401`, insufficient scope `403`. Cap each tenant with `mnemostack quota set --tenant <id> --max-points N --max-rps R` (storage enforced at ingest, rate on the HTTP surface → `429`). The operator endpoints (`/health`, `/healthz`, `/readyz`, `/status`, `/metrics`) stay unauthenticated — protect them at your proxy if sensitive. Auth is **off by default**; you can still front the server with your own reverse proxy (nginx, Caddy, Traefik) either way. See [`docs/deployment.md`](docs/deployment.md) and [`docs/api-stability.md`](docs/api-stability.md).
 
 ### Knowledge graph (optional)
 
