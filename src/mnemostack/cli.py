@@ -511,12 +511,17 @@ def cmd_tenant_export(args: argparse.Namespace) -> int:
         print(f"error: cannot reach Qdrant at {args.qdrant}: {e}", file=sys.stderr)
         return 1
 
+    # A file export is written ATOMICALLY (temp in the same dir + replace): a
+    # backup command must never truncate an existing dump and leave a partial
+    # file at the trusted path when Qdrant drops mid-scroll. The final name
+    # (over)writes only after the export completed.
+    tmp_path: Path | None = None
     if args.output == "-":
         out = sys.stdout
     else:
         try:
-            # "w" overwrites an existing dump (documented in --output's help).
-            out = open(args.output, "w", encoding="utf-8")
+            tmp_path = Path(args.output).with_name(Path(args.output).name + ".tmp")
+            out = open(tmp_path, "w", encoding="utf-8")
         except OSError as e:
             print(f"error: cannot write {args.output}: {e}", file=sys.stderr)
             return 1
@@ -536,12 +541,25 @@ def cmd_tenant_export(args: argparse.Namespace) -> int:
                 row["vector"] = hit.vector
             out.write(_json.dumps(row, ensure_ascii=False) + "\n")
             count += 1
+        if out is not sys.stdout:
+            out.close()
+            assert tmp_path is not None
+            os.replace(tmp_path, args.output)  # success: land the dump atomically
+            tmp_path = None
     except Exception as e:  # noqa: BLE001
         print(f"error: export failed after {count} point(s): {e}", file=sys.stderr)
         return 1
     finally:
         if out is not sys.stdout:
-            out.close()
+            try:
+                out.close()
+            except Exception:  # noqa: BLE001 — already closed on success
+                pass
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink()  # failed run: drop the partial temp
+            except OSError:
+                pass
     print(
         f"exported {count} point(s) for tenant '{tenant}'"
         + ("" if args.output == "-" else f" to {args.output}"),
@@ -2205,7 +2223,9 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         "-o",
         "--output",
         default="-",
-        help="Output file ('-' = stdout, the default; progress then goes to stderr)",
+        help="Output file ('-' = stdout, the default; progress then goes to stderr). "
+        "Written atomically: an existing file is replaced only after the export "
+        "completes",
     )
     p_tenant_export.add_argument(
         "--no-vectors",
@@ -3222,15 +3242,33 @@ def main(argv: list[str] | None = None) -> int:
         # Lifecycle commands only need vector/graph *defaults* from the config
         # (they never touch embedding/LLM/recall settings), but unlike `keys`
         # they DO benefit from the config's graph auth — so try the full load
-        # and fall back to defaults instead of aborting: a malformed unrelated
-        # value (e.g. MNEMOSTACK_TOKEN_BUDGET=notint) must not block an
-        # emergency backup or offboarding.
+        # first: a malformed unrelated value (e.g. MNEMOSTACK_TOKEN_BUDGET=notint)
+        # must not block an emergency backup or offboarding.
         try:
             parser = build_parser()
         except Exception as e:  # noqa: BLE001
+            # Fall back — but NEVER to destructive defaults: with the config
+            # unreadable, the built-in http://localhost:6333/"mnemostack" seeds
+            # could point tenant-rm --yes (or a trusted backup) at the wrong
+            # store. Require the target to be named explicitly on the CLI.
+            missing = [
+                flag
+                for flag in ("--qdrant", "--collection")
+                if not any(a == flag or a.startswith(flag + "=") for a in raw)
+            ]
+            if missing:
+                print(
+                    f"error: stack config failed to load ({e}); refusing to fall "
+                    f"back to built-in defaults for {subcmd} — pass "
+                    f"{' and '.join(missing)} explicitly (and --memgraph-uri / "
+                    "graph credentials if the graph is involved)",
+                    file=sys.stderr,
+                )
+                return 2
             print(
                 f"warning: stack config failed to load ({e}); using built-in "
-                "defaults — pass --qdrant/--collection/--memgraph-uri explicitly",
+                "defaults for everything not passed explicitly (graph auth from "
+                "the config is unavailable)",
                 file=sys.stderr,
             )
             parser = build_parser(config_light=True)

@@ -527,6 +527,7 @@ def test_lifecycle_commands_tolerate_malformed_stack_config(monkeypatch, tmp_pat
     out = tmp_path / "dump.jsonl"
     rc = cli.main([
         "tenant-export", "--tenant", "alpha", "-o", str(out), "--no-vectors",
+        "--qdrant", "http://localhost:6333", "--collection", "mt",
     ])
     assert rc == 0
     captured = capsys.readouterr()
@@ -535,3 +536,46 @@ def test_lifecycle_commands_tolerate_malformed_stack_config(monkeypatch, tmp_pat
     # sanity: a non-lifecycle command still fails loud on the same env
     with pytest.raises(ValueError):  # Config.load: invalid literal for int()
         cli.main(["search", "q"])
+
+
+def test_config_fallback_refuses_destructive_defaults(monkeypatch, tmp_path, capsys):
+    # With the config unreadable, the built-in localhost/"mnemostack" defaults
+    # could point tenant-rm --yes (or a trusted backup) at the WRONG store —
+    # refuse unless the target is named explicitly.
+    monkeypatch.setenv("MNEMOSTACK_TOKEN_BUDGET", "notint")
+    deleted = []
+
+    class _Guard:
+        def __init__(self, **_):
+            deleted.append(True)
+
+    monkeypatch.setattr(cli, "VectorStore", _Guard)
+    rc = cli.main(["tenant-rm", "--tenant", "alpha", "--yes"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "refusing to fall back" in err and "--qdrant" in err
+    assert deleted == []  # no store was even constructed
+
+
+def test_tenant_export_is_atomic_on_midway_failure(monkeypatch, tmp_path, capsys):
+    # Qdrant dropping mid-scroll must not truncate an existing dump at the
+    # trusted backup path: the old file survives, no partial temp remains.
+    class _FlakyStore:
+        def __init__(self, **_):
+            pass
+
+        def collection_exists(self):
+            return True
+
+        def scroll(self, **_):
+            yield type("H", (), {"id": "1", "payload": {"text": "x"}, "vector": None})()
+            raise ConnectionError("qdrant dropped mid-scroll")
+
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: _FlakyStore())
+    out = tmp_path / "backup.jsonl"
+    out.write_text("PRECIOUS OLD BACKUP\n")
+    rc = cli.cmd_tenant_export(_ns(tenant="alpha", output=str(out), no_vectors=True))
+    assert rc == 1
+    assert "export failed after 1 point(s)" in capsys.readouterr().err
+    assert out.read_text() == "PRECIOUS OLD BACKUP\n"  # old dump untouched
+    assert not list(tmp_path.glob("*.tmp"))  # no partial temp left behind
