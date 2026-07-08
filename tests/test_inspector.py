@@ -498,3 +498,54 @@ def test_tenant_list_unions_config_tenants(monkeypatch, tmp_path):
                c.get("/api/tenants", headers=_hdr(admin_key)).json()["tenants"]}
     assert tenants.get("alpha") == 2       # from data
     assert tenants.get("gamma") == 0       # config-only (keystore), no data yet
+
+
+# ---------- external (verify-only) key store: console degradation ----------
+
+
+class _VerifyOnlyStore:
+    """A KeyStore like OpenBaoKeyStore: verify() and nothing else."""
+
+    def __init__(self, keys):  # keys: plaintext -> Principal
+        self._keys = dict(keys)
+
+    def verify(self, key):
+        return self._keys.get(key)
+
+
+def _external_admin_client(monkeypatch, tmp_path):
+    from mnemostack.auth import SCOPES, Principal
+
+    store = _seeded_store()
+    monkeypatch.setattr(insp, "get_provider", lambda *a, **k: _FakeProvider())
+    monkeypatch.setattr(insp, "VectorStore", lambda **_: store)
+    monkeypatch.setattr(insp, "_make_probe_client", lambda *a, **k: store.client)
+    ext = _VerifyOnlyStore({
+        "msk_admin": Principal(tenant="ops", scopes=frozenset(SCOPES)),
+        "msk_read": Principal(tenant="acme", scopes=frozenset({"read"})),
+    })
+    monkeypatch.setattr("mnemostack.auth.make_key_store", lambda *_a, **_k: ext)
+    app = insp.build_inspector_app(
+        ServerConfig(
+            provider_name="fake", collection="mt", graph_uri=None,
+            auth_enabled=True, quotas_file=str(tmp_path / "quotas.json"),
+        )
+    )
+    return TestClient(app)
+
+
+def test_external_keystore_auth_works_but_keys_management_is_501(monkeypatch, tmp_path):
+    c = _external_admin_client(monkeypatch, tmp_path)
+    h = {"X-API-Key": "msk_admin"}
+    # auth itself works against the external store (verify-only is all auth needs)
+    assert c.get("/api/tenants").status_code == 401
+    assert c.get("/api/tenants", headers={"X-API-Key": "msk_read"}).status_code == 403
+    assert c.get("/api/tenants", headers=h).status_code == 200
+    # key MANAGEMENT is 501 (managed externally), for every mutating verb too
+    assert c.get("/api/keys", headers=h).status_code == 501
+    assert c.post("/api/keys", headers=h,
+                  json={"tenant": "x", "scopes": ["read"]}).status_code == 501
+    assert c.delete("/api/keys/some-id", headers=h).status_code == 501
+    # quotas remain fully manageable (local store, unaffected)
+    assert c.put("/api/quotas/acme", headers=h, json={"max_points": 5}).status_code == 200
+    assert c.get("/api/quotas", headers=h).status_code == 200

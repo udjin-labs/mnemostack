@@ -1080,3 +1080,27 @@ def test_recall_endpoint_include_invalidated_and_as_of_threaded(monkeypatch):
     assert resp.status_code == 200
     assert captured.get("include_invalidated") is True
     assert captured.get("as_of") == "2026-03-01"
+
+
+def test_auth_works_with_external_verify_only_keystore(monkeypatch, tmp_path):
+    # The HTTP auth path must depend only on the KeyStore Protocol (verify), so a
+    # verify-only external backend (e.g. OpenBao) is a drop-in via the factory.
+    from mnemostack.auth import SCOPES, Principal
+
+    class _VerifyOnly:
+        def verify(self, key):
+            if key == "msk_ok":
+                return Principal(tenant="alpha", scopes=frozenset(SCOPES))
+            return None
+
+    monkeypatch.setattr("mnemostack.auth.make_key_store", lambda *_a, **_k: _VerifyOnly())
+    cfg = ServerConfig(
+        provider_name="fake", llm_name="fake", graph_uri=None, auth_enabled=True,
+        quotas_file=str(tmp_path / "quotas.json"),
+    )
+    app, recaller = _patched_app(monkeypatch, config=cfg)
+    client = TestClient(app)
+    assert client.post("/recall", json={"query": "x"}).status_code == 401
+    r = client.post("/recall", json={"query": "x"}, headers={"X-API-Key": "msk_ok"})
+    assert r.status_code == 200
+    assert recaller.last_tenant == "alpha"  # tenant resolved via the external store

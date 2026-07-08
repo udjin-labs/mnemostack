@@ -119,6 +119,66 @@ def default_keys_path() -> Path:
     return Path(base) / "mnemostack" / "keys.json"
 
 
+def make_key_store(keys_file: str | Path | None = None) -> KeyStore:
+    """Build the key store the servers verify against, selected by env.
+
+    ``MNEMOSTACK_KEYSTORE`` picks the backend (default ``file``):
+
+    - ``file`` — :class:`FileKeyStore` at ``keys_file`` (or the default path).
+      The full store: verify + management (`mnemostack keys`, admin console).
+    - ``openbao`` — :class:`mnemostack.openbao.OpenBaoKeyStore`, **verify-only**
+      (key management stays in the store's own tooling). Configured via
+      ``MNEMOSTACK_OPENBAO_URL`` (required), ``MNEMOSTACK_OPENBAO_MOUNT``
+      (default ``secret``), ``MNEMOSTACK_OPENBAO_PATH_PREFIX`` (default
+      ``mnemostack/keys``), and either ``MNEMOSTACK_OPENBAO_TOKEN`` (falling
+      back to ``BAO_TOKEN`` / ``VAULT_TOKEN``) or AppRole via
+      ``MNEMOSTACK_OPENBAO_ROLE_ID`` + ``MNEMOSTACK_OPENBAO_SECRET_ID``;
+      tunables ``MNEMOSTACK_OPENBAO_CACHE_TTL`` (s, default 5) and
+      ``MNEMOSTACK_OPENBAO_TIMEOUT`` (s, default 3).
+
+    A selected-but-misconfigured backend raises :class:`KeyStoreError` so an
+    auth-enabled server **fails loudly at boot** instead of silently denying
+    (or worse, silently falling back to a file nobody maintains).
+    """
+    # strip-then-default so a whitespace-only value behaves like unset (file),
+    # not like an unknown '' backend.
+    backend = (os.environ.get("MNEMOSTACK_KEYSTORE") or "").strip().lower() or "file"
+    if backend == "file":
+        return FileKeyStore(keys_file)
+    if backend == "openbao":
+        from .openbao import OpenBaoKeyStore
+
+        url = os.environ.get("MNEMOSTACK_OPENBAO_URL")
+        if not url:
+            raise KeyStoreError(
+                "MNEMOSTACK_KEYSTORE=openbao requires MNEMOSTACK_OPENBAO_URL"
+            )
+        token = (
+            os.environ.get("MNEMOSTACK_OPENBAO_TOKEN")
+            or os.environ.get("BAO_TOKEN")
+            or os.environ.get("VAULT_TOKEN")
+            or None
+        )
+        try:
+            cache_ttl = float(os.environ.get("MNEMOSTACK_OPENBAO_CACHE_TTL", "5"))
+            timeout = float(os.environ.get("MNEMOSTACK_OPENBAO_TIMEOUT", "3"))
+        except ValueError as e:
+            raise KeyStoreError(f"bad OpenBao numeric setting: {e}") from e
+        return OpenBaoKeyStore(
+            url,
+            mount=os.environ.get("MNEMOSTACK_OPENBAO_MOUNT", "secret"),
+            path_prefix=os.environ.get("MNEMOSTACK_OPENBAO_PATH_PREFIX", "mnemostack/keys"),
+            token=token,
+            role_id=os.environ.get("MNEMOSTACK_OPENBAO_ROLE_ID") or None,
+            secret_id=os.environ.get("MNEMOSTACK_OPENBAO_SECRET_ID") or None,
+            cache_ttl=cache_ttl,
+            timeout=timeout,
+        )
+    raise KeyStoreError(
+        f"unknown MNEMOSTACK_KEYSTORE backend {backend!r} (valid: file, openbao)"
+    )
+
+
 class FileKeyStore:
     """A KeyStore backed by a JSON file of hashed key records.
 

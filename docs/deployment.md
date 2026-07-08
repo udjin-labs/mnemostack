@@ -434,6 +434,55 @@ The `filters` parameter on `/recall` and `/answer` provides data isolation insid
 
 For multi-tenant deployments, use the built-in **service-key auth** instead of trusting client filters: start the server with `mnemostack serve --auth`, issue per-tenant keys with `mnemostack keys add --tenant <id> --scopes read,write`, and clients present the key via `Authorization: Bearer <key>` or `X-API-Key`. The **tenant is resolved from the key** (a client can't assert another tenant) and enforced through the vector store's tenant filter plus a post-fusion `filter_by_tenant` backstop, so an authenticated caller only ever sees its own tenant's data. `/recall` and `/answer` require `read`, `/feedback` requires `write`; a missing/invalid key is `401`, an insufficient scope `403` (default-deny). The operator endpoints stay **unauthenticated even under `--auth`** — `/health`, `/healthz`, `/readyz`, `/status`, `/metrics` expose version, dependency reachability, and counters; protect them at your proxy (or bind to a trusted interface) if that's sensitive. (Auth is off by default — single-tenant deployments are unaffected.) You can still additionally inject a tenant filter at a reverse proxy for defense-in-depth. Upgrade note: on 0.5.0 and earlier, several retrievers ignored `filters=` entirely — see the Security section of the changelog.
 
+### External key store (OpenBao / Vault-compatible)
+
+By default service keys live in a local hashed-JSON file (`FileKeyStore`). If you
+already run a secret store, point verification at it instead — key lifecycle
+(rotation, audit, replication across `serve` nodes) then belongs to the store's
+own tooling rather than a flat file you replicate by hand:
+
+```bash
+export MNEMOSTACK_KEYSTORE=openbao
+export MNEMOSTACK_OPENBAO_URL=https://bao.internal:8200
+export BAO_TOKEN=...                       # or MNEMOSTACK_OPENBAO_TOKEN, or AppRole:
+# export MNEMOSTACK_OPENBAO_ROLE_ID=...    #   MNEMOSTACK_OPENBAO_SECRET_ID=...
+mnemostack serve --auth                    # mcp-serve --auth reads the same env
+```
+
+Records live in the KV-v2 engine at `<mount>/<path_prefix>/<sha256-of-key>`
+(defaults `secret` / `mnemostack/keys`, override with `MNEMOSTACK_OPENBAO_MOUNT`
+/ `MNEMOSTACK_OPENBAO_PATH_PREFIX`) with the same shape the file store uses —
+the plaintext never reaches the store, only its hash:
+
+```bash
+KEY=msk_$(openssl rand -hex 24)            # you mint the key; give it to the client
+HASH=$(printf %s "$KEY" | sha256sum | cut -d' ' -f1)
+bao kv put secret/mnemostack/keys/$HASH tenant=acme scopes=read,write
+bao kv delete secret/mnemostack/keys/$HASH   # revoke
+```
+
+Semantics to know before switching:
+
+- **Verify-only.** The adapter only ever *reads* (a read-capable token/AppRole is
+  all it needs). `mnemostack keys` and the inspector's Keys panel manage the
+  local file store only — under an external backend the panel reports keys as
+  externally managed (`501`) and the CLI warns; quotas stay locally manageable.
+- **Fail closed.** An unreachable/misconfigured store denies every key (and a
+  selected-but-misconfigured backend fails the server at boot). Positive lookups
+  are cached briefly (`MNEMOSTACK_OPENBAO_CACHE_TTL`, default 5s) so the MCP
+  server's per-tool-call re-verification doesn't pay a network round trip each
+  time; the TTL bounds how long **any** grant change (revocation, scope
+  downgrade, tenant move) takes effect. Misses are never cached — a just-added
+  key works immediately. Only the KV **v2** engine is supported; pointing at a
+  v1 mount denies every key, so verify with one `bao kv get` before switching.
+  Redirect responses from the store are refused (never followed), so the store
+  token can't be re-sent to another host.
+- No new dependency: the adapter uses the standard library's HTTP client with
+  TLS verification on.
+
+For a single box that doesn't want another daemon, encrypt the key file at rest
+instead — see the sops + age recipe in [recipes.md](recipes.md).
+
 ### Per-tenant quotas and rate limits
 
 Under `--auth` you can cap each tenant's resource use from a small per-tenant quota store (`mnemostack quota set --tenant <id> …`; JSON file at `MNEMOSTACK_QUOTAS_FILE`, default `~/.config/mnemostack/quotas.json`):

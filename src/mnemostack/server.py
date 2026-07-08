@@ -679,11 +679,13 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     key_store = None
     rate_limiter = None
     if cfg.auth_enabled:
-        from mnemostack.auth import FileKeyStore
+        from mnemostack.auth import make_key_store
         from mnemostack.quotas import FileQuotaStore, RateLimitExceededError
         from mnemostack.ratelimit import RateLimiter
 
-        key_store = FileKeyStore(cfg.keys_file)
+        # Backend selected by MNEMOSTACK_KEYSTORE (file default, openbao optional);
+        # a selected-but-misconfigured backend raises at boot (fail loud).
+        key_store = make_key_store(cfg.keys_file)
         # Per-tenant request rate limiting reads each tenant's max_rps from the
         # quota store (shared with the storage quota). Only tenants with a rate
         # quota are throttled; a live `quota set` is picked up within the cache TTL.

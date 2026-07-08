@@ -32,7 +32,7 @@ Install the server extra: ``pip install 'mnemostack[server]'``.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 try:
     from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query
@@ -45,6 +45,9 @@ except ImportError as e:  # pragma: no cover - import guard
     ) from e
 
 from qdrant_client.models import Filter, IsEmptyCondition, PayloadField
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from mnemostack.auth import FileKeyStore
 
 from mnemostack import __version__
 from mnemostack.config import model_kwargs
@@ -287,15 +290,19 @@ $("#q-rows").addEventListener("click",async e=>{
 // ---- boot / auth ----
 async function loadBrowse(){await loadTenants();await loadOverview();await loadRecords();}
 async function probeManage(){
-  // /api/keys is admin-only; 200 => admin console, 403 => read-only/no-auth mode.
-  try{await loadKeys();}
-  catch(e){if(e.status===403)return; throw e;}  // 403 = not admin; 401 -> boot() keybar
-  $('nav.tabs button[data-tab="keys"]').hidden=false;
+  // /api/keys is admin-only; 200 => admin console, 403 => read-only/no-auth mode,
+  // 501 => admin console but keys are managed externally (verify-only backend,
+  // e.g. OpenBao) — hide the Keys panel, keep quotas manageable.
+  try{await loadKeys();$('nav.tabs button[data-tab="keys"]').hidden=false;}
+  catch(e){
+    if(e.status===403)return;          // not an admin console; stay read-only
+    if(e.status!==501)throw e;         // 401 -> boot() keybar; others surface
+  }
   $("#mode").textContent="admin";
   // Quotas independently: a broken/unreadable quota store (503) must not hide the
-  // otherwise-usable keys panel.
+  // otherwise-usable keys panel — and vice versa (external keys, local quotas).
   try{await loadQuotas();$('nav.tabs button[data-tab="quotas"]').hidden=false;}
-  catch(e){/* leave the quotas tab hidden; keys management still works */}
+  catch(e){/* leave the quotas tab hidden; the rest of the console still works */}
 }
 async function boot(){
   try{await loadBrowse();$("#keybar").hidden=true;await probeManage();}
@@ -364,11 +371,18 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
     key_store = None
     quota_store = None
     if cfg.auth_enabled:
-        from mnemostack.auth import FileKeyStore
+        from mnemostack.auth import make_key_store
         from mnemostack.quotas import FileQuotaStore
 
-        key_store = FileKeyStore(cfg.keys_file)
+        # Backend selected by MNEMOSTACK_KEYSTORE. An external (e.g. OpenBao)
+        # store is verify-only: auth works, but key MANAGEMENT stays in the
+        # store's own tooling — the /api/keys endpoints answer 501 and the UI
+        # hides the Keys panel (quotas remain manageable either way).
+        key_store = make_key_store(cfg.keys_file)
         quota_store = FileQuotaStore(cfg.quotas_file)
+    keys_manageable = all(
+        hasattr(key_store, m) for m in ("issue", "revoke_guarded", "list_keys")
+    )
     # Browse views (tenants / overview / records scroll) use count / scroll / facet
     # and need no embeddings, so don't construct the provider eagerly — that would
     # make `mnemostack inspect` require GEMINI_API_KEY (or the HF model/deps) just to
@@ -471,9 +485,12 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
         tenant that has a key or a quota but no data yet still appears in the list.
         Empty (and silent) in read-only mode or if a store is unreadable."""
         names: set[str] = set()
-        if key_store is not None:
+        if key_store is not None and keys_manageable:
+            # A verify-only external store can't enumerate keys — quota tenants
+            # (below) and the data facet still populate the list.
             try:
-                names.update(k["tenant"] for k in key_store.list_keys())
+                lister = cast("FileKeyStore", key_store)  # duck-checked above
+                names.update(k["tenant"] for k in lister.list_keys())
             except Exception as e:  # noqa: BLE001 — never fail the tenant list on this
                 log.info("key store tenant merge failed: %s", e)
         if quota_store is not None:
@@ -649,15 +666,32 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
 
     # ----- Admin console: service keys + quotas (--auth only, admin scope) -----
 
+    def _require_manageable_keys() -> FileKeyStore:
+        """The manageable key store, or 501 when the selected backend is
+        verify-only (e.g. OpenBao): the console must not pretend to manage keys
+        the servers don't verify against — lifecycle belongs to the external
+        store's own tooling. Returns the store typed with the management surface
+        (duck-checked at app build via ``keys_manageable``)."""
+        if key_store is None or not keys_manageable:
+            raise HTTPException(
+                status_code=501,
+                detail=(
+                    "service keys are managed externally "
+                    "(MNEMOSTACK_KEYSTORE selects a verify-only backend); "
+                    "use the key store's own tooling"
+                ),
+            )
+        return cast("FileKeyStore", key_store)
+
     @app.get("/api/keys")
     def list_keys(_p=_admin) -> dict[str, Any]:
         """Service keys (redacted — id/tenant/scopes/label/created; never a plaintext
         or hash). The key store fails closed, so a broken store surfaces as an error."""
         from mnemostack.auth import KeyStoreError
 
-        assert key_store is not None  # guaranteed by _admin (auth on)
+        ks = _require_manageable_keys()
         try:
-            return {"keys": key_store.list_keys()}
+            return {"keys": ks.list_keys()}
         except KeyStoreError as e:
             raise HTTPException(status_code=503, detail=f"key store unreadable: {e}") from e
 
@@ -667,7 +701,7 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
         caller must copy it now."""
         from mnemostack.auth import SCOPES, KeyStoreError
 
-        assert key_store is not None  # guaranteed by _admin (auth on)
+        ks = _require_manageable_keys()
         bad = [s for s in body.scopes if s not in SCOPES]
         if bad:
             raise HTTPException(
@@ -675,7 +709,7 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
                 detail=f"unknown scope(s) {bad}; valid: {sorted(SCOPES)}",
             )
         try:
-            key_id, plaintext = key_store.issue(
+            key_id, plaintext = ks.issue(
                 body.tenant.strip(), body.scopes, label=body.label
             )
         except ValueError as e:  # bad tenant/scope input → client error
@@ -691,9 +725,9 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
         console can't lock itself (and every other admin) out."""
         from mnemostack.auth import KeyStoreError
 
-        assert key_store is not None  # guaranteed by _admin (auth on)
+        ks = _require_manageable_keys()
         try:
-            status = key_store.revoke_guarded(key_id, protect_last_admin=True)
+            status = ks.revoke_guarded(key_id, protect_last_admin=True)
         except KeyStoreError as e:
             raise HTTPException(status_code=503, detail=f"key store error: {e}") from e
         if status == "not_found":

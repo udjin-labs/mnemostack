@@ -471,6 +471,17 @@ def _graph_relabel_preflight(args: argparse.Namespace) -> int:
 def _keys_store(args: argparse.Namespace):
     from mnemostack.auth import FileKeyStore
 
+    backend = (os.environ.get("MNEMOSTACK_KEYSTORE") or "file").strip().lower()
+    if backend != "file":
+        # `mnemostack keys` manages the LOCAL FILE store only. With an external
+        # backend selected the servers verify against that store instead, so a
+        # key added here would silently not authenticate — warn, loudly.
+        print(
+            f"warning: MNEMOSTACK_KEYSTORE={backend} is set — servers verify keys "
+            "against that external store, but this command manages only the local "
+            "file store. Manage keys with the external store's own tooling.",
+            file=sys.stderr,
+        )
     return FileKeyStore(getattr(args, "keys_file", None) or None)
 
 

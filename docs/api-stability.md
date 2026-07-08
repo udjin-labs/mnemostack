@@ -238,8 +238,14 @@ behave exactly as listed above.
   Principal | None`), `FileKeyStore` (`.verify` / `.issue` / `.revoke` /
   `.list_keys`; SHA-256-hashed JSON store), `SCOPES` (`{"read", "write",
   "admin"}`; `admin` implies the others), `KeyStoreError`, `hash_key`,
-  `default_keys_path`. This is the credential surface behind `serve --auth` /
-  `mcp-serve --auth`; keys are stored hashed and the plaintext is shown once.
+  `default_keys_path`, `make_key_store` (the backend factory the servers use —
+  selected by `MNEMOSTACK_KEYSTORE`: `file` default, `openbao` for
+  `mnemostack.openbao.OpenBaoKeyStore`, a **verify-only** KV-v2 adapter; a
+  selected-but-misconfigured backend fails the server at boot). This is the
+  credential surface behind `serve --auth` / `mcp-serve --auth`; keys are stored
+  hashed and the plaintext is shown once. The env selection contract (`file` /
+  `openbao` names, fail-loud) is 🟢 stable; `OpenBaoKeyStore`'s constructor shape
+  is 🟡 experimental.
 - **Quotas (per-tenant resource limits)**: `mnemostack.quotas` — `TenantQuota`
   (`max_points`, `max_rps`, `burst`, `.effective_burst()`), `QuotaStore` (Protocol:
   `.get(tenant) -> TenantQuota | None`), `FileQuotaStore` (`.get` / `.set` /
