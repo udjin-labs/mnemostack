@@ -390,3 +390,48 @@ def test_keys_list_works_with_malformed_stack_config(tmp_path, monkeypatch):
     monkeypatch.setenv("MNEMOSTACK_TOKEN_BUDGET", "not-a-number")
     rc = main(["keys", "list", "--keys-file", str(tmp_path / "keys.json")])
     assert rc == 0
+
+
+def test_revoke_tenant_atomic_all_and_last_admin(tmp_path):
+    ks = _store(tmp_path)
+    ks.issue("acme", ["read"])
+    ks.issue("acme", ["write"])
+    ks.issue("beta", ["read"])
+    # drops ALL of the tenant's keys in one shot, leaves others
+    res = ks.revoke_tenant("acme")
+    assert res == {"revoked": 2, "last_admin_kept": False}
+    assert [k["tenant"] for k in ks.list_keys()] == ["beta"]
+
+    # the tenant's key that is the only usable admin is KEPT and flagged
+    ks2 = _store(tmp_path / "sub")
+    ks2.issue("ops", ["admin"])   # the only admin, owned by 'ops'
+    ks2.issue("ops", ["write"])
+    res2 = ks2.revoke_tenant("ops", protect_last_admin=True)
+    assert res2["last_admin_kept"] is True and res2["revoked"] == 1  # write dropped
+    assert any("admin" in k["scopes"] for k in ks2.list_keys())
+
+    with pytest.raises(ValueError):
+        ks.revoke_tenant("")
+
+
+def test_revoke_tenant_keeps_one_admin_when_tenant_owns_them_all(tmp_path):
+    # If the offboarded tenant owns EVERY usable admin key (2+), one must survive
+    # or key management is locked out — a global snapshot count missed this.
+    ks = _store(tmp_path)
+    ks.issue("acme", ["admin"])
+    ks.issue("acme", ["admin"])  # two admins, both acme; no other admin anywhere
+    ks.issue("acme", ["write"])
+    res = ks.revoke_tenant("acme", protect_last_admin=True)
+    assert res["last_admin_kept"] is True
+    assert res["revoked"] == 2  # one admin + the write key dropped; one admin kept
+    remaining = ks.list_keys()
+    assert len(remaining) == 1 and "admin" in remaining[0]["scopes"]
+
+    # but with an admin owned by ANOTHER tenant, all of acme's keys can go
+    ks2 = _store(tmp_path / "b")
+    ks2.issue("acme", ["admin"])
+    ks2.issue("acme", ["admin"])
+    ks2.issue("ops", ["admin"])  # a surviving admin elsewhere
+    res2 = ks2.revoke_tenant("acme", protect_last_admin=True)
+    assert res2 == {"revoked": 2, "last_admin_kept": False}
+    assert [k["tenant"] for k in ks2.list_keys()] == ["ops"]
