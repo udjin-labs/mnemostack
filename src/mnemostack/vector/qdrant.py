@@ -542,11 +542,14 @@ class VectorStore:
         # deleted count). Exact for the single-writer offboarding case; under a
         # concurrent writer the actual delete may differ by a few.
         n = self.client.count(collection_name=self.collection, count_filter=sel).count
-        if n:
-            self.client.delete(
-                collection_name=self.collection,
-                points_selector=FilterSelector(filter=sel),
-            )
+        # ALWAYS issue the (idempotent) filter-delete, even when the snapshot
+        # count is 0: a concurrent writer could create the tenant's first point
+        # between the count and here, and gating the delete on the stale count
+        # would leave it behind while tenant-rm reports "fully removed".
+        self.client.delete(
+            collection_name=self.collection,
+            points_selector=FilterSelector(filter=sel),
+        )
         return n
 
     def invalidate(

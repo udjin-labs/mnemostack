@@ -57,6 +57,18 @@ def test_delete_tenant_rejects_empty():
         s.delete_tenant("")
 
 
+def test_delete_tenant_issues_delete_even_on_zero_snapshot(monkeypatch):
+    # Race: the pre-delete count snapshots 0, but a concurrent writer created the
+    # tenant's first point just after. The idempotent filter-delete must STILL
+    # fire (not be gated on the stale count) — otherwise tenant-rm reports the
+    # tenant fully removed while the racer's point survives.
+    s = _seeded_store()  # alpha owns 2 points
+    monkeypatch.setattr(s.client, "count", lambda **k: type("C", (), {"count": 0})())
+    assert s.delete_tenant("alpha") == 0  # returns the (stale) snapshot count
+    monkeypatch.undo()  # restore the real count to verify the actual state
+    assert s.count(tenant="alpha") == 0  # the points were deleted anyway
+
+
 # ---------- Hit.vector via scroll ----------
 
 
