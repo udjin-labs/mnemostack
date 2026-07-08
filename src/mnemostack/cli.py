@@ -1088,18 +1088,20 @@ def cmd_keys_add(args: argparse.Namespace) -> int:
         _audit("keys.issue", tenant=args.tenant, outcome="error", error=str(e))
         print(f"error: {e}", file=sys.stderr)
         return 1
-    scopes = ",".join(sorted({s.strip() for s in args.scopes.split(",") if s.strip()}))
-    # key_id only — never the key or its hash (audit module contract).
+    scopes_list = sorted({s.strip() for s in args.scopes.split(",") if s.strip()})
+    # key_id only — never the key or its hash (audit module contract). Scopes
+    # go into the event as a LIST — the same shape the inspector's keys.issue
+    # writes — so trail consumers see one schema regardless of surface.
     _audit(
         "keys.issue",
         tenant=args.tenant,
         key_id=key_id,
-        scopes=scopes,
+        scopes=scopes_list,
         label=args.label or "",
     )
     print(f"key id:  {key_id}")
     print(f"tenant:  {args.tenant}")
-    print(f"scopes:  {scopes}")
+    print(f"scopes:  {','.join(scopes_list)}")
     print("\nkey (shown once — store it now, it is not recoverable):")
     print(f"  {key}")
     return 0
