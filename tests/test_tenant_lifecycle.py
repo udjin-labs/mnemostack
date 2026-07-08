@@ -396,16 +396,19 @@ def test_tenant_rm_continues_when_graph_down(monkeypatch, tmp_path, capsys):
     assert all(k["tenant"] != "alpha" for k in ks.list_keys())
 
 
-def test_tenant_rm_unreadable_key_store_is_partial_not_success(monkeypatch, tmp_path, capsys):
+def test_tenant_rm_unreadable_key_store_aborts_sweep(monkeypatch, tmp_path, capsys):
+    # Keys that can't be inspected might still be verified by serve --auth, so a
+    # live key could re-write swept data — abort, don't sweep with keys of
+    # unknown state.
     store = _seeded_store()
     monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
     _seed_config(tmp_path)
     (tmp_path / "keys.json").write_text("{ not json")  # corrupt the key store
     rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", yes=True))
-    assert rc == 1  # keys couldn't be inspected -> never "fully removed"
+    assert rc == 1
     err = capsys.readouterr().err
-    assert "FAILED: service keys" in err
-    assert store.count(tenant="alpha") == 0  # the rest proceeded
+    assert "could not be inspected" in err and "NOT removed" in err
+    assert store.count(tenant="alpha") == 2  # data sweep never ran
 
 
 def test_tenant_rm_unreadable_quota_store_is_partial(monkeypatch, tmp_path, capsys):
@@ -754,3 +757,32 @@ def test_tenant_rm_unrevocable_key_aborts_sweep(monkeypatch, tmp_path, capsys):
     err = capsys.readouterr().err
     assert "unrevocable record" in err and "NOT removed" in err
     assert store.count(tenant="alpha") == 2  # data sweep never ran
+
+
+# ---------- review round 8 ----------
+
+
+def test_tenant_rm_empty_memgraph_uri_is_rejected(monkeypatch, tmp_path, capsys):
+    # An explicit but empty --memgraph-uri signals intent to clean the graph; it
+    # must not coerce to None and silently skip it under a "fully removed" report.
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    _seed_config(tmp_path)
+    rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", yes=True, memgraph_uri="  "))
+    assert rc == 2
+    assert "empty value" in capsys.readouterr().err
+    assert store.count(tenant="alpha") == 2  # nothing deleted
+
+
+def test_tenant_rm_unknown_backend_aborts_before_sweep(monkeypatch, tmp_path, capsys):
+    # An unknown MNEMOSTACK_KEYSTORE backend leaves key state unknown -> abort the
+    # data sweep too (not just report keys failed).
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    _seed_config(tmp_path)
+    monkeypatch.setenv("MNEMOSTACK_KEYSTORE", "flie")
+    rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", yes=True))
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "could not be inspected" in err and "NOT removed" in err
+    assert store.count(tenant="alpha") == 2  # sweep never ran

@@ -640,7 +640,18 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
     except Exception as e:  # noqa: BLE001 — a Qdrant outage must not strand the rest
         unavailable["vector points"] = f"cannot reach Qdrant at {args.qdrant}: {e}"
 
-    memgraph_uri = getattr(args, "memgraph_uri", None) or None
+    # An EXPLICIT but empty --memgraph-uri (e.g. `--memgraph-uri "$UNSET"`) signals
+    # intent to clean the graph but would coerce to None and silently skip it,
+    # then still report "fully removed". Reject it rather than treat it as omission.
+    raw_graph = getattr(args, "memgraph_uri", None)
+    if raw_graph is not None and not str(raw_graph).strip():
+        print(
+            "error: --memgraph-uri was given an empty value; omit it to skip the "
+            "graph, or pass the bolt URI to clean it",
+            file=sys.stderr,
+        )
+        return 2
+    memgraph_uri = raw_graph or None
     graph_counts = None
     gs = None
     if memgraph_uri:
@@ -769,6 +780,17 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
     # command has already cleaned, and "fully removed" would be stale the moment
     # it printed. Auth re-verifies per request/tool-call, so cutting the key off
     # before the data stores are swept closes that window.
+    if "service keys" in unavailable:
+        # We couldn't even INSPECT the local keys (no read access, corrupt file,
+        # unknown backend). The servers may still verify those keys, so a live
+        # write/admin key could re-write swept data — abort like the other
+        # active-key cases rather than sweep with keys of unknown state.
+        print(
+            f"error: tenant '{tenant}' service keys could not be inspected — "
+            "cannot confirm they're revoked. Fix key-store access and re-run.",
+            file=sys.stderr,
+        )
+        return _abort_keys_alive(tenant, failed, gs)
     if external_keys:
         # tenant-rm can't revoke a key it only verifies (it lives in the
         # external store). Refuse to sweep unless the operator confirms they
