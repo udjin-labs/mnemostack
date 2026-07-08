@@ -26,6 +26,13 @@ Contract — read this before extending:
 - **Rotation is external.** The file grows without bound; point logrotate (or
   equivalent) at it. Reads tolerate a mid-line truncation from a copytruncate
   rotation by skipping unparseable lines (counted, not silent).
+- **Hardened file handling.** Both read and write open the trail with every
+  path component refusing symlinks (an ``openat`` walk — a pre-planted link
+  anywhere in the path can neither divert appends nor feed the Audit tab
+  spoofed events), the target must be a regular file (a FIFO can't hang an
+  audited operation), and short writes are completed or reported as failures.
+  Deliberate consequence: a *legitimately* symlinked directory in the path is
+  also refused — point ``MNEMOSTACK_AUDIT_FILE`` at a real path.
 """
 
 from __future__ import annotations
@@ -33,12 +40,68 @@ from __future__ import annotations
 import json
 import logging
 import os
+import stat
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
 log = logging.getLogger(__name__)
+
+#: Whether os.open supports dir_fd (POSIX) — enables the openat() walk below.
+_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
+
+
+def _require_regular(fd: int, path: Path) -> int:
+    """Refuse anything but a regular file (FIFO, device, socket): a pre-planted
+    FIFO would otherwise turn every audited operation into a potential hang, and
+    a device node is not an append-only trail. Closes ``fd`` on refusal."""
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f"audit path {path} is not a regular file")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _open_trail_fd(path: Path, *, write: bool) -> int:
+    """Open the trail with EVERY path component refusing symlinks.
+
+    ``O_NOFOLLOW`` on a single open only protects the final component — a
+    symlinked *ancestor* (``audit-dir -> attacker-dir``) would still divert the
+    trail. So walk the path with ``openat`` semantics (``dir_fd``), each
+    component ``O_NOFOLLOW``; the final open adds ``O_NONBLOCK`` (a FIFO with no
+    reader fails with ENXIO instead of hanging the audited operation) and the
+    result must be a regular file. The trade-off is deliberate: a legitimately
+    symlinked directory in the configured path is ALSO refused (loudly) —
+    point ``MNEMOSTACK_AUDIT_FILE`` at a real path. Raises OSError on refusal.
+    """
+    final_flags = (
+        ((os.O_WRONLY | os.O_APPEND | os.O_CREAT) if write else os.O_RDONLY)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    if not _SUPPORTS_DIR_FD:  # pragma: no cover — non-POSIX platform
+        # No openat walk available (Windows): best remaining defense is the
+        # final-component flags + the regular-file check.
+        return _require_regular(os.open(str(path), final_flags, 0o640), path)
+    parts = path.parts
+    if path.is_absolute():
+        anchor, walk = parts[0], parts[1:]
+    else:
+        anchor, walk = ".", parts
+    if not walk:
+        raise OSError(f"audit path {path} is not a file path")
+    dfd = os.open(anchor, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for comp in walk[:-1]:
+            ndfd = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dfd)
+            os.close(dfd)
+            dfd = ndfd
+        return _require_regular(os.open(walk[-1], final_flags, 0o640, dir_fd=dfd), path)
+    finally:
+        os.close(dfd)
 
 #: Actions recorded today (call sites keep this in sync; the log itself does
 #: not validate — an old reader must tolerate actions added by a newer writer).
@@ -137,14 +200,12 @@ class FileAuditLog:
             # string form rather than losing the whole event to a TypeError.
             line = json.dumps(event, ensure_ascii=False, default=str) + "\n"
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            # 0o640 ceiling (umask may restrict further): the trail names tenants
-            # and key ids — operational metadata other local users needn't read.
-            # O_NOFOLLOW: refuse a symlink pre-planted at the configured path (the
-            # same shared-dir threat FileKeyStore guards against) — otherwise an
-            # attacker with write access to the parent dir could silently divert
-            # the trail into an arbitrary file while record() reports success.
-            flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
-            fd = os.open(str(self.path), flags, 0o640)
+            # Hardened open (see _open_trail_fd): every component refuses
+            # symlinks — the shared-dir threat FileKeyStore guards against,
+            # extended to ancestors — and the target must be a regular file
+            # created 0o640 (umask may restrict further; the trail names
+            # tenants and key ids, which other local users needn't read).
+            fd = _open_trail_fd(self.path, write=True)
             try:
                 # Exclusive lock so a CLI op and an inspector op appending at the
                 # same moment can't interleave bytes of their lines. fcntl is
@@ -158,7 +219,17 @@ class FileAuditLog:
                 if fcntl is not None:
                     fcntl.flock(fd, fcntl.LOCK_EX)
                 try:
-                    os.write(fd, line.encode("utf-8"))
+                    # os.write may accept only part of the buffer (disk filling
+                    # mid-line, interrupted write) WITHOUT raising — reporting
+                    # success on a truncated event would violate the loud
+                    # best-effort contract. Loop until every byte landed or the
+                    # write raises; the flock keeps the pieces contiguous.
+                    data = line.encode("utf-8")
+                    while data:
+                        n = os.write(fd, data)
+                        if n <= 0:  # defensive: a 0-byte "success" must not spin
+                            raise OSError("short write to the audit log")
+                        data = data[n:]
                 finally:
                     if fcntl is not None:
                         fcntl.flock(fd, fcntl.LOCK_UN)
@@ -180,11 +251,11 @@ class FileAuditLog:
         events: deque[dict[str, Any]] = deque(maxlen=limit)
         skipped = 0
         try:
-            # Same no-symlink rule as record(): a pre-planted link must not let
-            # the Audit tab display spoofed events from an attacker-chosen file
-            # while writes are (correctly) refused — the read fails loud instead.
-            read_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-            fd = os.open(str(self.path), read_flags)
+            # Same hardened open as record() (symlink-refusing walk + regular
+            # file only): a pre-planted link must not let the Audit tab display
+            # spoofed events from an attacker-chosen file while writes are
+            # (correctly) refused — the read fails loud instead.
+            fd = _open_trail_fd(self.path, write=False)
             with os.fdopen(fd, encoding="utf-8", errors="replace") as f:
                 for raw in f:
                     raw = raw.strip()

@@ -62,6 +62,52 @@ def test_record_refuses_a_symlinked_audit_path(tmp_path):
     assert target.read_text() == ""  # nothing was appended through the link
 
 
+def test_record_refuses_a_symlinked_ancestor_dir(tmp_path):
+    # O_NOFOLLOW on the final open doesn't cover a symlinked PARENT
+    # (audit-dir -> attacker-dir) — the openat walk must refuse it too.
+    real = tmp_path / "real"
+    real.mkdir()
+    linkdir = tmp_path / "linkdir"
+    linkdir.symlink_to(real, target_is_directory=True)
+    assert FileAuditLog(linkdir / "audit.jsonl").record("keys.issue") is False
+    assert not (real / "audit.jsonl").exists()  # nothing landed behind the link
+
+
+def test_tail_refuses_a_symlinked_ancestor_dir(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "audit.jsonl").write_text('{"action": "keys.issue", "actor": "spoof"}\n')
+    linkdir = tmp_path / "linkdir"
+    linkdir.symlink_to(real, target_is_directory=True)
+    with pytest.raises(AuditLogError):
+        FileAuditLog(linkdir / "audit.jsonl").tail()
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="mkfifo is POSIX-only")
+def test_fifo_at_the_audit_path_fails_fast_not_hangs(tmp_path):
+    # A pre-created FIFO with no reader would hang a plain open() forever,
+    # taking key management down with it — O_NONBLOCK + the regular-file check
+    # must turn it into a fast, loud failure on both paths.
+    p = tmp_path / "audit.jsonl"
+    os.mkfifo(p)
+    assert FileAuditLog(p).record("keys.issue") is False  # ENXIO, immediate
+    with pytest.raises(AuditLogError):
+        FileAuditLog(p).tail()  # opens nonblocking, refused as non-regular
+
+
+def test_record_completes_short_writes(tmp_path, monkeypatch):
+    # os.write may accept only part of the buffer without raising — record()
+    # must loop until the whole line landed, not report success on a truncated
+    # (and later skipped-as-corrupt) event.
+    real_write = os.write
+    monkeypatch.setattr(os, "write", lambda fd, data: real_write(fd, bytes(data)[:3]))
+    log = FileAuditLog(tmp_path / "a.jsonl")
+    assert log.record("keys.issue", tenant="acme", details={"key_id": "abc123"}) is True
+    monkeypatch.undo()
+    (ev,) = _events(tmp_path / "a.jsonl")  # parses fully — no torn line
+    assert ev["tenant"] == "acme" and ev["details"] == {"key_id": "abc123"}
+
+
 def test_record_degrades_exotic_detail_values(tmp_path):
     # default=str: a non-JSON-serializable detail must not lose the event.
     log = FileAuditLog(tmp_path / "a.jsonl")
