@@ -22,7 +22,9 @@ Contract — read this before extending:
   recorded here.
 - **Never any key material.** Events carry public key *ids* only — never a
   plaintext key, never a hash (a hash is an offline-crackable fingerprint of
-  the key). This rule binds every call site.
+  the key). This rule binds every call site — and the sink enforces it too:
+  any ``msk_``-shaped string anywhere in an event (an operator pasting a
+  plaintext key where an id belongs) is redacted before serialization.
 - **Rotation is external.** The file grows without bound; point logrotate (or
   equivalent) at it. Reads tolerate a mid-line truncation from a copytruncate
   rotation by skipping unparseable lines (counted, not silent).
@@ -56,6 +58,26 @@ log = logging.getLogger(__name__)
 
 #: Whether os.open supports dir_fd (POSIX) — enables the openat() walk below.
 _SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
+
+#: The service-key prefix (mirrors ``mnemostack.auth._KEY_PREFIX``): any string
+#: with this shape reaching the sink is presumed key material and redacted.
+_KEY_SHAPE_PREFIX = "msk_"
+_REDACTED = "[redacted:key-shaped]"
+
+
+def _redact_key_shaped(value: Any) -> Any:
+    """Defense in depth for the no-key-material contract, enforced AT THE SINK:
+    a caller mistake (e.g. an operator pasting a plaintext key where a public id
+    belongs, which then flows into a ``details.key_id`` of a not-found revoke)
+    must not land a usable credential in the trail. Any ``msk_``-prefixed string
+    anywhere in an event is replaced before serialization."""
+    if isinstance(value, str):
+        return _REDACTED if value.startswith(_KEY_SHAPE_PREFIX) else value
+    if isinstance(value, dict):
+        return {k: _redact_key_shaped(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_key_shaped(v) for v in value]
+    return value
 
 #: Bounded wait for the append lock: ~2s total, then the write is reported
 #: failed. A blocking LOCK_EX would let a hung/hostile lock-holder stall key
@@ -115,9 +137,14 @@ def _open_trail_fd(path: Path, *, write: bool) -> int:
         | getattr(os, "O_NOFOLLOW", 0)
         | getattr(os, "O_NONBLOCK", 0)
     )
-    if not _SUPPORTS_DIR_FD:  # pragma: no cover — non-POSIX platform
-        # No openat walk available (Windows): best remaining defense is the
-        # final-component flags + the regular-file check.
+    if not _SUPPORTS_DIR_FD:
+        # No openat walk available (Windows, where O_NOFOLLOW is also absent):
+        # refuse symlinks by lstat-walking the path first. This is check-then-
+        # open (a TOCTOU window the POSIX walk doesn't have) — best-effort on a
+        # secondary platform where creating symlinks requires elevation anyway.
+        for component in (path, *path.parents):
+            if component.is_symlink():
+                raise OSError(f"audit path component {component} is a symlink — refused")
         return _require_regular(os.open(str(path), final_flags, 0o640), path)
     parts = path.parts
     if path.is_absolute():
@@ -222,11 +249,14 @@ class FileAuditLog:
         event = {
             "ts": datetime.now(timezone.utc).isoformat(),
             "action": action,
-            "actor": actor,
+            # actor/tenant/details pass through the key-shape redaction — the
+            # sink enforces the no-key-material contract even against a caller
+            # mistake (see _redact_key_shaped).
+            "actor": _redact_key_shaped(actor),
             "surface": surface,
             "outcome": outcome,
-            "tenant": tenant,
-            "details": details or {},
+            "tenant": _redact_key_shaped(tenant),
+            "details": _redact_key_shaped(details or {}),
         }
         try:
             # default=str: an exotic detail value (Path, datetime) degrades to its

@@ -213,6 +213,54 @@ def test_tail_rejects_nonpositive_limit(tmp_path):
         FileAuditLog(tmp_path / "a.jsonl").tail(0)
 
 
+def test_sink_redacts_key_shaped_strings_everywhere(tmp_path):
+    # An operator pasting a plaintext key where a public id belongs (e.g.
+    # `keys revoke msk_...` -> not-found event) must not land a usable
+    # credential in the trail — the SINK redacts any msk_-shaped string,
+    # wherever it sits in the event.
+    log = FileAuditLog(tmp_path / "a.jsonl")
+    assert log.record(
+        "keys.revoke",
+        tenant="msk_pasted_as_tenant",
+        actor="msk_pasted_as_actor",
+        details={"key_id": "msk_secret123", "nested": {"ids": ["ok", "msk_deep"]}},
+    )
+    raw = (tmp_path / "a.jsonl").read_text()
+    assert "msk_" not in raw
+    (ev,) = _events(tmp_path / "a.jsonl")
+    assert ev["details"]["key_id"] == "[redacted:key-shaped]"
+    assert ev["details"]["nested"]["ids"] == ["ok", "[redacted:key-shaped]"]
+    assert ev["tenant"] == "[redacted:key-shaped]" and ev["actor"] == "[redacted:key-shaped]"
+    # normal ids/tenants are untouched
+    log2 = FileAuditLog(tmp_path / "b.jsonl")
+    log2.record("keys.revoke", tenant="acme", details={"key_id": "abc123"})
+    (ev2,) = _events(tmp_path / "b.jsonl")
+    assert ev2["tenant"] == "acme" and ev2["details"]["key_id"] == "abc123"
+
+
+def test_no_dir_fd_fallback_still_refuses_symlinks(tmp_path, monkeypatch):
+    # The fallback branch (no openat walk — Windows) must lstat-refuse a
+    # symlink anywhere in the path instead of silently following it.
+    import mnemostack.audit as audit_mod
+
+    monkeypatch.setattr(audit_mod, "_SUPPORTS_DIR_FD", False)
+    target = tmp_path / "diverted.jsonl"
+    target.write_text("")
+    link = tmp_path / "audit.jsonl"
+    link.symlink_to(target)
+    assert FileAuditLog(link).record("keys.issue") is False
+    assert target.read_text() == ""
+    real = tmp_path / "realdir"
+    real.mkdir()
+    linkdir = tmp_path / "linkdir"
+    linkdir.symlink_to(real, target_is_directory=True)
+    assert FileAuditLog(linkdir / "audit.jsonl").record("keys.issue") is False
+    with pytest.raises(AuditLogError):
+        FileAuditLog(link).tail()
+    # and a clean path still works through the fallback
+    assert FileAuditLog(tmp_path / "ok.jsonl").record("keys.issue") is True
+
+
 # ---------- env plumbing ----------
 
 
