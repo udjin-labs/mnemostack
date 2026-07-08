@@ -421,14 +421,24 @@ class FileKeyStore:
         last_admin_kept = False
         with self._locked():
             records = self._load()
-            n_admins = sum(1 for r in records if _is_usable_admin(r))
+            # Would any usable admin remain AFTER this tenant's keys are gone?
+            # Count admins owned by OTHER tenants — if there are none, one of this
+            # tenant's admin keys must be kept, or offboarding locks out key
+            # management (the case a global-count snapshot missed when the tenant
+            # owned *several* admins).
+            other_admins = sum(
+                1 for r in records if r.get("tenant") != tenant and _is_usable_admin(r)
+            )
+            keep_one_admin = protect_last_admin and other_admins == 0
             kept: list[dict[str, Any]] = []
+            admin_preserved = False
             for r in records:
                 if r.get("tenant") != tenant:
                     kept.append(r)
                     continue
-                if protect_last_admin and _is_usable_admin(r) and n_admins <= 1:
-                    kept.append(r)  # the last usable admin — never auto-revoked
+                if keep_one_admin and not admin_preserved and _is_usable_admin(r):
+                    kept.append(r)  # preserve exactly ONE admin so mgmt survives
+                    admin_preserved = True
                     last_admin_kept = True
                     continue
                 revoked += 1  # dropped
