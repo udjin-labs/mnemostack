@@ -1,0 +1,398 @@
+"""Audit log — module contract + CLI and inspector wiring.
+
+The module contract under test: opt-in via MNEMOSTACK_AUDIT_FILE, best-effort
+writes that never raise into the audited operation, JSONL lines with no key
+material ever, and reads that tolerate corrupt lines (counted, not silent).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import stat
+
+import pytest
+
+from mnemostack.audit import (
+    AuditLogError,
+    FileAuditLog,
+    NullAuditLog,
+    audit_log_from_env,
+)
+
+
+def _events(path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+# ---------- FileAuditLog ----------
+
+
+def test_record_appends_jsonl_with_expected_fields(tmp_path):
+    log = FileAuditLog(tmp_path / "audit.jsonl")
+    assert log.record("keys.issue", tenant="acme", details={"key_id": "abc123"}) is True
+    assert log.record("quota.set", tenant="globex", outcome="error") is True
+    ev = _events(tmp_path / "audit.jsonl")
+    assert len(ev) == 2
+    assert ev[0]["action"] == "keys.issue" and ev[0]["tenant"] == "acme"
+    assert ev[0]["actor"] == "operator:cli" and ev[0]["surface"] == "cli"
+    assert ev[0]["outcome"] == "success" and ev[0]["details"] == {"key_id": "abc123"}
+    assert ev[0]["ts"].endswith("+00:00")  # UTC, ISO-8601
+    assert ev[1]["outcome"] == "error" and ev[1]["details"] == {}
+
+
+def test_record_never_raises_on_unwritable_path(tmp_path):
+    # Parent "dir" is a file — mkdir/open must fail; record reports False, no raise.
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file, not a dir")
+    log = FileAuditLog(blocker / "audit.jsonl")
+    assert log.record("keys.issue", tenant="acme") is False
+
+
+def test_record_degrades_exotic_detail_values(tmp_path):
+    # default=str: a non-JSON-serializable detail must not lose the event.
+    log = FileAuditLog(tmp_path / "a.jsonl")
+    assert log.record("tenant.export", details={"path": tmp_path}) is True
+    (ev,) = _events(tmp_path / "a.jsonl")
+    assert str(tmp_path) in ev["details"]["path"]
+
+
+def test_audit_file_not_world_accessible(tmp_path):
+    log = FileAuditLog(tmp_path / "a.jsonl")
+    log.record("keys.issue")
+    mode = stat.S_IMODE(os.stat(tmp_path / "a.jsonl").st_mode)
+    assert mode & 0o007 == 0  # 0o640 ceiling: no world access regardless of umask
+
+
+def test_tail_returns_last_n_oldest_first_and_counts_corrupt(tmp_path):
+    p = tmp_path / "a.jsonl"
+    log = FileAuditLog(p)
+    for i in range(5):
+        log.record("quota.set", tenant=f"t{i}")
+    # a truncated line (copytruncate rotation) and a non-object line
+    with open(p, "a", encoding="utf-8") as f:
+        f.write('{"ts": "2026-07-08T', )
+        f.write("\n[1, 2]\n")
+    events, skipped = log.tail(3)
+    assert [e["tenant"] for e in events] == ["t2", "t3", "t4"]
+    assert skipped == 2
+
+
+def test_tail_missing_file_is_empty_not_error(tmp_path):
+    events, skipped = FileAuditLog(tmp_path / "missing.jsonl").tail()
+    assert events == [] and skipped == 0
+
+
+def test_tail_unreadable_file_raises(tmp_path):
+    p = tmp_path / "a.jsonl"
+    log = FileAuditLog(p)
+    log.record("keys.issue")
+    os.chmod(p, 0)
+    if os.access(p, os.R_OK):  # running as root: chmod 0 doesn't bite
+        pytest.skip("cannot make the file unreadable under this user")
+    try:
+        with pytest.raises(AuditLogError):
+            log.tail()
+    finally:
+        os.chmod(p, 0o600)
+
+
+def test_tail_rejects_nonpositive_limit(tmp_path):
+    with pytest.raises(ValueError):
+        FileAuditLog(tmp_path / "a.jsonl").tail(0)
+
+
+# ---------- env plumbing ----------
+
+
+def test_audit_log_from_env(monkeypatch, tmp_path):
+    monkeypatch.delenv("MNEMOSTACK_AUDIT_FILE", raising=False)
+    assert isinstance(audit_log_from_env(), NullAuditLog)
+    monkeypatch.setenv("MNEMOSTACK_AUDIT_FILE", "  ")
+    assert isinstance(audit_log_from_env(), NullAuditLog)  # blank = unset
+    monkeypatch.setenv("MNEMOSTACK_AUDIT_FILE", str(tmp_path / "a.jsonl"))
+    sink = audit_log_from_env()
+    assert isinstance(sink, FileAuditLog)
+    assert sink.path == tmp_path / "a.jsonl"
+
+
+def test_null_audit_log_is_a_noop():
+    assert NullAuditLog().record("keys.issue", tenant="acme") is False
+
+
+# ---------- CLI wiring ----------
+
+import mnemostack.cli as cli  # noqa: E402
+from mnemostack.auth import FileKeyStore  # noqa: E402
+from mnemostack.quotas import FileQuotaStore  # noqa: E402
+
+
+@pytest.fixture
+def audit_file(monkeypatch, tmp_path):
+    p = tmp_path / "audit.jsonl"
+    monkeypatch.setenv("MNEMOSTACK_AUDIT_FILE", str(p))
+    return p
+
+
+def _keys_ns(tmp_path, **kw):
+    base = {"keys_file": str(tmp_path / "keys.json"), "label": None}
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def test_cli_keys_add_audits_key_id_never_the_key(tmp_path, audit_file, capsys):
+    rc = cli.cmd_keys_add(_keys_ns(tmp_path, tenant="acme", scopes="read,write"))
+    assert rc == 0
+    (ev,) = _events(audit_file)
+    assert ev["action"] == "keys.issue" and ev["tenant"] == "acme"
+    assert ev["details"]["scopes"] == "read,write"
+    key_id = ev["details"]["key_id"]
+    assert FileKeyStore(tmp_path / "keys.json").list_keys()[0]["id"] == key_id
+    # The plaintext key (printed once) and its hash must NEVER reach the log.
+    plaintext = next(
+        line.strip() for line in capsys.readouterr().out.splitlines()
+        if line.strip().startswith("msk_")
+    )
+    raw = audit_file.read_text()
+    assert plaintext not in raw
+    from mnemostack.auth import hash_key
+
+    assert hash_key(plaintext) not in raw
+
+
+def test_cli_keys_revoke_audits_success_and_not_found(tmp_path, audit_file):
+    ks = FileKeyStore(tmp_path / "keys.json")
+    key_id, _ = ks.issue("acme", ["read"])
+    assert cli.cmd_keys_revoke(_keys_ns(tmp_path, id=key_id)) == 0
+    assert cli.cmd_keys_revoke(_keys_ns(tmp_path, id="nope")) == 1
+    ev = _events(audit_file)
+    assert [e["outcome"] for e in ev] == ["success", "error"]
+    assert ev[0]["details"]["key_id"] == key_id
+    assert ev[1]["details"]["reason"] == "not_found"
+
+
+def test_cli_quota_set_and_rm_audit(tmp_path, audit_file):
+    ns = argparse.Namespace(
+        quotas_file=str(tmp_path / "q.json"), tenant="acme", max_points=100
+    )
+    assert cli.cmd_quota_set(ns) == 0
+    assert cli.cmd_quota_rm(argparse.Namespace(quotas_file=str(tmp_path / "q.json"), tenant="acme")) == 0
+    ev = _events(audit_file)
+    assert ev[0]["action"] == "quota.set" and ev[0]["details"]["max_points"] == 100
+    assert ev[1]["action"] == "quota.remove" and ev[1]["outcome"] == "success"
+
+
+def test_cli_disabled_audit_writes_nothing(monkeypatch, tmp_path):
+    monkeypatch.delenv("MNEMOSTACK_AUDIT_FILE", raising=False)
+    assert cli.cmd_keys_add(_keys_ns(tmp_path, tenant="acme", scopes="read")) == 0
+    assert not list(tmp_path.glob("*.jsonl"))
+
+
+class _FakeHit:
+    def __init__(self, i):
+        self.id = str(i)
+        self.payload = {"text": f"row {i}", "tenant_id": "acme"}
+        self.vector = None
+
+
+class _FakeExportStore:
+    def __init__(self, **_):
+        pass
+
+    def collection_exists(self):
+        return True
+
+    def scroll(self, **_):
+        return iter([_FakeHit(1), _FakeHit(2)])
+
+
+def test_cli_tenant_export_audits_points_and_destination(monkeypatch, tmp_path, audit_file):
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: _FakeExportStore())
+    out = tmp_path / "dump.jsonl"
+    ns = argparse.Namespace(
+        collection="mt", qdrant="http://localhost:6333",
+        tenant="acme", output=str(out), no_vectors=True,
+    )
+    assert cli.cmd_tenant_export(ns) == 0
+    (ev,) = _events(audit_file)
+    assert ev["action"] == "tenant.export" and ev["tenant"] == "acme"
+    assert ev["details"] == {"points": 2, "output": str(out)}
+
+
+def test_cli_tenant_rm_audits_the_sweep_outcome(monkeypatch, tmp_path, audit_file):
+    # Full sweep with fakes: success -> one tenant.rm success event.
+    class _FakeRmStore:
+        def __init__(self, **_):
+            pass
+
+        def collection_exists(self):
+            return True
+
+        def count(self, *, tenant=None):
+            return 1
+
+        def delete_tenant(self, tenant):
+            return 1
+
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: _FakeRmStore())
+    ks = FileKeyStore(tmp_path / "keys.json")
+    ks.issue("acme", ["read"])
+    ks.issue("ops", ["admin"])  # another tenant's admin survives the sweep
+    FileQuotaStore(tmp_path / "quotas.json").set("acme", max_points=5)
+    ns = argparse.Namespace(
+        collection="mt", qdrant="http://localhost:6333",
+        tenant="acme", memgraph_uri=None, no_graph=False, graph_timeout=5.0,
+        dry_run=False, yes=True,
+        keys_file=str(tmp_path / "keys.json"),
+        quotas_file=str(tmp_path / "quotas.json"),
+        state_path=str(tmp_path / "state.json"),
+        external_keys_revoked=False,
+    )
+    assert cli.cmd_tenant_rm(ns) == 0
+    (ev,) = _events(audit_file)
+    assert ev["action"] == "tenant.rm" and ev["tenant"] == "acme"
+    assert ev["outcome"] == "success"
+
+
+def test_cli_tenant_rm_abort_audits_aborted(tmp_path, audit_file, capsys):
+    rc = cli._abort_keys_alive("acme", ["service keys (last admin key)"], None)
+    assert rc == 1
+    (ev,) = _events(audit_file)
+    assert ev["action"] == "tenant.rm" and ev["outcome"] == "aborted"
+    assert ev["details"]["failed"] == ["service keys (last admin key)"]
+
+
+# ---------- inspector wiring ----------
+
+pytest.importorskip("fastapi")
+
+from fastapi.testclient import TestClient  # noqa: E402
+from qdrant_client import QdrantClient  # noqa: E402
+from qdrant_client.models import Distance  # noqa: E402
+
+import mnemostack.inspector as insp  # noqa: E402
+from mnemostack.server import ServerConfig  # noqa: E402
+from mnemostack.vector import VectorStore  # noqa: E402
+
+
+def _mini_store() -> VectorStore:
+    s = VectorStore.__new__(VectorStore)
+    s.collection = "mt"
+    s.dimension = 4
+    s.distance = Distance.COSINE
+    s.client = QdrantClient(":memory:")
+    s.ensure_collection()
+    s.upsert(1, [1.0, 0, 0, 0], {"text": "one"}, tenant="acme")
+    return s
+
+
+def _admin_client(monkeypatch, tmp_path):
+    """Inspector under --auth with real key/quota stores.
+    Returns (client, admin_key, admin_id, read_key)."""
+    store = _mini_store()
+    monkeypatch.setattr(insp, "VectorStore", lambda **_: store)
+    monkeypatch.setattr(insp, "_make_probe_client", lambda *a, **k: store.client)
+    ks = FileKeyStore(tmp_path / "keys.json")
+    admin_id, admin_key = ks.issue("ops", ["admin"])
+    _, read_key = ks.issue("acme", ["read"])
+    app = insp.build_inspector_app(
+        ServerConfig(
+            provider_name="fake", collection="mt", graph_uri=None,
+            auth_enabled=True,
+            keys_file=str(tmp_path / "keys.json"),
+            quotas_file=str(tmp_path / "quotas.json"),
+        )
+    )
+    return TestClient(app), admin_key, admin_id, read_key
+
+
+def _hdr(key):
+    return {"X-API-Key": key}
+
+
+def test_inspector_key_issue_audits_with_admin_actor(monkeypatch, tmp_path, audit_file):
+    c, admin_key, admin_id, _ = _admin_client(monkeypatch, tmp_path)
+    r = c.post(
+        "/api/keys",
+        json={"tenant": "acme", "scopes": ["read"], "label": "ci"},
+        headers=_hdr(admin_key),
+    )
+    assert r.status_code == 201
+    ev = [e for e in _events(audit_file) if e["action"] == "keys.issue"]
+    assert len(ev) == 1
+    assert ev[0]["surface"] == "inspector" and ev[0]["actor"] == f"key:{admin_id}"
+    assert ev[0]["tenant"] == "acme" and ev[0]["details"]["key_id"] == r.json()["id"]
+    # never the plaintext returned by the endpoint
+    assert r.json()["key"] not in audit_file.read_text()
+
+
+def test_inspector_denials_are_audited_but_probes_are_not(monkeypatch, tmp_path, audit_file):
+    c, _admin, _aid, read_key = _admin_client(monkeypatch, tmp_path)
+    assert c.get("/api/keys").status_code == 401  # missing key: probe, NOT audited
+    assert c.get("/api/keys", headers=_hdr("msk_bogus")).status_code == 401
+    assert c.get("/api/keys", headers=_hdr(read_key)).status_code == 403
+    ev = _events(audit_file)
+    assert [e["details"]["reason"] for e in ev] == ["invalid_key", "not_admin"]
+    assert all(e["action"] == "auth.denied" and e["outcome"] == "denied" for e in ev)
+    assert ev[0]["actor"].startswith("ip:")
+    assert ev[1]["actor"].startswith("key:")  # rejected non-admin is attributable
+    assert "msk_bogus" not in audit_file.read_text()  # never presented key material
+
+
+def test_inspector_last_admin_revoke_audits_denied(monkeypatch, tmp_path, audit_file):
+    c, admin_key, admin_id, _ = _admin_client(monkeypatch, tmp_path)
+    r = c.delete(f"/api/keys/{admin_id}", headers=_hdr(admin_key))
+    assert r.status_code == 409
+    ev = [e for e in _events(audit_file) if e["action"] == "keys.revoke"]
+    assert len(ev) == 1 and ev[0]["outcome"] == "denied"
+    assert ev[0]["details"]["reason"] == "last_admin"
+
+
+def test_inspector_quota_set_and_remove_audit(monkeypatch, tmp_path, audit_file):
+    c, admin_key, *_ = _admin_client(monkeypatch, tmp_path)
+    assert (
+        c.put("/api/quotas/acme", json={"max_points": 9}, headers=_hdr(admin_key)).status_code
+        == 200
+    )
+    assert c.delete("/api/quotas/acme", headers=_hdr(admin_key)).status_code == 200
+    ev = [e for e in _events(audit_file) if e["action"].startswith("quota.")]
+    assert [e["action"] for e in ev] == ["quota.set", "quota.remove"]
+    assert ev[0]["details"]["max_points"] == 9 and ev[0]["tenant"] == "acme"
+
+
+def test_inspector_audit_endpoint(monkeypatch, tmp_path, audit_file):
+    c, admin_key, *_ = _admin_client(monkeypatch, tmp_path)
+    c.put("/api/quotas/acme", json={"max_points": 9}, headers=_hdr(admin_key))
+    d = c.get("/api/audit", headers=_hdr(admin_key)).json()
+    assert d["enabled"] is True and d["skipped"] == 0
+    assert any(e["action"] == "quota.set" for e in d["events"])
+    # admin-gated like every management endpoint
+    assert c.get("/api/audit").status_code == 401
+
+
+def test_inspector_audit_endpoint_reports_disabled(monkeypatch, tmp_path):
+    monkeypatch.delenv("MNEMOSTACK_AUDIT_FILE", raising=False)
+    c, admin_key, *_ = _admin_client(monkeypatch, tmp_path)
+    d = c.get("/api/audit", headers=_hdr(admin_key)).json()
+    assert d == {"enabled": False, "events": [], "skipped": 0}
+
+
+def test_inspector_audit_endpoint_forbidden_without_auth(monkeypatch):
+    store = _mini_store()
+    monkeypatch.setattr(insp, "VectorStore", lambda **_: store)
+    monkeypatch.setattr(insp, "_make_probe_client", lambda *a, **k: store.client)
+    app = insp.build_inspector_app(
+        ServerConfig(provider_name="fake", collection="mt", graph_uri=None)
+    )
+    assert TestClient(app).get("/api/audit").status_code == 403
+
+
+# ---------- Principal.key_id (audit attribution) ----------
+
+
+def test_verify_carries_the_key_id(tmp_path):
+    ks = FileKeyStore(tmp_path / "keys.json")
+    key_id, key = ks.issue("acme", ["read"])
+    p = ks.verify(key)
+    assert p is not None and p.key_id == key_id

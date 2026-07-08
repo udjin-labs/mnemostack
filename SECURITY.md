@@ -61,6 +61,14 @@ and the rate limiter is **per-process** (N workers multiply the effective ceilin
 by N), so use a reverse proxy for a hard global limit. Auth is off by default —
 single-tenant deployments are unaffected.
 
+Control-plane operations (key issue/revoke, quota changes, tenant
+offboarding/export/migration, admin-console denials) can be recorded to an
+opt-in **audit trail** (`MNEMOSTACK_AUDIT_FILE`, JSONL). It is a best-effort
+operational log, **not tamper-evident** — a local writer can edit it, and a
+failed audit write never blocks the operation. Events carry public key ids
+only, never key material. Ship the file to an external collector if you need
+integrity guarantees. See `docs/deployment.md` for the full contract.
+
 Recall `filters=` provide data isolation inside the retrievers, but they are
 caller-supplied — **not an authorization boundary**: a client that can reach the
 endpoint can pass any filter, or none. For a real trust boundary in multi-tenant

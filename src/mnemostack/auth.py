@@ -50,6 +50,9 @@ class Principal:
 
     tenant: str
     scopes: frozenset[str]
+    #: Public id of the key that authenticated (for audit attribution — never
+    #: the key itself). None when the backend's records carry no id.
+    key_id: str | None = None
 
     def can(self, scope: str) -> bool:
         """Whether this principal is allowed a scope. ``admin`` implies all."""
@@ -325,7 +328,12 @@ class FileKeyStore:
                     scopes = frozenset(_normalize_scopes(raw_scopes))
                 except (ValueError, TypeError):
                     return None
-                return Principal(tenant=tenant, scopes=scopes)
+                rec_id = rec.get("id")
+                return Principal(
+                    tenant=tenant,
+                    scopes=scopes,
+                    key_id=rec_id if isinstance(rec_id, str) and rec_id else None,
+                )
         return None
 
     # ---- management ----
