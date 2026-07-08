@@ -29,10 +29,15 @@ Contract — read this before extending:
 - **Hardened file handling.** Both read and write open the trail with every
   path component refusing symlinks (an ``openat`` walk — a pre-planted link
   anywhere in the path can neither divert appends nor feed the Audit tab
-  spoofed events), the target must be a regular file (a FIFO can't hang an
-  audited operation), and short writes are completed or reported as failures.
-  Deliberate consequence: a *legitimately* symlinked directory in the path is
-  also refused — point ``MNEMOSTACK_AUDIT_FILE`` at a real path.
+  spoofed events); the target must be a regular file (a FIFO can't hang an
+  audited operation) **owned by the running user or root and no looser than
+  ``0o640``** (a pre-created world-accessible file is refused, not silently
+  appended to); the append lock is acquired with a bounded ~2s budget (a hung
+  lock-holder can't stall key revocation); and short writes are completed or
+  reported as failures. Deliberate consequences: a *legitimately* symlinked
+  directory in the path is refused — point ``MNEMOSTACK_AUDIT_FILE`` at a real
+  path — and a pre-provisioned trail file must be owner-correct and
+  ``chmod 0640`` (or stricter).
 """
 
 from __future__ import annotations
@@ -41,6 +46,7 @@ import json
 import logging
 import os
 import stat
+import time
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,14 +57,35 @@ log = logging.getLogger(__name__)
 #: Whether os.open supports dir_fd (POSIX) — enables the openat() walk below.
 _SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 
+#: Bounded wait for the append lock: ~2s total, then the write is reported
+#: failed. A blocking LOCK_EX would let a hung/hostile lock-holder stall key
+#: revocation or an offboarding forever — the exact hang the contract forbids.
+_LOCK_ATTEMPTS = 20
+_LOCK_SLEEP = 0.1
+
 
 def _require_regular(fd: int, path: Path) -> int:
-    """Refuse anything but a regular file (FIFO, device, socket): a pre-planted
-    FIFO would otherwise turn every audited operation into a potential hang, and
-    a device node is not an append-only trail. Closes ``fd`` on refusal."""
+    """Refuse an unsafe trail target. Closes ``fd`` on refusal.
+
+    Must be a regular file (a FIFO would hang audited operations; a device node
+    is not an append-only trail), owned by the running user or root, and not
+    group-writable or world-accessible — a pre-created ``0666`` file in a shared
+    log directory would otherwise leak tenant names/key ids to every local user
+    (and let any of them spoof or truncate the trail) while ``record()`` reports
+    success. Fresh files are created ``0o640``; an existing file must be at
+    least that strict."""
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
             raise OSError(f"audit path {path} is not a regular file")
+        geteuid = getattr(os, "geteuid", None)  # POSIX-only; skip where absent
+        if geteuid is not None and st.st_uid not in (geteuid(), 0):
+            raise OSError(f"audit path {path} is owned by uid {st.st_uid} — not trusted")
+        if st.st_mode & 0o027:  # group-write or any world access
+            raise OSError(
+                f"audit path {path} has insecure mode {stat.S_IMODE(st.st_mode):#o} "
+                "(group-writable or world-accessible) — fix it, e.g. chmod 0640"
+            )
     except BaseException:
         os.close(fd)
         raise
@@ -217,7 +244,22 @@ class FileAuditLog:
                 except ImportError:  # pragma: no cover — non-POSIX platform
                     fcntl = None  # type: ignore[assignment]
                 if fcntl is not None:
-                    fcntl.flock(fd, fcntl.LOCK_EX)
+                    # Bounded, NON-blocking acquisition: a hung (or hostile)
+                    # holder of this advisory lock must stall an audited
+                    # operation for at most ~2s, not forever — after the budget
+                    # the write is reported failed (loud, best-effort), and key
+                    # revocation / offboarding proceeds.
+                    for attempt in range(_LOCK_ATTEMPTS):
+                        try:
+                            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            break
+                        except (BlockingIOError, InterruptedError):
+                            if attempt == _LOCK_ATTEMPTS - 1:
+                                raise OSError(
+                                    "audit log lock is held by another process "
+                                    f"(waited ~{_LOCK_ATTEMPTS * _LOCK_SLEEP:.0f}s)"
+                                ) from None
+                            time.sleep(_LOCK_SLEEP)
                 try:
                     # os.write may accept only part of the buffer (disk filling
                     # mid-line, interrupted write) WITHOUT raising — reporting

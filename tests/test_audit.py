@@ -95,6 +95,46 @@ def test_fifo_at_the_audit_path_fails_fast_not_hangs(tmp_path):
         FileAuditLog(p).tail()  # opens nonblocking, refused as non-regular
 
 
+def test_record_and_tail_refuse_an_insecure_precreated_file(tmp_path):
+    # A file pre-planted 0666 in a shared log dir would leak tenant names/key
+    # ids to every local user (and let any of them spoof the trail) — both
+    # paths must refuse it loudly, not append/read and report success.
+    p = tmp_path / "audit.jsonl"
+    p.write_text("")
+    os.chmod(p, 0o666)
+    assert FileAuditLog(p).record("keys.issue", tenant="acme") is False
+    assert p.read_text() == ""  # nothing was appended to the insecure file
+    with pytest.raises(AuditLogError):
+        FileAuditLog(p).tail()
+    os.chmod(p, 0o640)  # fixed by the operator -> works again
+    assert FileAuditLog(p).record("keys.issue", tenant="acme") is True
+    assert FileAuditLog(p).tail()[0][0]["tenant"] == "acme"
+
+
+def test_record_gives_up_on_a_held_lock_within_budget(tmp_path, monkeypatch):
+    # A hung (or hostile) process holding the advisory lock must not stall an
+    # audited operation forever — record() waits a bounded budget, then reports
+    # the write failed and the operation proceeds.
+    import fcntl
+
+    import mnemostack.audit as audit_mod
+
+    monkeypatch.setattr(audit_mod, "_LOCK_ATTEMPTS", 3)
+    monkeypatch.setattr(audit_mod, "_LOCK_SLEEP", 0.01)
+    log = FileAuditLog(tmp_path / "a.jsonl")
+    assert log.record("keys.issue") is True  # create the file first
+    holder = os.open(str(tmp_path / "a.jsonl"), os.O_WRONLY)
+    try:
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        assert log.record("quota.set", tenant="acme") is False  # bounded give-up
+    finally:
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        os.close(holder)
+    assert log.record("quota.set", tenant="acme") is True  # lock released -> works
+    events, _ = log.tail()
+    assert [e["action"] for e in events] == ["keys.issue", "quota.set"]
+
+
 def test_record_completes_short_writes(tmp_path, monkeypatch):
     # os.write may accept only part of the buffer without raising — record()
     # must loop until the whole line landed, not report success on a truncated
