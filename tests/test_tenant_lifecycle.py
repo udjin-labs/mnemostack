@@ -905,3 +905,83 @@ def test_tenant_export_preserves_existing_file_mode(monkeypatch, tmp_path):
     os.chmod(out, 0o644)
     assert cli.cmd_tenant_export(_ns(tenant="alpha", output=str(out), no_vectors=True)) == 0
     assert stat.S_IMODE(os.stat(out).st_mode) == 0o644  # not silently narrowed to 0600
+
+
+# ---------- review round 12 ----------
+
+
+def test_tenant_rm_honors_state_path_env(monkeypatch, tmp_path):
+    # tenant-rm without --state-path must clean the SAME state file the servers
+    # use (MNEMOSTACK_STATE_PATH), not the XDG default.
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    ks = FileKeyStore(tmp_path / "keys.json")
+    ks.issue("alpha", ["read"])
+    FileQuotaStore(tmp_path / "quotas.json").set("alpha", max_points=1)
+    env_state = tmp_path / "env-state.json"
+    fs = FileStateStore(env_state)
+    fs.set(tenant_state_key("q_table", "alpha"), {"w": 1})
+    monkeypatch.setenv("MNEMOSTACK_STATE_PATH", str(env_state))
+    ns = _rm_ns(tmp_path, tenant="alpha", yes=True)
+    del ns.state_path  # force the env/default resolution path
+    rc = cli.cmd_tenant_rm(ns)
+    assert rc == 0
+    assert fs.get(tenant_state_key("q_table", "alpha")) is None  # env file was cleaned
+
+
+def test_tenant_rm_removes_quota_created_after_count(monkeypatch, tmp_path):
+    # A quota created for the tenant AFTER the count snapshot must still be
+    # removed (remove() is idempotent and now called unconditionally).
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    ks = FileKeyStore(tmp_path / "keys.json")
+    ks.issue("alpha", ["read"])
+    # NO quota at count time
+    qf = tmp_path / "quotas.json"
+
+    real_remove = FileQuotaStore.remove
+
+    class _RacyQuota(FileQuotaStore):
+        def list_quotas(self):
+            return []  # count sees nothing
+
+        def remove(self, tenant):
+            return real_remove(self, tenant)
+
+    holder = _RacyQuota(qf)
+    monkeypatch.setattr(cli, "_quota_store", lambda _a: holder)
+    # a racer sets a quota during the sweep
+    FileQuotaStore(qf).set("alpha", max_points=99)
+    rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", yes=True))
+    assert rc == 0
+    assert FileQuotaStore(qf).get("alpha") is None  # removed despite empty snapshot
+
+
+def test_tenant_rm_late_admin_during_sweep_is_partial(monkeypatch, tmp_path, capsys):
+    # A late-issued key that becomes the last usable admin (revoked==0,
+    # last_admin_kept) must be a partial removal, not a silent success.
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    ks = FileKeyStore(tmp_path / "keys.json")
+    ks.issue("alpha", ["write"])  # one non-admin key at count time
+    FileQuotaStore(tmp_path / "quotas.json").set("alpha", max_points=1)
+
+    class _LateAdmin:
+        def __init__(self):
+            self.calls = 0
+
+        def list_keys(self):
+            return ks.list_keys()
+
+        def revoke_tenant(self, tenant, **kw):
+            self.calls += 1
+            res = ks.revoke_tenant(tenant, **kw)  # pass 1 drops the write key
+            if self.calls == 1:
+                ks.issue("alpha", ["admin"])  # a racer onboards an admin mid-sweep
+            return res
+
+    monkeypatch.setattr(cli, "_keys_store", lambda _a: _LateAdmin())
+    rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", yes=True))
+    assert rc == 1  # not "fully removed"
+    err = capsys.readouterr().err
+    assert "last usable admin" in err and "DURING" in err

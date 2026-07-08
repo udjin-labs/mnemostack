@@ -707,7 +707,14 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
     from .recall.pipeline import FileStateStore, default_state_path
     from .recall.pipeline.state import tenant_state_key
 
-    state_path = getattr(args, "state_path", None) or default_state_path()
+    # Honor MNEMOSTACK_STATE_PATH like the servers do (the MCP server reads it),
+    # or tenant-rm would inspect/clean a DIFFERENT state file than the live
+    # server and report full removal while the tenant's partitions survive.
+    state_path = (
+        getattr(args, "state_path", None)
+        or os.environ.get("MNEMOSTACK_STATE_PATH")
+        or default_state_path()
+    )
     state_keys = [tenant_state_key(base, tenant) for base in ("q_table", "ior_log")]
     state_store = None
     present_state: list[str] = []
@@ -875,10 +882,13 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
             print(f"error: graph delete failed: {e}", file=sys.stderr)
         finally:
             gs.close()
-    if quota_present and "quota" not in unavailable:
+    if "quota" not in unavailable:
+        # Call remove() unconditionally (it's idempotent), NOT gated on the
+        # count-phase quota_present snapshot: a quota created for the tenant after
+        # the count (a concurrent admin/inspector session) would otherwise survive
+        # under a "fully removed" report.
         try:
-            _quota_store(args).remove(tenant)
-            print("removed quota")
+            print("removed quota" if _quota_store(args).remove(tenant) else "quota: none")
         except Exception as e:  # noqa: BLE001
             failed.append("quota")
             print(f"error: quota removal failed: {e}", file=sys.stderr)
@@ -902,12 +912,18 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
     if not external_keys and "service keys" not in unavailable:
         try:
             late = _keys_store(args).revoke_tenant(tenant, protect_last_admin=True)
-            if late["revoked"]:
+            if late["revoked"] or late["last_admin_kept"]:
                 failed.append("service keys (issued during sweep)")
                 print(
-                    f"warning: {late['revoked']} key(s) for '{tenant}' appeared DURING "
-                    "the sweep and were revoked — data may have been re-created; "
-                    "re-run tenant-rm (and don't issue keys for a tenant being removed).",
+                    f"warning: key(s) for '{tenant}' appeared DURING the sweep "
+                    f"({late['revoked']} revoked"
+                    + (
+                        ", 1 kept as the last usable admin and still active"
+                        if late["last_admin_kept"]
+                        else ""
+                    )
+                    + ") — data may have been re-created; re-run tenant-rm (and don't "
+                    "issue keys for a tenant being removed).",
                     file=sys.stderr,
                 )
         except Exception as e:  # noqa: BLE001 — best-effort second pass
