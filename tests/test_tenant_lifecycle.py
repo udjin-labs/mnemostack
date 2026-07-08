@@ -658,8 +658,9 @@ def test_tenant_rm_revocation_write_failure_aborts_sweep(monkeypatch, tmp_path, 
         def list_keys(self):
             return ks.list_keys()  # readable...
 
-        def revoke_guarded(self, kid, **kw):
-            raise OSError("read-only file system")  # ...but not writable
+        def revoke_tenant(self, tenant, **kw):
+            from mnemostack.auth import KeyStoreError
+            raise KeyStoreError("read-only file system")  # ...but not writable
 
     monkeypatch.setattr(cli, "_keys_store", lambda _a: _BrokenWrite())
     rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", yes=True))
@@ -823,3 +824,84 @@ def test_tenant_rm_external_warns_about_verify_cache(monkeypatch, tmp_path, caps
     )
     assert rc == 0
     assert "verify cache expires" in capsys.readouterr().err
+
+
+# ---------- self-review batch (primary graph path, sweep-window, export mode) ----------
+
+
+def test_tenant_rm_primary_path_uses_configured_graph(monkeypatch, tmp_path, capsys):
+    # THE hole Codex missed: on a normal (config loads fine) deployment with a
+    # graph configured, omitting --memgraph-uri must NOT print "fully removed"
+    # while graph records survive — the flag now defaults to the configured URI.
+    from mnemostack.config import Config, GraphConfig
+
+    def _load_with_graph(*a, **k):
+        cfg = Config()
+        cfg.graph = GraphConfig(uri="bolt://configured:7687")
+        return cfg
+
+    monkeypatch.setattr(Config, "load", classmethod(lambda cls: _load_with_graph()))
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    _seed_config(tmp_path)
+    called = {}
+
+    class _G:
+        def delete_tenant(self, tenant, *, dry_run=False):
+            called["uri_used"] = True
+            return {"nodes": 1, "relationships": 0, "detached": 0}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("mnemostack.graph.factory.make_graph_store", lambda *a, **k: _G())
+    # no --memgraph-uri on the CLI, but the config has one -> it's swept
+    rc = cli.main([
+        "tenant-rm", "--tenant", "alpha", "--yes",
+        "--qdrant", "http://localhost:6333", "--collection", "mt",
+    ])
+    assert rc == 0
+    assert called.get("uri_used") is True  # the configured graph was actually swept
+
+
+def test_tenant_rm_key_issued_during_sweep_is_caught(monkeypatch, tmp_path, capsys):
+    # A key that appears mid-sweep (concurrent onboarding) is caught by the final
+    # re-scan and reported as a partial removal, not a silent "fully removed".
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    ks, _fs = _seed_config(tmp_path)  # alpha has 2 keys at count time
+
+    class _RacerKeys:
+        def __init__(self):
+            self.calls = 0
+
+        def list_keys(self):
+            return ks.list_keys()
+
+        def revoke_tenant(self, tenant, **kw):
+            self.calls += 1
+            res = ks.revoke_tenant(tenant, **kw)
+            if self.calls == 1:
+                ks.issue("alpha", ["write"])  # a racer onboards mid-sweep
+            return res
+
+    racer = _RacerKeys()  # ONE instance so `calls` persists across the two revoke passes
+    monkeypatch.setattr(cli, "_keys_store", lambda _a: racer)
+    rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", yes=True))
+    assert rc == 1  # not "fully removed"
+    err = capsys.readouterr().err
+    assert "during the sweep" in err.lower() or "DURING" in err
+    assert not any(k["tenant"] == "alpha" for k in ks.list_keys())  # racer key revoked
+
+
+def test_tenant_export_preserves_existing_file_mode(monkeypatch, tmp_path):
+    import os
+    import stat
+
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    out = tmp_path / "dump.jsonl"
+    out.write_text("old\n")
+    os.chmod(out, 0o644)
+    assert cli.cmd_tenant_export(_ns(tenant="alpha", output=str(out), no_vectors=True)) == 0
+    assert stat.S_IMODE(os.stat(out).st_mode) == 0o644  # not silently narrowed to 0600

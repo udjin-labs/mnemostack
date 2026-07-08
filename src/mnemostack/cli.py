@@ -552,6 +552,16 @@ def cmd_tenant_export(args: argparse.Namespace) -> int:
         if out is not sys.stdout:
             out.close()
             assert tmp_path is not None
+            # mkstemp made the temp 0600; if we're replacing an existing dump,
+            # keep ITS mode rather than silently narrowing a 0644 backup (the
+            # export carries no plaintext secrets — keys aren't exported).
+            try:
+                prev_mode = os.stat(args.output).st_mode & 0o777
+                os.chmod(tmp_path, prev_mode)
+            except FileNotFoundError:
+                pass  # new file: leave mkstemp's owner-only default
+            except OSError:
+                pass  # best-effort; a platform without chmod keeps 0600
             os.replace(tmp_path, args.output)  # success: land the dump atomically
             tmp_path = None
     except Exception as e:  # noqa: BLE001
@@ -825,9 +835,10 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
                 failed.append("service keys (last admin key)")
                 print(
                     f"error: a key of tenant '{tenant}' is the LAST usable admin key — "
-                    "refusing to revoke it (that would lock out key management). "
-                    "Issue another admin key (`mnemostack keys add --scopes admin`), "
-                    "then re-run.",
+                    "refusing to revoke it (that would lock out key management). Issue "
+                    "an admin key for a DIFFERENT tenant (`mnemostack keys add --tenant "
+                    "<other> --scopes admin`) — one for this tenant would just be kept "
+                    "again — then re-run.",
                     file=sys.stderr,
                 )
                 # The surviving key is write-capable (admin implies write), so it
@@ -881,6 +892,27 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
         except Exception as e:  # noqa: BLE001
             failed.append("learning state")
             print(f"error: learning-state cleanup failed: {e}", file=sys.stderr)
+
+    # Final key re-scan: a key issued for the tenant DURING the sweep (a racer
+    # concurrently onboarding it) is missed by the pre-sweep revocation and could
+    # have re-written data into a store we just cleaned. Re-revoke; if any turned
+    # up, report a partial removal rather than claim success — the operator must
+    # stop issuing keys for an offboarding tenant (or pause the servers) for a
+    # hard guarantee; one CLI pass can't lock out issuance cluster-wide.
+    if not external_keys and "service keys" not in unavailable:
+        try:
+            late = _keys_store(args).revoke_tenant(tenant, protect_last_admin=True)
+            if late["revoked"]:
+                failed.append("service keys (issued during sweep)")
+                print(
+                    f"warning: {late['revoked']} key(s) for '{tenant}' appeared DURING "
+                    "the sweep and were revoked — data may have been re-created; "
+                    "re-run tenant-rm (and don't issue keys for a tenant being removed).",
+                    file=sys.stderr,
+                )
+        except Exception as e:  # noqa: BLE001 — best-effort second pass
+            failed.append("service keys (post-sweep re-scan)")
+            print(f"error: post-sweep key re-scan failed: {e}", file=sys.stderr)
 
     if failed:
         print(
@@ -2348,9 +2380,11 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     )
     p_tenant_rm.add_argument(
         "--memgraph-uri",
-        default=None,
+        default=cfg.graph.uri,  # a graph configured in config/env is swept by default
         help="Also delete the tenant's graph nodes/edges at this bolt URI. "
-        "Omit to remove vector/config data only.",
+        "Defaults to the configured graph (config/env), so a graph deployment is "
+        "swept automatically; passes through as unset only when no graph is "
+        "configured. Pass an explicit URI to override.",
     )
     p_tenant_rm.add_argument(
         "--graph-timeout",

@@ -538,6 +538,9 @@ class VectorStore:
         if not tenant or not isinstance(tenant, str):
             raise ValueError("delete_tenant requires a non-empty tenant")
         sel = Filter(must=[_tenant_condition(tenant)])
+        # Pre-delete snapshot count (Qdrant's filter-delete doesn't return a
+        # deleted count). Exact for the single-writer offboarding case; under a
+        # concurrent writer the actual delete may differ by a few.
         n = self.client.count(collection_name=self.collection, count_filter=sel).count
         if n:
             self.client.delete(
