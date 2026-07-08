@@ -417,6 +417,11 @@ class FileKeyStore:
         """
         if not tenant or not isinstance(tenant, str):
             raise ValueError("revoke_tenant requires a non-empty tenant")
+        # No file = no keys: return a no-op WITHOUT taking the lock, which would
+        # otherwise create the store dir / lock file — and fail if the caller
+        # can't write that parent (a key store it only ever reads).
+        if not self.path.exists():
+            return {"revoked": 0, "last_admin_kept": False}
         revoked = 0
         last_admin_kept = False
         with self._locked():

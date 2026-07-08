@@ -650,10 +650,15 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
     except Exception as e:  # noqa: BLE001 — a Qdrant outage must not strand the rest
         unavailable["vector points"] = f"cannot reach Qdrant at {args.qdrant}: {e}"
 
+    # --no-graph explicitly opts out of graph cleanup (a vector-only deployment);
+    # it wins over the configured/default URI.
+    if getattr(args, "no_graph", False):
+        raw_graph = None
+    else:
+        raw_graph = getattr(args, "memgraph_uri", None)
     # An EXPLICIT but empty --memgraph-uri (e.g. `--memgraph-uri "$UNSET"`) signals
     # intent to clean the graph but would coerce to None and silently skip it,
     # then still report "fully removed". Reject it rather than treat it as omission.
-    raw_graph = getattr(args, "memgraph_uri", None)
     if raw_graph is not None and not str(raw_graph).strip():
         print(
             "error: --memgraph-uri was given an empty value; omit it to skip the "
@@ -725,7 +730,9 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
         state_store = FileStateStore(state_path)
         import json as _json
 
-        spath = Path(state_path)
+        # FileStateStore expands ~; use the SAME expanded path for the strict
+        # preflight read, or preview/dry-run inspects a different file than delete.
+        spath = Path(state_path).expanduser()
         if spath.exists():
             _json.loads(spath.read_text())
             present_state = [k for k in state_keys if state_store.get(k) is not None]
@@ -2403,6 +2410,13 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         "configured. Pass an explicit URI to override.",
     )
     p_tenant_rm.add_argument(
+        "--no-graph",
+        action="store_true",
+        help="Explicitly skip graph deletion (a vector-only deployment). Required "
+        "instead of --memgraph-uri when the stack config can't be loaded, so a "
+        "config-file-only graph can't be silently missed.",
+    )
+    p_tenant_rm.add_argument(
         "--graph-timeout",
         type=float,
         default=cfg.graph.timeout,
@@ -3401,21 +3415,17 @@ def main(argv: list[str] | None = None) -> int:
                 return any(a == flag or a.startswith(flag + "=") for a in raw)
 
             missing = [f for f in ("--qdrant", "--collection") if not _passed(f)]
-            # tenant-rm claims full removal, so a graph configured via env must
-            # not silently drop out of the sweep just because the config load
-            # failed — require it to be re-stated explicitly.
-            # config.py accepts either env name for the graph URI (GRAPH_URI is
-            # canonical, MEMGRAPH_URI an alias) — check BOTH, or an env-configured
-            # graph could silently drop out of the sweep.
+            # tenant-rm claims full removal, but with the config unreadable we
+            # CAN'T see a graph configured in the config FILE — so require an
+            # explicit graph decision (a URI, or --no-graph) rather than silently
+            # skipping a graph that might exist. (--memgraph-uri's cfg-default is
+            # None here since config_light built a bare Config.)
             if (
                 subcmd == "tenant-rm"
-                and (
-                    os.environ.get("MNEMOSTACK_GRAPH_URI")
-                    or os.environ.get("MNEMOSTACK_MEMGRAPH_URI")
-                )
                 and not _passed("--memgraph-uri")
+                and not _passed("--no-graph")
             ):
-                missing.append("--memgraph-uri (a graph is configured via env)")
+                missing.append("--memgraph-uri or --no-graph (config-file graph is invisible now)")
             if missing:
                 print(
                     f"error: stack config failed to load ({e}); refusing to fall "

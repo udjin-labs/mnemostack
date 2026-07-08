@@ -187,6 +187,7 @@ def _rm_ns(tmp_path, **kw) -> argparse.Namespace:
         "quotas_file": str(tmp_path / "quotas.json"),
         "state_path": str(tmp_path / "state.json"),
         "external_keys_revoked": False,
+        "no_graph": False,
     }
     base.update(kw)
     return argparse.Namespace(**base)
@@ -985,3 +986,86 @@ def test_tenant_rm_late_admin_during_sweep_is_partial(monkeypatch, tmp_path, cap
     assert rc == 1  # not "fully removed"
     err = capsys.readouterr().err
     assert "last usable admin" in err and "DURING" in err
+
+
+# ---------- review round 13 ----------
+
+
+def test_config_fallback_requires_explicit_graph_decision(monkeypatch, tmp_path, capsys):
+    # With the config unreadable, a graph configured only in the config FILE is
+    # invisible, so tenant-rm must require --memgraph-uri OR --no-graph (fail
+    # closed) rather than silently skipping a possibly-configured graph.
+    monkeypatch.setenv("MNEMOSTACK_TOKEN_BUDGET", "notint")  # unrelated bad value
+    monkeypatch.delenv("MNEMOSTACK_GRAPH_URI", raising=False)
+    monkeypatch.delenv("MNEMOSTACK_MEMGRAPH_URI", raising=False)
+    rc = cli.main([
+        "tenant-rm", "--tenant", "alpha", "--yes",
+        "--qdrant", "http://localhost:6333", "--collection", "mt",
+    ])
+    assert rc == 2
+    assert "--no-graph" in capsys.readouterr().err
+
+    # --no-graph makes the vector-only intent explicit and lets it proceed
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    rc2 = cli.main([
+        "tenant-rm", "--tenant", "alpha", "--yes", "--no-graph",
+        "--qdrant", "http://localhost:6333", "--collection", "mt",
+        "--keys-file", str(tmp_path / "k.json"),
+        "--quotas-file", str(tmp_path / "q.json"),
+        "--state-path", str(tmp_path / "s.json"),
+    ])
+    assert rc2 == 0
+    assert store.count(tenant="alpha") == 0
+
+
+def test_no_graph_flag_skips_configured_graph(monkeypatch, tmp_path, capsys):
+    # --no-graph overrides even an explicit/configured URI.
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    _seed_config(tmp_path)
+    called = {"graph": False}
+    monkeypatch.setattr(
+        "mnemostack.graph.factory.make_graph_store",
+        lambda *a, **k: called.__setitem__("graph", True),
+    )
+    rc = cli.cmd_tenant_rm(
+        _rm_ns(tmp_path, tenant="alpha", yes=True, no_graph=True,
+               memgraph_uri="bolt://x:7687")
+    )
+    assert rc == 0
+    assert called["graph"] is False  # graph store never even constructed
+    assert "graph:            (skipped" in capsys.readouterr().out
+
+
+def test_state_path_tilde_expanded_in_preview(monkeypatch, tmp_path):
+    # A ~ in --state-path must be expanded for the strict preflight read, or the
+    # preview inspects a different file than deletion operates on.
+    import os
+
+    fake_home = tmp_path / "home"
+    (fake_home / ".local").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setattr(os.path, "expanduser",
+                        lambda p: p.replace("~", str(fake_home)) if isinstance(p, str) else p)
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    ks = FileKeyStore(tmp_path / "keys.json")
+    ks.issue("alpha", ["read"])
+    # write a CORRUPT state file at the expanded path
+    (fake_home / "state.json").write_text("{ not json")
+    ns = _rm_ns(tmp_path, tenant="alpha", dry_run=True, state_path="~/state.json")
+    rc = cli.cmd_tenant_rm(ns)
+    # the corrupt file at the EXPANDED path is detected (unusable), not read as 0
+    assert rc == 1  # dry-run with an uninspectable store -> nonzero
+
+
+def test_revoke_tenant_no_file_is_noop_without_lock(tmp_path):
+    # An absent key store must be a no-op WITHOUT creating the dir/lock (which
+    # would fail if the parent is unwritable / read-only key store).
+    from mnemostack.auth import FileKeyStore
+
+    ks = FileKeyStore(tmp_path / "nope" / "keys.json")  # parent doesn't exist
+    res = ks.revoke_tenant("alpha")
+    assert res == {"revoked": 0, "last_admin_kept": False}
+    assert not (tmp_path / "nope").exists()  # no dir/lock was created
