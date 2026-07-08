@@ -499,15 +499,13 @@ def test_tenant_rm_revokes_keys_before_data_deletion(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cli, "VectorStore", lambda **_: _OrderStore())
     ks, _fs = _seed_config(tmp_path)
-    real_revoke = ks.revoke_guarded
-
     class _OrderKeys:
         def list_keys(self):
             return ks.list_keys()
 
-        def revoke_guarded(self, kid, **kw):
+        def revoke_tenant(self, tenant, **kw):
             order.append("keys")
-            return real_revoke(kid, **kw)
+            return ks.revoke_tenant(tenant, **kw)
 
     monkeypatch.setattr(cli, "_keys_store", lambda _a: _OrderKeys())
     rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", yes=True))
@@ -737,26 +735,23 @@ def test_config_fallback_requires_graph_flag_for_GRAPH_URI_alias(monkeypatch, tm
     assert "--memgraph-uri" in capsys.readouterr().err
 
 
-def test_tenant_rm_unrevocable_key_aborts_sweep(monkeypatch, tmp_path, capsys):
-    # A record list_keys() shows but revoke_guarded() reports "not_found" (e.g. a
-    # malformed id) may still authenticate — abort rather than sweep with it alive.
+def test_tenant_rm_revokes_malformed_id_record_by_tenant(monkeypatch, tmp_path):
+    # revoke_tenant matches by RECORD (tenant), not id, so a malformed-id record
+    # that revoke-by-id would miss is still removed — no "unrevocable" survivor.
+    import json as _json
+
     store = _seeded_store()
     monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
-    ks, _fs = _seed_config(tmp_path)
-
-    class _Ghost:
-        def list_keys(self):
-            return [{"id": "ghost", "tenant": "alpha", "scopes": ["write"]}]
-
-        def revoke_guarded(self, kid, **kw):
-            return "not_found"  # shown by list_keys but unrevocable by id
-
-    monkeypatch.setattr(cli, "_keys_store", lambda _a: _Ghost())
+    kf = tmp_path / "keys.json"
+    ks = FileKeyStore(kf)
+    ks.issue("alpha", ["write"])
+    data = _json.loads(kf.read_text())
+    data["keys"][0]["id"] = 12345  # numeric id: revoke-by-id (str) would miss it
+    kf.write_text(_json.dumps(data))
     rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", yes=True))
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert "unrevocable record" in err and "NOT removed" in err
-    assert store.count(tenant="alpha") == 2  # data sweep never ran
+    assert rc == 0
+    assert not any(k["tenant"] == "alpha" for k in FileKeyStore(kf).list_keys())
+    assert store.count(tenant="alpha") == 0
 
 
 # ---------- review round 8 ----------
@@ -786,3 +781,45 @@ def test_tenant_rm_unknown_backend_aborts_before_sweep(monkeypatch, tmp_path, ca
     err = capsys.readouterr().err
     assert "could not be inspected" in err and "NOT removed" in err
     assert store.count(tenant="alpha") == 2  # sweep never ran
+
+
+# ---------- review round 9 ----------
+
+
+def test_tenant_rm_catches_key_issued_after_count(monkeypatch, tmp_path, capsys):
+    # The concurrent-offboarding race: a key issued AFTER the count phase must
+    # still be revoked (revoke_tenant re-reads under lock, not a snapshot).
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    kf = tmp_path / "keys.json"
+    ks = FileKeyStore(kf)  # start with NO keys for alpha (count sees zero)
+
+    class _RacyKeys:
+        def __init__(self):
+            self._store = ks
+
+        def list_keys(self):
+            return self._store.list_keys()
+
+        def revoke_tenant(self, tenant, **kw):
+            return self._store.revoke_tenant(tenant, **kw)
+
+    monkeypatch.setattr(cli, "_keys_store", lambda _a: _RacyKeys())
+    # revoke_tenant re-reads under lock, so a key present at sweep time is caught
+    # regardless of the count-phase snapshot.
+    ks.issue("alpha", ["write"])
+    rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", yes=True))
+    assert rc == 0
+    assert not any(k["tenant"] == "alpha" for k in ks.list_keys())  # caught & revoked
+
+
+def test_tenant_rm_external_warns_about_verify_cache(monkeypatch, tmp_path, capsys):
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    _seed_config(tmp_path)
+    monkeypatch.setenv("MNEMOSTACK_KEYSTORE", "openbao")
+    rc = cli.cmd_tenant_rm(
+        _rm_ns(tmp_path, tenant="alpha", yes=True, external_keys_revoked=True)
+    )
+    assert rc == 0
+    assert "verify cache expires" in capsys.readouterr().err

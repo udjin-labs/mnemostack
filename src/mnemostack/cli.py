@@ -806,50 +806,32 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
             )
             return _abort_keys_alive(tenant, failed, gs)
         print("service keys: external store — treated as revoked (--external-keys-revoked)")
-    if not external_keys and "service keys" not in unavailable and key_ids:
+        print(
+            "note: a running server may still accept a just-revoked external key "
+            "until its verify cache expires (MNEMOSTACK_OPENBAO_CACHE_TTL) — ensure "
+            "that elapsed (or restart the servers) before trusting this removal",
+            file=sys.stderr,
+        )
+    if not external_keys and "service keys" not in unavailable:
         try:
-            ks = _keys_store(args)
-            revoked = 0
-            last_admin_blocked = False
-            not_found = 0
-            for kid in key_ids:
-                # Same guard the admin console uses: offboarding a tenant that
-                # happens to hold the LAST usable admin key must not lock the
-                # operator out of `keys`/the inspector console.
-                status = ks.revoke_guarded(kid, protect_last_admin=True)
-                if status == "revoked":
-                    revoked += 1
-                elif status == "last_admin":
-                    last_admin_blocked = True
-                elif status == "not_found":
-                    # The id came straight from list_keys(), so a "not_found" on
-                    # revoke means the record didn't match by id (e.g. a malformed
-                    # id) yet verify() may still accept it — treat it as a key
-                    # that stayed usable, not a silent success.
-                    not_found += 1
-            print(f"revoked {revoked} service key(s)")
-            if last_admin_blocked or not_found:
-                if last_admin_blocked:
-                    failed.append("service keys (last admin key)")
-                    print(
-                        f"error: a key of tenant '{tenant}' is the LAST usable admin key — "
-                        "refusing to revoke it (that would lock out key management). "
-                        "Issue another admin key (`mnemostack keys add --scopes admin`), "
-                        "then re-run.",
-                        file=sys.stderr,
-                    )
-                if not_found:
-                    failed.append("service keys (unrevocable record)")
-                    print(
-                        f"error: {not_found} key record(s) of tenant '{tenant}' could not "
-                        "be revoked by id (malformed record?) yet may still authenticate — "
-                        "fix/remove them in the key store, then re-run.",
-                        file=sys.stderr,
-                    )
-                # The surviving key is write-capable (admin implies write), so the
-                # tenant could re-write into any store swept below the moment it's
-                # cleaned. Don't sweep data while an active key remains — abort
-                # here and let the re-run (after the key store is fixed) do it.
+            # Atomically revoke ALL of the tenant's keys under ONE store lock,
+            # re-read at this moment — not a count-phase snapshot. This catches a
+            # key issued for the tenant after the earlier count (the concurrent-
+            # offboarding race) and any malformed record, so no usable key can
+            # survive into the data sweep below.
+            result = _keys_store(args).revoke_tenant(tenant, protect_last_admin=True)
+            print(f"revoked {result['revoked']} service key(s)")
+            if result["last_admin_kept"]:
+                failed.append("service keys (last admin key)")
+                print(
+                    f"error: a key of tenant '{tenant}' is the LAST usable admin key — "
+                    "refusing to revoke it (that would lock out key management). "
+                    "Issue another admin key (`mnemostack keys add --scopes admin`), "
+                    "then re-run.",
+                    file=sys.stderr,
+                )
+                # The surviving key is write-capable (admin implies write), so it
+                # could re-write into any store swept below the moment it's cleaned.
                 return _abort_keys_alive(tenant, failed, gs)
         except Exception as e:  # noqa: BLE001
             # A failed revocation WRITE (unwritable dir, full disk) leaves the
@@ -2359,8 +2341,10 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         "--external-keys-revoked",
         action="store_true",
         help="With an external key store (MNEMOSTACK_KEYSTORE=openbao), confirm you "
-        "have ALREADY revoked the tenant's key(s) there — tenant-rm can't do it and "
-        "otherwise refuses to sweep data while a key could still write",
+        "have ALREADY revoked the tenant's key(s) there AND that running servers "
+        "no longer accept them (their positive-verify cache has expired past "
+        "MNEMOSTACK_OPENBAO_CACHE_TTL, or they were restarted) — tenant-rm can't "
+        "verify this and otherwise refuses to sweep while a key could still write",
     )
     p_tenant_rm.add_argument(
         "--memgraph-uri",

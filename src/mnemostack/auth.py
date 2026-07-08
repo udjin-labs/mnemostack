@@ -401,6 +401,41 @@ class FileKeyStore:
             self._save([r for r in records if r.get("id") != key_id])
         return "revoked"
 
+    def revoke_tenant(self, tenant: str, *, protect_last_admin: bool = True) -> dict[str, Any]:
+        """Atomically revoke **all** of a tenant's keys under one lock.
+
+        Unlike revoking a snapshot of ids, this re-reads the store inside the
+        lock and drops every record whose ``tenant`` matches — so a key issued
+        for the tenant *after* a caller's earlier ``list_keys()`` is still caught
+        (no snapshot TOCTOU), and a malformed id that ``revoke_guarded`` would
+        report ``not_found`` is removed by matching on the record, not the id.
+
+        With ``protect_last_admin`` the tenant's key that is the only remaining
+        usable admin is **kept** (and reported via ``last_admin_kept``), so an
+        offboarding can't lock out key management. Returns
+        ``{"revoked": n, "last_admin_kept": bool}``.
+        """
+        if not tenant or not isinstance(tenant, str):
+            raise ValueError("revoke_tenant requires a non-empty tenant")
+        revoked = 0
+        last_admin_kept = False
+        with self._locked():
+            records = self._load()
+            n_admins = sum(1 for r in records if _is_usable_admin(r))
+            kept: list[dict[str, Any]] = []
+            for r in records:
+                if r.get("tenant") != tenant:
+                    kept.append(r)
+                    continue
+                if protect_last_admin and _is_usable_admin(r) and n_admins <= 1:
+                    kept.append(r)  # the last usable admin — never auto-revoked
+                    last_admin_kept = True
+                    continue
+                revoked += 1  # dropped
+            if revoked:
+                self._save(kept)
+        return {"revoked": revoked, "last_admin_kept": last_admin_kept}
+
     def list_keys(self) -> list[dict[str, Any]]:
         """List keys WITHOUT their hashes (safe to print).
 
