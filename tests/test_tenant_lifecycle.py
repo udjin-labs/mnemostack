@@ -715,3 +715,42 @@ def test_config_fallback_seeds_graph_auth_from_env(monkeypatch, tmp_path, capsys
     ])
     assert rc == 0
     assert seen == {"user": "neo4j", "password": "s3cret"}  # env creds threaded through
+
+
+# ---------- review round 7 ----------
+
+
+def test_config_fallback_requires_graph_flag_for_GRAPH_URI_alias(monkeypatch, tmp_path, capsys):
+    # config.py reads MNEMOSTACK_GRAPH_URI (canonical) as well as _MEMGRAPH_URI —
+    # both must force --memgraph-uri on the fallback, or an env-configured graph
+    # silently drops out of the sweep.
+    monkeypatch.setenv("MNEMOSTACK_TOKEN_BUDGET", "notint")
+    monkeypatch.setenv("MNEMOSTACK_GRAPH_URI", "bolt://prod-graph:7687")
+    rc = cli.main([
+        "tenant-rm", "--tenant", "alpha", "--yes",
+        "--qdrant", "http://localhost:6333", "--collection", "mt",
+    ])
+    assert rc == 2
+    assert "--memgraph-uri" in capsys.readouterr().err
+
+
+def test_tenant_rm_unrevocable_key_aborts_sweep(monkeypatch, tmp_path, capsys):
+    # A record list_keys() shows but revoke_guarded() reports "not_found" (e.g. a
+    # malformed id) may still authenticate — abort rather than sweep with it alive.
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    ks, _fs = _seed_config(tmp_path)
+
+    class _Ghost:
+        def list_keys(self):
+            return [{"id": "ghost", "tenant": "alpha", "scopes": ["write"]}]
+
+        def revoke_guarded(self, kid, **kw):
+            return "not_found"  # shown by list_keys but unrevocable by id
+
+    monkeypatch.setattr(cli, "_keys_store", lambda _a: _Ghost())
+    rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", yes=True))
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "unrevocable record" in err and "NOT removed" in err
+    assert store.count(tenant="alpha") == 2  # data sweep never ran

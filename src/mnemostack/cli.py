@@ -789,6 +789,7 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
             ks = _keys_store(args)
             revoked = 0
             last_admin_blocked = False
+            not_found = 0
             for kid in key_ids:
                 # Same guard the admin console uses: offboarding a tenant that
                 # happens to hold the LAST usable admin key must not lock the
@@ -798,20 +799,35 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
                     revoked += 1
                 elif status == "last_admin":
                     last_admin_blocked = True
+                elif status == "not_found":
+                    # The id came straight from list_keys(), so a "not_found" on
+                    # revoke means the record didn't match by id (e.g. a malformed
+                    # id) yet verify() may still accept it — treat it as a key
+                    # that stayed usable, not a silent success.
+                    not_found += 1
             print(f"revoked {revoked} service key(s)")
-            if last_admin_blocked:
-                failed.append("service keys (last admin key)")
-                print(
-                    f"error: a key of tenant '{tenant}' is the LAST usable admin key — "
-                    "refusing to revoke it (that would lock out key management). "
-                    "Issue another admin key (`mnemostack keys add --scopes admin`), "
-                    "then re-run.",
-                    file=sys.stderr,
-                )
+            if last_admin_blocked or not_found:
+                if last_admin_blocked:
+                    failed.append("service keys (last admin key)")
+                    print(
+                        f"error: a key of tenant '{tenant}' is the LAST usable admin key — "
+                        "refusing to revoke it (that would lock out key management). "
+                        "Issue another admin key (`mnemostack keys add --scopes admin`), "
+                        "then re-run.",
+                        file=sys.stderr,
+                    )
+                if not_found:
+                    failed.append("service keys (unrevocable record)")
+                    print(
+                        f"error: {not_found} key record(s) of tenant '{tenant}' could not "
+                        "be revoked by id (malformed record?) yet may still authenticate — "
+                        "fix/remove them in the key store, then re-run.",
+                        file=sys.stderr,
+                    )
                 # The surviving key is write-capable (admin implies write), so the
                 # tenant could re-write into any store swept below the moment it's
                 # cleaned. Don't sweep data while an active key remains — abort
-                # here and let the re-run (after a new admin key) do it atomically.
+                # here and let the re-run (after the key store is fixed) do it.
                 return _abort_keys_alive(tenant, failed, gs)
         except Exception as e:  # noqa: BLE001
             # A failed revocation WRITE (unwritable dir, full disk) leaves the
@@ -3332,9 +3348,15 @@ def main(argv: list[str] | None = None) -> int:
             # tenant-rm claims full removal, so a graph configured via env must
             # not silently drop out of the sweep just because the config load
             # failed — require it to be re-stated explicitly.
+            # config.py accepts either env name for the graph URI (GRAPH_URI is
+            # canonical, MEMGRAPH_URI an alias) — check BOTH, or an env-configured
+            # graph could silently drop out of the sweep.
             if (
                 subcmd == "tenant-rm"
-                and os.environ.get("MNEMOSTACK_MEMGRAPH_URI")
+                and (
+                    os.environ.get("MNEMOSTACK_GRAPH_URI")
+                    or os.environ.get("MNEMOSTACK_MEMGRAPH_URI")
+                )
                 and not _passed("--memgraph-uri")
             ):
                 missing.append("--memgraph-uri (a graph is configured via env)")
