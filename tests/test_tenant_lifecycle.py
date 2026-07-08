@@ -1,0 +1,343 @@
+"""Tenant offboarding (tenant-rm) and backup (tenant-export) — cross-store tests.
+
+Uses a real in-memory Qdrant seeded across two tenants plus a legacy unscoped
+point, so the isolation assertions are genuine: removing tenant A must never
+touch tenant B's records or the unscoped legacy data.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+
+import pytest
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance
+
+import mnemostack.cli as cli
+from mnemostack.auth import FileKeyStore
+from mnemostack.quotas import FileQuotaStore
+from mnemostack.recall.pipeline import FileStateStore
+from mnemostack.recall.pipeline.state import tenant_state_key
+from mnemostack.vector import VectorStore
+
+_VEC = [1.0, 0.0, 0.0, 0.0]
+
+
+def _seeded_store() -> VectorStore:
+    s = VectorStore.__new__(VectorStore)
+    s.collection = "mt"
+    s.dimension = 4
+    s.distance = Distance.COSINE
+    s.client = QdrantClient(":memory:")
+    s.ensure_collection()
+    s.upsert(1, _VEC, {"text": "alpha one", "source": "a1.md"}, tenant="alpha")
+    s.upsert(2, _VEC, {"text": "alpha two", "source": "a2.md"}, tenant="alpha")
+    s.upsert(3, _VEC, {"text": "beta one", "source": "b1.md"}, tenant="beta")
+    s.upsert(4, _VEC, {"text": "legacy unscoped"})  # no tenant_id
+    return s
+
+
+# ---------- VectorStore.delete_tenant ----------
+
+
+def test_delete_tenant_removes_only_that_tenant():
+    s = _seeded_store()
+    assert s.delete_tenant("alpha") == 2
+    assert s.count(tenant="alpha") == 0
+    assert s.count(tenant="beta") == 1  # untouched
+    # the legacy unscoped point survives too (total = beta + legacy)
+    assert s.client.count(collection_name="mt").count == 2
+    assert s.delete_tenant("alpha") == 0  # idempotent
+
+
+def test_delete_tenant_rejects_empty():
+    s = _seeded_store()
+    with pytest.raises(ValueError):
+        s.delete_tenant("")
+
+
+# ---------- Hit.vector via scroll ----------
+
+
+def test_scroll_with_vectors_carries_the_embedding():
+    s = _seeded_store()
+    hits = list(s.scroll(with_vectors=True, tenant="beta"))
+    assert len(hits) == 1 and hits[0].vector is not None
+    assert len(hits[0].vector) == 4
+    # default scroll stays vector-free (no payload bloat for browse paths)
+    assert all(h.vector is None for h in s.scroll(tenant="beta"))
+
+
+# ---------- GraphStore.delete_tenant (recorded Cypher) ----------
+
+
+def test_graph_delete_tenant_cypher_is_tenant_confined():
+    from unittest.mock import MagicMock
+
+    from mnemostack.graph.store import GraphStore
+
+    calls: list[tuple[str, dict]] = []
+
+    class _Session:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def run(self, cypher, **params):
+            calls.append((cypher, params))
+
+            class _R:
+                def single(self):
+                    return {"n": 3}
+
+            return _R()
+
+    store = GraphStore.__new__(GraphStore)
+    driver = MagicMock()
+    driver.session.return_value = _Session()
+    store.driver = driver
+    store.database = None
+
+    counts = store.delete_tenant("acme")
+    assert counts == {"nodes": 3, "relationships": 3, "detached": 3}
+    # every statement is confined to the tenant property — no unscoped MATCH
+    assert len(calls) == 5  # 3 counts + delete rels + detach delete nodes
+    for cypher, params in calls:
+        assert "{tenant: $tenant}" in cypher
+        assert params == {"tenant": "acme"}
+    assert any("DETACH DELETE" in c for c, _ in calls)
+
+    # dry_run only counts
+    calls.clear()
+    store.delete_tenant("acme", dry_run=True)
+    assert len(calls) == 3 and all("DETACH" not in c and not c.strip().endswith("DELETE r") for c, _ in calls)
+
+    with pytest.raises(ValueError):
+        store.delete_tenant("")
+
+
+# ---------- state store delete ----------
+
+
+def test_state_store_delete(tmp_path):
+    fs = FileStateStore(tmp_path / "state.json")
+    key = tenant_state_key("q_table", "acme")
+    fs.set(key, {"x": 1})
+    fs.set("q_table", {"y": 2})  # unscoped partition
+    assert fs.delete(key) is True
+    assert fs.get(key) is None
+    assert fs.get("q_table") == {"y": 2}  # unscoped survives
+    assert fs.delete(key) is False  # already gone
+
+
+# ---------- CLI: tenant-export ----------
+
+
+def _ns(**kw) -> argparse.Namespace:
+    base = {"collection": "mt", "qdrant": "http://localhost:6333"}
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def test_tenant_export_writes_only_the_tenant(monkeypatch, tmp_path):
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    out = tmp_path / "dump.jsonl"
+    rc = cli.cmd_tenant_export(_ns(tenant="alpha", output=str(out), no_vectors=False))
+    assert rc == 0
+    lines = [json.loads(line) for line in out.read_text().splitlines()]
+    assert lines[0]["kind"] == "meta" and lines[0]["tenant"] == "alpha"
+    points = [row for row in lines if row["kind"] == "point"]
+    assert len(points) == 2
+    assert all(r["payload"]["tenant_id"] == "alpha" for r in points)
+    assert all(len(r["vector"]) == 4 for r in points)  # vectors included
+    texts = {r["payload"]["text"] for r in points}
+    assert "beta one" not in texts and "legacy unscoped" not in texts
+
+
+def test_tenant_export_no_vectors(monkeypatch, tmp_path):
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    out = tmp_path / "dump.jsonl"
+    assert cli.cmd_tenant_export(_ns(tenant="beta", output=str(out), no_vectors=True)) == 0
+    points = [json.loads(line) for line in out.read_text().splitlines()][1:]
+    assert points and all("vector" not in r for r in points)
+
+
+def test_tenant_export_rejects_empty_tenant(monkeypatch, tmp_path, capsys):
+    assert cli.cmd_tenant_export(_ns(tenant="  ", output="-", no_vectors=False)) == 2
+    assert "non-empty tenant" in capsys.readouterr().err
+
+
+# ---------- CLI: tenant-rm ----------
+
+
+def _rm_ns(tmp_path, **kw) -> argparse.Namespace:
+    base = {
+        "collection": "mt",
+        "qdrant": "http://localhost:6333",
+        "memgraph_uri": None,
+        "graph_timeout": 5.0,
+        "dry_run": False,
+        "yes": False,
+        "keys_file": str(tmp_path / "keys.json"),
+        "quotas_file": str(tmp_path / "quotas.json"),
+        "state_path": str(tmp_path / "state.json"),
+    }
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def _seed_config(tmp_path):
+    ks = FileKeyStore(tmp_path / "keys.json")
+    ks.issue("alpha", ["read"])
+    ks.issue("alpha", ["write"])
+    ks.issue("beta", ["read"])
+    FileQuotaStore(tmp_path / "quotas.json").set("alpha", max_points=100)
+    fs = FileStateStore(tmp_path / "state.json")
+    fs.set(tenant_state_key("q_table", "alpha"), {"w": 1})
+    fs.set(tenant_state_key("ior_log", "alpha"), [1])
+    fs.set(tenant_state_key("q_table", "beta"), {"w": 2})
+    return ks, fs
+
+
+def test_tenant_rm_dry_run_deletes_nothing(monkeypatch, tmp_path, capsys):
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    ks, fs = _seed_config(tmp_path)
+    rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", dry_run=True))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "vector points:    2" in out and "service keys:     2" in out
+    assert "quota:            set" in out and "2 partition(s)" in out
+    # nothing was deleted
+    assert store.count(tenant="alpha") == 2
+    assert len(ks.list_keys()) == 3
+    assert fs.get(tenant_state_key("q_table", "alpha")) is not None
+
+
+def test_tenant_rm_requires_yes(monkeypatch, tmp_path, capsys):
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    _seed_config(tmp_path)
+    rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha"))
+    assert rc == 2
+    assert "--yes" in capsys.readouterr().err
+    assert store.count(tenant="alpha") == 2  # nothing deleted
+
+
+def test_tenant_rm_removes_everything_and_spares_others(monkeypatch, tmp_path):
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    ks, fs = _seed_config(tmp_path)
+    rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", yes=True))
+    assert rc == 0
+    # alpha is gone across every store
+    assert store.count(tenant="alpha") == 0
+    assert all(k["tenant"] != "alpha" for k in ks.list_keys())
+    assert FileQuotaStore(tmp_path / "quotas.json").get("alpha") is None
+    assert fs.get(tenant_state_key("q_table", "alpha")) is None
+    assert fs.get(tenant_state_key("ior_log", "alpha")) is None
+    # beta and the legacy unscoped data are untouched
+    assert store.count(tenant="beta") == 1
+    assert store.client.count(collection_name="mt").count == 2  # beta + legacy
+    assert any(k["tenant"] == "beta" for k in ks.list_keys())
+    assert fs.get(tenant_state_key("q_table", "beta")) == {"w": 2}
+
+
+def test_tenant_rm_deletes_graph_when_uri_given(monkeypatch, tmp_path):
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    _seed_config(tmp_path)
+
+    class _FakeGraph:
+        def __init__(self):
+            self.calls: list[tuple[str, bool]] = []
+
+        def delete_tenant(self, tenant, *, dry_run=False):
+            self.calls.append((tenant, dry_run))
+            return {"nodes": 5, "relationships": 7}
+
+        def close(self):
+            pass
+
+    fake = _FakeGraph()
+    monkeypatch.setattr("mnemostack.graph.factory.make_graph_store", lambda *a, **k: fake)
+    rc = cli.cmd_tenant_rm(
+        _rm_ns(tmp_path, tenant="alpha", yes=True, memgraph_uri="bolt://x:7687")
+    )
+    assert rc == 0
+    # counted (dry_run=True) then deleted (dry_run=False), tenant-confined
+    assert fake.calls == [("alpha", True), ("alpha", False)]
+
+
+def test_tenant_rm_external_keystore_skips_keys(monkeypatch, tmp_path, capsys):
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    ks, _fs = _seed_config(tmp_path)
+    monkeypatch.setenv("MNEMOSTACK_KEYSTORE", "openbao")
+    rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", yes=True))
+    assert rc == 0
+    assert "managed externally" in capsys.readouterr().out
+    # the local file store was NOT touched (keys live in the external store)
+    assert sum(1 for k in ks.list_keys() if k["tenant"] == "alpha") == 2
+
+
+def test_tenant_rm_partial_failure_reports_and_continues(monkeypatch, tmp_path, capsys):
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    ks, fs = _seed_config(tmp_path)
+
+    def _boom(tenant):
+        raise RuntimeError("qdrant exploded")
+
+    monkeypatch.setattr(store, "delete_tenant", _boom)
+    rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", yes=True))
+    assert rc == 1  # nonzero: something failed
+    err = capsys.readouterr().err
+    assert "vector delete failed" in err and "FAILED: vector points" in err
+    # the other stores were still cleaned (best-effort, not all-or-nothing)
+    assert all(k["tenant"] != "alpha" for k in ks.list_keys())
+    assert fs.get(tenant_state_key("q_table", "alpha")) is None
+
+
+def test_tenant_rm_refuses_to_revoke_last_admin_key(monkeypatch, tmp_path, capsys):
+    # If the offboarded tenant holds the LAST usable admin key, revoking it would
+    # lock the operator out of key management — same guard the admin console uses.
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    ks = FileKeyStore(tmp_path / "keys.json")
+    admin_id, _ = ks.issue("alpha", ["admin"])  # alpha holds the ONLY admin key
+    ks.issue("alpha", ["read"])
+    rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", yes=True))
+    assert rc == 1  # partial: the admin key survived
+    err = capsys.readouterr().err
+    assert "LAST usable admin key" in err and "last admin key" in err
+    remaining = ks.list_keys()
+    assert [k["id"] for k in remaining] == [admin_id]  # read key revoked, admin kept
+    # with a SECOND admin key elsewhere, the same offboarding completes cleanly
+    ks.issue("ops", ["admin"])
+    rc2 = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", yes=True))
+    assert rc2 == 0
+    assert all(k["tenant"] != "alpha" for k in ks.list_keys())
+
+
+def test_tenant_export_unwritable_output_is_clean_error(monkeypatch, tmp_path, capsys):
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    bad = tmp_path / "no-such-dir" / "dump.jsonl"
+    rc = cli.cmd_tenant_export(_ns(tenant="alpha", output=str(bad), no_vectors=False))
+    assert rc == 1
+    assert "cannot write" in capsys.readouterr().err  # clean error, no traceback
+
+
+def test_tenant_export_zero_points_warns(monkeypatch, tmp_path, capsys):
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    out = tmp_path / "empty.jsonl"
+    rc = cli.cmd_tenant_export(_ns(tenant="ghost", output=str(out), no_vectors=False))
+    assert rc == 0  # an empty tenant is a valid (if suspicious) dump
+    assert "0 points matched" in capsys.readouterr().err

@@ -492,6 +492,29 @@ Under `--auth` you can cap each tenant's resource use from a small per-tenant qu
 
 `quota set` is a partial update (only the fields you pass change; pass `none` to clear one), and `quota list` / `quota rm` round it out.
 
+### Tenant offboarding and backup
+
+When a tenant leaves (customer churn, an erasure request), remove it across every store in one command instead of manual surgery:
+
+```bash
+mnemostack tenant-rm --tenant acme --memgraph-uri bolt://localhost:7687 --dry-run
+# tenant 'acme':                      <- per-store counts, nothing deleted yet
+#   vector points:    5120
+#   graph nodes:      312
+#   ...
+mnemostack tenant-rm --tenant acme --memgraph-uri bolt://localhost:7687 --yes
+```
+
+This deletes the tenant's vector points (a server-side filter delete — unscoped/legacy points and other tenants are never matched), its graph nodes **and** edges (only with `--memgraph-uri`; omit it for a vector-only deployment), its service keys (local file store — under an external `MNEMOSTACK_KEYSTORE` the keys are reported as externally managed and left to that store's tooling), its quota, and its learning-state partitions. The deletion is gated behind `--yes` and is **best-effort per store**: a failing store is reported, the rest proceed, and a nonzero exit lists what remains — re-run after fixing it.
+
+Before removing (or for a plain backup), dump the tenant's data:
+
+```bash
+mnemostack tenant-export --tenant acme -o acme.jsonl
+```
+
+The export is the tenant's vector points (vectors + payloads, JSONL) — the portable source of truth. The graph is derived (rebuild by re-indexing), and keys/quotas/learning state are deliberately excluded (keys are secrets; copy the key store explicitly if that's really intended).
+
 ### MCP
 
 The MCP server is stdio-based:

@@ -524,6 +524,48 @@ class GraphStore:
             "relationships": int(rels["n"] if rels else 0),
         }
 
+    def delete_tenant(self, tenant: str, *, dry_run: bool = False) -> dict[str, int]:
+        """Delete EVERY node and relationship owned by ``tenant`` (offboarding).
+
+        The graph twin of ``VectorStore.delete_tenant``. Removes relationships
+        stamped with the tenant first (they can also connect to shared/unscoped
+        nodes), then ``DETACH DELETE``s the tenant's nodes — detach covers any
+        remaining edge touching a tenant node, so nothing owned lingers. Other
+        tenants' nodes and standalone unscoped records are never matched; the
+        one collateral is an edge NOT stamped with the tenant that touches a
+        tenant node (e.g. written by a legacy unscoped indexer) — it can't
+        survive its endpoint and is reported separately as ``"detached"`` so the
+        counts never under-state what a delete removes. ``dry_run`` counts
+        without deleting. Returns ``{"nodes", "relationships", "detached"}``.
+        """
+        if not tenant or not isinstance(tenant, str):
+            raise ValueError("delete_tenant requires a non-empty tenant")
+        with self.driver.session(database=self.database) as session:
+            nodes = session.run(
+                "MATCH (n {tenant: $tenant}) RETURN count(n) AS n", tenant=tenant
+            ).single()
+            rels = session.run(
+                "MATCH ()-[r {tenant: $tenant}]->() RETURN count(r) AS n", tenant=tenant
+            ).single()
+            detached = session.run(
+                "MATCH (n {tenant: $tenant})-[r]-() "
+                "WHERE r.tenant IS NULL OR r.tenant <> $tenant "
+                "RETURN count(DISTINCT r) AS n",
+                tenant=tenant,
+            ).single()
+            if not dry_run:
+                session.run(
+                    "MATCH ()-[r {tenant: $tenant}]->() DELETE r", tenant=tenant
+                )
+                session.run(
+                    "MATCH (n {tenant: $tenant}) DETACH DELETE n", tenant=tenant
+                )
+        return {
+            "nodes": int(nodes["n"] if nodes else 0),
+            "relationships": int(rels["n"] if rels else 0),
+            "detached": int(detached["n"] if detached else 0),
+        }
+
     # ---------- helpers ----------
 
     @staticmethod

@@ -70,6 +70,14 @@ class InMemoryStateStore(StateStore):
             self._data[key] = new_value
             return new_value
 
+    def delete(self, key) -> bool:
+        """Drop a state key entirely (e.g. a tenant's partition on offboarding).
+        Returns True if it existed. Concrete on the shipped stores, not part of
+        the ``StateStore`` ABC — a custom store without it is tolerated by callers.
+        """
+        with self._lock:
+            return self._data.pop(key, None) is not None
+
 
 _LEGACY_STATE_PATH = Path("/tmp/mnemostack-server-state.json")
 
@@ -177,3 +185,14 @@ class FileStateStore(StateStore):
             data[key] = new_value
             self._write_all(data)
             return new_value
+
+    def delete(self, key) -> bool:
+        """Drop a state key entirely (e.g. a tenant's partition on offboarding).
+        Returns True if it existed; see ``InMemoryStateStore.delete``."""
+        with self._lock, self._file_lock():
+            data = self._read_all()
+            if key not in data:
+                return False
+            del data[key]
+            self._write_all(data)
+            return True

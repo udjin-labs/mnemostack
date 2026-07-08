@@ -468,6 +468,272 @@ def _graph_relabel_preflight(args: argparse.Namespace) -> int:
     return 0
 
 
+def _require_tenant_arg(args: argparse.Namespace) -> str | None:
+    """The tenant id from ``--tenant``, VERBATIM, or None (error printed).
+
+    An empty/whitespace value must fail closed — for export it would silently
+    dump nothing, and for rm the stores' own guards would refuse anyway, but the
+    operator deserves one clear message instead of five store errors.
+
+    The value is deliberately NOT normalized (no strip): the onboarding paths
+    (``keys add``, ``quota set``, stamped ``tenant_id``) store whatever was
+    passed, so export/rm must match it byte-for-byte — a silently stripped
+    ``" acme "`` would under-delete and then falsely report "fully removed".
+    """
+    tenant = str(getattr(args, "tenant", "") or "")
+    if not tenant.strip():
+        print("error: --tenant requires a non-empty tenant id", file=sys.stderr)
+        return None
+    return tenant
+
+
+def cmd_tenant_export(args: argparse.Namespace) -> int:
+    """Export a tenant's vector points (vectors + payloads) as JSONL.
+
+    The vector points are the source of truth — the graph is derived (file links
+    from re-indexing, fact triples from enrichment) and per-tenant learning state
+    is behavioral, so a point dump is the honest portable backup. One JSON object
+    per line: a ``meta`` header, then ``{"kind": "point", id, vector, payload}``
+    rows. NOT included (documented): service keys (secrets — copy the key store
+    explicitly if that's intended), quotas, learning state, graph records.
+    """
+    import json as _json
+
+    tenant = _require_tenant_arg(args)
+    if tenant is None:
+        return 2
+    try:
+        store = VectorStore(collection=args.collection, dimension=1, host=args.qdrant)
+        if not store.collection_exists():
+            print(f"error: collection '{args.collection}' does not exist", file=sys.stderr)
+            return 1
+    except Exception as e:  # noqa: BLE001
+        print(f"error: cannot reach Qdrant at {args.qdrant}: {e}", file=sys.stderr)
+        return 1
+
+    if args.output == "-":
+        out = sys.stdout
+    else:
+        try:
+            # "w" overwrites an existing dump (documented in --output's help).
+            out = open(args.output, "w", encoding="utf-8")
+        except OSError as e:
+            print(f"error: cannot write {args.output}: {e}", file=sys.stderr)
+            return 1
+    count = 0
+    try:
+        meta = {
+            "kind": "meta",
+            "format": "mnemostack-tenant-export/1",
+            "tenant": tenant,
+            "collection": args.collection,
+            "vectors": not args.no_vectors,
+        }
+        out.write(_json.dumps(meta, ensure_ascii=False) + "\n")
+        for hit in store.scroll(with_vectors=not args.no_vectors, tenant=tenant):
+            row: dict[str, Any] = {"kind": "point", "id": hit.id, "payload": hit.payload}
+            if hit.vector is not None:
+                row["vector"] = hit.vector
+            out.write(_json.dumps(row, ensure_ascii=False) + "\n")
+            count += 1
+    except Exception as e:  # noqa: BLE001
+        print(f"error: export failed after {count} point(s): {e}", file=sys.stderr)
+        return 1
+    finally:
+        if out is not sys.stdout:
+            out.close()
+    print(
+        f"exported {count} point(s) for tenant '{tenant}'"
+        + ("" if args.output == "-" else f" to {args.output}"),
+        file=sys.stderr if args.output == "-" else sys.stdout,
+    )
+    if count == 0:
+        # An empty dump is valid (a provisioned-but-empty tenant) but is more
+        # often a typo'd tenant id — don't let it pass as a trusted backup.
+        print(
+            f"warning: 0 points matched tenant '{tenant}' — check the tenant id "
+            "before trusting this as a backup",
+            file=sys.stderr,
+        )
+    return 0
+
+
+def cmd_tenant_rm(args: argparse.Namespace) -> int:
+    """Offboard a tenant: delete its data and config across every store.
+
+    Touches five stores — vector points, graph nodes/edges (when
+    ``--memgraph-uri`` is given), service keys, quota, and the per-tenant
+    learning-state partitions. Counts everything first; ``--dry-run`` stops
+    there, and the actual deletion is gated behind ``--yes`` (there is no
+    interactive fallback — an irreversible cross-store wipe deserves an explicit
+    flag). Best-effort per store: a failure in one is reported and the rest
+    proceed, with a nonzero exit if anything failed — so a partial outage
+    doesn't strand the whole offboarding, and the report says what remains.
+    """
+    tenant = _require_tenant_arg(args)
+    if tenant is None:
+        return 2
+
+    # ---- count phase (read-only) ----
+    try:
+        store = VectorStore(collection=args.collection, dimension=1, host=args.qdrant)
+        points = store.count(tenant=tenant) if store.collection_exists() else 0
+    except Exception as e:  # noqa: BLE001
+        print(f"error: cannot reach Qdrant at {args.qdrant}: {e}", file=sys.stderr)
+        return 1
+
+    memgraph_uri = getattr(args, "memgraph_uri", None) or None
+    graph_counts = None
+    gs = None
+    if memgraph_uri:
+        from .graph.factory import make_graph_store
+
+        try:
+            gs = make_graph_store(
+                memgraph_uri, timeout=getattr(args, "graph_timeout", 5.0), **_graph_auth(args)
+            )
+            graph_counts = gs.delete_tenant(tenant, dry_run=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"error: cannot reach graph at {memgraph_uri}: {e}", file=sys.stderr)
+            if gs is not None:
+                gs.close()
+            return 1
+
+    external_keys = (os.environ.get("MNEMOSTACK_KEYSTORE") or "").strip().lower() not in ("", "file")
+    key_ids: list[str] = []
+    if not external_keys:
+        try:
+            key_ids = [k["id"] for k in _keys_store(args).list_keys() if k["tenant"] == tenant]
+        except Exception as e:  # noqa: BLE001
+            print(f"warning: key store unreadable ({e}); keys not counted", file=sys.stderr)
+
+    quota = None
+    try:
+        quota = _quota_store(args).get(tenant)  # fails open, but guard construction too
+    except Exception as e:  # noqa: BLE001 — a broken quota store must not crash the count
+        print(f"warning: quota store unreadable ({e}); quota not counted", file=sys.stderr)
+
+    from .recall.pipeline import FileStateStore, default_state_path
+    from .recall.pipeline.state import tenant_state_key
+
+    state_path = getattr(args, "state_path", None) or default_state_path()
+    state_keys = [tenant_state_key(base, tenant) for base in ("q_table", "ior_log")]
+    state_store = FileStateStore(state_path)
+    try:
+        present_state = [k for k in state_keys if state_store.get(k) is not None]
+    except Exception as e:  # noqa: BLE001 — a corrupt state file must not crash the count
+        print(f"warning: state store unreadable ({e}); state not counted", file=sys.stderr)
+        present_state = []
+
+    print(f"tenant '{tenant}':")
+    print(f"  vector points:    {points}")
+    if graph_counts is not None:
+        print(f"  graph nodes:      {graph_counts['nodes']}")
+        print(f"  graph edges:      {graph_counts['relationships']}")
+        if graph_counts.get("detached"):
+            print(
+                f"  graph collateral: {graph_counts['detached']} unowned edge(s) "
+                "attached to the tenant's nodes (removed with them)"
+            )
+    else:
+        print("  graph:            (skipped — no --memgraph-uri)")
+    if external_keys:
+        print("  service keys:     managed externally (MNEMOSTACK_KEYSTORE) — not touched")
+    else:
+        print(f"  service keys:     {len(key_ids)}")
+    print(f"  quota:            {'set' if quota is not None else 'none'}")
+    print(f"  learning state:   {len(present_state)} partition(s)")
+
+    if args.dry_run:
+        if gs is not None:
+            gs.close()
+        print("dry-run: nothing deleted")
+        return 0
+    if not args.yes:
+        if gs is not None:
+            gs.close()
+        print(
+            "error: deleting a tenant is irreversible and spans every store; "
+            "re-run with --yes to confirm (use --dry-run to preview)",
+            file=sys.stderr,
+        )
+        return 2
+
+    # ---- delete phase (best-effort per store, loud report) ----
+    failed: list[str] = []
+    try:
+        deleted = store.delete_tenant(tenant)
+        print(f"deleted {deleted} vector point(s)")
+    except Exception as e:  # noqa: BLE001
+        failed.append("vector points")
+        print(f"error: vector delete failed: {e}", file=sys.stderr)
+    if gs is not None:
+        try:
+            gc = gs.delete_tenant(tenant)
+            extra = (
+                f" (+{gc['detached']} attached unowned edge(s))" if gc.get("detached") else ""
+            )
+            print(f"deleted {gc['nodes']} graph node(s), {gc['relationships']} edge(s){extra}")
+        except Exception as e:  # noqa: BLE001
+            failed.append("graph")
+            print(f"error: graph delete failed: {e}", file=sys.stderr)
+        finally:
+            gs.close()
+    if not external_keys and key_ids:
+        try:
+            ks = _keys_store(args)
+            revoked = 0
+            last_admin_blocked = False
+            for kid in key_ids:
+                # Same guard the admin console uses: offboarding a tenant that
+                # happens to hold the LAST usable admin key must not lock the
+                # operator out of `keys`/the inspector console.
+                status = ks.revoke_guarded(kid, protect_last_admin=True)
+                if status == "revoked":
+                    revoked += 1
+                elif status == "last_admin":
+                    last_admin_blocked = True
+            print(f"revoked {revoked} service key(s)")
+            if last_admin_blocked:
+                failed.append("service keys (last admin key)")
+                print(
+                    f"error: a key of tenant '{tenant}' is the LAST usable admin key — "
+                    "refusing to revoke it (that would lock out key management). "
+                    "Issue another admin key (`mnemostack keys add --scopes admin`), "
+                    "then re-run.",
+                    file=sys.stderr,
+                )
+        except Exception as e:  # noqa: BLE001
+            failed.append("service keys")
+            print(f"error: key revocation failed: {e}", file=sys.stderr)
+    if quota is not None:
+        try:
+            _quota_store(args).remove(tenant)
+            print("removed quota")
+        except Exception as e:  # noqa: BLE001
+            failed.append("quota")
+            print(f"error: quota removal failed: {e}", file=sys.stderr)
+    removed_state = 0
+    try:
+        for k in state_keys:
+            if state_store.delete(k):
+                removed_state += 1
+        print(f"removed {removed_state} learning-state partition(s)")
+    except Exception as e:  # noqa: BLE001
+        failed.append("learning state")
+        print(f"error: learning-state cleanup failed: {e}", file=sys.stderr)
+
+    if failed:
+        print(
+            f"tenant '{tenant}' partially removed — FAILED: {', '.join(failed)}; "
+            "re-run after fixing the store(s) above",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"tenant '{tenant}' fully removed")
+    return 0
+
+
 def _keys_store(args: argparse.Namespace):
     from mnemostack.auth import FileKeyStore
 
@@ -1874,6 +2140,71 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         help="Memgraph connection timeout in seconds (default 5.0)",
     )
     p_tenant_migrate.set_defaults(func=cmd_tenant_migrate)
+
+    p_tenant_export = sub.add_parser(
+        "tenant-export",
+        parents=[common],
+        help="Export a tenant's vector points (vectors + payloads) as JSONL",
+    )
+    p_tenant_export.add_argument("--tenant", required=True, help="tenant_id to export")
+    p_tenant_export.add_argument(
+        "-o",
+        "--output",
+        default="-",
+        help="Output file ('-' = stdout, the default; progress then goes to stderr)",
+    )
+    p_tenant_export.add_argument(
+        "--no-vectors",
+        action="store_true",
+        help="Payloads only (smaller dump; restoring requires re-embedding)",
+    )
+    p_tenant_export.set_defaults(func=cmd_tenant_export)
+
+    p_tenant_rm = sub.add_parser(
+        "tenant-rm",
+        parents=[common],
+        help="Offboard a tenant: delete its points, graph records, keys, quota, and "
+        "learning state (counts first; --dry-run / --yes)",
+    )
+    p_tenant_rm.add_argument("--tenant", required=True, help="tenant_id to remove")
+    p_tenant_rm.add_argument(
+        "--dry-run", action="store_true", help="Report per-store counts without deleting"
+    )
+    p_tenant_rm.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Confirm the irreversible cross-store deletion",
+    )
+    p_tenant_rm.add_argument(
+        "--memgraph-uri",
+        default=None,
+        help="Also delete the tenant's graph nodes/edges at this bolt URI. "
+        "Omit to remove vector/config data only.",
+    )
+    p_tenant_rm.add_argument(
+        "--graph-timeout",
+        type=float,
+        default=cfg.graph.timeout,
+        help="Memgraph connection timeout in seconds (default 5.0)",
+    )
+    p_tenant_rm.add_argument(
+        "--keys-file",
+        default=None,
+        help="Key store path (default: $MNEMOSTACK_KEYS_FILE or ~/.config/mnemostack/keys.json)",
+    )
+    p_tenant_rm.add_argument(
+        "--quotas-file",
+        default=None,
+        help="Quota store path (default: $MNEMOSTACK_QUOTAS_FILE or "
+        "~/.config/mnemostack/quotas.json)",
+    )
+    p_tenant_rm.add_argument(
+        "--state-path",
+        default=None,
+        help="Learning-state file (default: the server's default state path)",
+    )
+    p_tenant_rm.set_defaults(func=cmd_tenant_rm)
 
     p_keys = sub.add_parser(
         "keys", help="Manage service keys for multi-tenant auth (add / list / revoke)"
