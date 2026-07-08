@@ -584,6 +584,27 @@ def cmd_tenant_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def _abort_keys_alive(tenant: str, failed: list[str], gs: Any) -> int:
+    """Abort the tenant-rm data sweep because a usable tenant key remains.
+
+    Whether revocation was *refused* (last admin key) or *failed* (unwritable
+    store), the outcome is the same: a write-capable key survives, and any store
+    swept now could be re-written the moment it's cleaned. Nothing below the key
+    step has been deleted at this point, so aborting keeps the offboarding
+    atomic for the re-run.
+    """
+    print(
+        "skipping vector/graph/quota/learning-state deletion while the tenant "
+        "retains an active key — nothing was deleted; fix the key store (or issue "
+        "another admin key) and re-run",
+        file=sys.stderr,
+    )
+    if gs is not None:
+        gs.close()
+    print(f"tenant '{tenant}' NOT removed — FAILED: {', '.join(failed)}", file=sys.stderr)
+    return 1
+
+
 def cmd_tenant_rm(args: argparse.Namespace) -> int:
     """Offboard a tenant: delete its data and config across every store.
 
@@ -772,22 +793,15 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
                 # tenant could re-write into any store swept below the moment it's
                 # cleaned. Don't sweep data while an active key remains — abort
                 # here and let the re-run (after a new admin key) do it atomically.
-                print(
-                    "skipping vector/graph/quota/learning-state deletion while the "
-                    "tenant retains an active key — nothing was deleted; re-run "
-                    "after issuing another admin key",
-                    file=sys.stderr,
-                )
-                if gs is not None:
-                    gs.close()
-                print(
-                    f"tenant '{tenant}' NOT removed — FAILED: {', '.join(failed)}",
-                    file=sys.stderr,
-                )
-                return 1
+                return _abort_keys_alive(tenant, failed, gs)
         except Exception as e:  # noqa: BLE001
+            # A failed revocation WRITE (unwritable dir, full disk) leaves the
+            # tenant's keys just as alive as the last-admin case — same abort:
+            # sweeping data now would hand the still-active key a clean store
+            # to re-write into.
             failed.append("service keys")
             print(f"error: key revocation failed: {e}", file=sys.stderr)
+            return _abort_keys_alive(tenant, failed, gs)
     if "vector points" not in unavailable:
         if collection_absent:
             print("vector points: collection absent — nothing to delete")
@@ -3285,24 +3299,33 @@ def main(argv: list[str] | None = None) -> int:
             # unreadable, the built-in http://localhost:6333/"mnemostack" seeds
             # could point tenant-rm --yes (or a trusted backup) at the wrong
             # store. Require the target to be named explicitly on the CLI.
-            missing = [
-                flag
-                for flag in ("--qdrant", "--collection")
-                if not any(a == flag or a.startswith(flag + "=") for a in raw)
-            ]
+            def _passed(flag: str) -> bool:
+                return any(a == flag or a.startswith(flag + "=") for a in raw)
+
+            missing = [f for f in ("--qdrant", "--collection") if not _passed(f)]
+            # tenant-rm claims full removal, so a graph configured via env must
+            # not silently drop out of the sweep just because the config load
+            # failed — require it to be re-stated explicitly.
+            if (
+                subcmd == "tenant-rm"
+                and os.environ.get("MNEMOSTACK_MEMGRAPH_URI")
+                and not _passed("--memgraph-uri")
+            ):
+                missing.append("--memgraph-uri (a graph is configured via env)")
             if missing:
                 print(
                     f"error: stack config failed to load ({e}); refusing to fall "
                     f"back to built-in defaults for {subcmd} — pass "
-                    f"{' and '.join(missing)} explicitly (and --memgraph-uri / "
-                    "graph credentials if the graph is involved)",
+                    f"{' and '.join(missing)} explicitly (and graph credentials "
+                    "via env if the graph is authenticated)",
                     file=sys.stderr,
                 )
                 return 2
             print(
                 f"warning: stack config failed to load ({e}); using built-in "
-                "defaults for everything not passed explicitly (graph auth from "
-                "the config is unavailable)",
+                "defaults for everything not passed explicitly. Graph settings "
+                "from the CONFIG FILE are invisible here — if it configures a "
+                "graph, pass --memgraph-uri explicitly",
                 file=sys.stderr,
             )
             parser = build_parser(config_light=True)

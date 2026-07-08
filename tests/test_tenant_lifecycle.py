@@ -629,3 +629,41 @@ def test_tenant_export_temp_is_exclusive(monkeypatch, tmp_path):
     assert rc == 0
     assert out.exists()
     assert bystander.read_text() == "SOMEONE ELSE'S FILE\n"  # untouched
+
+
+# ---------- review round 5 ----------
+
+
+def test_tenant_rm_revocation_write_failure_aborts_sweep(monkeypatch, tmp_path, capsys):
+    # A failed revocation WRITE (disk full / unwritable dir) leaves the tenant's
+    # keys alive — same active-key window as last-admin, same abort.
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    ks, _fs = _seed_config(tmp_path)
+
+    class _BrokenWrite:
+        def list_keys(self):
+            return ks.list_keys()  # readable...
+
+        def revoke_guarded(self, kid, **kw):
+            raise OSError("read-only file system")  # ...but not writable
+
+    monkeypatch.setattr(cli, "_keys_store", lambda _a: _BrokenWrite())
+    rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", yes=True))
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "key revocation failed" in err and "NOT removed" in err
+    assert store.count(tenant="alpha") == 2  # data sweep never ran
+
+
+def test_config_fallback_requires_graph_flag_when_env_graph_set(monkeypatch, tmp_path, capsys):
+    # With the config unreadable and a graph configured via env, tenant-rm must
+    # not silently drop the graph from the sweep — require --memgraph-uri too.
+    monkeypatch.setenv("MNEMOSTACK_TOKEN_BUDGET", "notint")
+    monkeypatch.setenv("MNEMOSTACK_MEMGRAPH_URI", "bolt://prod-graph:7687")
+    rc = cli.main([
+        "tenant-rm", "--tenant", "alpha", "--yes",
+        "--qdrant", "http://localhost:6333", "--collection", "mt",
+    ])
+    assert rc == 2
+    assert "--memgraph-uri" in capsys.readouterr().err
