@@ -172,4 +172,3 @@ def test_inspector_audit_endpoint_forbidden_without_auth(monkeypatch):
         ServerConfig(provider_name="fake", collection="mt", graph_uri=None)
     )
     assert TestClient(app).get("/api/audit").status_code == 403
-
