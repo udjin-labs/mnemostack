@@ -118,9 +118,11 @@ def build_server(
     # effect immediately (fail closed). Off by default: byte-identical, unscoped.
     key_store = None
     if auth_enabled:
-        from ..auth import FileKeyStore
+        from ..auth import make_key_store
 
-        key_store = FileKeyStore(keys_file)
+        # Backend selected by MNEMOSTACK_KEYSTORE (file default, openbao optional);
+        # a selected-but-misconfigured backend raises here (boot fails loud).
+        key_store = make_key_store(keys_file)
         if not api_key:
             raise ValueError(
                 "auth enabled but no service key provided (set --api-key or MNEMOSTACK_API_KEY)"

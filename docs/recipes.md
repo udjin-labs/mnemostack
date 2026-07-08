@@ -1,11 +1,11 @@
-# Recipes: reranking and BM25 language analyzers
+# Recipes: rerankers, BM25 analyzers, key-file encryption
 
-Concrete, runnable recipes for two extension points mnemostack ships but
+Concrete, runnable recipes for extension points mnemostack ships but
 deliberately keeps dependency-free: the score-based reranker
-(`ScoringReranker` / `RelevanceScorer`) and the pluggable BM25 analyzer
-(`BM25Retriever(tokenizer=...)`). The core installs none of the models or
-NLP libraries below — they live in *your* application, so you pick the
-licensing and the language coverage you need.
+(`ScoringReranker` / `RelevanceScorer`), the pluggable BM25 analyzer
+(`BM25Retriever(tokenizer=...)`), and hardening the service-key file at rest.
+The core installs none of the models or libraries below — they live in *your*
+application/host, so you pick the licensing and coverage you need.
 
 Both stages are complementary: a BM25 analyzer improves **which** candidates
 enter the pool; a reranker improves the **order** of candidates already
@@ -283,3 +283,45 @@ analyzer, pass `retokenize=False` to avoid a second pass:
 ```python
 BM25Retriever(pretokenized_docs, tokenizer=my_analyzer, retokenize=False)
 ```
+
+## Encrypting the service-key file at rest (sops + age)
+
+`FileKeyStore` stores keys **hashed** (never plaintext), so a leaked
+`keys.json` can't be replayed — but the file still reveals the tenant map,
+scopes, and revocation state, and it travels with any disk backup or snapshot.
+For a single-box deployment that doesn't want to run a secret store, the honest
+minimum is encrypting the file at rest with [sops](https://github.com/getsops/sops)
+and [age](https://github.com/FiloSottile/age):
+
+```bash
+# One-time: generate a host identity and encrypt the key file with it.
+age-keygen -o /etc/mnemostack/age.key            # note the public key it prints
+sops --encrypt --age <age-public-key> \
+    ~/.config/mnemostack/keys.json > /etc/mnemostack/keys.enc.json
+shred -u ~/.config/mnemostack/keys.json          # remove the plaintext-metadata copy
+```
+
+At service start, decrypt to a path that never touches persistent disk
+(`tmpfs`), point the server at it, and keep permissions tight:
+
+```bash
+# e.g. in the systemd unit (ExecStartPre) or an entrypoint script:
+export SOPS_AGE_KEY_FILE=/etc/mnemostack/age.key
+install -m 700 -d /run/mnemostack                 # /run is tmpfs
+sops --decrypt /etc/mnemostack/keys.enc.json > /run/mnemostack/keys.json
+chmod 600 /run/mnemostack/keys.json
+
+MNEMOSTACK_KEYS_FILE=/run/mnemostack/keys.json mnemostack serve --auth
+```
+
+Manage keys against the decrypted path (`mnemostack keys add --keys-file
+/run/mnemostack/keys.json ...`), then re-encrypt:
+
+```bash
+sops --encrypt --age <age-public-key> \
+    /run/mnemostack/keys.json > /etc/mnemostack/keys.enc.json
+```
+
+Zero code changes; backups now carry only the sops-encrypted blob. If you
+outgrow the file (multi-node, rotation/audit requirements), switch the backend
+instead: `MNEMOSTACK_KEYSTORE=openbao` — see the deployment guide.

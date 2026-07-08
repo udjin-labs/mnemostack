@@ -4,6 +4,12 @@ All notable changes to mnemostack will be documented here. Format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Pluggable key-store backends (`MNEMOSTACK_KEYSTORE`)**: the servers now build their key store through a factory (`mnemostack.auth.make_key_store`) instead of hard-wiring the local file, so deployments with an existing secret store can point verification at it. Two backends ship: `file` (the default — `FileKeyStore`, unchanged) and `openbao` — a new **verify-only** adapter (`mnemostack.openbao.OpenBaoKeyStore`) for [OpenBao](https://openbao.org) / Vault-compatible KV-v2 stores. Records live at `<mount>/<path_prefix>/<sha256-of-key>` with the same shape the file store uses (`tenant`, `scopes`), so **plaintext never reaches the store** — the lookup key is the hash, and record validation mirrors `FileKeyStore.verify` exactly (a malformed record denies; a `scopes` comma-string, which `bao kv put scopes=read,write` naturally produces, is accepted). Auth: a static token (`MNEMOSTACK_OPENBAO_TOKEN`, falling back to `BAO_TOKEN`/`VAULT_TOKEN`) or AppRole (`MNEMOSTACK_OPENBAO_ROLE_ID`/`SECRET_ID`, with one automatic re-login when the token expires). Any store error — unreachable, bad credentials, malformed response — **fails closed** (deny, logged loudly), and a selected-but-misconfigured backend **fails the server at boot** rather than silently denying or falling back to a file nobody maintains. Because MCP re-verifies the key on every tool call, positive lookups are cached briefly (`MNEMOSTACK_OPENBAO_CACHE_TTL`, default 5s — the bound on revocation latency); misses are never cached, so a just-issued key works immediately. The adapter is deliberately verify-only: key lifecycle (issue/rotate/revoke/audit) belongs to the store's own tooling, so it needs only a read-capable credential — `mnemostack keys` keeps managing the local file store (and warns when an external backend is selected), and the inspector admin console reports keys as externally managed (`501`) while quotas remain locally manageable. No new dependency (stdlib HTTP, TLS verified). For single-box deployments that just want the key file protected at rest, `docs/recipes.md` gains a **sops + age** encryption recipe (decrypt to `tmpfs` at start) — zero code, closes the "tenant map in disk backups" gap.
+
 ## [1.0.0] - 2026-07-07
 
 ### Added
