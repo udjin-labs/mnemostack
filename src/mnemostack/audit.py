@@ -30,7 +30,6 @@ Contract — read this before extending:
 
 from __future__ import annotations
 
-import fcntl
 import json
 import logging
 import os
@@ -148,12 +147,21 @@ class FileAuditLog:
             fd = os.open(str(self.path), flags, 0o640)
             try:
                 # Exclusive lock so a CLI op and an inspector op appending at the
-                # same moment can't interleave bytes of their lines.
-                fcntl.flock(fd, fcntl.LOCK_EX)
+                # same moment can't interleave bytes of their lines. fcntl is
+                # POSIX-only (lazy import, like the key/quota stores' locks) —
+                # without it (Windows) fall back to the bare O_APPEND write
+                # rather than letting an ImportError break the audited op.
+                try:
+                    import fcntl
+                except ImportError:  # pragma: no cover — non-POSIX platform
+                    fcntl = None  # type: ignore[assignment]
+                if fcntl is not None:
+                    fcntl.flock(fd, fcntl.LOCK_EX)
                 try:
                     os.write(fd, line.encode("utf-8"))
                 finally:
-                    fcntl.flock(fd, fcntl.LOCK_UN)
+                    if fcntl is not None:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
             finally:
                 os.close(fd)
         except Exception as e:  # noqa: BLE001 — contract: a broken log never blocks the op
@@ -172,7 +180,12 @@ class FileAuditLog:
         events: deque[dict[str, Any]] = deque(maxlen=limit)
         skipped = 0
         try:
-            with open(self.path, encoding="utf-8", errors="replace") as f:
+            # Same no-symlink rule as record(): a pre-planted link must not let
+            # the Audit tab display spoofed events from an attacker-chosen file
+            # while writes are (correctly) refused — the read fails loud instead.
+            read_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(str(self.path), read_flags)
+            with os.fdopen(fd, encoding="utf-8", errors="replace") as f:
                 for raw in f:
                     raw = raw.strip()
                     if not raw:

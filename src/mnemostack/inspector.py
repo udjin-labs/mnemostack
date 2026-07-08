@@ -325,10 +325,13 @@ async function probeManage(){
   // otherwise-usable keys panel — and vice versa (external keys, local quotas).
   try{await loadQuotas();$('nav.tabs button[data-tab="quotas"]').hidden=false;}
   catch(e){/* leave the quotas tab hidden; the rest of the console still works */}
-  // Audit likewise independent: shown whenever the console is admin-unlocked
-  // (the tab itself explains how to enable auditing when it's off).
-  try{await loadAudit();$('nav.tabs button[data-tab="audit"]').hidden=false;}
-  catch(e){/* unreadable audit file: keep the tab hidden, console still works */}
+  // Audit tab is ALWAYS shown in admin mode: a configured-but-unreadable trail
+  // must surface as a visible error (the read fails loud by design), not a
+  // silently missing tab that masks the outage. Disabled auditing renders its
+  // own how-to-enable notice inside the tab.
+  try{await loadAudit();}
+  catch(e){$("#a-status").textContent="audit log unreadable: "+e.message;$("#a-rows").innerHTML="";}
+  $('nav.tabs button[data-tab="audit"]').hidden=false;
 }
 async function boot(){
   try{await loadBrowse();$("#keybar").hidden=true;await probeManage();}
@@ -820,27 +823,54 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
         from mnemostack.auth import KeyStoreError
 
         ks = _require_manageable_keys()
+        # Attribution lookup BEFORE deletion (best-effort — a lookup failure
+        # must never block the revocation), so the event says whose credential
+        # was removed without joining to a possibly-rotated-out issue event.
+        key_tenant: str | None = None
+        try:
+            key_tenant = next(
+                (k.get("tenant") for k in ks.list_keys() if k.get("id") == key_id), None
+            )
+        except Exception:  # noqa: BLE001 — attribution only; revoke proceeds
+            pass
         try:
             status = ks.revoke_guarded(key_id, protect_last_admin=True)
         except KeyStoreError as e:
-            _audit_evt("keys.revoke", principal=_p, outcome="error", key_id=key_id, error=str(e))
+            _audit_evt(
+                "keys.revoke",
+                principal=_p,
+                tenant=key_tenant,
+                outcome="error",
+                key_id=key_id,
+                error=str(e),
+            )
             raise HTTPException(status_code=503, detail=f"key store error: {e}") from e
         if status == "not_found":
             _audit_evt(
-                "keys.revoke", principal=_p, outcome="error", key_id=key_id, reason="not_found"
+                "keys.revoke",
+                principal=_p,
+                tenant=key_tenant,
+                outcome="error",
+                key_id=key_id,
+                reason="not_found",
             )
             raise HTTPException(status_code=404, detail="key not found")
         if status == "last_admin":
             # The guard refused — a distinct outcome from an error: the store is
             # fine, the operation was denied to prevent an admin lockout.
             _audit_evt(
-                "keys.revoke", principal=_p, outcome="denied", key_id=key_id, reason="last_admin"
+                "keys.revoke",
+                principal=_p,
+                tenant=key_tenant,
+                outcome="denied",
+                key_id=key_id,
+                reason="last_admin",
             )
             raise HTTPException(
                 status_code=409,
                 detail="refusing to revoke the last admin key (would lock out admin)",
             )
-        _audit_evt("keys.revoke", principal=_p, key_id=key_id)
+        _audit_evt("keys.revoke", principal=_p, tenant=key_tenant, key_id=key_id)
         return {"revoked": True, "id": key_id}
 
     @app.get("/api/quotas")

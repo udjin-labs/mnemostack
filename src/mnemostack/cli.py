@@ -1112,19 +1112,27 @@ def cmd_keys_list(args: argparse.Namespace) -> int:
 def cmd_keys_revoke(args: argparse.Namespace) -> int:
     from mnemostack.auth import KeyStoreError
 
+    ks = _keys_store(args)
+    # Attribution lookup BEFORE deletion, so the revoke event can say whose
+    # credential was removed without joining to an issue event that may have
+    # rotated out of the retained trail. Best-effort: a lookup failure must
+    # never block the revocation itself.
+    tenant: str | None = None
     try:
-        removed = _keys_store(args).revoke(args.id)
+        tenant = next((k.get("tenant") for k in ks.list_keys() if k.get("id") == args.id), None)
+    except Exception:  # noqa: BLE001 — attribution only; revoke proceeds
+        pass
+    try:
+        removed = ks.revoke(args.id)
     except KeyStoreError as e:
-        _audit("keys.revoke", outcome="error", key_id=args.id, error=str(e))
+        _audit("keys.revoke", tenant=tenant, outcome="error", key_id=args.id, error=str(e))
         print(f"error: {e}", file=sys.stderr)
         return 1
     if removed:
-        # tenant unknown here (revoke() matches by id only) — the issue event
-        # for this key_id carries it.
-        _audit("keys.revoke", key_id=args.id)
+        _audit("keys.revoke", tenant=tenant, key_id=args.id)
         print(f"revoked key {args.id}")
         return 0
-    _audit("keys.revoke", outcome="error", key_id=args.id, reason="not_found")
+    _audit("keys.revoke", tenant=tenant, outcome="error", key_id=args.id, reason="not_found")
     print(f"error: no key with id '{args.id}'", file=sys.stderr)
     return 1
 

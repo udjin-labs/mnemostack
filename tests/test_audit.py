@@ -96,6 +96,18 @@ def test_tail_missing_file_is_empty_not_error(tmp_path):
     assert events == [] and skipped == 0
 
 
+def test_tail_refuses_a_symlinked_audit_path(tmp_path):
+    # Read-side twin of the write-side O_NOFOLLOW: a pre-planted link must not
+    # let the Audit tab render spoofed events from an attacker-chosen file —
+    # the management read fails loud instead.
+    target = tmp_path / "spoofed.jsonl"
+    target.write_text('{"action": "keys.issue", "actor": "attacker"}\n')
+    link = tmp_path / "audit.jsonl"
+    link.symlink_to(target)
+    with pytest.raises(AuditLogError):
+        FileAuditLog(link).tail()
+
+
 def test_tail_unreadable_file_raises(tmp_path):
     p = tmp_path / "a.jsonl"
     log = FileAuditLog(p)
@@ -181,7 +193,9 @@ def test_cli_keys_revoke_audits_success_and_not_found(tmp_path, audit_file):
     ev = _events(audit_file)
     assert [e["outcome"] for e in ev] == ["success", "error"]
     assert ev[0]["details"]["key_id"] == key_id
+    assert ev[0]["tenant"] == "acme"  # attributed via pre-deletion lookup
     assert ev[1]["details"]["reason"] == "not_found"
+    assert ev[1]["tenant"] is None  # unknown id: nothing to attribute
 
 
 def test_cli_quota_set_and_rm_audit(tmp_path, audit_file):
@@ -360,6 +374,31 @@ def test_inspector_last_admin_revoke_audits_denied(monkeypatch, tmp_path, audit_
     ev = [e for e in _events(audit_file) if e["action"] == "keys.revoke"]
     assert len(ev) == 1 and ev[0]["outcome"] == "denied"
     assert ev[0]["details"]["reason"] == "last_admin"
+    assert ev[0]["tenant"] == "ops"  # the key's tenant, from the pre-lookup
+
+
+def test_inspector_revoke_success_attributes_the_tenant(monkeypatch, tmp_path, audit_file):
+    c, admin_key, _aid, _read = _admin_client(monkeypatch, tmp_path)
+    read_id = next(
+        k["id"] for k in FileKeyStore(tmp_path / "keys.json").list_keys()
+        if k["tenant"] == "acme"
+    )
+    assert c.delete(f"/api/keys/{read_id}", headers=_hdr(admin_key)).status_code == 200
+    ev = [e for e in _events(audit_file) if e["action"] == "keys.revoke"]
+    assert len(ev) == 1 and ev[0]["outcome"] == "success"
+    assert ev[0]["tenant"] == "acme" and ev[0]["details"]["key_id"] == read_id
+
+
+def test_inspector_audit_endpoint_503_on_symlinked_trail(monkeypatch, tmp_path):
+    # Configured-but-diverted trail: /api/audit fails loud (503), and the UI
+    # keeps the tab visible rendering the error rather than hiding the outage.
+    target = tmp_path / "spoofed.jsonl"
+    target.write_text("{}\n")
+    link = tmp_path / "audit.jsonl"
+    link.symlink_to(target)
+    monkeypatch.setenv("MNEMOSTACK_AUDIT_FILE", str(link))
+    c, admin_key, *_ = _admin_client(monkeypatch, tmp_path)
+    assert c.get("/api/audit", headers=_hdr(admin_key)).status_code == 503
 
 
 def test_inspector_quota_set_and_remove_audit(monkeypatch, tmp_path, audit_file):
