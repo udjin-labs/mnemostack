@@ -238,6 +238,40 @@ def test_sink_redacts_key_shaped_strings_everywhere(tmp_path):
     assert ev2["tenant"] == "acme" and ev2["details"]["key_id"] == "abc123"
 
 
+def test_sink_redacts_key_shaped_substrings(tmp_path):
+    # Prefix-only redaction misses a key EMBEDDED in a longer string — e.g. a
+    # denied request audited with details.path="/api/keys/msk_..." — which
+    # would still land usable material in the trail.
+    log = FileAuditLog(tmp_path / "a.jsonl")
+    log.record(
+        "auth.denied",
+        actor="key:msk_sometoken",
+        details={"path": "/api/keys/msk_abc-123", "reason": "not_admin"},
+    )
+    raw = (tmp_path / "a.jsonl").read_text()
+    assert "msk_" not in raw
+    (ev,) = _events(tmp_path / "a.jsonl")
+    assert ev["actor"] == "key:[redacted:key-shaped]"
+    assert ev["details"]["path"] == "/api/keys/[redacted:key-shaped]"
+    assert ev["details"]["reason"] == "not_admin"  # untouched
+
+
+def test_record_repairs_a_torn_tail(tmp_path):
+    # A file ending mid-line (copytruncate rotation cut a write short) must not
+    # swallow the NEXT event by gluing it onto the corrupt bytes — record()
+    # starts on a fresh line, and only the torn line is lost (counted).
+    p = tmp_path / "a.jsonl"
+    log = FileAuditLog(p)
+    log.record("keys.issue", tenant="acme")
+    with open(p, "a", encoding="utf-8") as f:
+        f.write('{"ts": "trunc')  # torn tail, no newline
+    assert log.record("quota.set", tenant="globex") is True
+    events, skipped = log.tail()
+    assert [e["action"] for e in events] == ["keys.issue", "quota.set"]
+    assert events[1]["tenant"] == "globex"  # the post-truncation event survives
+    assert skipped == 1  # only the torn line itself is the casualty
+
+
 def test_no_dir_fd_fallback_still_refuses_symlinks(tmp_path, monkeypatch):
     # The fallback branch (no openat walk — Windows) must lstat-refuse a
     # symlink anywhere in the path instead of silently following it.

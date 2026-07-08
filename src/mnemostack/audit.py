@@ -47,6 +47,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import stat
 import time
 from collections import deque
@@ -59,20 +60,21 @@ log = logging.getLogger(__name__)
 #: Whether os.open supports dir_fd (POSIX) — enables the openat() walk below.
 _SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 
-#: The service-key prefix (mirrors ``mnemostack.auth._KEY_PREFIX``): any string
-#: with this shape reaching the sink is presumed key material and redacted.
-_KEY_SHAPE_PREFIX = "msk_"
+#: Service-key shape (mirrors ``mnemostack.auth._KEY_PREFIX`` + token charset):
+#: any substring of this shape reaching the sink is presumed key material.
+_KEY_SHAPE_RE = re.compile(r"msk_[A-Za-z0-9_\-]*")
 _REDACTED = "[redacted:key-shaped]"
 
 
 def _redact_key_shaped(value: Any) -> Any:
     """Defense in depth for the no-key-material contract, enforced AT THE SINK:
-    a caller mistake (e.g. an operator pasting a plaintext key where a public id
-    belongs, which then flows into a ``details.key_id`` of a not-found revoke)
-    must not land a usable credential in the trail. Any ``msk_``-prefixed string
-    anywhere in an event is replaced before serialization."""
+    a caller mistake (an operator pasting a plaintext key where a public id
+    belongs; a denied request whose audited ``path`` is ``/api/keys/msk_...``)
+    must not land a usable credential in the trail. Any ``msk_``-shaped token
+    anywhere INSIDE any string of an event — not just a whole-value prefix —
+    is replaced before serialization."""
     if isinstance(value, str):
-        return _REDACTED if value.startswith(_KEY_SHAPE_PREFIX) else value
+        return _KEY_SHAPE_RE.sub(_REDACTED, value) if "msk_" in value else value
     if isinstance(value, dict):
         return {k: _redact_key_shaped(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
@@ -133,7 +135,10 @@ def _open_trail_fd(path: Path, *, write: bool) -> int:
     point ``MNEMOSTACK_AUDIT_FILE`` at a real path. Raises OSError on refusal.
     """
     final_flags = (
-        ((os.O_WRONLY | os.O_APPEND | os.O_CREAT) if write else os.O_RDONLY)
+        # O_RDWR (not O_WRONLY) on the write path: record() needs to pread the
+        # file's last byte to repair a torn tail; O_APPEND still forces every
+        # write to the end regardless of read position.
+        ((os.O_RDWR | os.O_APPEND | os.O_CREAT) if write else os.O_RDONLY)
         | getattr(os, "O_NOFOLLOW", 0)
         | getattr(os, "O_NONBLOCK", 0)
     )
@@ -303,6 +308,18 @@ class FileAuditLog:
                     # best-effort contract. Loop until every byte landed or the
                     # write raises; the flock keeps the pieces contiguous.
                     data = line.encode("utf-8")
+                    # Torn-tail repair (under the lock): if the file ends
+                    # mid-line — a copytruncate rotation or an earlier failed
+                    # write cut a line short — appending directly would glue
+                    # THIS event onto the corrupt bytes and lose it too. Start
+                    # on a fresh line; the torn line stays one skipped-and-
+                    # counted read casualty. os.pread is POSIX-only — without
+                    # it the repair is skipped (same platform tier as flock).
+                    pread = getattr(os, "pread", None)
+                    if pread is not None:
+                        size = os.fstat(fd).st_size
+                        if size and pread(fd, 1, size - 1) != b"\n":
+                            data = b"\n" + data
                     while data:
                         n = os.write(fd, data)
                         if n <= 0:  # defensive: a 0-byte "success" must not spin
