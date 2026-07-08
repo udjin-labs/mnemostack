@@ -57,8 +57,9 @@ from typing import Any, Protocol
 
 log = logging.getLogger(__name__)
 
-#: Whether os.open supports dir_fd (POSIX) — enables the openat() walk below.
-_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
+#: Whether os.open/os.mkdir support dir_fd (POSIX) — enables the openat() walk
+#: below, including symlink-safe creation of missing parent directories.
+_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd and os.mkdir in os.supports_dir_fd
 
 #: Service-key shape (mirrors ``mnemostack.auth._KEY_PREFIX`` + token charset):
 #: any substring of this shape reaching the sink is presumed key material.
@@ -146,6 +147,8 @@ def _open_trail_fd(path: Path, *, write: bool) -> int:
         for component in (path, *path.parents):
             if component.is_symlink():
                 raise OSError(f"audit path component {component} is a symlink — refused")
+        if write:
+            os.makedirs(path.parent, exist_ok=True)  # after the lstat refusal above
         return _require_regular(os.open(str(path), final_flags, 0o640), path)
     parts = path.parts
     if path.is_absolute():
@@ -157,7 +160,20 @@ def _open_trail_fd(path: Path, *, write: bool) -> int:
     dfd = os.open(anchor, os.O_RDONLY | os.O_DIRECTORY)
     try:
         for comp in walk[:-1]:
-            ndfd = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dfd)
+            try:
+                ndfd = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dfd)
+            except FileNotFoundError:
+                if not write:
+                    raise
+                # Create the missing component INSIDE the already-validated
+                # parent (dir_fd-relative) — a path-string mkdir(parents=True)
+                # would follow a symlinked ancestor BEFORE the walk could
+                # refuse it, planting directories outside the configured path.
+                try:
+                    os.mkdir(comp, 0o750, dir_fd=dfd)
+                except FileExistsError:
+                    pass  # raced with a concurrent creator — reopen below
+                ndfd = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dfd)
             os.close(dfd)
             dfd = ndfd
         return _require_regular(os.open(walk[-1], final_flags, 0o640, dir_fd=dfd), path)
@@ -263,12 +279,14 @@ class FileAuditLog:
             # default=str conversions have become text — so no shape of caller
             # input can carry key material past it (see _redact_line).
             line = _redact_line(json.dumps(event, ensure_ascii=False, default=str)) + "\n"
-            self.path.parent.mkdir(parents=True, exist_ok=True)
             # Hardened open (see _open_trail_fd): every component refuses
             # symlinks — the shared-dir threat FileKeyStore guards against,
             # extended to ancestors — and the target must be a regular file
             # created 0o640 (umask may restrict further; the trail names
             # tenants and key ids, which other local users needn't read).
+            # Missing parent directories are created INSIDE the walk (dir_fd-
+            # relative), so even the mkdir can't be routed through a planted
+            # symlink before the walk refuses it.
             fd = _open_trail_fd(self.path, write=True)
             try:
                 # Exclusive lock so a CLI op and an inspector op appending at the

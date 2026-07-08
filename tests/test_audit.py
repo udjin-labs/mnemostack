@@ -148,6 +148,29 @@ def test_record_completes_short_writes(tmp_path, monkeypatch):
     assert ev["tenant"] == "acme" and ev["details"] == {"key_id": "abc123"}
 
 
+def test_record_creates_missing_parents_inside_the_walk(tmp_path):
+    # Parent creation happens dir_fd-relative inside the validated walk (the
+    # old path-string mkdir(parents=True) is gone) — a clean nested path still
+    # self-provisions.
+    log = FileAuditLog(tmp_path / "a" / "b" / "audit.jsonl")
+    assert log.record("keys.issue", tenant="acme") is True
+    (ev,) = _events(tmp_path / "a" / "b" / "audit.jsonl")
+    assert ev["tenant"] == "acme"
+
+
+def test_record_never_mkdirs_through_a_symlinked_ancestor(tmp_path):
+    # Round-8 repro: linkdir -> real, configured path linkdir/sub/audit.jsonl.
+    # The old pre-walk mkdir(parents=True) would create real/sub before the
+    # walk refused — a filesystem write outside the configured path. Now the
+    # mkdir itself is dir_fd-relative and refused at linkdir.
+    real = tmp_path / "real"
+    real.mkdir()
+    linkdir = tmp_path / "linkdir"
+    linkdir.symlink_to(real, target_is_directory=True)
+    assert FileAuditLog(linkdir / "sub" / "audit.jsonl").record("keys.issue") is False
+    assert not (real / "sub").exists()  # no directory planted behind the link
+
+
 def test_record_degrades_exotic_detail_values(tmp_path):
     # default=str: a non-JSON-serializable detail must not lose the event.
     log = FileAuditLog(tmp_path / "a.jsonl")
