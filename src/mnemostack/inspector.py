@@ -506,6 +506,7 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
                 _audit_evt(
                     "auth.denied",
                     principal=principal,
+                    tenant=principal.tenant,  # known here, unlike invalid_key
                     outcome="denied",
                     reason="not_admin",
                     path=request.url.path,

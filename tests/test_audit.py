@@ -50,6 +50,18 @@ def test_record_never_raises_on_unwritable_path(tmp_path):
     assert log.record("keys.issue", tenant="acme") is False
 
 
+def test_record_refuses_a_symlinked_audit_path(tmp_path):
+    # A symlink pre-planted at the configured path (shared-dir attack) must not
+    # divert the trail into an arbitrary file — O_NOFOLLOW refuses it, and the
+    # best-effort contract turns that into False, not a crash.
+    target = tmp_path / "diverted.log"
+    target.write_text("")
+    link = tmp_path / "audit.jsonl"
+    link.symlink_to(target)
+    assert FileAuditLog(link).record("keys.issue", tenant="acme") is False
+    assert target.read_text() == ""  # nothing was appended through the link
+
+
 def test_record_degrades_exotic_detail_values(tmp_path):
     # default=str: a non-JSON-serializable detail must not lose the event.
     log = FileAuditLog(tmp_path / "a.jsonl")
@@ -337,6 +349,7 @@ def test_inspector_denials_are_audited_but_probes_are_not(monkeypatch, tmp_path,
     assert all(e["action"] == "auth.denied" and e["outcome"] == "denied" for e in ev)
     assert ev[0]["actor"].startswith("ip:")
     assert ev[1]["actor"].startswith("key:")  # rejected non-admin is attributable
+    assert ev[1]["tenant"] == "acme"  # ...and tenant-filterable
     assert "msk_bogus" not in audit_file.read_text()  # never presented key material
 
 

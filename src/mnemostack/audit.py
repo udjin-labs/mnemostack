@@ -140,7 +140,12 @@ class FileAuditLog:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             # 0o640 ceiling (umask may restrict further): the trail names tenants
             # and key ids — operational metadata other local users needn't read.
-            fd = os.open(str(self.path), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o640)
+            # O_NOFOLLOW: refuse a symlink pre-planted at the configured path (the
+            # same shared-dir threat FileKeyStore guards against) — otherwise an
+            # attacker with write access to the parent dir could silently divert
+            # the trail into an arbitrary file while record() reports success.
+            flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(str(self.path), flags, 0o640)
             try:
                 # Exclusive lock so a CLI op and an inspector op appending at the
                 # same moment can't interleave bytes of their lines.
