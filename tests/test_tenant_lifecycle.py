@@ -186,6 +186,7 @@ def _rm_ns(tmp_path, **kw) -> argparse.Namespace:
         "keys_file": str(tmp_path / "keys.json"),
         "quotas_file": str(tmp_path / "quotas.json"),
         "state_path": str(tmp_path / "state.json"),
+        "external_keys_revoked": False,
     }
     base.update(kw)
     return argparse.Namespace(**base)
@@ -274,15 +275,26 @@ def test_tenant_rm_deletes_graph_when_uri_given(monkeypatch, tmp_path):
     assert fake.calls == [("alpha", True), ("alpha", False)]
 
 
-def test_tenant_rm_external_keystore_skips_keys(monkeypatch, tmp_path, capsys):
+def test_tenant_rm_external_keystore_requires_flag_then_sweeps(monkeypatch, tmp_path, capsys):
     store = _seeded_store()
     monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
     ks, _fs = _seed_config(tmp_path)
     monkeypatch.setenv("MNEMOSTACK_KEYSTORE", "openbao")
+    # WITHOUT the flag: tenant-rm can't revoke the external key, so it refuses to
+    # sweep (a live key would re-write the data back) — nothing deleted.
     rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", yes=True))
-    assert rc == 0
-    assert "managed externally" in capsys.readouterr().out
-    # the local file store was NOT touched (keys live in the external store)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "external store" in err and "--external-keys-revoked" in err
+    assert store.count(tenant="alpha") == 2  # data untouched
+    # WITH the flag (operator revoked the key in OpenBao first): sweep proceeds.
+    rc2 = cli.cmd_tenant_rm(
+        _rm_ns(tmp_path, tenant="alpha", yes=True, external_keys_revoked=True)
+    )
+    assert rc2 == 0
+    assert "treated as revoked" in capsys.readouterr().out
+    assert store.count(tenant="alpha") == 0
+    # the LOCAL file store was never touched (keys live in the external store)
     assert sum(1 for k in ks.list_keys() if k["tenant"] == "alpha") == 2
 
 
@@ -667,3 +679,39 @@ def test_config_fallback_requires_graph_flag_when_env_graph_set(monkeypatch, tmp
     ])
     assert rc == 2
     assert "--memgraph-uri" in capsys.readouterr().err
+
+
+# ---------- review round 6 ----------
+
+
+def test_config_fallback_seeds_graph_auth_from_env(monkeypatch, tmp_path, capsys):
+    # With the config unreadable but graph auth in env, the fallback must still
+    # pass those creds through — else graph deletion fails on an authed Memgraph
+    # and the sweep proceeds reporting removal while graph records survive.
+    monkeypatch.setenv("MNEMOSTACK_TOKEN_BUDGET", "notint")
+    monkeypatch.setenv("MNEMOSTACK_MEMGRAPH_URI", "bolt://g:7687")
+    monkeypatch.setenv("MNEMOSTACK_GRAPH_USER", "neo4j")
+    monkeypatch.setenv("MNEMOSTACK_GRAPH_PASSWORD", "s3cret")
+    seen: dict = {}
+
+    class _FakeGraph:
+        def delete_tenant(self, tenant, *, dry_run=False):
+            return {"nodes": 0, "relationships": 0, "detached": 0}
+
+        def close(self):
+            pass
+
+    def _capture(uri, *, timeout=5.0, user=None, password=None, database=None):
+        seen.update(user=user, password=password)
+        return _FakeGraph()
+
+    monkeypatch.setattr("mnemostack.graph.factory.make_graph_store", _capture)
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    rc = cli.main([
+        "tenant-rm", "--tenant", "alpha", "--yes",
+        "--qdrant", "http://localhost:6333", "--collection", "mt",
+        "--memgraph-uri", "bolt://g:7687",
+    ])
+    assert rc == 0
+    assert seen == {"user": "neo4j", "password": "s3cret"}  # env creds threaded through

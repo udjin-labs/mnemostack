@@ -726,7 +726,11 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
     else:
         print("  graph:            (skipped — no --memgraph-uri)")
     if external_keys:
-        print("  service keys:     managed externally (MNEMOSTACK_KEYSTORE) — not touched")
+        confirmed = " — confirmed revoked" if args.external_keys_revoked else ""
+        print(
+            "  service keys:     managed externally (MNEMOSTACK_KEYSTORE); "
+            f"revoke them in that store{confirmed or ' + pass --external-keys-revoked'}"
+        )
     else:
         _line("service keys:    ", f"{len(key_ids)}", "service keys")
     _line("quota:           ", "set" if quota_present else "none", "quota")
@@ -760,11 +764,26 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
     # ---- delete phase (best-effort per store, loud report) ----
     # Unreachable stores are failures up front: their cleanup did NOT happen.
     failed: list[str] = list(unavailable)
-    # Keys are revoked FIRST: on a live authenticated deployment the tenant's
+    # Keys are handled FIRST: on a live authenticated deployment the tenant's
     # key could otherwise keep writing (feedback, graph facts) into stores this
     # command has already cleaned, and "fully removed" would be stale the moment
-    # it printed. Auth re-verifies per request/tool-call, so a revocation cuts
-    # new writes off before the data stores are swept.
+    # it printed. Auth re-verifies per request/tool-call, so cutting the key off
+    # before the data stores are swept closes that window.
+    if external_keys:
+        # tenant-rm can't revoke a key it only verifies (it lives in the
+        # external store). Refuse to sweep unless the operator confirms they
+        # revoked it out-of-band — otherwise a live key re-writes the data back.
+        if not args.external_keys_revoked:
+            failed.append("service keys (external store — not confirmed revoked)")
+            print(
+                f"error: tenant '{tenant}' keys are in an external store "
+                "(MNEMOSTACK_KEYSTORE) — tenant-rm can't revoke them. Revoke the "
+                "tenant's key(s) there first (e.g. `bao kv delete ...`), then re-run "
+                "with --external-keys-revoked to sweep the data stores.",
+                file=sys.stderr,
+            )
+            return _abort_keys_alive(tenant, failed, gs)
+        print("service keys: external store — treated as revoked (--external-keys-revoked)")
     if not external_keys and "service keys" not in unavailable and key_ids:
         try:
             ks = _keys_store(args)
@@ -2299,6 +2318,13 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         help="Confirm the irreversible cross-store deletion",
     )
     p_tenant_rm.add_argument(
+        "--external-keys-revoked",
+        action="store_true",
+        help="With an external key store (MNEMOSTACK_KEYSTORE=openbao), confirm you "
+        "have ALREADY revoked the tenant's key(s) there — tenant-rm can't do it and "
+        "otherwise refuses to sweep data while a key could still write",
+    )
+    p_tenant_rm.add_argument(
         "--memgraph-uri",
         default=None,
         help="Also delete the tenant's graph nodes/edges at this bolt URI. "
@@ -3329,6 +3355,15 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             parser = build_parser(config_light=True)
+            # config_light built a bare Config() that skipped the graph-auth ENV
+            # overrides, so re-apply them: an authenticated Memgraph must still
+            # receive its credentials (else graph deletion fails and the sweep
+            # proceeds, reporting removal while graph records survive).
+            parser.set_defaults(
+                graph_user=os.environ.get("MNEMOSTACK_GRAPH_USER") or None,
+                graph_password=os.environ.get("MNEMOSTACK_GRAPH_PASSWORD") or None,
+                graph_database=os.environ.get("MNEMOSTACK_GRAPH_DATABASE") or None,
+            )
     else:
         parser = build_parser(config_light=subcmd in {"keys", "quota"})
     args = parser.parse_args(argv)

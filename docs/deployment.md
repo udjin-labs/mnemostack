@@ -505,7 +505,9 @@ mnemostack tenant-rm --tenant acme --memgraph-uri bolt://localhost:7687 --dry-ru
 mnemostack tenant-rm --tenant acme --memgraph-uri bolt://localhost:7687 --yes
 ```
 
-This deletes the tenant's vector points (a server-side filter delete — unscoped/legacy points and other tenants are never matched), its graph nodes **and** edges (only with `--memgraph-uri`; omit it for a vector-only deployment), its service keys (local file store — under an external `MNEMOSTACK_KEYSTORE` the keys are reported as externally managed and left to that store's tooling), its quota, and its learning-state partitions. The deletion is gated behind `--yes` and is **best-effort per store**: a failing store is reported, the rest proceed, and a nonzero exit lists what remains — re-run after fixing it.
+This deletes the tenant's vector points (a server-side filter delete — unscoped/legacy points and other tenants are never matched), its graph nodes **and** edges (only with `--memgraph-uri`; omit it for a vector-only deployment), its service keys, its quota, and its learning-state partitions. The deletion is gated behind `--yes` and is **best-effort per store**: a failing store is reported, the rest proceed, and a nonzero exit lists what remains — re-run after fixing it.
+
+Keys are handled **first** so a still-valid key can't re-write data into a store that was just cleaned. On a local key store the tenant's keys are revoked (and if that would remove the last usable admin key, or the revocation fails, the whole sweep aborts with nothing deleted — issue another admin key / fix the store and re-run). With an external key store (`MNEMOSTACK_KEYSTORE=openbao`) `tenant-rm` **cannot** revoke — revoke the tenant's key(s) there first (e.g. `bao kv delete ...`), then re-run with `--external-keys-revoked` to confirm and sweep the data stores.
 
 Before removing (or for a plain backup), dump the tenant's data:
 
