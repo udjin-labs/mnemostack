@@ -865,6 +865,37 @@ def test_tenant_rm_primary_path_uses_configured_graph(monkeypatch, tmp_path, cap
     assert called.get("uri_used") is True  # the configured graph was actually swept
 
 
+def test_tenant_rm_empty_config_graph_uri_is_disabled_not_rejected(monkeypatch, tmp_path, capsys):
+    # A config with an EMPTY graph.uri means "no graph configured" (as doctor
+    # reads it). The parser default normalizes "" -> None, so omitting
+    # --memgraph-uri must skip the graph and succeed — NOT trip the
+    # explicit-empty-flag error (which is reserved for `--memgraph-uri ""` on
+    # the CLI).
+    from mnemostack.config import Config, GraphConfig
+
+    def _load_empty_graph(*a, **k):
+        cfg = Config()
+        cfg.graph = GraphConfig(uri="")  # configured, but empty
+        return cfg
+
+    monkeypatch.setattr(Config, "load", classmethod(lambda cls: _load_empty_graph()))
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    _seed_config(tmp_path)
+
+    def _boom(*a, **k):  # graph must never be probed when the config URI is empty
+        raise AssertionError("make_graph_store called for an empty config graph.uri")
+
+    monkeypatch.setattr("mnemostack.graph.factory.make_graph_store", _boom)
+    rc = cli.main([
+        "tenant-rm", "--tenant", "alpha", "--yes",
+        "--qdrant", "http://localhost:6333", "--collection", "mt",
+    ])
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "empty value" not in err  # not rejected as an explicit-empty flag
+
+
 def test_tenant_rm_key_issued_during_sweep_is_caught(monkeypatch, tmp_path, capsys):
     # A key that appears mid-sweep (concurrent onboarding) is caught by the final
     # re-scan and reported as a partial removal, not a silent "fully removed".

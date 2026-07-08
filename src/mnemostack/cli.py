@@ -2403,7 +2403,11 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     )
     p_tenant_rm.add_argument(
         "--memgraph-uri",
-        default=cfg.graph.uri,  # a graph configured in config/env is swept by default
+        # A graph configured in config/env is swept by default; an EMPTY/unset
+        # config value normalizes to None so it reads as "no graph configured"
+        # (matching doctor's `if not cfg.graph.uri`) — not an explicit-empty-flag
+        # error. Only an empty value passed on the CLI hits that error below.
+        default=cfg.graph.uri or None,
         help="Also delete the tenant's graph nodes/edges at this bolt URI. "
         "Defaults to the configured graph (config/env), so a graph deployment is "
         "swept automatically; passes through as unset only when no graph is "
