@@ -514,14 +514,22 @@ def cmd_tenant_export(args: argparse.Namespace) -> int:
     # A file export is written ATOMICALLY (temp in the same dir + replace): a
     # backup command must never truncate an existing dump and leave a partial
     # file at the trusted path when Qdrant drops mid-scroll. The final name
-    # (over)writes only after the export completed.
+    # (over)writes only after the export completed. mkstemp (unique, O_EXCL,
+    # 0600) — a predictable ".tmp" name could truncate/unlink another user's
+    # file or follow a planted symlink in a shared directory.
+    import tempfile
+
     tmp_path: Path | None = None
     if args.output == "-":
         out = sys.stdout
     else:
         try:
-            tmp_path = Path(args.output).with_name(Path(args.output).name + ".tmp")
-            out = open(tmp_path, "w", encoding="utf-8")
+            target = Path(args.output)
+            fd, tmp_name = tempfile.mkstemp(
+                dir=str(target.parent) or ".", prefix=target.name + ".", suffix=".tmp"
+            )
+            tmp_path = Path(tmp_name)
+            out = os.fdopen(fd, "w", encoding="utf-8")
         except OSError as e:
             print(f"error: cannot write {args.output}: {e}", file=sys.stderr)
             return 1
@@ -628,13 +636,22 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
                 gs.close()
                 gs = None
 
-    external_keys = (os.environ.get("MNEMOSTACK_KEYSTORE") or "").strip().lower() not in ("", "file")
+    # Mirror the key-store factory's backend set: `file` is handled locally,
+    # `openbao` is genuinely external (the store's own tooling revokes) — but a
+    # TYPO ("flie") must be a cleanup failure, not a silent skip that lets the
+    # tenant's local keys survive an offboarding reported as fully removed.
+    _ks_backend = (os.environ.get("MNEMOSTACK_KEYSTORE") or "").strip().lower() or "file"
+    external_keys = _ks_backend == "openbao"
     key_ids: list[str] = []
-    if not external_keys:
+    if _ks_backend == "file":
         try:
             key_ids = [k["id"] for k in _keys_store(args).list_keys() if k["tenant"] == tenant]
         except Exception as e:  # noqa: BLE001 — unreadable keys = incomplete offboarding
             unavailable["service keys"] = f"key store unreadable: {e}"
+    elif not external_keys:
+        unavailable["service keys"] = (
+            f"unknown MNEMOSTACK_KEYSTORE backend {_ks_backend!r} (valid: file, openbao)"
+        )
 
     # Quota: get() fails OPEN (None for a corrupt store), which would silently
     # skip removal and still report success — probe with list_quotas(), which is
@@ -751,6 +768,23 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
                     "then re-run.",
                     file=sys.stderr,
                 )
+                # The surviving key is write-capable (admin implies write), so the
+                # tenant could re-write into any store swept below the moment it's
+                # cleaned. Don't sweep data while an active key remains — abort
+                # here and let the re-run (after a new admin key) do it atomically.
+                print(
+                    "skipping vector/graph/quota/learning-state deletion while the "
+                    "tenant retains an active key — nothing was deleted; re-run "
+                    "after issuing another admin key",
+                    file=sys.stderr,
+                )
+                if gs is not None:
+                    gs.close()
+                print(
+                    f"tenant '{tenant}' NOT removed — FAILED: {', '.join(failed)}",
+                    file=sys.stderr,
+                )
+                return 1
         except Exception as e:  # noqa: BLE001
             failed.append("service keys")
             print(f"error: key revocation failed: {e}", file=sys.stderr)

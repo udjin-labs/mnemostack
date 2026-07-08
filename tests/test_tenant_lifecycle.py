@@ -579,3 +579,53 @@ def test_tenant_export_is_atomic_on_midway_failure(monkeypatch, tmp_path, capsys
     assert "export failed after 1 point(s)" in capsys.readouterr().err
     assert out.read_text() == "PRECIOUS OLD BACKUP\n"  # old dump untouched
     assert not list(tmp_path.glob("*.tmp"))  # no partial temp left behind
+
+
+# ---------- review round 4 ----------
+
+
+def test_tenant_rm_unknown_keystore_backend_is_failure_not_skip(monkeypatch, tmp_path, capsys):
+    # A typo like MNEMOSTACK_KEYSTORE=flie must not read as "externally managed"
+    # and silently skip local keys — that would report full removal with the
+    # tenant's keys alive.
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    ks, _fs = _seed_config(tmp_path)
+    monkeypatch.setenv("MNEMOSTACK_KEYSTORE", "flie")
+    rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", yes=True))
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "unknown MNEMOSTACK_KEYSTORE backend" in err and "FAILED: service keys" in err
+    # keys were not touched (unknown backend), but the run is loudly partial
+    assert sum(1 for k in ks.list_keys() if k["tenant"] == "alpha") == 2
+
+
+def test_tenant_rm_last_admin_aborts_data_sweep(monkeypatch, tmp_path, capsys):
+    # If the tenant retains a usable (write-capable) key, sweeping data stores
+    # would leave a window for fresh writes right after cleaning — abort instead.
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    ks = FileKeyStore(tmp_path / "keys.json")
+    ks.issue("alpha", ["admin"])  # the ONLY admin key — revocation will refuse
+    FileQuotaStore(tmp_path / "quotas.json").set("alpha", max_points=5)
+    rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", yes=True))
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "retains an active key" in err and "NOT removed" in err
+    # nothing was swept: points and quota still present for the re-run
+    assert store.count(tenant="alpha") == 2
+    assert FileQuotaStore(tmp_path / "quotas.json").get("alpha") is not None
+
+
+def test_tenant_export_temp_is_exclusive(monkeypatch, tmp_path):
+    # A pre-existing "<output>.tmp" (another user's file / stale export) must
+    # survive: the temp is mkstemp-unique, never a predictable truncate target.
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    out = tmp_path / "dump.jsonl"
+    bystander = tmp_path / "dump.jsonl.tmp"
+    bystander.write_text("SOMEONE ELSE'S FILE\n")
+    rc = cli.cmd_tenant_export(_ns(tenant="alpha", output=str(out), no_vectors=True))
+    assert rc == 0
+    assert out.exists()
+    assert bystander.read_text() == "SOMEONE ELSE'S FILE\n"  # untouched
