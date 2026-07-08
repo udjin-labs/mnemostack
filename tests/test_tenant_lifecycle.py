@@ -459,8 +459,38 @@ def test_tenant_rm_absent_collection_is_not_a_failure(monkeypatch, tmp_path, cap
     rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", yes=True))
     assert rc == 0
     out = capsys.readouterr().out
-    assert "collection absent" in out and "fully removed" in out
+    assert "collection absent" in out and "best-effort" in out
     assert all(k["tenant"] != "alpha" for k in ks.list_keys())
+
+
+def test_tenant_rm_collection_created_mid_sweep_is_swept(monkeypatch, tmp_path, capsys):
+    # Round-16 race: the collection is absent at the count phase, but a racer
+    # creates the tenant's first point before its keys are revoked. Keys are
+    # revoked FIRST, so the post-revocation re-check must sweep the now-present
+    # collection instead of skipping it under a clean report.
+    class _RacyStore:
+        def __init__(self, **_):
+            self.exists_calls = 0
+            self.deleted = False
+
+        def collection_exists(self):
+            self.exists_calls += 1
+            return self.exists_calls > 1  # absent at preflight, present at re-check
+
+        def count(self, *, tenant=None):
+            return 0
+
+        def delete_tenant(self, tenant):
+            self.deleted = True
+            return 3
+
+    store = _RacyStore()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    _seed_config(tmp_path)
+    rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", yes=True))
+    assert rc == 0
+    assert store.deleted is True  # the racer's collection was swept, not skipped
+    assert "deleted 3 vector point(s)" in capsys.readouterr().out
 
 
 def test_state_store_delete_raises_on_corrupt_file(tmp_path):

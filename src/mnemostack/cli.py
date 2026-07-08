@@ -626,6 +626,15 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
     flag). Best-effort per store: a failure in one is reported and the rest
     proceed, with a nonzero exit if anything failed — so a partial outage
     doesn't strand the whole offboarding, and the report says what remains.
+
+    Concurrency contract — this is a BEST-EFFORT sweep, not a distributed
+    transaction. It revokes the tenant's keys BEFORE deleting data, so once the
+    sweep starts no further *authenticated* write can land; each data store is
+    then swept from live state (never a stale preflight count), and a final
+    key re-scan catches a key that raced in mid-sweep. What one CLI pass CANNOT
+    do is lock out key issuance cluster-wide or stop out-of-band/unauthenticated
+    writers — for a hard guarantee, quiesce writers (pause the servers / freeze
+    issuance) first. The command reports what it swept and never claims more.
     """
     tenant = _require_tenant_arg(args)
     if tenant is None:
@@ -867,16 +876,24 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
             print(f"error: key revocation failed: {e}", file=sys.stderr)
             return _abort_keys_alive(tenant, failed, gs)
     if "vector points" not in unavailable:
-        if collection_absent:
-            print("vector points: collection absent — nothing to delete")
-        else:
-            try:
-                assert store is not None
+        assert store is not None
+        try:
+            # If the collection was absent at preflight, RE-CHECK it now — a racer
+            # may have created the tenant's first point (and the collection)
+            # between the count phase and key revocation. Keys are now revoked, so
+            # no further authenticated write can land; one idempotent tenant delete
+            # closes the collection-creation race. `collection_exists()` runs only
+            # in this already-absent branch, so the common path keeps its single
+            # round-trip — and the whole block is guarded, so Qdrant dropping
+            # between preflight and here is a reported failure, not a crash.
+            if collection_absent and not store.collection_exists():
+                print("vector points: collection absent — nothing to delete")
+            else:
                 deleted = store.delete_tenant(tenant)
                 print(f"deleted {deleted} vector point(s)")
-            except Exception as e:  # noqa: BLE001
-                failed.append("vector points")
-                print(f"error: vector delete failed: {e}", file=sys.stderr)
+        except Exception as e:  # noqa: BLE001
+            failed.append("vector points")
+            print(f"error: vector delete failed: {e}", file=sys.stderr)
     if gs is not None:
         try:
             gc = gs.delete_tenant(tenant)
@@ -944,7 +961,12 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    print(f"tenant '{tenant}' fully removed")
+    print(
+        f"tenant '{tenant}' swept from all reachable stores (best-effort). Keys "
+        "were revoked before the sweep, so no further authenticated write can "
+        "land; completeness still assumes no out-of-band writers — quiesce "
+        "writers (pause servers / freeze issuance) first for a hard guarantee."
+    )
     return 0
 
 
