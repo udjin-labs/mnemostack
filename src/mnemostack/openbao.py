@@ -242,4 +242,11 @@ def _record_principal(rec: Any) -> Principal | None:
         scopes = frozenset(_normalize_scopes(raw_scopes))
     except (ValueError, TypeError):
         return None
-    return Principal(tenant=tenant, scopes=scopes)
+    # Optional public id for audit attribution (`bao kv put ... id=...`);
+    # the OpenBao record schema doesn't require one.
+    rec_id = rec.get("id")
+    return Principal(
+        tenant=tenant,
+        scopes=scopes,
+        key_id=rec_id if isinstance(rec_id, str) and rec_id else None,
+    )

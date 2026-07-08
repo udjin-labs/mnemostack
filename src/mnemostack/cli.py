@@ -321,9 +321,19 @@ def cmd_tenant_migrate(args: argparse.Namespace) -> int:
         )
         exists = store.collection_exists()  # first network call — inside the guard
     except Exception as e:  # noqa: BLE001
+        # A non-dry-run migration that dies in preflight is a failed ATTEMPT at
+        # a mutation — the trail must show it (same rule as tenant-export's
+        # early errors). A --dry-run pass stays unaudited (nothing attempted).
+        if not args.dry_run:
+            _audit("tenant.migrate", tenant=args.tenant, outcome="error", error=str(e))
         print(f"error: cannot reach Qdrant at {args.qdrant}: {e}", file=sys.stderr)
         return 1
     if not exists:
+        if not args.dry_run:
+            _audit(
+                "tenant.migrate", tenant=args.tenant, outcome="error",
+                reason="collection_absent",
+            )
         print(f"error: collection '{args.collection}' does not exist", file=sys.stderr)
         return 1
 
@@ -343,6 +353,8 @@ def cmd_tenant_migrate(args: argparse.Namespace) -> int:
             count_filter=Filter(must=[IsEmptyCondition(is_empty=PayloadField(key=TENANT_ID_KEY))]),
         ).count
     except Exception as e:  # noqa: BLE001
+        if not args.dry_run:
+            _audit("tenant.migrate", tenant=args.tenant, outcome="error", error=str(e))
         print(f"error: cannot reach Qdrant at {args.qdrant}: {e}", file=sys.stderr)
         return 1
     # Safety: --all relabels points that already carry a tenant_id (legacy user
@@ -366,6 +378,13 @@ def cmd_tenant_migrate(args: argparse.Namespace) -> int:
     if args.all and not args.dry_run and not args.yes:
         rc = _graph_relabel_preflight(args)
         if rc != 0:
+            # rc 1 = graph unreachable (a failed attempt — audited); rc 2 = the
+            # needs---yes refusal (a validation gate, nothing attempted — not).
+            if rc == 1:
+                _audit(
+                    "tenant.migrate", tenant=args.tenant, outcome="error",
+                    reason="graph_preflight_failed",
+                )
             return rc
 
     pending = missing if only_missing else total
@@ -376,10 +395,20 @@ def cmd_tenant_migrate(args: argparse.Namespace) -> int:
     try:
         stamped = store.stamp_tenant(args.tenant, only_missing=only_missing)
     except Exception as e:  # noqa: BLE001
+        _audit("tenant.migrate", tenant=args.tenant, outcome="error", error=str(e))
         print(f"error: cannot reach Qdrant at {args.qdrant}: {e}", file=sys.stderr)
         return 1
     print(f"stamped tenant_id='{args.tenant}' onto {stamped} point(s) {scope}")
-    return _graph_stamp_tenant(args, only_missing, dry_run=False)
+    rc = _graph_stamp_tenant(args, only_missing, dry_run=False)
+    # Vectors are stamped at this point; a failed graph stamp = partial migration.
+    _audit(
+        "tenant.migrate",
+        tenant=args.tenant,
+        outcome="success" if rc == 0 else "partial",
+        stamped=stamped,
+        all=bool(args.all),
+    )
+    return rc
 
 
 def _graph_stamp_tenant(args: argparse.Namespace, only_missing: bool, *, dry_run: bool) -> int:
@@ -505,9 +534,11 @@ def cmd_tenant_export(args: argparse.Namespace) -> int:
     try:
         store = VectorStore(collection=args.collection, dimension=1, host=args.qdrant)
         if not store.collection_exists():
+            _audit("tenant.export", tenant=tenant, outcome="error", reason="collection_absent")
             print(f"error: collection '{args.collection}' does not exist", file=sys.stderr)
             return 1
     except Exception as e:  # noqa: BLE001
+        _audit("tenant.export", tenant=tenant, outcome="error", error=str(e))
         print(f"error: cannot reach Qdrant at {args.qdrant}: {e}", file=sys.stderr)
         return 1
 
@@ -531,6 +562,7 @@ def cmd_tenant_export(args: argparse.Namespace) -> int:
             tmp_path = Path(tmp_name)
             out = os.fdopen(fd, "w", encoding="utf-8")
         except OSError as e:
+            _audit("tenant.export", tenant=tenant, outcome="error", error=str(e))
             print(f"error: cannot write {args.output}: {e}", file=sys.stderr)
             return 1
     count = 0
@@ -565,6 +597,7 @@ def cmd_tenant_export(args: argparse.Namespace) -> int:
             os.replace(tmp_path, args.output)  # success: land the dump atomically
             tmp_path = None
     except Exception as e:  # noqa: BLE001
+        _audit("tenant.export", tenant=tenant, outcome="error", error=str(e), points=count)
         print(f"error: export failed after {count} point(s): {e}", file=sys.stderr)
         return 1
     finally:
@@ -578,6 +611,13 @@ def cmd_tenant_export(args: argparse.Namespace) -> int:
                 tmp_path.unlink()  # failed run: drop the partial temp
             except OSError:
                 pass
+    # A whole-corpus read of one tenant's data — exactly what a trail must show.
+    _audit(
+        "tenant.export",
+        tenant=tenant,
+        points=count,
+        output="stdout" if args.output == "-" else args.output,
+    )
     print(
         f"exported {count} point(s) for tenant '{tenant}'"
         + ("" if args.output == "-" else f" to {args.output}"),
@@ -611,6 +651,7 @@ def _abort_keys_alive(tenant: str, failed: list[str], gs: Any) -> int:
     )
     if gs is not None:
         gs.close()
+    _audit("tenant.rm", tenant=tenant, outcome="aborted", failed=failed)
     print(f"tenant '{tenant}' NOT removed — FAILED: {', '.join(failed)}", file=sys.stderr)
     return 1
 
@@ -955,12 +996,14 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
             print(f"error: post-sweep key re-scan failed: {e}", file=sys.stderr)
 
     if failed:
+        _audit("tenant.rm", tenant=tenant, outcome="partial", failed=failed)
         print(
             f"tenant '{tenant}' partially removed — FAILED: {', '.join(failed)}; "
             "re-run after fixing the store(s) above",
             file=sys.stderr,
         )
         return 1
+    _audit("tenant.rm", tenant=tenant)
     print(
         f"tenant '{tenant}' swept from all reachable stores (best-effort). Keys "
         "were revoked before the sweep, so no further authenticated write can "
@@ -968,6 +1011,19 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
         "writers (pause servers / freeze issuance) first for a hard guarantee."
     )
     return 0
+
+
+def _audit(action: str, *, tenant: str | None = None, outcome: str = "success", **details: Any) -> None:
+    """Best-effort audit of a control-plane operation (see ``mnemostack.audit``:
+    never raises, and a no-op unless ``MNEMOSTACK_AUDIT_FILE`` is set).
+
+    Convention across the CLI: **mutations** (and attempted mutations that fail
+    against a store) are audited; pure input-validation rejections and
+    ``--dry-run`` passes — where nothing was attempted — are not.
+    """
+    from mnemostack.audit import audit_log_from_env
+
+    audit_log_from_env().record(action, tenant=tenant, outcome=outcome, details=details or None)
 
 
 def _keys_store(args: argparse.Namespace):
@@ -1029,9 +1085,18 @@ def cmd_keys_add(args: argparse.Namespace) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 2
     except KeyStoreError as e:
+        _audit("keys.issue", tenant=args.tenant, outcome="error", error=str(e))
         print(f"error: {e}", file=sys.stderr)
         return 1
     scopes = ",".join(sorted({s.strip() for s in args.scopes.split(",") if s.strip()}))
+    # key_id only — never the key or its hash (audit module contract).
+    _audit(
+        "keys.issue",
+        tenant=args.tenant,
+        key_id=key_id,
+        scopes=scopes,
+        label=args.label or "",
+    )
     print(f"key id:  {key_id}")
     print(f"tenant:  {args.tenant}")
     print(f"scopes:  {scopes}")
@@ -1066,14 +1131,27 @@ def cmd_keys_list(args: argparse.Namespace) -> int:
 def cmd_keys_revoke(args: argparse.Namespace) -> int:
     from mnemostack.auth import KeyStoreError
 
+    ks = _keys_store(args)
+    # Attribution lookup BEFORE deletion, so the revoke event can say whose
+    # credential was removed without joining to an issue event that may have
+    # rotated out of the retained trail. Best-effort: a lookup failure must
+    # never block the revocation itself.
+    tenant: str | None = None
     try:
-        removed = _keys_store(args).revoke(args.id)
+        tenant = next((k.get("tenant") for k in ks.list_keys() if k.get("id") == args.id), None)
+    except Exception:  # noqa: BLE001 — attribution only; revoke proceeds
+        pass
+    try:
+        removed = ks.revoke(args.id)
     except KeyStoreError as e:
+        _audit("keys.revoke", tenant=tenant, outcome="error", key_id=args.id, error=str(e))
         print(f"error: {e}", file=sys.stderr)
         return 1
     if removed:
+        _audit("keys.revoke", tenant=tenant, key_id=args.id)
         print(f"revoked key {args.id}")
         return 0
+    _audit("keys.revoke", tenant=tenant, outcome="error", key_id=args.id, reason="not_found")
     print(f"error: no key with id '{args.id}'", file=sys.stderr)
     return 1
 
@@ -1097,8 +1175,17 @@ def cmd_quota_set(args: argparse.Namespace) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 2
     except QuotaStoreError as e:
+        _audit("quota.set", tenant=args.tenant, outcome="error", error=str(e))
         print(f"error: {e}", file=sys.stderr)
         return 1
+    # The RESULTING quota (partial update), so the trail shows what now applies.
+    _audit(
+        "quota.set",
+        tenant=args.tenant,
+        max_points=quota.max_points,
+        max_rps=quota.max_rps,
+        burst=quota.effective_burst(),
+    )
     mp = "unlimited" if quota.max_points is None else str(quota.max_points)
     rps = "unlimited" if quota.max_rps is None else f"{quota.max_rps:g}"
     burst = "-" if quota.effective_burst() is None else str(quota.effective_burst())
@@ -1143,11 +1230,14 @@ def cmd_quota_rm(args: argparse.Namespace) -> int:
     try:
         removed = _quota_store(args).remove(args.tenant)
     except QuotaStoreError as e:
+        _audit("quota.remove", tenant=args.tenant, outcome="error", error=str(e))
         print(f"error: {e}", file=sys.stderr)
         return 1
     if removed:
+        _audit("quota.remove", tenant=args.tenant)
         print(f"removed quota for tenant '{args.tenant}'")
         return 0
+    _audit("quota.remove", tenant=args.tenant, outcome="error", reason="not_found")
     print(f"error: no quota set for tenant '{args.tenant}'", file=sys.stderr)
     return 1
 

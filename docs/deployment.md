@@ -519,6 +519,17 @@ mnemostack tenant-export --tenant acme -o acme.jsonl
 
 The export is the tenant's vector points (vectors + payloads, JSONL) — the portable source of truth. The graph is derived (rebuild by re-indexing), and keys/quotas/learning state are deliberately excluded (keys are secrets; copy the key store explicitly if that's really intended).
 
+### Audit log (control-plane operations)
+
+Set `MNEMOSTACK_AUDIT_FILE=/var/log/mnemostack/audit.jsonl` (one env var, all surfaces) to record every control-plane operation that touches a tenant's resources as one JSON line — who (`operator:cli`, or the admin key's public id at the `inspect --auth` console), what (`keys.issue`/`keys.revoke`, `quota.set`/`quota.remove`, `tenant.rm`/`tenant.export`/`tenant.migrate`, `auth.denied`), which tenant, and the outcome (`success` / `error` / `partial` / `aborted` / `denied`). Unset (the default) nothing is written. The admin console shows the trail in an **Audit** tab.
+
+Know what it is and isn't:
+
+- **Best-effort, never blocking.** A failed audit write logs a loud error and the operation proceeds — a broken log must not take key management or an emergency offboarding down. It is an *operational trail*, not a tamper-evident compliance ledger: anyone who can write the file can edit it. For tamper evidence, ship the JSONL to an external collector.
+- **No key material, ever.** Events carry public key ids only — never a plaintext key or hash. Admin-console denials are logged for *presented-but-rejected* credentials (with the client IP); anonymous no-key probes are not (access-log noise).
+- **Data plane is out of scope.** Recall/answer/feedback requests belong to your HTTP access logs; the audit trail is for operations that change a tenant's resources. Input-validation rejections and `--dry-run` passes (nothing attempted) are likewise not recorded.
+- **Rotate externally.** The file grows without bound — point logrotate at it. Reading the trail (the Audit tab / `GET /api/audit`) scans the whole file each time (memory-bounded, but time grows with the file), so lapsed rotation shows up as a slower tab, another reason to rotate. Appends are `flock`-serialized with a bounded ~2s wait (CLI + console never interleave, and a hung lock-holder can't stall an audited operation), the file is created `0o640`, and readers skip-and-count a line truncated by a copytruncate rotation. Both reads and writes refuse symlinks in **every** path component and require a regular file owned by the running user (or root) that is no looser than `0640` — a planted link, FIFO, or pre-created world-accessible file fails loudly instead of diverting, hanging, or leaking the trail. So point `MNEMOSTACK_AUDIT_FILE` at a real path (a deliberately symlinked log directory is refused too), and if you pre-provision the file (e.g. via logrotate `create`), make it `0640` and owned by the service user.
+
 ### MCP
 
 The MCP server is stdio-based:
