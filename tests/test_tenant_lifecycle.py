@@ -458,3 +458,80 @@ def test_tenant_rm_dry_run_incomplete_counts_exit_nonzero(monkeypatch, tmp_path,
     out = capsys.readouterr()
     assert "unknown — store unavailable" in out.out
     assert "counts are incomplete" in out.err
+
+
+# ---------- review round 2 ----------
+
+
+def test_tenant_rm_revokes_keys_before_data_deletion(monkeypatch, tmp_path):
+    # On a live authed deployment the tenant's key must die FIRST, or it can
+    # keep writing into stores this command already cleaned.
+    order: list[str] = []
+
+    class _OrderStore:
+        def __init__(self, **_):
+            pass
+
+        def collection_exists(self):
+            return True
+
+        def count(self, tenant=None):
+            return 1
+
+        def delete_tenant(self, tenant):
+            order.append("vector")
+            return 1
+
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: _OrderStore())
+    ks, _fs = _seed_config(tmp_path)
+    real_revoke = ks.revoke_guarded
+
+    class _OrderKeys:
+        def list_keys(self):
+            return ks.list_keys()
+
+        def revoke_guarded(self, kid, **kw):
+            order.append("keys")
+            return real_revoke(kid, **kw)
+
+    monkeypatch.setattr(cli, "_keys_store", lambda _a: _OrderKeys())
+    rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", yes=True))
+    assert rc == 0
+    assert "keys" in order and "vector" in order
+    assert order.index("keys") < order.index("vector")  # revocation cuts writes first
+
+
+def test_tenant_rm_bad_state_path_is_partial_not_abort(monkeypatch, tmp_path, capsys):
+    # --state-path whose parent can't be created (a path component is a FILE)
+    # must degrade to a failed store, not abort the whole offboarding.
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    ks, _fs = _seed_config(tmp_path)
+    blocker = tmp_path / "blocker"
+    blocker.write_text("i am a file")  # mkdir(parents=True) under it will fail
+    rc = cli.cmd_tenant_rm(
+        _rm_ns(tmp_path, tenant="alpha", yes=True, state_path=str(blocker / "x" / "state.json"))
+    )
+    assert rc == 1
+    assert "FAILED: learning state" in capsys.readouterr().err
+    # the rest still proceeded
+    assert store.count(tenant="alpha") == 0
+    assert all(k["tenant"] != "alpha" for k in ks.list_keys())
+
+
+def test_lifecycle_commands_tolerate_malformed_stack_config(monkeypatch, tmp_path, capsys):
+    # A malformed unrelated env value must not block emergency backup/offboarding.
+    monkeypatch.setenv("MNEMOSTACK_TOKEN_BUDGET", "notint")
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    out = tmp_path / "dump.jsonl"
+    rc = cli.main([
+        "tenant-export", "--tenant", "alpha", "-o", str(out), "--no-vectors",
+    ])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "config failed to load" in captured.err  # warned, not aborted
+    assert out.exists()
+    # sanity: a non-lifecycle command still fails loud on the same env
+    with pytest.raises(ValueError):  # Config.load: invalid literal for int()
+        cli.main(["search", "q"])

@@ -632,11 +632,13 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
 
     state_path = getattr(args, "state_path", None) or default_state_path()
     state_keys = [tenant_state_key(base, tenant) for base in ("q_table", "ior_log")]
-    state_store = FileStateStore(state_path)
+    state_store = None
     present_state: list[str] = []
     try:
-        # get() fails OPEN on a corrupt file (recall must survive it), so parse
-        # the file strictly here — offboarding must know it couldn't inspect.
+        # Construction can itself fail (mkdir on a bad --state-path); and get()
+        # fails OPEN on a corrupt file (recall must survive it), so parse the
+        # file strictly here — offboarding must know it couldn't inspect.
+        state_store = FileStateStore(state_path)
         import json as _json
 
         spath = Path(state_path)
@@ -644,7 +646,7 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
             _json.loads(spath.read_text())
             present_state = [k for k in state_keys if state_store.get(k) is not None]
     except Exception as e:  # noqa: BLE001
-        unavailable["learning state"] = f"state store unreadable: {e}"
+        unavailable["learning state"] = f"state store unusable: {e}"
 
     def _line(label: str, value: str, unavailable_as: str | None = None) -> None:
         if unavailable_as is not None and unavailable_as in unavailable:
@@ -702,29 +704,11 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
     # ---- delete phase (best-effort per store, loud report) ----
     # Unreachable stores are failures up front: their cleanup did NOT happen.
     failed: list[str] = list(unavailable)
-    if "vector points" not in unavailable:
-        if collection_absent:
-            print("vector points: collection absent — nothing to delete")
-        else:
-            try:
-                assert store is not None
-                deleted = store.delete_tenant(tenant)
-                print(f"deleted {deleted} vector point(s)")
-            except Exception as e:  # noqa: BLE001
-                failed.append("vector points")
-                print(f"error: vector delete failed: {e}", file=sys.stderr)
-    if gs is not None:
-        try:
-            gc = gs.delete_tenant(tenant)
-            extra = (
-                f" (+{gc['detached']} attached unowned edge(s))" if gc.get("detached") else ""
-            )
-            print(f"deleted {gc['nodes']} graph node(s), {gc['relationships']} edge(s){extra}")
-        except Exception as e:  # noqa: BLE001
-            failed.append("graph")
-            print(f"error: graph delete failed: {e}", file=sys.stderr)
-        finally:
-            gs.close()
+    # Keys are revoked FIRST: on a live authenticated deployment the tenant's
+    # key could otherwise keep writing (feedback, graph facts) into stores this
+    # command has already cleaned, and "fully removed" would be stale the moment
+    # it printed. Auth re-verifies per request/tool-call, so a revocation cuts
+    # new writes off before the data stores are swept.
     if not external_keys and "service keys" not in unavailable and key_ids:
         try:
             ks = _keys_store(args)
@@ -752,6 +736,29 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
         except Exception as e:  # noqa: BLE001
             failed.append("service keys")
             print(f"error: key revocation failed: {e}", file=sys.stderr)
+    if "vector points" not in unavailable:
+        if collection_absent:
+            print("vector points: collection absent — nothing to delete")
+        else:
+            try:
+                assert store is not None
+                deleted = store.delete_tenant(tenant)
+                print(f"deleted {deleted} vector point(s)")
+            except Exception as e:  # noqa: BLE001
+                failed.append("vector points")
+                print(f"error: vector delete failed: {e}", file=sys.stderr)
+    if gs is not None:
+        try:
+            gc = gs.delete_tenant(tenant)
+            extra = (
+                f" (+{gc['detached']} attached unowned edge(s))" if gc.get("detached") else ""
+            )
+            print(f"deleted {gc['nodes']} graph node(s), {gc['relationships']} edge(s){extra}")
+        except Exception as e:  # noqa: BLE001
+            failed.append("graph")
+            print(f"error: graph delete failed: {e}", file=sys.stderr)
+        finally:
+            gs.close()
     if quota_present and "quota" not in unavailable:
         try:
             _quota_store(args).remove(tenant)
@@ -759,7 +766,7 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
         except Exception as e:  # noqa: BLE001
             failed.append("quota")
             print(f"error: quota removal failed: {e}", file=sys.stderr)
-    if "learning state" not in unavailable:
+    if state_store is not None and "learning state" not in unavailable:
         removed_state = 0
         try:
             for k in state_keys:
@@ -3211,7 +3218,24 @@ def main(argv: list[str] | None = None) -> int:
     # `keys` and `quota` manage their own stores and need no stack config, so a
     # malformed unrelated config/env must not block managing a key or a quota.
     subcmd = next((a for a in raw if not a.startswith("-")), None)
-    parser = build_parser(config_light=subcmd in {"keys", "quota"})
+    if subcmd in {"tenant-rm", "tenant-export"}:
+        # Lifecycle commands only need vector/graph *defaults* from the config
+        # (they never touch embedding/LLM/recall settings), but unlike `keys`
+        # they DO benefit from the config's graph auth — so try the full load
+        # and fall back to defaults instead of aborting: a malformed unrelated
+        # value (e.g. MNEMOSTACK_TOKEN_BUDGET=notint) must not block an
+        # emergency backup or offboarding.
+        try:
+            parser = build_parser()
+        except Exception as e:  # noqa: BLE001
+            print(
+                f"warning: stack config failed to load ({e}); using built-in "
+                "defaults — pass --qdrant/--collection/--memgraph-uri explicitly",
+                file=sys.stderr,
+            )
+            parser = build_parser(config_light=True)
+    else:
+        parser = build_parser(config_light=subcmd in {"keys", "quota"})
     args = parser.parse_args(argv)
     return args.func(args)
 
