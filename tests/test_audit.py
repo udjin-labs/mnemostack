@@ -332,6 +332,79 @@ def test_cli_tenant_export_audits_points_and_destination(monkeypatch, tmp_path, 
     assert ev["details"] == {"points": 2, "output": str(out)}
 
 
+def _migrate_ns(tmp_path, **kw):
+    base = {
+        "collection": "mt", "qdrant": "http://localhost:6333",
+        "tenant": "acme", "all": False, "yes": False, "dry_run": False,
+        "memgraph_uri": None, "graph_timeout": 5.0,
+    }
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def test_cli_tenant_migrate_preflight_failure_is_audited(monkeypatch, tmp_path, audit_file):
+    # A non-dry-run migration that dies before stamp_tenant (unreachable
+    # Qdrant / missing collection) is a failed ATTEMPT — the trail must show
+    # it, same rule as tenant-export's early errors.
+    class _Down:
+        def __init__(self, **_):
+            raise ConnectionError("qdrant down")
+
+    monkeypatch.setattr(cli, "VectorStore", _Down)
+    assert cli.cmd_tenant_migrate(_migrate_ns(tmp_path)) == 1
+    (ev,) = _events(audit_file)
+    assert ev["action"] == "tenant.migrate" and ev["outcome"] == "error"
+    assert "qdrant down" in ev["details"]["error"]
+
+
+def test_cli_tenant_migrate_absent_collection_is_audited(monkeypatch, tmp_path, audit_file):
+    class _NoColl:
+        def __init__(self, **_):
+            pass
+
+        def collection_exists(self):
+            return False
+
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: _NoColl())
+    assert cli.cmd_tenant_migrate(_migrate_ns(tmp_path)) == 1
+    (ev,) = _events(audit_file)
+    assert ev["outcome"] == "error" and ev["details"]["reason"] == "collection_absent"
+
+
+def test_cli_tenant_migrate_dry_run_preflight_failure_not_audited(
+    monkeypatch, tmp_path, audit_file
+):
+    class _Down:
+        def __init__(self, **_):
+            raise ConnectionError("qdrant down")
+
+    monkeypatch.setattr(cli, "VectorStore", _Down)
+    assert cli.cmd_tenant_migrate(_migrate_ns(tmp_path, dry_run=True)) == 1
+    assert not audit_file.exists()  # dry-run: nothing attempted, nothing logged
+
+
+def test_mode_check_skipped_on_non_posix(monkeypatch, tmp_path):
+    # Windows reports synthesized group/world permission bits that chmod can't
+    # clear — the POSIX mode check must be gated on os.name, or every fresh
+    # trail file would be rejected as "world-accessible" and record() would
+    # always fail. Tested at the _require_regular level (patching os.name
+    # globally breaks pathlib, which the higher-level record() path uses).
+    import mnemostack.audit as audit_mod
+
+    p = tmp_path / "a.jsonl"
+    p.write_text("")
+    os.chmod(p, 0o666)
+    fd = os.open(str(p), os.O_RDONLY)
+    monkeypatch.setattr(os, "name", "nt")
+    assert audit_mod._require_regular(fd, p) == fd  # accepted: bits not enforceable
+    monkeypatch.undo()
+    os.close(fd)
+    fd2 = os.open(str(p), os.O_RDONLY)
+    with pytest.raises(OSError, match="insecure mode"):  # POSIX: still refused
+        audit_mod._require_regular(fd2, p)
+    os.chmod(p, 0o640)
+
+
 def test_cli_tenant_rm_audits_the_sweep_outcome(monkeypatch, tmp_path, audit_file):
     # Full sweep with fakes: success -> one tenant.rm success event.
     class _FakeRmStore:

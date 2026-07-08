@@ -321,9 +321,19 @@ def cmd_tenant_migrate(args: argparse.Namespace) -> int:
         )
         exists = store.collection_exists()  # first network call — inside the guard
     except Exception as e:  # noqa: BLE001
+        # A non-dry-run migration that dies in preflight is a failed ATTEMPT at
+        # a mutation — the trail must show it (same rule as tenant-export's
+        # early errors). A --dry-run pass stays unaudited (nothing attempted).
+        if not args.dry_run:
+            _audit("tenant.migrate", tenant=args.tenant, outcome="error", error=str(e))
         print(f"error: cannot reach Qdrant at {args.qdrant}: {e}", file=sys.stderr)
         return 1
     if not exists:
+        if not args.dry_run:
+            _audit(
+                "tenant.migrate", tenant=args.tenant, outcome="error",
+                reason="collection_absent",
+            )
         print(f"error: collection '{args.collection}' does not exist", file=sys.stderr)
         return 1
 
@@ -343,6 +353,8 @@ def cmd_tenant_migrate(args: argparse.Namespace) -> int:
             count_filter=Filter(must=[IsEmptyCondition(is_empty=PayloadField(key=TENANT_ID_KEY))]),
         ).count
     except Exception as e:  # noqa: BLE001
+        if not args.dry_run:
+            _audit("tenant.migrate", tenant=args.tenant, outcome="error", error=str(e))
         print(f"error: cannot reach Qdrant at {args.qdrant}: {e}", file=sys.stderr)
         return 1
     # Safety: --all relabels points that already carry a tenant_id (legacy user
@@ -366,6 +378,13 @@ def cmd_tenant_migrate(args: argparse.Namespace) -> int:
     if args.all and not args.dry_run and not args.yes:
         rc = _graph_relabel_preflight(args)
         if rc != 0:
+            # rc 1 = graph unreachable (a failed attempt — audited); rc 2 = the
+            # needs---yes refusal (a validation gate, nothing attempted — not).
+            if rc == 1:
+                _audit(
+                    "tenant.migrate", tenant=args.tenant, outcome="error",
+                    reason="graph_preflight_failed",
+                )
             return rc
 
     pending = missing if only_missing else total

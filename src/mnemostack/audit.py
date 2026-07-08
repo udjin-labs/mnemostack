@@ -78,14 +78,20 @@ def _require_regular(fd: int, path: Path) -> int:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise OSError(f"audit path {path} is not a regular file")
-        geteuid = getattr(os, "geteuid", None)  # POSIX-only; skip where absent
-        if geteuid is not None and st.st_uid not in (geteuid(), 0):
-            raise OSError(f"audit path {path} is owned by uid {st.st_uid} — not trusted")
-        if st.st_mode & 0o027:  # group-write or any world access
-            raise OSError(
-                f"audit path {path} has insecure mode {stat.S_IMODE(st.st_mode):#o} "
-                "(group-writable or world-accessible) — fix it, e.g. chmod 0640"
-            )
+        # Owner/mode checks are POSIX-semantics: on Windows st_uid is 0 and the
+        # permission bits are synthesized (a normal writable file reports
+        # group/world bits chmod can't clear), so enforcing them there would
+        # reject every freshly-created trail. Windows access control is ACLs —
+        # out of scope for this best-effort trail; documented.
+        if os.name == "posix":
+            geteuid = getattr(os, "geteuid", None)
+            if geteuid is not None and st.st_uid not in (geteuid(), 0):
+                raise OSError(f"audit path {path} is owned by uid {st.st_uid} — not trusted")
+            if st.st_mode & 0o027:  # group-write or any world access
+                raise OSError(
+                    f"audit path {path} has insecure mode {stat.S_IMODE(st.st_mode):#o} "
+                    "(group-writable or world-accessible) — fix it, e.g. chmod 0640"
+                )
     except BaseException:
         os.close(fd)
         raise
