@@ -245,7 +245,9 @@ behave exactly as listed above.
   `tenant`-scoped `recall_flow`, don't hand it mixed-tenant memories expecting the
   `tenant=` argument to clean them.
 - **Auth (multi-tenant service keys)**: `mnemostack.auth` — `Principal`
-  (`tenant`, `scopes`, `.can(scope)`), `KeyStore` (Protocol: `.verify(key) ->
+  (`tenant`, `scopes`, `.can(scope)`, plus an optional `key_id` — the public id
+  of the key that authenticated, for audit attribution; `None` on backends whose
+  records carry no id), `KeyStore` (Protocol: `.verify(key) ->
   Principal | None`), `FileKeyStore` (`.verify` / `.issue` / `.revoke` /
   `.list_keys`; SHA-256-hashed JSON store), `SCOPES` (`{"read", "write",
   "admin"}`; `admin` implies the others), `KeyStoreError`, `hash_key`,
@@ -267,6 +269,13 @@ behave exactly as listed above.
   on a broken store. Rate-limit mechanics live in `mnemostack.ratelimit`
   (`RateLimiter`, `TokenBucket`) — 🟡 experimental (the enforcement is the stable
   contract, not the class shapes).
+- **Audit (control-plane trail)**: `mnemostack.audit` — the *behavior contract*
+  is 🟢 stable: opt-in via `MNEMOSTACK_AUDIT_FILE` (unset = nothing written),
+  append-only JSONL events (`ts`/`action`/`actor`/`surface`/`outcome`/`tenant`/
+  `details`), best-effort writes that never raise into the audited operation,
+  and **no key material ever** (public key ids only). The class shapes
+  (`FileAuditLog` / `NullAuditLog` / `AuditLogError` / `audit_log_from_env`) are
+  🟡 experimental.
 - **Markdown**: `collect_markdown`, `MarkdownChunk`, `LinkEdge`,
   `MarkdownCollection`, `parse_frontmatter`, `extract_links`, `MarkdownSyncer`.
 - **Graph**: `GraphStore` (documented methods), `make_graph_store` (the

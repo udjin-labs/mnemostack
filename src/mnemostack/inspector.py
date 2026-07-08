@@ -35,7 +35,7 @@ import logging
 from typing import TYPE_CHECKING, Any, cast
 
 try:
-    from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query
+    from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request
     from fastapi.responses import HTMLResponse
     from pydantic import BaseModel, Field
 except ImportError as e:  # pragma: no cover - import guard
@@ -107,6 +107,7 @@ INSPECTOR_HTML = """<!doctype html>
  <button data-tab="browse" class="active">Browse</button>
  <button data-tab="keys" hidden>Keys</button>
  <button data-tab="quotas" hidden>Quotas</button>
+ <button data-tab="audit" hidden>Audit</button>
 </nav>
 
 <section id="tab-browse">
@@ -159,6 +160,15 @@ INSPECTOR_HTML = """<!doctype html>
  <tbody id="q-rows"></tbody></table>
 </section>
 
+<section id="tab-audit" hidden>
+ <div class="bar">
+  <button id="a-refresh">Refresh</button>
+  <span class="muted" id="a-status"></span>
+ </div>
+ <table><thead><tr><th>time</th><th>action</th><th>actor</th><th>tenant</th><th>outcome</th><th>details</th></tr></thead>
+ <tbody id="a-rows"></tbody></table>
+</section>
+
 <script>
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const esc=t=>String(t??"").replace(/[<&>"']/g,c=>({"<":"&lt;","&":"&amp;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -179,7 +189,7 @@ function effBurst(q){return q.burst!=null?q.burst:(q.max_rps!=null?Math.max(1,Ma
 // ---- tabs ----
 $$("nav.tabs button").forEach(b=>b.addEventListener("click",()=>{
   $$("nav.tabs button").forEach(x=>x.classList.remove("active"));b.classList.add("active");
-  for(const t of ["browse","keys","quotas"])$("#tab-"+t).hidden=(t!==b.dataset.tab);
+  for(const t of ["browse","keys","quotas","audit"])$("#tab-"+t).hidden=(t!==b.dataset.tab);
 }));
 
 // ---- browse ----
@@ -287,6 +297,18 @@ $("#q-rows").addEventListener("click",async e=>{
   catch(err){alert(err.message);}
 });
 
+// ---- audit ----
+async function loadAudit(){
+  const d=await j("/api/audit");
+  if(!d.enabled){$("#a-status").textContent="auditing is off — set MNEMOSTACK_AUDIT_FILE and restart";$("#a-rows").innerHTML="";return;}
+  $("#a-status").textContent=d.skipped?d.skipped+" unparseable line(s) skipped":"";
+  $("#a-rows").innerHTML=d.events.slice().reverse().map(e=>
+    `<tr><td>${esc((e.ts||"").replace("T"," ").slice(0,19))}</td><td>${esc(e.action)}</td>`+
+    `<td>${esc(e.actor)}</td><td>${esc(e.tenant??"")}</td><td>${esc(e.outcome)}</td>`+
+    `<td class="muted">${esc(JSON.stringify(e.details||{}))}</td></tr>`).join("");
+}
+$("#a-refresh").addEventListener("click",()=>loadAudit().catch(e=>{$("#a-status").textContent=e.message;}));
+
 // ---- boot / auth ----
 async function loadBrowse(){await loadTenants();await loadOverview();await loadRecords();}
 async function probeManage(){
@@ -303,6 +325,13 @@ async function probeManage(){
   // otherwise-usable keys panel — and vice versa (external keys, local quotas).
   try{await loadQuotas();$('nav.tabs button[data-tab="quotas"]').hidden=false;}
   catch(e){/* leave the quotas tab hidden; the rest of the console still works */}
+  // Audit tab is ALWAYS shown in admin mode: a configured-but-unreadable trail
+  // must surface as a visible error (the read fails loud by design), not a
+  // silently missing tab that masks the outage. Disabled auditing renders its
+  // own how-to-enable notice inside the tab.
+  try{await loadAudit();}
+  catch(e){$("#a-status").textContent="audit log unreadable: "+e.message;$("#a-rows").innerHTML="";}
+  $('nav.tabs button[data-tab="audit"]').hidden=false;
 }
 async function boot(){
   try{await loadBrowse();$("#keybar").hidden=true;await probeManage();}
@@ -410,12 +439,45 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
             return authorization[7:].strip()
         return None
 
+    def _audit_evt(
+        action: str,
+        *,
+        principal: Any = None,
+        actor: str | None = None,
+        tenant: str | None = None,
+        outcome: str = "success",
+        **details: Any,
+    ) -> None:
+        """Best-effort audit of a console action (no-op unless
+        ``MNEMOSTACK_AUDIT_FILE`` is set; never raises — module contract).
+        The actor is the admin key's public id — never key material."""
+        from mnemostack.audit import audit_log_from_env
+
+        if actor is None:
+            if principal is not None and getattr(principal, "key_id", None):
+                actor = f"key:{principal.key_id}"
+            elif principal is not None:
+                # A backend whose records carry no id (e.g. a bare OpenBao
+                # record) — attribute to the key's tenant, the next-best handle.
+                actor = f"key:?(tenant={principal.tenant})"
+            else:
+                actor = "anonymous"
+        audit_log_from_env().record(
+            action,
+            tenant=tenant,
+            actor=actor,
+            surface="inspector",
+            outcome=outcome,
+            details=details or None,
+        )
+
     def _require(*, manage: bool):
         """Dependency: admin key required. ``manage`` endpoints (keys/quotas) also
         require ``--auth`` to be on at all — they're never reachable unauthenticated.
         Browse endpoints are open in the default (no-auth) read-only mode."""
 
         def _dep(
+            request: Request,
             authorization: str | None = Header(default=None),
             x_api_key: str | None = Header(default=None, alias="X-API-Key"),
         ):
@@ -428,11 +490,30 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
                 return None  # read-only browse is open without --auth (legacy)
             key = _extract_key(authorization, x_api_key)
             if not key:
+                # NOT audited: a missing key is an anonymous probe (every page
+                # load fires them) — that's access-log noise, not a security
+                # signal. Presented-but-rejected credentials below ARE logged.
                 raise HTTPException(status_code=401, detail="missing admin key")
+            client_ip = request.client.host if request.client else "?"
             principal = key_store.verify(key) if key_store else None
             if principal is None:
+                _audit_evt(
+                    "auth.denied",
+                    actor=f"ip:{client_ip}",
+                    outcome="denied",
+                    reason="invalid_key",
+                    path=request.url.path,
+                )
                 raise HTTPException(status_code=401, detail="invalid admin key")
             if not principal.can("admin"):
+                _audit_evt(
+                    "auth.denied",
+                    principal=principal,
+                    tenant=principal.tenant,  # known here, unlike invalid_key
+                    outcome="denied",
+                    reason="not_admin",
+                    path=request.url.path,
+                )
                 raise HTTPException(status_code=403, detail="admin scope required")
             return principal
 
@@ -715,7 +796,23 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
         except ValueError as e:  # bad tenant/scope input → client error
             raise HTTPException(status_code=400, detail=str(e)) from e
         except KeyStoreError as e:  # unreadable/corrupt store → server error (like the rest)
+            _audit_evt(
+                "keys.issue",
+                principal=_p,
+                tenant=body.tenant.strip(),
+                outcome="error",
+                error=str(e),
+            )
             raise HTTPException(status_code=503, detail=f"key store error: {e}") from e
+        # key_id only — never the plaintext or its hash (audit module contract).
+        _audit_evt(
+            "keys.issue",
+            principal=_p,
+            tenant=body.tenant.strip(),
+            key_id=key_id,
+            scopes=body.scopes,
+            label=body.label,
+        )
         return {"id": key_id, "key": plaintext, "tenant": body.tenant.strip(),
                 "scopes": body.scopes, "label": body.label}
 
@@ -726,17 +823,54 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
         from mnemostack.auth import KeyStoreError
 
         ks = _require_manageable_keys()
+        # Attribution lookup BEFORE deletion (best-effort — a lookup failure
+        # must never block the revocation), so the event says whose credential
+        # was removed without joining to a possibly-rotated-out issue event.
+        key_tenant: str | None = None
+        try:
+            key_tenant = next(
+                (k.get("tenant") for k in ks.list_keys() if k.get("id") == key_id), None
+            )
+        except Exception:  # noqa: BLE001 — attribution only; revoke proceeds
+            pass
         try:
             status = ks.revoke_guarded(key_id, protect_last_admin=True)
         except KeyStoreError as e:
+            _audit_evt(
+                "keys.revoke",
+                principal=_p,
+                tenant=key_tenant,
+                outcome="error",
+                key_id=key_id,
+                error=str(e),
+            )
             raise HTTPException(status_code=503, detail=f"key store error: {e}") from e
         if status == "not_found":
+            _audit_evt(
+                "keys.revoke",
+                principal=_p,
+                tenant=key_tenant,
+                outcome="error",
+                key_id=key_id,
+                reason="not_found",
+            )
             raise HTTPException(status_code=404, detail="key not found")
         if status == "last_admin":
+            # The guard refused — a distinct outcome from an error: the store is
+            # fine, the operation was denied to prevent an admin lockout.
+            _audit_evt(
+                "keys.revoke",
+                principal=_p,
+                tenant=key_tenant,
+                outcome="denied",
+                key_id=key_id,
+                reason="last_admin",
+            )
             raise HTTPException(
                 status_code=409,
                 detail="refusing to revoke the last admin key (would lock out admin)",
             )
+        _audit_evt("keys.revoke", principal=_p, tenant=key_tenant, key_id=key_id)
         return {"revoked": True, "id": key_id}
 
     @app.get("/api/quotas")
@@ -775,7 +909,19 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         except QuotaStoreError as e:
+            _audit_evt(
+                "quota.set", principal=_p, tenant=tenant.strip(), outcome="error", error=str(e)
+            )
             raise HTTPException(status_code=503, detail=f"quota store error: {e}") from e
+        # The RESULTING quota (partial update), so the trail shows what now applies.
+        _audit_evt(
+            "quota.set",
+            principal=_p,
+            tenant=tenant.strip(),
+            max_points=quota.max_points,
+            max_rps=quota.max_rps,
+            burst=quota.effective_burst(),
+        )
         return {
             "tenant": tenant.strip(),
             "max_points": quota.max_points,
@@ -791,8 +937,31 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
         try:
             removed = quota_store.remove(tenant)
         except QuotaStoreError as e:
+            _audit_evt("quota.remove", principal=_p, tenant=tenant, outcome="error", error=str(e))
             raise HTTPException(status_code=503, detail=f"quota store error: {e}") from e
+        if removed:
+            _audit_evt("quota.remove", principal=_p, tenant=tenant)
+        else:
+            _audit_evt(
+                "quota.remove", principal=_p, tenant=tenant, outcome="error", reason="not_found"
+            )
         return {"removed": bool(removed), "tenant": tenant}
+
+    @app.get("/api/audit")
+    def audit_trail(limit: int = Query(200, ge=1, le=1000), _p=_admin) -> dict[str, Any]:
+        """The tail of the audit trail (admin-gated). ``enabled=False`` when no
+        ``MNEMOSTACK_AUDIT_FILE`` is configured — the UI says how to turn it on.
+        Reading the trail is itself a read, not a mutation — not audited."""
+        from mnemostack.audit import AuditLogError, FileAuditLog, audit_log_from_env
+
+        sink = audit_log_from_env()
+        if not isinstance(sink, FileAuditLog):
+            return {"enabled": False, "events": [], "skipped": 0}
+        try:
+            events, skipped = sink.tail(limit)
+        except AuditLogError as e:
+            raise HTTPException(status_code=503, detail=str(e)) from e
+        return {"enabled": True, "events": events, "skipped": skipped}
 
     return app
 
