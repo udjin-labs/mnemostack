@@ -389,7 +389,8 @@ def test_cli_keys_add_audits_key_id_never_the_key(tmp_path, audit_file, capsys):
     assert rc == 0
     (ev,) = _events(audit_file)
     assert ev["action"] == "keys.issue" and ev["tenant"] == "acme"
-    assert ev["details"]["scopes"] == "read,write"
+    # a LIST, matching the inspector's keys.issue shape (one schema per action)
+    assert ev["details"]["scopes"] == ["read", "write"]
     key_id = ev["details"]["key_id"]
     assert FileKeyStore(tmp_path / "keys.json").list_keys()[0]["id"] == key_id
     # The plaintext key (printed once) and its hash must NEVER reach the log.
