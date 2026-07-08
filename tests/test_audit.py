@@ -256,6 +256,34 @@ def test_sink_redacts_key_shaped_substrings(tmp_path):
     assert ev["details"]["reason"] == "not_admin"  # untouched
 
 
+def test_sink_redacts_dict_keys_and_stringified_values(tmp_path):
+    # Two shapes a structural pre-serialization walk would miss: key material
+    # as a dict KEY, and inside a non-string value that default=str converts
+    # during dumping. The line-level redaction catches both.
+    from pathlib import Path as _P
+
+    log = FileAuditLog(tmp_path / "a.jsonl")
+    log.record("keys.revoke", details={"msk_pasted_as_key": "x", "path": _P("msk_in_path")})
+    raw = (tmp_path / "a.jsonl").read_text()
+    assert "msk_" not in raw
+    (ev,) = _events(tmp_path / "a.jsonl")  # and the line is still valid JSON
+    assert ev["details"]["[redacted:key-shaped]"] == "x"
+
+
+def test_tail_counts_non_decode_parse_failures_as_skipped(tmp_path):
+    # json.loads can fail with a bare ValueError (huge int on 3.11+), not just
+    # JSONDecodeError — one such hand-edited line must count as skipped, not
+    # 500 the Audit tab.
+    p = tmp_path / "a.jsonl"
+    log = FileAuditLog(p)
+    log.record("keys.issue", tenant="acme")
+    with open(p, "a", encoding="utf-8") as f:
+        f.write('{"n": ' + "9" * 5000 + "}\n")
+    events, skipped = log.tail()
+    assert [e["tenant"] for e in events] == ["acme"]
+    assert skipped == 1
+
+
 def test_record_repairs_a_torn_tail(tmp_path):
     # A file ending mid-line (copytruncate rotation cut a write short) must not
     # swallow the NEXT event by gluing it onto the corrupt bytes — record()

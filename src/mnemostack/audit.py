@@ -66,20 +66,16 @@ _KEY_SHAPE_RE = re.compile(r"msk_[A-Za-z0-9_\-]*")
 _REDACTED = "[redacted:key-shaped]"
 
 
-def _redact_key_shaped(value: Any) -> Any:
-    """Defense in depth for the no-key-material contract, enforced AT THE SINK:
-    a caller mistake (an operator pasting a plaintext key where a public id
-    belongs; a denied request whose audited ``path`` is ``/api/keys/msk_...``)
-    must not land a usable credential in the trail. Any ``msk_``-shaped token
-    anywhere INSIDE any string of an event — not just a whole-value prefix —
-    is replaced before serialization."""
-    if isinstance(value, str):
-        return _KEY_SHAPE_RE.sub(_REDACTED, value) if "msk_" in value else value
-    if isinstance(value, dict):
-        return {k: _redact_key_shaped(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_redact_key_shaped(v) for v in value]
-    return value
+def _redact_line(line: str) -> str:
+    """Defense in depth for the no-key-material contract, enforced AT THE SINK
+    on the SERIALIZED line: a caller mistake (an operator pasting a plaintext
+    key where a public id belongs; a denied request whose audited ``path`` is
+    ``/api/keys/msk_...``; a key-shaped dict KEY or a ``default=str``-converted
+    value, which a structural pre-serialization walk would miss) must not land
+    a usable credential in the trail. The token charset (``[A-Za-z0-9_-]``)
+    contains no JSON syntax and is never ``\\u``-escaped, so substituting in
+    the serialized text cannot corrupt the line's structure."""
+    return _KEY_SHAPE_RE.sub(_REDACTED, line) if "msk_" in line else line
 
 #: Bounded wait for the append lock: ~2s total, then the write is reported
 #: failed. A blocking LOCK_EX would let a hung/hostile lock-holder stall key
@@ -254,19 +250,19 @@ class FileAuditLog:
         event = {
             "ts": datetime.now(timezone.utc).isoformat(),
             "action": action,
-            # actor/tenant/details pass through the key-shape redaction — the
-            # sink enforces the no-key-material contract even against a caller
-            # mistake (see _redact_key_shaped).
-            "actor": _redact_key_shaped(actor),
+            "actor": actor,
             "surface": surface,
             "outcome": outcome,
-            "tenant": _redact_key_shaped(tenant),
-            "details": _redact_key_shaped(details or {}),
+            "tenant": tenant,
+            "details": details or {},
         }
         try:
             # default=str: an exotic detail value (Path, datetime) degrades to its
             # string form rather than losing the whole event to a TypeError.
-            line = json.dumps(event, ensure_ascii=False, default=str) + "\n"
+            # Redaction runs on the SERIALIZED line — after dict keys and
+            # default=str conversions have become text — so no shape of caller
+            # input can carry key material past it (see _redact_line).
+            line = _redact_line(json.dumps(event, ensure_ascii=False, default=str)) + "\n"
             self.path.parent.mkdir(parents=True, exist_ok=True)
             # Hardened open (see _open_trail_fd): every component refuses
             # symlinks — the shared-dir threat FileKeyStore guards against,
@@ -358,7 +354,13 @@ class FileAuditLog:
                         continue
                     try:
                         parsed = json.loads(raw)
-                    except json.JSONDecodeError:
+                    except (ValueError, RecursionError):
+                        # ValueError covers JSONDecodeError AND the non-decode
+                        # parse failures (a hand-edited line with an integer
+                        # past sys.get_int_max_str_digits() raises bare
+                        # ValueError on 3.11+); RecursionError covers a crafted
+                        # deeply-nested line. One bad line must count as
+                        # skipped, not 500 the Audit tab until hand-repair.
                         skipped += 1
                         continue
                     if isinstance(parsed, dict):
