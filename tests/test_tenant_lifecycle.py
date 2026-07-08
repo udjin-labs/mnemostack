@@ -341,3 +341,120 @@ def test_tenant_export_zero_points_warns(monkeypatch, tmp_path, capsys):
     rc = cli.cmd_tenant_export(_ns(tenant="ghost", output=str(out), no_vectors=False))
     assert rc == 0  # an empty tenant is a valid (if suspicious) dump
     assert "0 points matched" in capsys.readouterr().err
+
+
+# ---------- best-effort under store outages (review round 1) ----------
+
+
+def test_tenant_rm_continues_when_qdrant_down(monkeypatch, tmp_path, capsys):
+    # Qdrant unreachable must NOT strand keys/quota/state cleanup — that outage is
+    # exactly what best-effort is for. Vector store lands in FAILED, exit nonzero.
+    class _DownStore:
+        def __init__(self, **_):
+            raise ConnectionError("qdrant down")
+
+    monkeypatch.setattr(cli, "VectorStore", _DownStore)
+    ks, fs = _seed_config(tmp_path)
+    rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", yes=True))
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "FAILED: vector points" in err
+    # ...but everything reachable was still cleaned
+    assert all(k["tenant"] != "alpha" for k in ks.list_keys())
+    assert FileQuotaStore(tmp_path / "quotas.json").get("alpha") is None
+    assert fs.get(tenant_state_key("q_table", "alpha")) is None
+
+
+def test_tenant_rm_continues_when_graph_down(monkeypatch, tmp_path, capsys):
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    ks, _fs = _seed_config(tmp_path)
+
+    def _boom(*a, **k):
+        raise ConnectionError("memgraph down")
+
+    monkeypatch.setattr("mnemostack.graph.factory.make_graph_store", _boom)
+    rc = cli.cmd_tenant_rm(
+        _rm_ns(tmp_path, tenant="alpha", yes=True, memgraph_uri="bolt://x:7687")
+    )
+    assert rc == 1
+    assert "FAILED: graph" in capsys.readouterr().err
+    # vector + keys still cleaned despite the graph outage
+    assert store.count(tenant="alpha") == 0
+    assert all(k["tenant"] != "alpha" for k in ks.list_keys())
+
+
+def test_tenant_rm_unreadable_key_store_is_partial_not_success(monkeypatch, tmp_path, capsys):
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    _seed_config(tmp_path)
+    (tmp_path / "keys.json").write_text("{ not json")  # corrupt the key store
+    rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", yes=True))
+    assert rc == 1  # keys couldn't be inspected -> never "fully removed"
+    err = capsys.readouterr().err
+    assert "FAILED: service keys" in err
+    assert store.count(tenant="alpha") == 0  # the rest proceeded
+
+
+def test_tenant_rm_unreadable_quota_store_is_partial(monkeypatch, tmp_path, capsys):
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    _seed_config(tmp_path)
+    (tmp_path / "quotas.json").write_text("{ not json")  # get() would fail OPEN
+    rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", yes=True))
+    assert rc == 1
+    assert "FAILED: quota" in capsys.readouterr().err
+
+
+def test_tenant_rm_corrupt_state_file_is_partial(monkeypatch, tmp_path, capsys):
+    store = _seeded_store()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    _seed_config(tmp_path)
+    (tmp_path / "state.json").write_text("{ not json")  # _read_all would fail OPEN
+    rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", yes=True))
+    assert rc == 1
+    assert "FAILED: learning state" in capsys.readouterr().err
+
+
+def test_tenant_rm_absent_collection_is_not_a_failure(monkeypatch, tmp_path, capsys):
+    # A never-created/already-dropped collection means nothing to delete — the
+    # offboarding of keys/quota/state must complete cleanly (exit 0).
+    class _NoCollection:
+        def __init__(self, **_):
+            pass
+
+        def collection_exists(self):
+            return False
+
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: _NoCollection())
+    ks, _fs = _seed_config(tmp_path)
+    rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", yes=True))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "collection absent" in out and "fully removed" in out
+    assert all(k["tenant"] != "alpha" for k in ks.list_keys())
+
+
+def test_state_store_delete_raises_on_corrupt_file(tmp_path):
+    # delete() is a management op: unlike get() (fail-open for recall), a corrupt
+    # file must raise, not read as "nothing to delete".
+    p = tmp_path / "state.json"
+    p.write_text("{ not json")
+    fs = FileStateStore(p)
+    assert fs.get("anything") is None  # read path still fails open
+    with pytest.raises(ValueError):  # json.JSONDecodeError is a ValueError
+        fs.delete("anything")
+
+
+def test_tenant_rm_dry_run_incomplete_counts_exit_nonzero(monkeypatch, tmp_path, capsys):
+    class _DownStore:
+        def __init__(self, **_):
+            raise ConnectionError("qdrant down")
+
+    monkeypatch.setattr(cli, "VectorStore", _DownStore)
+    _seed_config(tmp_path)
+    rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", dry_run=True))
+    assert rc == 1  # a script must notice the counts are partial
+    out = capsys.readouterr()
+    assert "unknown — store unavailable" in out.out
+    assert "counts are incomplete" in out.err

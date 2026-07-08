@@ -574,13 +574,24 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
     if tenant is None:
         return 2
 
-    # ---- count phase (read-only) ----
+    # ---- count phase (read-only; a store outage degrades to "unknown") ----
+    # Stores that could not even be INSPECTED. They pre-seed the delete phase's
+    # failure list: an unreachable store's cleanup can't happen, but it must not
+    # strand the other stores (best-effort) — and must never read as success.
+    unavailable: dict[str, str] = {}
+
+    store = None
+    points: int | None = None
+    collection_absent = False
     try:
         store = VectorStore(collection=args.collection, dimension=1, host=args.qdrant)
-        points = store.count(tenant=tenant) if store.collection_exists() else 0
-    except Exception as e:  # noqa: BLE001
-        print(f"error: cannot reach Qdrant at {args.qdrant}: {e}", file=sys.stderr)
-        return 1
+        if store.collection_exists():
+            points = store.count(tenant=tenant)
+        else:
+            points = 0
+            collection_absent = True  # nothing to delete — not a failure
+    except Exception as e:  # noqa: BLE001 — a Qdrant outage must not strand the rest
+        unavailable["vector points"] = f"cannot reach Qdrant at {args.qdrant}: {e}"
 
     memgraph_uri = getattr(args, "memgraph_uri", None) or None
     graph_counts = None
@@ -593,25 +604,28 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
                 memgraph_uri, timeout=getattr(args, "graph_timeout", 5.0), **_graph_auth(args)
             )
             graph_counts = gs.delete_tenant(tenant, dry_run=True)
-        except Exception as e:  # noqa: BLE001
-            print(f"error: cannot reach graph at {memgraph_uri}: {e}", file=sys.stderr)
+        except Exception as e:  # noqa: BLE001 — a graph outage must not strand the rest
+            unavailable["graph"] = f"cannot reach graph at {memgraph_uri}: {e}"
             if gs is not None:
                 gs.close()
-            return 1
+                gs = None
 
     external_keys = (os.environ.get("MNEMOSTACK_KEYSTORE") or "").strip().lower() not in ("", "file")
     key_ids: list[str] = []
     if not external_keys:
         try:
             key_ids = [k["id"] for k in _keys_store(args).list_keys() if k["tenant"] == tenant]
-        except Exception as e:  # noqa: BLE001
-            print(f"warning: key store unreadable ({e}); keys not counted", file=sys.stderr)
+        except Exception as e:  # noqa: BLE001 — unreadable keys = incomplete offboarding
+            unavailable["service keys"] = f"key store unreadable: {e}"
 
-    quota = None
+    # Quota: get() fails OPEN (None for a corrupt store), which would silently
+    # skip removal and still report success — probe with list_quotas(), which is
+    # a management read and raises on a corrupt/unreadable store.
+    quota_present = False
     try:
-        quota = _quota_store(args).get(tenant)  # fails open, but guard construction too
-    except Exception as e:  # noqa: BLE001 — a broken quota store must not crash the count
-        print(f"warning: quota store unreadable ({e}); quota not counted", file=sys.stderr)
+        quota_present = any(q["tenant"] == tenant for q in _quota_store(args).list_quotas())
+    except Exception as e:  # noqa: BLE001
+        unavailable["quota"] = f"quota store unreadable: {e}"
 
     from .recall.pipeline import FileStateStore, default_state_path
     from .recall.pipeline.state import tenant_state_key
@@ -619,15 +633,31 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
     state_path = getattr(args, "state_path", None) or default_state_path()
     state_keys = [tenant_state_key(base, tenant) for base in ("q_table", "ior_log")]
     state_store = FileStateStore(state_path)
+    present_state: list[str] = []
     try:
-        present_state = [k for k in state_keys if state_store.get(k) is not None]
-    except Exception as e:  # noqa: BLE001 — a corrupt state file must not crash the count
-        print(f"warning: state store unreadable ({e}); state not counted", file=sys.stderr)
-        present_state = []
+        # get() fails OPEN on a corrupt file (recall must survive it), so parse
+        # the file strictly here — offboarding must know it couldn't inspect.
+        import json as _json
+
+        spath = Path(state_path)
+        if spath.exists():
+            _json.loads(spath.read_text())
+            present_state = [k for k in state_keys if state_store.get(k) is not None]
+    except Exception as e:  # noqa: BLE001
+        unavailable["learning state"] = f"state store unreadable: {e}"
+
+    def _line(label: str, value: str, unavailable_as: str | None = None) -> None:
+        if unavailable_as is not None and unavailable_as in unavailable:
+            print(f"  {label} unknown — store unavailable")
+        else:
+            print(f"  {label} {value}")
 
     print(f"tenant '{tenant}':")
-    print(f"  vector points:    {points}")
-    if graph_counts is not None:
+    _line("vector points:   ", f"{points}" + (" (collection absent)" if collection_absent else ""),
+          "vector points")
+    if "graph" in unavailable:
+        print("  graph:            unknown — store unavailable")
+    elif graph_counts is not None:
         print(f"  graph nodes:      {graph_counts['nodes']}")
         print(f"  graph edges:      {graph_counts['relationships']}")
         if graph_counts.get("detached"):
@@ -640,14 +670,24 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
     if external_keys:
         print("  service keys:     managed externally (MNEMOSTACK_KEYSTORE) — not touched")
     else:
-        print(f"  service keys:     {len(key_ids)}")
-    print(f"  quota:            {'set' if quota is not None else 'none'}")
-    print(f"  learning state:   {len(present_state)} partition(s)")
+        _line("service keys:    ", f"{len(key_ids)}", "service keys")
+    _line("quota:           ", "set" if quota_present else "none", "quota")
+    _line("learning state:  ", f"{len(present_state)} partition(s)", "learning state")
+    for name, reason in unavailable.items():
+        print(f"warning: {name}: {reason}", file=sys.stderr)
 
     if args.dry_run:
         if gs is not None:
             gs.close()
         print("dry-run: nothing deleted")
+        if unavailable:
+            print(
+                "warning: counts are incomplete — "
+                + ", ".join(unavailable)
+                + " could not be inspected",
+                file=sys.stderr,
+            )
+            return 1
         return 0
     if not args.yes:
         if gs is not None:
@@ -660,13 +700,19 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
         return 2
 
     # ---- delete phase (best-effort per store, loud report) ----
-    failed: list[str] = []
-    try:
-        deleted = store.delete_tenant(tenant)
-        print(f"deleted {deleted} vector point(s)")
-    except Exception as e:  # noqa: BLE001
-        failed.append("vector points")
-        print(f"error: vector delete failed: {e}", file=sys.stderr)
+    # Unreachable stores are failures up front: their cleanup did NOT happen.
+    failed: list[str] = list(unavailable)
+    if "vector points" not in unavailable:
+        if collection_absent:
+            print("vector points: collection absent — nothing to delete")
+        else:
+            try:
+                assert store is not None
+                deleted = store.delete_tenant(tenant)
+                print(f"deleted {deleted} vector point(s)")
+            except Exception as e:  # noqa: BLE001
+                failed.append("vector points")
+                print(f"error: vector delete failed: {e}", file=sys.stderr)
     if gs is not None:
         try:
             gc = gs.delete_tenant(tenant)
@@ -679,7 +725,7 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
             print(f"error: graph delete failed: {e}", file=sys.stderr)
         finally:
             gs.close()
-    if not external_keys and key_ids:
+    if not external_keys and "service keys" not in unavailable and key_ids:
         try:
             ks = _keys_store(args)
             revoked = 0
@@ -706,22 +752,23 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
         except Exception as e:  # noqa: BLE001
             failed.append("service keys")
             print(f"error: key revocation failed: {e}", file=sys.stderr)
-    if quota is not None:
+    if quota_present and "quota" not in unavailable:
         try:
             _quota_store(args).remove(tenant)
             print("removed quota")
         except Exception as e:  # noqa: BLE001
             failed.append("quota")
             print(f"error: quota removal failed: {e}", file=sys.stderr)
-    removed_state = 0
-    try:
-        for k in state_keys:
-            if state_store.delete(k):
-                removed_state += 1
-        print(f"removed {removed_state} learning-state partition(s)")
-    except Exception as e:  # noqa: BLE001
-        failed.append("learning state")
-        print(f"error: learning-state cleanup failed: {e}", file=sys.stderr)
+    if "learning state" not in unavailable:
+        removed_state = 0
+        try:
+            for k in state_keys:
+                if state_store.delete(k):
+                    removed_state += 1
+            print(f"removed {removed_state} learning-state partition(s)")
+        except Exception as e:  # noqa: BLE001
+            failed.append("learning state")
+            print(f"error: learning-state cleanup failed: {e}", file=sys.stderr)
 
     if failed:
         print(

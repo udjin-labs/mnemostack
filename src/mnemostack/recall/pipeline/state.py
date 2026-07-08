@@ -188,9 +188,17 @@ class FileStateStore(StateStore):
 
     def delete(self, key) -> bool:
         """Drop a state key entirely (e.g. a tenant's partition on offboarding).
-        Returns True if it existed; see ``InMemoryStateStore.delete``."""
+        Returns True if it existed; see ``InMemoryStateStore.delete``.
+
+        Unlike the read paths (``_read_all`` fails OPEN so recall survives a
+        corrupt state file), deletion is a *management* operation and fails
+        LOUD: a corrupt/unreadable file raises instead of reading as empty —
+        an offboarding must never report a cleanup it couldn't inspect.
+        """
         with self._lock, self._file_lock():
-            data = self._read_all()
+            if not self.path.exists():
+                return False
+            data = json.loads(self.path.read_text())  # raises on corrupt/unreadable
             if key not in data:
                 return False
             del data[key]
