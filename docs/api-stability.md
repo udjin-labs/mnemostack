@@ -52,13 +52,24 @@ this is purely additive. See [Multi-tenancy & authentication](#multi-tenancy--au
 
 🟢 **Stable** commands and their documented flags / exit codes:
 `health`, `doctor`, `search`, `answer`, `index`, `index-markdown`, `invalidate`,
-`feedback`, `serve`, `mcp-serve`, `keys`, `quota`, `tenant-migrate`, `init`, `config`.
+`feedback`, `serve`, `mcp-serve`, `keys`, `quota`, `tenant-migrate`, `tenant-export`,
+`tenant-rm`, `init`, `config`.
 
 - `tenant-migrate --tenant <id>` stamps existing points into a tenant (idempotent;
   `--all` to force-relabel, `--dry-run` to preview) — the operator path to adopting
   tenancy on a pre-tenant collection; `VectorStore.stamp_tenant` is its library twin.
   Add `--memgraph-uri <bolt>` to also stamp the graph (nodes + edges), the twin of
   `GraphStore.stamp_tenant`.
+- `tenant-export --tenant <id>` dumps the tenant's vector points as JSONL (vectors +
+  payloads; `--no-vectors` for payloads only; `-o` file or stdout). Keys, quotas,
+  learning state, and graph records are deliberately not exported — the points are
+  the portable source of truth.
+- `tenant-rm --tenant <id>` offboards a tenant across every store (vector points,
+  graph with `--memgraph-uri`, service keys, quota, learning-state partitions):
+  counts first, `--dry-run` previews, the deletion requires `--yes`, and a per-store
+  failure exits nonzero listing what remains. Library twins:
+  `VectorStore.delete_tenant`, `GraphStore.delete_tenant`, `StateStore.delete(key)`
+  (on the shipped stores).
 - `keys add` / `keys list` / `keys revoke` manage the service-key store for
   multi-tenant auth. `keys add --tenant <t> --scopes read,write` prints the
   plaintext key **once** (only its SHA-256 hash is stored); `--keys-file` (or

@@ -492,6 +492,33 @@ Under `--auth` you can cap each tenant's resource use from a small per-tenant qu
 
 `quota set` is a partial update (only the fields you pass change; pass `none` to clear one), and `quota list` / `quota rm` round it out.
 
+### Tenant offboarding and backup
+
+When a tenant leaves (customer churn, an erasure request), remove it across every store in one command instead of manual surgery:
+
+```bash
+mnemostack tenant-rm --tenant acme --memgraph-uri bolt://localhost:7687 --dry-run
+# tenant 'acme':                      <- per-store counts, nothing deleted yet
+#   vector points:    5120
+#   graph nodes:      312
+#   ...
+mnemostack tenant-rm --tenant acme --memgraph-uri bolt://localhost:7687 --yes
+```
+
+This deletes the tenant's vector points (a server-side filter delete — unscoped/legacy points and other tenants are never matched), its graph nodes **and** edges (`--memgraph-uri` defaults to the graph configured in your config/env, so a graph deployment is swept automatically; pass `--no-graph` to opt out on a vector-only deployment — and if the stack config can't be loaded, one of `--memgraph-uri` / `--no-graph` is required, since a config-file graph would otherwise be invisible), its service keys, its quota, and its learning-state partitions.
+
+**Do not issue keys for a tenant while it is being offboarded**, and for a hard guarantee pause the servers (or wait past `MNEMOSTACK_OPENBAO_CACHE_TTL` for an external key store). `tenant-rm` revokes the tenant's keys before sweeping and re-scans after, but a single CLI pass cannot lock out key issuance cluster-wide: a key minted mid-sweep is caught by the re-scan and **reported as a partial removal** (so you re-run), not silently ignored — but the window is only fully closed by not issuing keys during the operation. Because keys go first, each data store is then swept from **live state** (never a stale preflight count), so a point, collection, or quota an *authenticated* writer created just before revocation is still caught — what's left after that is only out-of-band/unauthenticated writers, which is why the command reports a best-effort sweep rather than claiming the tenant is provably gone. The deletion is gated behind `--yes` and is **best-effort per store**: a failing store is reported, the rest proceed, and a nonzero exit lists what remains — re-run after fixing it.
+
+Keys are handled **first** so a still-valid key can't re-write data into a store that was just cleaned. On a local key store the tenant's keys are revoked (and if that would remove the last usable admin key, or the revocation fails, the whole sweep aborts with nothing deleted — issue another admin key / fix the store and re-run). With an external key store (`MNEMOSTACK_KEYSTORE=openbao`) `tenant-rm` **cannot** revoke — revoke the tenant's key(s) there first (e.g. `bao kv delete ...`), then re-run with `--external-keys-revoked` to confirm and sweep the data stores.
+
+Before removing (or for a plain backup), dump the tenant's data:
+
+```bash
+mnemostack tenant-export --tenant acme -o acme.jsonl
+```
+
+The export is the tenant's vector points (vectors + payloads, JSONL) — the portable source of truth. The graph is derived (rebuild by re-indexing), and keys/quotas/learning state are deliberately excluded (keys are secrets; copy the key store explicitly if that's really intended).
+
 ### MCP
 
 The MCP server is stdio-based:

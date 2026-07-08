@@ -468,6 +468,508 @@ def _graph_relabel_preflight(args: argparse.Namespace) -> int:
     return 0
 
 
+def _require_tenant_arg(args: argparse.Namespace) -> str | None:
+    """The tenant id from ``--tenant``, VERBATIM, or None (error printed).
+
+    An empty/whitespace value must fail closed — for export it would silently
+    dump nothing, and for rm the stores' own guards would refuse anyway, but the
+    operator deserves one clear message instead of five store errors.
+
+    The value is deliberately NOT normalized (no strip): the onboarding paths
+    (``keys add``, ``quota set``, stamped ``tenant_id``) store whatever was
+    passed, so export/rm must match it byte-for-byte — a silently stripped
+    ``" acme "`` would under-delete and then falsely report "fully removed".
+    """
+    tenant = str(getattr(args, "tenant", "") or "")
+    if not tenant.strip():
+        print("error: --tenant requires a non-empty tenant id", file=sys.stderr)
+        return None
+    return tenant
+
+
+def cmd_tenant_export(args: argparse.Namespace) -> int:
+    """Export a tenant's vector points (vectors + payloads) as JSONL.
+
+    The vector points are the source of truth — the graph is derived (file links
+    from re-indexing, fact triples from enrichment) and per-tenant learning state
+    is behavioral, so a point dump is the honest portable backup. One JSON object
+    per line: a ``meta`` header, then ``{"kind": "point", id, vector, payload}``
+    rows. NOT included (documented): service keys (secrets — copy the key store
+    explicitly if that's intended), quotas, learning state, graph records.
+    """
+    import json as _json
+
+    tenant = _require_tenant_arg(args)
+    if tenant is None:
+        return 2
+    try:
+        store = VectorStore(collection=args.collection, dimension=1, host=args.qdrant)
+        if not store.collection_exists():
+            print(f"error: collection '{args.collection}' does not exist", file=sys.stderr)
+            return 1
+    except Exception as e:  # noqa: BLE001
+        print(f"error: cannot reach Qdrant at {args.qdrant}: {e}", file=sys.stderr)
+        return 1
+
+    # A file export is written ATOMICALLY (temp in the same dir + replace): a
+    # backup command must never truncate an existing dump and leave a partial
+    # file at the trusted path when Qdrant drops mid-scroll. The final name
+    # (over)writes only after the export completed. mkstemp (unique, O_EXCL,
+    # 0600) — a predictable ".tmp" name could truncate/unlink another user's
+    # file or follow a planted symlink in a shared directory.
+    import tempfile
+
+    tmp_path: Path | None = None
+    if args.output == "-":
+        out = sys.stdout
+    else:
+        try:
+            target = Path(args.output)
+            fd, tmp_name = tempfile.mkstemp(
+                dir=str(target.parent) or ".", prefix=target.name + ".", suffix=".tmp"
+            )
+            tmp_path = Path(tmp_name)
+            out = os.fdopen(fd, "w", encoding="utf-8")
+        except OSError as e:
+            print(f"error: cannot write {args.output}: {e}", file=sys.stderr)
+            return 1
+    count = 0
+    try:
+        meta = {
+            "kind": "meta",
+            "format": "mnemostack-tenant-export/1",
+            "tenant": tenant,
+            "collection": args.collection,
+            "vectors": not args.no_vectors,
+        }
+        out.write(_json.dumps(meta, ensure_ascii=False) + "\n")
+        for hit in store.scroll(with_vectors=not args.no_vectors, tenant=tenant):
+            row: dict[str, Any] = {"kind": "point", "id": hit.id, "payload": hit.payload}
+            if hit.vector is not None:
+                row["vector"] = hit.vector
+            out.write(_json.dumps(row, ensure_ascii=False) + "\n")
+            count += 1
+        if out is not sys.stdout:
+            out.close()
+            assert tmp_path is not None
+            # mkstemp made the temp 0600; if we're replacing an existing dump,
+            # keep ITS mode rather than silently narrowing a 0644 backup (the
+            # export carries no plaintext secrets — keys aren't exported).
+            try:
+                prev_mode = os.stat(args.output).st_mode & 0o777
+                os.chmod(tmp_path, prev_mode)
+            except FileNotFoundError:
+                pass  # new file: leave mkstemp's owner-only default
+            except OSError:
+                pass  # best-effort; a platform without chmod keeps 0600
+            os.replace(tmp_path, args.output)  # success: land the dump atomically
+            tmp_path = None
+    except Exception as e:  # noqa: BLE001
+        print(f"error: export failed after {count} point(s): {e}", file=sys.stderr)
+        return 1
+    finally:
+        if out is not sys.stdout:
+            try:
+                out.close()
+            except Exception:  # noqa: BLE001 — already closed on success
+                pass
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink()  # failed run: drop the partial temp
+            except OSError:
+                pass
+    print(
+        f"exported {count} point(s) for tenant '{tenant}'"
+        + ("" if args.output == "-" else f" to {args.output}"),
+        file=sys.stderr if args.output == "-" else sys.stdout,
+    )
+    if count == 0:
+        # An empty dump is valid (a provisioned-but-empty tenant) but is more
+        # often a typo'd tenant id — don't let it pass as a trusted backup.
+        print(
+            f"warning: 0 points matched tenant '{tenant}' — check the tenant id "
+            "before trusting this as a backup",
+            file=sys.stderr,
+        )
+    return 0
+
+
+def _abort_keys_alive(tenant: str, failed: list[str], gs: Any) -> int:
+    """Abort the tenant-rm data sweep because a usable tenant key remains.
+
+    Whether revocation was *refused* (last admin key) or *failed* (unwritable
+    store), the outcome is the same: a write-capable key survives, and any store
+    swept now could be re-written the moment it's cleaned. Nothing below the key
+    step has been deleted at this point, so aborting keeps the offboarding
+    atomic for the re-run.
+    """
+    print(
+        "skipping vector/graph/quota/learning-state deletion while the tenant "
+        "retains an active key — nothing was deleted; fix the key store (or issue "
+        "another admin key) and re-run",
+        file=sys.stderr,
+    )
+    if gs is not None:
+        gs.close()
+    print(f"tenant '{tenant}' NOT removed — FAILED: {', '.join(failed)}", file=sys.stderr)
+    return 1
+
+
+def cmd_tenant_rm(args: argparse.Namespace) -> int:
+    """Offboard a tenant: delete its data and config across every store.
+
+    Touches five stores — vector points, graph nodes/edges (when
+    ``--memgraph-uri`` is given), service keys, quota, and the per-tenant
+    learning-state partitions. Counts everything first; ``--dry-run`` stops
+    there, and the actual deletion is gated behind ``--yes`` (there is no
+    interactive fallback — an irreversible cross-store wipe deserves an explicit
+    flag). Best-effort per store: a failure in one is reported and the rest
+    proceed, with a nonzero exit if anything failed — so a partial outage
+    doesn't strand the whole offboarding, and the report says what remains.
+
+    Concurrency contract — this is a BEST-EFFORT sweep, not a distributed
+    transaction. It revokes the tenant's keys BEFORE deleting data, so once the
+    sweep starts no further *authenticated* write can land; each data store is
+    then swept from live state (never a stale preflight count), and a final
+    key re-scan catches a key that raced in mid-sweep. What one CLI pass CANNOT
+    do is lock out key issuance cluster-wide or stop out-of-band/unauthenticated
+    writers — for a hard guarantee, quiesce writers (pause the servers / freeze
+    issuance) first. The command reports what it swept and never claims more.
+    """
+    tenant = _require_tenant_arg(args)
+    if tenant is None:
+        return 2
+
+    # ---- count phase (read-only; a store outage degrades to "unknown") ----
+    # Stores that could not even be INSPECTED. They pre-seed the delete phase's
+    # failure list: an unreachable store's cleanup can't happen, but it must not
+    # strand the other stores (best-effort) — and must never read as success.
+    unavailable: dict[str, str] = {}
+
+    store = None
+    points: int | None = None
+    collection_absent = False
+    try:
+        store = VectorStore(collection=args.collection, dimension=1, host=args.qdrant)
+        if store.collection_exists():
+            points = store.count(tenant=tenant)
+        else:
+            points = 0
+            collection_absent = True  # nothing to delete — not a failure
+    except Exception as e:  # noqa: BLE001 — a Qdrant outage must not strand the rest
+        unavailable["vector points"] = f"cannot reach Qdrant at {args.qdrant}: {e}"
+
+    # --no-graph explicitly opts out of graph cleanup (a vector-only deployment);
+    # it wins over the configured/default URI.
+    if getattr(args, "no_graph", False):
+        raw_graph = None
+    else:
+        raw_graph = getattr(args, "memgraph_uri", None)
+    # An EXPLICIT but empty --memgraph-uri (e.g. `--memgraph-uri "$UNSET"`) signals
+    # intent to clean the graph but would coerce to None and silently skip it,
+    # then still report "fully removed". Reject it rather than treat it as omission.
+    if raw_graph is not None and not str(raw_graph).strip():
+        print(
+            "error: --memgraph-uri was given an empty value; omit it to skip the "
+            "graph, or pass the bolt URI to clean it",
+            file=sys.stderr,
+        )
+        return 2
+    memgraph_uri = raw_graph or None
+    graph_counts = None
+    gs = None
+    if memgraph_uri:
+        from .graph.factory import make_graph_store
+
+        try:
+            gs = make_graph_store(
+                memgraph_uri, timeout=getattr(args, "graph_timeout", 5.0), **_graph_auth(args)
+            )
+            graph_counts = gs.delete_tenant(tenant, dry_run=True)
+        except Exception as e:  # noqa: BLE001 — a graph outage must not strand the rest
+            unavailable["graph"] = f"cannot reach graph at {memgraph_uri}: {e}"
+            if gs is not None:
+                gs.close()
+                gs = None
+
+    # Mirror the key-store factory's backend set: `file` is handled locally,
+    # `openbao` is genuinely external (the store's own tooling revokes) — but a
+    # TYPO ("flie") must be a cleanup failure, not a silent skip that lets the
+    # tenant's local keys survive an offboarding reported as fully removed.
+    _ks_backend = (os.environ.get("MNEMOSTACK_KEYSTORE") or "").strip().lower() or "file"
+    external_keys = _ks_backend == "openbao"
+    key_ids: list[str] = []
+    if _ks_backend == "file":
+        try:
+            key_ids = [k["id"] for k in _keys_store(args).list_keys() if k["tenant"] == tenant]
+        except Exception as e:  # noqa: BLE001 — unreadable keys = incomplete offboarding
+            unavailable["service keys"] = f"key store unreadable: {e}"
+    elif not external_keys:
+        unavailable["service keys"] = (
+            f"unknown MNEMOSTACK_KEYSTORE backend {_ks_backend!r} (valid: file, openbao)"
+        )
+
+    # Quota: get() fails OPEN (None for a corrupt store), which would silently
+    # skip removal and still report success — probe with list_quotas(), which is
+    # a management read and raises on a corrupt/unreadable store.
+    quota_present = False
+    try:
+        quota_present = any(q["tenant"] == tenant for q in _quota_store(args).list_quotas())
+    except Exception as e:  # noqa: BLE001
+        unavailable["quota"] = f"quota store unreadable: {e}"
+
+    from .recall.pipeline import FileStateStore, default_state_path
+    from .recall.pipeline.state import tenant_state_key
+
+    # Honor MNEMOSTACK_STATE_PATH like the servers do (the MCP server reads it),
+    # or tenant-rm would inspect/clean a DIFFERENT state file than the live
+    # server and report full removal while the tenant's partitions survive.
+    state_path = (
+        getattr(args, "state_path", None)
+        or os.environ.get("MNEMOSTACK_STATE_PATH")
+        or default_state_path()
+    )
+    state_keys = [tenant_state_key(base, tenant) for base in ("q_table", "ior_log")]
+    state_store = None
+    present_state: list[str] = []
+    try:
+        # Construction can itself fail (mkdir on a bad --state-path); and get()
+        # fails OPEN on a corrupt file (recall must survive it), so parse the
+        # file strictly here — offboarding must know it couldn't inspect.
+        state_store = FileStateStore(state_path)
+        import json as _json
+
+        # FileStateStore expands ~; use the SAME expanded path for the strict
+        # preflight read, or preview/dry-run inspects a different file than delete.
+        spath = Path(state_path).expanduser()
+        if spath.exists():
+            _json.loads(spath.read_text())
+            present_state = [k for k in state_keys if state_store.get(k) is not None]
+    except Exception as e:  # noqa: BLE001
+        unavailable["learning state"] = f"state store unusable: {e}"
+
+    def _line(label: str, value: str, unavailable_as: str | None = None) -> None:
+        if unavailable_as is not None and unavailable_as in unavailable:
+            print(f"  {label} unknown — store unavailable")
+        else:
+            print(f"  {label} {value}")
+
+    print(f"tenant '{tenant}':")
+    _line("vector points:   ", f"{points}" + (" (collection absent)" if collection_absent else ""),
+          "vector points")
+    if "graph" in unavailable:
+        print("  graph:            unknown — store unavailable")
+    elif graph_counts is not None:
+        print(f"  graph nodes:      {graph_counts['nodes']}")
+        print(f"  graph edges:      {graph_counts['relationships']}")
+        if graph_counts.get("detached"):
+            print(
+                f"  graph collateral: {graph_counts['detached']} unowned edge(s) "
+                "attached to the tenant's nodes (removed with them)"
+            )
+    else:
+        print("  graph:            (skipped — no --memgraph-uri)")
+    if external_keys:
+        confirmed = " — confirmed revoked" if args.external_keys_revoked else ""
+        print(
+            "  service keys:     managed externally (MNEMOSTACK_KEYSTORE); "
+            f"revoke them in that store{confirmed or ' + pass --external-keys-revoked'}"
+        )
+    else:
+        _line("service keys:    ", f"{len(key_ids)}", "service keys")
+    _line("quota:           ", "set" if quota_present else "none", "quota")
+    _line("learning state:  ", f"{len(present_state)} partition(s)", "learning state")
+    for name, reason in unavailable.items():
+        print(f"warning: {name}: {reason}", file=sys.stderr)
+
+    if args.dry_run:
+        if gs is not None:
+            gs.close()
+        print("dry-run: nothing deleted")
+        if unavailable:
+            print(
+                "warning: counts are incomplete — "
+                + ", ".join(unavailable)
+                + " could not be inspected",
+                file=sys.stderr,
+            )
+            return 1
+        return 0
+    if not args.yes:
+        if gs is not None:
+            gs.close()
+        print(
+            "error: deleting a tenant is irreversible and spans every store; "
+            "re-run with --yes to confirm (use --dry-run to preview)",
+            file=sys.stderr,
+        )
+        return 2
+
+    # ---- delete phase (best-effort per store, loud report) ----
+    # Unreachable stores are failures up front: their cleanup did NOT happen.
+    failed: list[str] = list(unavailable)
+    # Keys are handled FIRST: on a live authenticated deployment the tenant's
+    # key could otherwise keep writing (feedback, graph facts) into stores this
+    # command has already cleaned, and "fully removed" would be stale the moment
+    # it printed. Auth re-verifies per request/tool-call, so cutting the key off
+    # before the data stores are swept closes that window.
+    if "service keys" in unavailable:
+        # We couldn't even INSPECT the local keys (no read access, corrupt file,
+        # unknown backend). The servers may still verify those keys, so a live
+        # write/admin key could re-write swept data — abort like the other
+        # active-key cases rather than sweep with keys of unknown state.
+        print(
+            f"error: tenant '{tenant}' service keys could not be inspected — "
+            "cannot confirm they're revoked. Fix key-store access and re-run.",
+            file=sys.stderr,
+        )
+        return _abort_keys_alive(tenant, failed, gs)
+    if external_keys:
+        # tenant-rm can't revoke a key it only verifies (it lives in the
+        # external store). Refuse to sweep unless the operator confirms they
+        # revoked it out-of-band — otherwise a live key re-writes the data back.
+        if not args.external_keys_revoked:
+            failed.append("service keys (external store — not confirmed revoked)")
+            print(
+                f"error: tenant '{tenant}' keys are in an external store "
+                "(MNEMOSTACK_KEYSTORE) — tenant-rm can't revoke them. Revoke the "
+                "tenant's key(s) there first (e.g. `bao kv delete ...`), then re-run "
+                "with --external-keys-revoked to sweep the data stores.",
+                file=sys.stderr,
+            )
+            return _abort_keys_alive(tenant, failed, gs)
+        print("service keys: external store — treated as revoked (--external-keys-revoked)")
+        print(
+            "note: a running server may still accept a just-revoked external key "
+            "until its verify cache expires (MNEMOSTACK_OPENBAO_CACHE_TTL) — ensure "
+            "that elapsed (or restart the servers) before trusting this removal",
+            file=sys.stderr,
+        )
+    if not external_keys and "service keys" not in unavailable:
+        try:
+            # Atomically revoke ALL of the tenant's keys under ONE store lock,
+            # re-read at this moment — not a count-phase snapshot. This catches a
+            # key issued for the tenant after the earlier count (the concurrent-
+            # offboarding race) and any malformed record, so no usable key can
+            # survive into the data sweep below.
+            result = _keys_store(args).revoke_tenant(tenant, protect_last_admin=True)
+            print(f"revoked {result['revoked']} service key(s)")
+            if result["last_admin_kept"]:
+                failed.append("service keys (last admin key)")
+                print(
+                    f"error: a key of tenant '{tenant}' is the LAST usable admin key — "
+                    "refusing to revoke it (that would lock out key management). Issue "
+                    "an admin key for a DIFFERENT tenant (`mnemostack keys add --tenant "
+                    "<other> --scopes admin`) — one for this tenant would just be kept "
+                    "again — then re-run.",
+                    file=sys.stderr,
+                )
+                # The surviving key is write-capable (admin implies write), so it
+                # could re-write into any store swept below the moment it's cleaned.
+                return _abort_keys_alive(tenant, failed, gs)
+        except Exception as e:  # noqa: BLE001
+            # A failed revocation WRITE (unwritable dir, full disk) leaves the
+            # tenant's keys just as alive as the last-admin case — same abort:
+            # sweeping data now would hand the still-active key a clean store
+            # to re-write into.
+            failed.append("service keys")
+            print(f"error: key revocation failed: {e}", file=sys.stderr)
+            return _abort_keys_alive(tenant, failed, gs)
+    if "vector points" not in unavailable:
+        assert store is not None
+        try:
+            # If the collection was absent at preflight, RE-CHECK it now — a racer
+            # may have created the tenant's first point (and the collection)
+            # between the count phase and key revocation. Keys are now revoked, so
+            # no further authenticated write can land; one idempotent tenant delete
+            # closes the collection-creation race. `collection_exists()` runs only
+            # in this already-absent branch, so the common path keeps its single
+            # round-trip — and the whole block is guarded, so Qdrant dropping
+            # between preflight and here is a reported failure, not a crash.
+            if collection_absent and not store.collection_exists():
+                print("vector points: collection absent — nothing to delete")
+            else:
+                deleted = store.delete_tenant(tenant)
+                print(f"deleted {deleted} vector point(s)")
+        except Exception as e:  # noqa: BLE001
+            failed.append("vector points")
+            print(f"error: vector delete failed: {e}", file=sys.stderr)
+    if gs is not None:
+        try:
+            gc = gs.delete_tenant(tenant)
+            extra = (
+                f" (+{gc['detached']} attached unowned edge(s))" if gc.get("detached") else ""
+            )
+            print(f"deleted {gc['nodes']} graph node(s), {gc['relationships']} edge(s){extra}")
+        except Exception as e:  # noqa: BLE001
+            failed.append("graph")
+            print(f"error: graph delete failed: {e}", file=sys.stderr)
+        finally:
+            gs.close()
+    if "quota" not in unavailable:
+        # Call remove() unconditionally (it's idempotent), NOT gated on the
+        # count-phase quota_present snapshot: a quota created for the tenant after
+        # the count (a concurrent admin/inspector session) would otherwise survive
+        # under a "fully removed" report.
+        try:
+            print("removed quota" if _quota_store(args).remove(tenant) else "quota: none")
+        except Exception as e:  # noqa: BLE001
+            failed.append("quota")
+            print(f"error: quota removal failed: {e}", file=sys.stderr)
+    if state_store is not None and "learning state" not in unavailable:
+        removed_state = 0
+        try:
+            for k in state_keys:
+                if state_store.delete(k):
+                    removed_state += 1
+            print(f"removed {removed_state} learning-state partition(s)")
+        except Exception as e:  # noqa: BLE001
+            failed.append("learning state")
+            print(f"error: learning-state cleanup failed: {e}", file=sys.stderr)
+
+    # Final key re-scan: a key issued for the tenant DURING the sweep (a racer
+    # concurrently onboarding it) is missed by the pre-sweep revocation and could
+    # have re-written data into a store we just cleaned. Re-revoke; if any turned
+    # up, report a partial removal rather than claim success — the operator must
+    # stop issuing keys for an offboarding tenant (or pause the servers) for a
+    # hard guarantee; one CLI pass can't lock out issuance cluster-wide.
+    if not external_keys and "service keys" not in unavailable:
+        try:
+            late = _keys_store(args).revoke_tenant(tenant, protect_last_admin=True)
+            if late["revoked"] or late["last_admin_kept"]:
+                failed.append("service keys (issued during sweep)")
+                print(
+                    f"warning: key(s) for '{tenant}' appeared DURING the sweep "
+                    f"({late['revoked']} revoked"
+                    + (
+                        ", 1 kept as the last usable admin and still active"
+                        if late["last_admin_kept"]
+                        else ""
+                    )
+                    + ") — data may have been re-created; re-run tenant-rm (and don't "
+                    "issue keys for a tenant being removed).",
+                    file=sys.stderr,
+                )
+        except Exception as e:  # noqa: BLE001 — best-effort second pass
+            failed.append("service keys (post-sweep re-scan)")
+            print(f"error: post-sweep key re-scan failed: {e}", file=sys.stderr)
+
+    if failed:
+        print(
+            f"tenant '{tenant}' partially removed — FAILED: {', '.join(failed)}; "
+            "re-run after fixing the store(s) above",
+            file=sys.stderr,
+        )
+        return 1
+    print(
+        f"tenant '{tenant}' swept from all reachable stores (best-effort). Keys "
+        "were revoked before the sweep, so no further authenticated write can "
+        "land; completeness still assumes no out-of-band writers — quiesce "
+        "writers (pause servers / freeze issuance) first for a hard guarantee."
+    )
+    return 0
+
+
 def _keys_store(args: argparse.Namespace):
     from mnemostack.auth import FileKeyStore
 
@@ -1875,6 +2377,95 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     )
     p_tenant_migrate.set_defaults(func=cmd_tenant_migrate)
 
+    p_tenant_export = sub.add_parser(
+        "tenant-export",
+        parents=[common],
+        help="Export a tenant's vector points (vectors + payloads) as JSONL",
+    )
+    p_tenant_export.add_argument("--tenant", required=True, help="tenant_id to export")
+    p_tenant_export.add_argument(
+        "-o",
+        "--output",
+        default="-",
+        help="Output file ('-' = stdout, the default; progress then goes to stderr). "
+        "Written atomically: an existing file is replaced only after the export "
+        "completes",
+    )
+    p_tenant_export.add_argument(
+        "--no-vectors",
+        action="store_true",
+        help="Payloads only (smaller dump; restoring requires re-embedding)",
+    )
+    p_tenant_export.set_defaults(func=cmd_tenant_export)
+
+    p_tenant_rm = sub.add_parser(
+        "tenant-rm",
+        parents=[common],
+        help="Offboard a tenant: delete its points, graph records, keys, quota, and "
+        "learning state (counts first; --dry-run / --yes)",
+    )
+    p_tenant_rm.add_argument("--tenant", required=True, help="tenant_id to remove")
+    p_tenant_rm.add_argument(
+        "--dry-run", action="store_true", help="Report per-store counts without deleting"
+    )
+    p_tenant_rm.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Confirm the irreversible cross-store deletion",
+    )
+    p_tenant_rm.add_argument(
+        "--external-keys-revoked",
+        action="store_true",
+        help="With an external key store (MNEMOSTACK_KEYSTORE=openbao), confirm you "
+        "have ALREADY revoked the tenant's key(s) there AND that running servers "
+        "no longer accept them (their positive-verify cache has expired past "
+        "MNEMOSTACK_OPENBAO_CACHE_TTL, or they were restarted) — tenant-rm can't "
+        "verify this and otherwise refuses to sweep while a key could still write",
+    )
+    p_tenant_rm.add_argument(
+        "--memgraph-uri",
+        # A graph configured in config/env is swept by default; an EMPTY/unset
+        # config value normalizes to None so it reads as "no graph configured"
+        # (matching doctor's `if not cfg.graph.uri`) — not an explicit-empty-flag
+        # error. Only an empty value passed on the CLI hits that error below.
+        default=cfg.graph.uri or None,
+        help="Also delete the tenant's graph nodes/edges at this bolt URI. "
+        "Defaults to the configured graph (config/env), so a graph deployment is "
+        "swept automatically; passes through as unset only when no graph is "
+        "configured. Pass an explicit URI to override.",
+    )
+    p_tenant_rm.add_argument(
+        "--no-graph",
+        action="store_true",
+        help="Explicitly skip graph deletion (a vector-only deployment). Required "
+        "instead of --memgraph-uri when the stack config can't be loaded, so a "
+        "config-file-only graph can't be silently missed.",
+    )
+    p_tenant_rm.add_argument(
+        "--graph-timeout",
+        type=float,
+        default=cfg.graph.timeout,
+        help="Memgraph connection timeout in seconds (default 5.0)",
+    )
+    p_tenant_rm.add_argument(
+        "--keys-file",
+        default=None,
+        help="Key store path (default: $MNEMOSTACK_KEYS_FILE or ~/.config/mnemostack/keys.json)",
+    )
+    p_tenant_rm.add_argument(
+        "--quotas-file",
+        default=None,
+        help="Quota store path (default: $MNEMOSTACK_QUOTAS_FILE or "
+        "~/.config/mnemostack/quotas.json)",
+    )
+    p_tenant_rm.add_argument(
+        "--state-path",
+        default=None,
+        help="Learning-state file (default: the server's default state path)",
+    )
+    p_tenant_rm.set_defaults(func=cmd_tenant_rm)
+
     p_keys = sub.add_parser(
         "keys", help="Manage service keys for multi-tenant auth (add / list / revoke)"
     )
@@ -2833,7 +3424,62 @@ def main(argv: list[str] | None = None) -> int:
     # `keys` and `quota` manage their own stores and need no stack config, so a
     # malformed unrelated config/env must not block managing a key or a quota.
     subcmd = next((a for a in raw if not a.startswith("-")), None)
-    parser = build_parser(config_light=subcmd in {"keys", "quota"})
+    if subcmd in {"tenant-rm", "tenant-export"}:
+        # Lifecycle commands only need vector/graph *defaults* from the config
+        # (they never touch embedding/LLM/recall settings), but unlike `keys`
+        # they DO benefit from the config's graph auth — so try the full load
+        # first: a malformed unrelated value (e.g. MNEMOSTACK_TOKEN_BUDGET=notint)
+        # must not block an emergency backup or offboarding.
+        try:
+            parser = build_parser()
+        except Exception as e:  # noqa: BLE001
+            # Fall back — but NEVER to destructive defaults: with the config
+            # unreadable, the built-in http://localhost:6333/"mnemostack" seeds
+            # could point tenant-rm --yes (or a trusted backup) at the wrong
+            # store. Require the target to be named explicitly on the CLI.
+            def _passed(flag: str) -> bool:
+                return any(a == flag or a.startswith(flag + "=") for a in raw)
+
+            missing = [f for f in ("--qdrant", "--collection") if not _passed(f)]
+            # tenant-rm claims full removal, but with the config unreadable we
+            # CAN'T see a graph configured in the config FILE — so require an
+            # explicit graph decision (a URI, or --no-graph) rather than silently
+            # skipping a graph that might exist. (--memgraph-uri's cfg-default is
+            # None here since config_light built a bare Config.)
+            if (
+                subcmd == "tenant-rm"
+                and not _passed("--memgraph-uri")
+                and not _passed("--no-graph")
+            ):
+                missing.append("--memgraph-uri or --no-graph (config-file graph is invisible now)")
+            if missing:
+                print(
+                    f"error: stack config failed to load ({e}); refusing to fall "
+                    f"back to built-in defaults for {subcmd} — pass "
+                    f"{' and '.join(missing)} explicitly (and graph credentials "
+                    "via env if the graph is authenticated)",
+                    file=sys.stderr,
+                )
+                return 2
+            print(
+                f"warning: stack config failed to load ({e}); using built-in "
+                "defaults for everything not passed explicitly. Graph settings "
+                "from the CONFIG FILE are invisible here — if it configures a "
+                "graph, pass --memgraph-uri explicitly",
+                file=sys.stderr,
+            )
+            parser = build_parser(config_light=True)
+            # config_light built a bare Config() that skipped the graph-auth ENV
+            # overrides, so re-apply them: an authenticated Memgraph must still
+            # receive its credentials (else graph deletion fails and the sweep
+            # proceeds, reporting removal while graph records survive).
+            parser.set_defaults(
+                graph_user=os.environ.get("MNEMOSTACK_GRAPH_USER") or None,
+                graph_password=os.environ.get("MNEMOSTACK_GRAPH_PASSWORD") or None,
+                graph_database=os.environ.get("MNEMOSTACK_GRAPH_DATABASE") or None,
+            )
+    else:
+        parser = build_parser(config_light=subcmd in {"keys", "quota"})
     args = parser.parse_args(argv)
     return args.func(args)
 

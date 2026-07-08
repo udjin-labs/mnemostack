@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from qdrant_client import QdrantClient
@@ -97,6 +97,9 @@ class Hit:
     id: str | int
     score: float
     payload: dict[str, Any]
+    #: The stored embedding — populated only by ``scroll(with_vectors=True)``
+    #: (export/migration); search results don't carry it.
+    vector: list[float] | None = None
 
 
 class VectorStore:
@@ -260,7 +263,14 @@ class VectorStore:
                 break
             for pt in points:
                 pid = str(pt.id) if isinstance(pt.id, UUID) else pt.id
-                yield Hit(id=pid, score=1.0, payload=pt.payload or {})
+                # qdrant-client types .vector as a union covering named/multi
+                # vectors; a single-vector collection yields a flat float list.
+                vec = (
+                    cast("list[float]", list(pt.vector))
+                    if with_vectors and isinstance(pt.vector, list)
+                    else None
+                )
+                yield Hit(id=pid, score=1.0, payload=pt.payload or {}, vector=vec)
             if next_offset is None:
                 break
 
@@ -516,6 +526,31 @@ class VectorStore:
             )
             total += len(chunk)
         return total
+
+    def delete_tenant(self, tenant: str) -> int:
+        """Delete EVERY point owned by ``tenant`` (offboarding). Returns the count.
+
+        Filter-based (server-side), so it never touches unscoped/legacy points or
+        another tenant's — the mandatory ``tenant_id`` condition is the selector,
+        not a caller-supplied id list. ``tenant`` must be a non-empty string: an
+        empty value must never silently select (and drop) the whole collection.
+        """
+        if not tenant or not isinstance(tenant, str):
+            raise ValueError("delete_tenant requires a non-empty tenant")
+        sel = Filter(must=[_tenant_condition(tenant)])
+        # Pre-delete snapshot count (Qdrant's filter-delete doesn't return a
+        # deleted count). Exact for the single-writer offboarding case; under a
+        # concurrent writer the actual delete may differ by a few.
+        n = self.client.count(collection_name=self.collection, count_filter=sel).count
+        # ALWAYS issue the (idempotent) filter-delete, even when the snapshot
+        # count is 0: a concurrent writer could create the tenant's first point
+        # between the count and here, and gating the delete on the stale count
+        # would leave it behind while tenant-rm reports "fully removed".
+        self.client.delete(
+            collection_name=self.collection,
+            points_selector=FilterSelector(filter=sel),
+        )
+        return n
 
     def invalidate(
         self,
