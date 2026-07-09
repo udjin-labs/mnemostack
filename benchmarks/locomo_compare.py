@@ -17,9 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sys
 import time
-from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -95,7 +93,7 @@ def ingest_sample(sample, provider, client, collection, log, pair_chunks=False):
 
     points = []
     bm25_docs = []
-    for i, (text, vec, rec) in enumerate(zip(texts, vectors, records), start=1):
+    for i, (text, vec, rec) in enumerate(zip(texts, vectors, records, strict=False), start=1):
         if not vec:
             continue
         points.append((i, vec, {"text": text, **rec}))
@@ -224,7 +222,7 @@ def main():
         if args.qa:
             qa = qa[:args.qa]
 
-        log(f"--- variant A: Recaller raw top-K ---")
+        log("--- variant A: Recaller raw top-K ---")
         a_stats, a_qa = run_variant(
             name="raw",
             recaller=recaller,
@@ -234,7 +232,7 @@ def main():
             limit=15,
             log=log,
         )
-        log(f"--- variant B: Recaller + full pipeline ---")
+        log("--- variant B: Recaller + full pipeline ---")
         b_stats, b_qa = run_variant(
             name="full_pipeline",
             recaller=recaller,
@@ -274,11 +272,11 @@ def main():
     log("\n=== FINAL ===")
     log(f"Variant A (raw):           {pct(all_a_stats)}")
     log(f"Variant B (full-pipeline): {pct(all_b_stats)}")
-    log(f"\nBy category — raw:")
+    log("\nBy category — raw:")
     for k, v in sorted(by_cat_a.items()):
         t = v["correct"] + v["partial"] + v["wrong"]
         log(f"  {k}: correct={v['correct']}/{t} partial={v['partial']}")
-    log(f"\nBy category — full pipeline:")
+    log("\nBy category — full pipeline:")
     for k, v in sorted(by_cat_b.items()):
         t = v["correct"] + v["partial"] + v["wrong"]
         log(f"  {k}: correct={v['correct']}/{t} partial={v['partial']}")
