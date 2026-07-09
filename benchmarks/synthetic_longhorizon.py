@@ -27,10 +27,9 @@ import argparse
 import json
 import os
 import random
-import sys
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean, median
@@ -142,7 +141,7 @@ def index_chunks(chunks: list[str], provider, store: VectorStore, batch: int = 6
             # Providers without batch API — fall back to single-item
             vectors = [provider.embed(t) for t in window]
         points: list[tuple[str, list[float], dict]] = []
-        for offset, (text, vec) in enumerate(zip(window, vectors)):
+        for offset, (text, vec) in enumerate(zip(window, vectors, strict=False)):
             if not vec:
                 continue
             turn = start + offset

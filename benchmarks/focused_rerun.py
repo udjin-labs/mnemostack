@@ -5,10 +5,14 @@ Much faster iteration loop for prompt tuning. Reuses ingestion per sample
 but only evaluates QA that previously failed (wrong or partial).
 """
 from __future__ import annotations
-import argparse, json, os, sys
+
+import argparse
+import json
+import os
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams
 
@@ -32,14 +36,17 @@ def parse_date(s):
 
 
 def ingest(sample, provider, client, collection, pair_chunks=True):
-    try: client.delete_collection(collection)
-    except Exception: pass
+    try:
+        client.delete_collection(collection)
+    except Exception:
+        pass
     client.create_collection(collection, vectors_config=VectorParams(size=provider.dimension, distance=Distance.COSINE))
     conv = sample['conversation']
     sess_keys = sorted([k for k in conv if k.startswith('session_') and not k.endswith('date_time')], key=lambda x: int(x.split('_')[1]))
     msgs, metas = [], []
     for skey in sess_keys:
-        if not isinstance(conv.get(skey), list): continue
+        if not isinstance(conv.get(skey), list):
+            continue
         sess_date = parse_date(conv.get(f'{skey}_date_time', ''))
         for msg in conv[skey]:
             msgs.append(f"[{sess_date.strftime('%Y-%m-%d')}] {msg['speaker']}: {msg['text']}")
@@ -52,8 +59,8 @@ def ingest(sample, provider, client, collection, pair_chunks=True):
     else:
         texts, records = msgs, metas
     vecs = provider.embed_batch(texts)
-    points = [(i, v, {'text': t, **r}) for i,(t,v,r) in enumerate(zip(texts,vecs,records),1) if v]
-    bm25 = [BM25Doc(id=i, text=t, payload={'text': t, **r}) for i,(t,v,r) in enumerate(zip(texts,vecs,records),1) if v]
+    points = [(i, v, {'text': t, **r}) for i,(t,v,r) in enumerate(zip(texts,vecs,records,strict=False),1) if v]
+    bm25 = [BM25Doc(id=i, text=t, payload={'text': t, **r}) for i,(t,v,r) in enumerate(zip(texts,vecs,records,strict=False),1) if v]
     store = VectorStore.__new__(VectorStore)
     store.collection = collection
     store.dimension = provider.dimension
@@ -66,10 +73,14 @@ def ingest(sample, provider, client, collection, pair_chunks=True):
 def evaluate(q, pred, truth, llm):
     p = f"Evaluate factual answer. Query: {q}\nGround truth: {truth}\nPredicted: {pred}\n\nRespond JSON only: " + '{"correct": true|false, "partial": true|false, "reason": "..."}'
     r = llm.generate(p, max_tokens=100).text.strip()
-    if r.startswith('```'): r = r.split('\n',1)[1] if '\n' in r else r[3:]
-    if r.endswith('```'): r = r[:-3]
-    try: return json.loads(r)
-    except Exception: return {'correct': truth.lower().strip() in pred.lower(), 'partial': False, 'reason': 'fallback'}
+    if r.startswith('```'):
+        r = r.split('\n',1)[1] if '\n' in r else r[3:]
+    if r.endswith('```'):
+        r = r[:-3]
+    try:
+        return json.loads(r)
+    except Exception:
+        return {'correct': truth.lower().strip() in pred.lower(), 'partial': False, 'reason': 'fallback'}
 
 
 def main():
@@ -85,7 +96,8 @@ def main():
         prev = json.load(f)
     failing = []
     for r in prev.get('per_qa', []):
-        if r['variant'] != args.variant: continue
+        if r['variant'] != args.variant:
+            continue
         label = 'correct' if r['correct'] else ('partial' if r['partial'] else 'wrong')
         if label in include:
             failing.append(r)
@@ -103,7 +115,8 @@ def main():
     by_sample = defaultdict(list)
     for r in failing:
         sid = q_to_sid.get(r['question'])
-        if sid: by_sample[sid].append(r)
+        if sid:
+            by_sample[sid].append(r)
 
     print(f'Total failing to rerun: {len(failing)} across {len(by_sample)} samples', flush=True)
 
@@ -124,7 +137,9 @@ def main():
         rec = Recaller(embedding_provider=provider, vector_store=store, bm25_docs=bm25)
         qe = QueryExpander(recaller=rec, llm=llm, n_variants=3) if use_expansion else None
         for r in rs:
-            q = r['question']; truth = str(r['ground_truth']); old = 'wrong' if not r['correct'] and not r['partial'] else 'partial'
+            q = r['question']
+            truth = str(r['ground_truth'])
+            old = 'wrong' if not r['correct'] and not r['partial'] else 'partial'
             raw = (qe.recall(q, limit=50) if qe else rec.recall(q, limit=50))
             mems = pipeline.apply(q, raw)[:20] if pipeline else raw[:20]
             ans = ag.generate(q, mems)
@@ -140,11 +155,14 @@ def main():
             print(f"     T: {truth[:80]}")
             print(f"     P: {ans.text[:80]}")
             per_qa.append({'question': q, 'category': r['category'], 'old': old, 'new': new, 'status': status, 'ground_truth': truth, 'predicted': ans.text, 'reason': ev.get('reason','')})
-        try: client.delete_collection(f'focused_{sid}')
-        except: pass
+        try:
+            client.delete_collection(f'focused_{sid}')
+        except Exception:
+            pass
 
-    print(f'\n=== SUMMARY ===')
-    for k, v in transitions.items(): print(f'  {k}: {v}')
+    print('\n=== SUMMARY ===')
+    for k, v in transitions.items():
+        print(f'  {k}: {v}')
     score = transitions['fixed'] - transitions['regressed']
     print(f'  NET: {score:+d} (fixed - regressed)')
     with open(args.output, 'w') as f:
