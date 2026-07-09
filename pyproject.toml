@@ -81,8 +81,19 @@ line-length = 100
 target-version = "py310"
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "B", "UP"]
+# W391 (blank line at EOF) is a ruff PREVIEW rule, so the "W" prefix alone
+# doesn't activate it. explicit-preview-rules keeps preview mode from pulling
+# in every other preview rule via the prefixes — only the ones named here.
+preview = true
+explicit-preview-rules = true
+select = ["E", "F", "W", "I", "B", "UP", "W391"]
 ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# Preview-mode F822 doesn't recognize the package's lazy PEP 562 re-exports
+# (__getattr__): every name in __all__ resolves at runtime, so these are
+# false positives, not missing exports.
+"src/mnemostack/__init__.py" = ["F822"]
 
 [tool.mypy]
 # 3.12, not our 3.10 floor: numpy >= 2.5 ships PEP 695 `type` statements in
