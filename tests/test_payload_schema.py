@@ -370,6 +370,7 @@ def test_synthesis_facts_and_timeline_respect_the_schema():
 
 def test_cmd_serve_threads_the_schema_into_server_config(monkeypatch, tmp_path):
     pytest.importorskip("fastapi")
+    pytest.importorskip("uvicorn")  # cmd_serve imports it before building the config
     import mnemostack.cli as cli
 
     cli._payload_schema.cache_clear()
