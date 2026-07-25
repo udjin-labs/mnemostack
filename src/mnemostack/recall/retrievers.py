@@ -42,6 +42,7 @@ from .validity import (
     graph_as_of_predicate,
     numeric_unit_for,
     parse_payload_instant,
+    parses_as_iso,
     to_utc_instant,
 )
 
@@ -225,7 +226,9 @@ def convert_timestamp_filter(
             # Integral instants emit as int so exact matches against int
             # payloads stay exact; fractional ones keep their float precision.
             return int(ts) if float(ts).is_integer() else ts
-        if is_num:  # iso collection, numeric caller value
+        # iso collection: a numeric value OR a numeric STRING ("1776254400")
+        # is cross-domain — an ISO-shaped string is native and stays verbatim.
+        if is_num or (isinstance(v, str) and not parses_as_iso(v)):
             dt = parse_payload_instant(v, numeric_unit="auto")
             return dt.isoformat() if dt is not None else v
         return v

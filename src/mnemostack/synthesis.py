@@ -183,15 +183,26 @@ def synthesize(
     )
     raw_results = [r for r in raw_results if _result_source_enabled(r, source_filter)]
 
-    # Schema resolution: explicit kwargs win; otherwise a SUPPLIED recaller
-    # already configured for a foreign collection carries the schema — the
-    # facts/timeline must read the same keys the retrieval used.
-    text_key = str(kwargs.get("text_key") or getattr(recaller, "text_key", "text"))
+    # Schema resolution: explicit kwargs win; otherwise the SUPPLIED recaller
+    # — or, in the documented retrievers=[...] construction, the first
+    # schema-aware direct retriever — carries the schema the retrieval used,
+    # and the facts/timeline must read the same keys.
+    schema_src: Any = recaller
+    if schema_src is None:
+        schema_src = next(
+            (
+                r
+                for r in (kwargs.get("retrievers") or [])
+                if getattr(r, "text_key", None) or getattr(r, "timestamp_key", None)
+            ),
+            None,
+        )
+    text_key = str(kwargs.get("text_key") or getattr(schema_src, "text_key", "text"))
     timestamp_key = str(
-        kwargs.get("timestamp_key") or getattr(recaller, "timestamp_key", "timestamp")
+        kwargs.get("timestamp_key") or getattr(schema_src, "timestamp_key", "timestamp")
     )
     timestamp_format = str(
-        kwargs.get("timestamp_format") or getattr(recaller, "timestamp_format", "iso")
+        kwargs.get("timestamp_format") or getattr(schema_src, "timestamp_format", "iso")
     )
     facts = _dedupe_facts(
         _facts_from_results(

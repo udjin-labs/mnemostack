@@ -574,6 +574,41 @@ def test_convert_filter_exact_cross_domain_becomes_degenerate_range():
     assert [h.text for h in hits] == ["april note"]
 
 
+def test_convert_filter_numeric_string_on_iso_collection():
+    from mnemostack.recall.retrievers import convert_timestamp_filter
+
+    # A JSON-string epoch on an ISO collection is cross-domain: it becomes a
+    # degenerate DatetimeRange (a string MatchValue could never equal RFC3339).
+    out = convert_timestamp_filter(
+        {"timestamp": str(_EPOCH)}, timestamp_key="timestamp", timestamp_format="iso"
+    )
+    cond = out["timestamp"]
+    assert isinstance(cond, dict) and cond["gte"] == cond["lte"]
+    assert cond["gte"].startswith("2026-04-15")
+    # A native ISO string still passes verbatim.
+    f = {"timestamp": "2026-04-15T12:00:00Z"}
+    assert convert_timestamp_filter(
+        f, timestamp_key="timestamp", timestamp_format="iso"
+    ) == f
+
+
+def test_synthesis_derives_schema_from_direct_retrievers():
+    # The documented retrievers=[...] construction (no recaller) must also
+    # carry the schema into facts/timeline.
+    from mnemostack.synthesis import synthesize
+
+    store = _foreign_store()
+    retr = VectorRetriever(
+        embedding=_FakeEmbedder(), vector_store=store, text_key="content",
+        timestamp_key="updated_at", timestamp_format="epoch",
+    )
+    result = synthesize("april", retrievers=[retr])
+    assert result.facts
+    assert all(f.timestamp is not None for f in result.facts)
+    assert all("content" not in f.metadata for f in result.facts)
+    assert result.timeline
+
+
 def test_answer_generator_derives_schema_from_recaller():
     from mnemostack.recall.answer import AnswerGenerator
 

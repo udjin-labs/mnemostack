@@ -40,6 +40,13 @@ def is_current(payload: dict[str, Any] | None) -> bool:
 _EPOCH_MS_THRESHOLD = 1e12
 
 
+def parses_as_iso(value: Any) -> bool:
+    """Whether ``value`` is an ISO-8601 instant STRING (the native domain of
+    an ``iso`` collection) — used to tell a same-domain value (pass through
+    verbatim) from a numeric-string epoch that needs conversion."""
+    return isinstance(value, str) and _to_instant(value) is not None
+
+
 def numeric_unit_for(timestamp_format: str) -> str:
     """The ``parse_payload_instant`` numeric unit for a configured
     ``timestamp_format``: an explicit format beats the magnitude heuristic."""
