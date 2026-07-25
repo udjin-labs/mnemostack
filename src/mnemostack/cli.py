@@ -123,7 +123,14 @@ _DOCTOR_MARKERS = {
 }
 
 
-def _doctor_qdrant(add, url: str, collection: str, timeout: int, expected_dim: int | None) -> None:
+def _doctor_qdrant(
+    add,
+    url: str,
+    collection: str,
+    timeout: int,
+    expected_dim: int | None,
+    text_search: str = "auto",
+) -> None:
     """Read-only Qdrant probe: reachability, collection, count, dimension match.
 
     Never calls ensure_collection — a diagnostic must not create a collection as
@@ -207,6 +214,40 @@ def _doctor_qdrant(add, url: str, collection: str, timeout: int, expected_dim: i
         add("qdrant", "warn", detail + " (empty — no data indexed)")
     else:
         add("qdrant", "ok", detail)
+    # Live readiness for the configured lexical arm — the enum being valid
+    # says nothing about the COLLECTION being ready; a green doctor followed
+    # by a permanently-degraded lexical arm is exactly the false signal a
+    # diagnostic exists to prevent.
+    if text_search == "sparse":
+        from mnemostack.vector.sparse import SPARSE_TEXT_VECTOR
+
+        sparse_spaces = getattr(info.config.params, "sparse_vectors", None) or {}
+        if SPARSE_TEXT_VECTOR in sparse_spaces:
+            add("qdrant.sparse_space", "ok", f"'{SPARSE_TEXT_VECTOR}' space present")
+        else:
+            add(
+                "qdrant.sparse_space",
+                "misconfig",
+                f"text_search=sparse but collection '{collection}' has no "
+                f"'{SPARSE_TEXT_VECTOR}' space",
+                "re-index under text_search=sparse (new collection) or run "
+                "`mnemostack sparse-backfill` after the space is added",
+            )
+    elif text_search == "lexical":
+        schema = getattr(info, "payload_schema", None) or {}
+        text_field = _payload_schema()[0]
+        field_info = schema.get(text_field)
+        if field_info is not None and "text" in str(
+            getattr(field_info, "data_type", field_info)
+        ).lower():
+            add("qdrant.text_index", "ok", f"full-text index on '{text_field}'")
+        else:
+            add(
+                "qdrant.text_index",
+                "misconfig",
+                f"text_search=lexical but no full-text index on '{text_field}'",
+                "run `mnemostack text-index` once against this collection",
+            )
 
 
 def _doctor_llm(add, name: str, model: str | None, live: bool) -> None:
@@ -1269,6 +1310,47 @@ def cmd_text_index(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sparse_backfill(args: argparse.Namespace) -> int:
+    """Write sparse text encodings onto every existing point (idempotent).
+
+    The migration path for enabling `recall.text_search: sparse` on an
+    already-populated collection: nothing is re-embedded — only the named
+    sparse vector is updated, batch by batch.
+    """
+    text_key = _payload_schema()[0]
+    store = VectorStore(
+        collection=args.collection,
+        dimension=1,
+        host=args.qdrant,
+        sparse_text=True,
+        text_key=text_key,
+    )
+    try:
+        if not store.collection_exists():
+            print(f"error: collection '{args.collection}' does not exist", file=sys.stderr)
+            return 1
+        store.ensure_collection()  # adds the sparse space if missing
+    except RuntimeError as e:
+        # ensure_collection's "backfill needed" refusal is exactly what this
+        # command exists to resolve — fall through to the backfill.
+        if "sparse-backfill" not in str(e):
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+    except Exception as e:  # noqa: BLE001
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    try:
+        updated = store.backfill_sparse_text()
+    except Exception as e:  # noqa: BLE001
+        print(f"error: sparse backfill failed: {e}", file=sys.stderr)
+        return 1
+    print(
+        f"sparse text encodings written onto {updated} point(s) of "
+        f"'{args.collection}' — `recall.text_search: sparse` is ready"
+    )
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """Diagnose a mnemostack deployment: config, dependencies, versions.
 
@@ -1359,7 +1441,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     # Qdrant (a hard recall dependency), read-only.
     expected_dim = provider.dimension if provider is not None else None
-    _doctor_qdrant(add, args.qdrant, args.collection, cfg.vector.health_timeout, expected_dim)
+    _doctor_qdrant(
+        add,
+        args.qdrant,
+        args.collection,
+        cfg.vector.health_timeout,
+        expected_dim,
+        text_search=cfg.recall.text_search,
+    )
 
     # LLM (optional — answer only) and graph (optional).
     _doctor_llm(add, cfg.llm.provider, cfg.llm.model, bool(getattr(args, "check_llm", False)))
@@ -1601,10 +1690,19 @@ def cmd_search(args: argparse.Namespace) -> int:
 def cmd_synthesize(args: argparse.Namespace) -> int:
     sources = list(args.source) if args.source else None
     source_filter = _normalize_source_filter(sources)
+    from mnemostack.config import resolve_text_search_mode
+
     provider = None
     store = None
-    if _source_enabled_for_cli("vector", source_filter) or _source_enabled_for_cli(
-        "temporal", source_filter
+    _needs_qdrant_lexical = _source_enabled_for_cli(
+        "bm25", source_filter
+    ) and resolve_text_search_mode(
+        _text_search_mode(), list(getattr(args, "bm25_path", []) or [])
+    ) in ("qdrant_bm25", "lexical")
+    if (
+        _source_enabled_for_cli("vector", source_filter)
+        or _source_enabled_for_cli("temporal", source_filter)
+        or _needs_qdrant_lexical
     ):
         provider = get_provider(args.provider, **model_kwargs(_embedding_model(args)))
         store = VectorStore(
@@ -1765,6 +1863,9 @@ def _normalize_source_filter(sources: list[str] | None) -> set[str] | None:
 
 
 def _source_enabled_for_cli(name: str, source_filter: set[str] | None) -> bool:
+    if source_filter is not None and "bm25" in source_filter:
+        # "bm25" selects the configured LEXICAL ARM, whichever mode it is.
+        source_filter = source_filter | {"qdrant_text", "sparse"}
     return source_filter is None or name in source_filter
 
 
@@ -2601,6 +2702,15 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     )
     p_text_index.set_defaults(func=cmd_text_index)
 
+    p_sparse_backfill = sub.add_parser(
+        "sparse-backfill",
+        parents=[common],
+        help="Write sparse text encodings onto every existing point — the "
+        "migration path for `recall.text_search: sparse` on a populated "
+        "collection (idempotent, nothing re-embedded)",
+    )
+    p_sparse_backfill.set_defaults(func=cmd_sparse_backfill)
+
     p_tenant_migrate = sub.add_parser(
         "tenant-migrate",
         parents=[common],
@@ -2921,7 +3031,7 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         "--source",
         action="append",
         choices=["vector", "bm25", "graph", "memgraph", "temporal"],
-        help="Retriever source to use (can be given multiple times; default: all available)",
+        help="Retriever source to use ('bm25' selects the CONFIGURED lexical arm — see recall.text_search) (can be given multiple times; default: all available)",
     )
     p_synthesize.add_argument(
         "--bm25-path",

@@ -226,7 +226,60 @@ class VectorStore:
                         f"({e}); re-create the collection (or re-index) to use "
                         "sparse text search"
                     ) from e
+                # The space now exists but EXISTING points carry no sparse
+                # vectors — sparse recall would silently see only future
+                # writes. Refuse to pretend the collection is sparse-ready.
+                if self.count() > 0:
+                    raise RuntimeError(
+                        f"collection '{self.collection}' gained the "
+                        f"'{SPARSE_TEXT_VECTOR}' space, but its existing points "
+                        "have no sparse vectors yet — run "
+                        "`mnemostack sparse-backfill` (or a full re-index) "
+                        "before using sparse text search"
+                    )
         return False
+
+    def backfill_sparse_text(self, batch_size: int = 256) -> int:
+        """Write the sparse text encoding onto EVERY existing point.
+
+        Scrolls the whole collection and updates only the named sparse vector
+        (``update_vectors`` — payloads and dense vectors untouched, nothing is
+        re-embedded). Idempotent; returns the number of points updated. This
+        is the migration path for enabling ``text_search: sparse`` on an
+        already-populated collection."""
+        if not self.sparse_text or self._sparse_encoder is None:
+            raise RuntimeError("backfill_sparse_text requires VectorStore(sparse_text=True)")
+        from qdrant_client.models import PointVectors
+
+        total = 0
+        offset = None
+        while True:
+            points, offset = self.client.scroll(
+                collection_name=self.collection,
+                limit=batch_size,
+                offset=offset,
+                with_payload=[self.text_key],
+                with_vectors=False,
+            )
+            if not points:
+                break
+            updates = []
+            for pt in points:
+                text = str((pt.payload or {}).get(self.text_key) or "")
+                indices, values = self._sparse_encoder.encode_document(text)
+                updates.append(
+                    PointVectors(
+                        id=pt.id,
+                        vector={
+                            SPARSE_TEXT_VECTOR: SparseVector(indices=indices, values=values)
+                        },
+                    )
+                )
+            self.client.update_vectors(collection_name=self.collection, points=updates)
+            total += len(updates)
+            if offset is None:
+                break
+        return total
 
     def _validate_dimension(self) -> None:
         info = self.client.get_collection(self.collection)
@@ -500,6 +553,11 @@ class VectorStore:
     ) -> None:
         """Merge payload keys into an existing point without re-embedding.
 
+        Under ``sparse_text=True``, editing the text field here leaves the
+        point's SPARSE encoding stale too (like the dense vector, it is only
+        rewritten on upsert) — re-upsert the point or run
+        ``backfill_sparse_text`` after bulk text edits.
+
         The vector is untouched — this is the cheap path for applying new
         payload fields (enrichment output, index_root) to already-indexed
         points. Merge semantics: keys not present in *payload* are kept.
@@ -772,6 +830,10 @@ class VectorStore:
             must.append(_tenant_condition(tenant))
         if hide_invalidated:
             must.append(_hide_invalidated_condition())
+        if text_any is not None and not text_any:
+            # An explicitly EMPTY gate is a caller bug: "match at least one of
+            # zero tokens" silently degrades to match-all — refuse loudly.
+            raise ValueError("text_any must contain at least one token (or be None)")
         if text_any:
             gate_key = text_any_key or self.text_key
             must.append(

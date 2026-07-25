@@ -670,6 +670,14 @@ arm; pick by collection size and whether you can re-index:
   a re-index.
 - All modes respect the tenant boundary and validity view exactly like dense
   search, and follow the configured payload schema.
+- **`sparse` writes are sync-only today**: `AsyncVectorStore` does not
+  maintain the sparse space — a deployment ingesting through the async store
+  under `text_search: sparse` would write dense-only points that never
+  surface from sparse recall. Ingest through the sync `VectorStore`/CLI, or
+  run `mnemostack sparse-backfill` after async writes.
+- Editing a chunk's text via `set_payload` (`index --refresh-payloads`)
+  leaves its sparse encoding stale (like the dense vector): re-upsert or run
+  `mnemostack sparse-backfill` after bulk text edits.
 
 ### Single-node vs distributed Qdrant
 

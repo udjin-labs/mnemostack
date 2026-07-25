@@ -133,7 +133,8 @@ names / numeric epoch timestamps; `timestamp_format` ∈ `iso|epoch|epoch_ms`),
 `auto|off|bm25|qdrant_bm25|lexical|sparse` — the mode names and their
 semantics are the stable contract; `QdrantTextRetriever` /
 `QdrantSparseRetriever` / `SparseTextEncoder` class shapes are 🟡
-experimental).
+experimental; `sparse` writes are maintained by the SYNC `VectorStore`
+only — `AsyncVectorStore` does not write sparse encodings).
 
 🟡 **Accepted but not yet wired** — present in the config schema, but the runtime
 does not consume them today, so don't depend on them until they are:

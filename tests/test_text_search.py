@@ -235,3 +235,139 @@ def test_cli_text_index_command(monkeypatch, capsys):
     rc = cli.cmd_text_index(argparse.Namespace(collection="ts", qdrant="http://x"))
     assert rc == 0
     assert "full-text index ensured" in capsys.readouterr().out
+
+
+# ---------- review-driven regressions ----------
+
+
+def test_synthesize_source_bm25_selects_the_configured_lexical_arm():
+    # The "--source bm25" umbrella: a sparse/lexical arm must survive BOTH
+    # filters (retriever-name and result-source) — it IS the lexical arm.
+    from mnemostack.recall.recaller import Recaller
+    from mnemostack.synthesis import _filter_recaller, synthesize
+
+    s = _store(sparse=True)
+    _seed(s)
+    r = QdrantSparseRetriever(vector_store=s)
+    rec = Recaller(retrievers=[r])
+    assert _filter_recaller(rec, {"bm25"}).retrievers  # not dropped
+    result = synthesize("postgres", sources=["bm25"], recaller=rec)
+    assert result.facts  # sparse-arm facts survive the result-source filter
+
+
+def test_sparse_enable_on_dense_collection_refuses_loudly():
+    # A dense-only collection can't silently masquerade as sparse-ready: the
+    # local client (like some servers) refuses to ADD the space post-hoc, and
+    # ensure_collection surfaces that instead of guessing.
+    dense = _store(sparse=False)
+    _seed(dense)
+    upgraded = VectorStore.__new__(VectorStore)
+    upgraded.collection = "ts"
+    upgraded.dimension = 4
+    upgraded.distance = Distance.COSINE
+    upgraded.client = dense.client
+    upgraded.sparse_text = True
+    upgraded.text_key = "text"
+    upgraded._sparse_encoder = SparseTextEncoder()
+    with pytest.raises(RuntimeError, match="sparse"):
+        upgraded.ensure_collection()
+
+
+def test_sparse_backfill_covers_preexisting_dense_only_points():
+    # The migration path: a collection that HAS the space but whose points
+    # were written dense-only (e.g. via a non-sparse writer) gets encodings
+    # for every point — nothing re-embedded.
+    sparse_store = _store(sparse=True)  # fresh collection WITH the space
+    dense_writer = VectorStore.__new__(VectorStore)
+    dense_writer.collection = "ts"
+    dense_writer.dimension = 4
+    dense_writer.distance = Distance.COSINE
+    dense_writer.client = sparse_store.client
+    dense_writer.sparse_text = False
+    dense_writer.text_key = "text"
+    dense_writer._sparse_encoder = None
+    _seed(dense_writer)  # dense-only points into the sparse-capable collection
+    assert sparse_store.sparse_search("postgres backup", limit=5) == []  # invisible
+    assert sparse_store.backfill_sparse_text() == 3
+    hits = sparse_store.sparse_search("postgres backup", limit=5)
+    assert [h.id for h in hits][:1] == [1]  # now fully covered
+
+
+def test_search_rejects_explicitly_empty_text_any():
+    s = _store()
+    _seed(s)
+    with pytest.raises(ValueError, match="text_any"):
+        s.search(_V1, limit=5, text_any=[])
+
+
+def test_cli_build_recaller_sparse_and_qdrant_bm25_modes(monkeypatch):
+    import argparse
+
+    import mnemostack.cli as cli
+
+    store = _store(sparse=True)
+    _seed(store)
+    monkeypatch.setattr(cli, "VectorStore", lambda **kw: store)
+    for mode, expected in (("sparse", "QdrantSparseRetriever"), ("qdrant_bm25", "BM25Retriever")):
+        monkeypatch.setenv("MNEMOSTACK_TEXT_SEARCH", mode)
+        cli._text_search_mode.cache_clear()
+        cli._payload_schema.cache_clear()
+        rec = cli._build_recaller(
+            argparse.Namespace(collection="ts", qdrant="http://x", bm25_path=[]),
+            _FakeEmbedder(),
+            store,
+        )
+        names = {type(r).__name__ for r in rec.retrievers}
+        assert expected in names, (mode, names)
+    cli._text_search_mode.cache_clear()
+    cli._payload_schema.cache_clear()
+
+
+def test_indexing_store_is_sparse_under_sparse_mode(monkeypatch):
+    import argparse
+
+    import mnemostack.cli as cli
+
+    captured = {}
+    monkeypatch.setattr(cli, "VectorStore", lambda **kw: captured.update(kw) or object())
+    monkeypatch.setenv("MNEMOSTACK_TEXT_SEARCH", "sparse")
+    cli._text_search_mode.cache_clear()
+    cli._payload_schema.cache_clear()
+    cli._indexing_store(
+        argparse.Namespace(collection="ts", qdrant="http://x"), _FakeEmbedder()
+    )
+    assert captured["sparse_text"] is True and captured["text_key"] == "text"
+    cli._text_search_mode.cache_clear()
+    cli._payload_schema.cache_clear()
+
+
+def test_doctor_reports_sparse_readiness(monkeypatch, capsys):
+    import argparse
+
+    import mnemostack.cli as cli
+
+    store = _store(sparse=True)  # collection HAS the sparse space
+    _seed(store)
+    monkeypatch.setenv("MNEMOSTACK_TEXT_SEARCH", "sparse")
+
+    class _FakeQC:
+        def __init__(self, *a, **k):
+            pass
+
+        def get_collections(self):
+            return store.client.get_collections()
+
+        def get_collection(self, name):
+            return store.client.get_collection("ts")
+
+    monkeypatch.setattr("qdrant_client.QdrantClient", _FakeQC)
+    cli._payload_schema.cache_clear()
+    cli.cmd_doctor(
+        argparse.Namespace(
+            json=True, provider="gemini", embedding_model=None,
+            qdrant="http://x", collection="ts",
+            memgraph_uri=None, graph_timeout=1.0, timeout=1,
+        )
+    )
+    out = capsys.readouterr().out
+    assert "sparse_space" in out
