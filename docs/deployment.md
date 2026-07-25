@@ -77,7 +77,7 @@ Save as `docker-compose.yml` and keep secrets in `.env` or your deployment secre
 ```yaml
 services:
   qdrant:
-    image: qdrant/qdrant:v1.12.6
+    image: qdrant/qdrant:v1.15.4
     restart: unless-stopped
     volumes:
       - qdrant_storage:/qdrant/storage
@@ -665,9 +665,18 @@ arm; pick by collection size and whether you can re-index:
   `mnemostack text-index` once (idempotent, non-destructive — safe on a
   mounted pre-existing collection).
 - `sparse` is the strongest lexical arm at scale: new collections indexed
-  under this mode get the sparse space automatically; switching an existing
-  deployment means a config-update attempt (fails loud where unsupported) or
-  a re-index.
+  under this mode get the sparse space automatically. Switching an existing
+  dense collection requires a **re-index into a collection created under
+  sparse mode** — Qdrant servers cannot add a new sparse space to an existing
+  collection (verified against v1.15.4; the attempt fails loudly, never
+  silently). `mnemostack sparse-backfill` is for the OTHER gap: a collection
+  that already has the space but holds points written dense-only (e.g.
+  through the async store) — it writes the missing encodings without
+  re-embedding anything.
+- Server version minimums for the new arms: full-text `MatchText` filtering
+  is long-standing, the sparse IDF modifier needs Qdrant server ≥ 1.10, and
+  the coverage check (`has_vector`) needs ≥ 1.13 — the compose example pins
+  `v1.15.4`, which is what this release is integration-tested against.
 - All modes respect the tenant boundary and validity view exactly like dense
   search, and follow the configured payload schema.
 - **`sparse` writes are sync-only today**: `AsyncVectorStore` does not
@@ -734,7 +743,7 @@ Before upgrade:
 Pin Qdrant versions in compose instead of using `latest` in production:
 
 ```yaml
-image: qdrant/qdrant:v1.12.6
+image: qdrant/qdrant:v1.15.4
 ```
 
 Read Qdrant release notes before upgrading. Test snapshots and collection compatibility on staging.
