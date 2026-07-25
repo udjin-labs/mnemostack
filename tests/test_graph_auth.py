@@ -243,7 +243,14 @@ def test_new_graph_params_are_appended_not_inserted():
     from mnemostack.recall.retrievers import MemgraphRetriever
 
     def _last(fn):
-        return list(inspect.signature(fn).parameters)[-1]
+        # The guard protects POSITIONAL compatibility — keyword-only params
+        # (which can never shift a positional caller) don't count as the tail.
+        params = [
+            name
+            for name, p in inspect.signature(fn).parameters.items()
+            if p.kind is not inspect.Parameter.KEYWORD_ONLY
+        ]
+        return params[-1]
 
     assert _last(build_full_pipeline) == "graph_database"
     assert _last(GraphResurrection.__init__) == "database"

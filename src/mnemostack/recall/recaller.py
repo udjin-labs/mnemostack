@@ -96,6 +96,10 @@ class Recaller:
         results = recaller.recall("query", limit=10)
     """
 
+    #: Class-level default so instances built without __init__ (test fakes,
+    #: __new__-style construction) still read the standard schema.
+    text_key = "text"
+
     # Default weight profiles per detected query shape. Picked conservatively
     # so that switching `adaptive_weights=True` cannot lower recall@K by more
     # than 1-2 percentage points on mixed workloads in our measurements, while
@@ -163,6 +167,7 @@ class Recaller:
         fallback_threshold: float = 0.35,
         mca_prefilter: bool = False,
         vector_floor: int = 0,
+        text_key: str = "text",
     ):
         """Two modes:
 
@@ -206,6 +211,11 @@ class Recaller:
         self.fallback_threshold = fallback_threshold
         self.mca_prefilter_enabled = mca_prefilter
         self.vector_floor = max(0, int(vector_floor))
+        #: Payload key holding the chunk text on the legacy vector paths
+        #: (_recall_once / search_many / vector-floor / fallback) — configurable
+        #: so recall works over a pre-existing collection's own schema.
+        #: Retrievers-mode sources carry their own text_key.
+        self.text_key = text_key
         self._query_expansion_cache: dict[str, list[str]] = {}
 
     # --- adaptive weight helpers ---
@@ -490,7 +500,7 @@ class Recaller:
                     results.append(
                         RecallResult(
                             id=item.id,
-                            text=payload.get("text", ""),
+                            text=payload.get(self.text_key, ""),
                             score=rrf_score,
                             payload=payload,
                             sources=self._sources_for(item, vector_hits, bm25_hits),
@@ -603,7 +613,7 @@ class Recaller:
             results.append(
                 RecallResult(
                     id=hit.id,
-                    text=payload.get("text", ""),
+                    text=payload.get(self.text_key, ""),
                     score=rrf_score,
                     payload=payload,
                     sources=["vector"],
@@ -929,7 +939,7 @@ class Recaller:
             candidates.append(
                 RecallResult(
                     id=hit.id,
-                    text=payload.get("text", ""),
+                    text=payload.get(self.text_key, ""),
                     score=hit.score,
                     payload=payload,
                     sources=["vector"],
@@ -1095,7 +1105,7 @@ class Recaller:
                 results.append(
                     RecallResult(
                         id=hit.id,
-                        text=payload.get("text", ""),
+                        text=payload.get(self.text_key, ""),
                         score=hit.score,
                         payload=payload,
                         sources=["vector"],

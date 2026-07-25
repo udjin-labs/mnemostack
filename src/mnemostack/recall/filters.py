@@ -48,7 +48,20 @@ def _in_range(value: Any, condition: dict[str, Any]) -> bool:
         if lte is not None and value > lte:
             return False
     except TypeError:
-        # Incomparable types (e.g. str payload vs numeric bound): cannot be
-        # proven inside the range — exclude.
-        return False
+        # Incomparable types — most commonly a TIME range crossing domains (an
+        # epoch-int payload vs an ISO-string bound, or vice versa, on a foreign
+        # collection). Before excluding, try to read all three as instants and
+        # compare on the time line; only when that fails too is the value
+        # genuinely unprovable inside the range.
+        from .validity import parse_payload_instant
+
+        v = parse_payload_instant(value)
+        g = parse_payload_instant(gte) if gte is not None else None
+        t = parse_payload_instant(lte) if lte is not None else None
+        if v is None or (gte is not None and g is None) or (lte is not None and t is None):
+            return False
+        if g is not None and v < g:
+            return False
+        if t is not None and v > t:
+            return False
     return True

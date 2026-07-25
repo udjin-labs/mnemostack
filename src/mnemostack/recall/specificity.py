@@ -136,6 +136,8 @@ def resolve_specificity(
     draft_answer: str,
     candidate_memories: Iterable[RecallResult | str],
     llm: LLMProvider,
+    *,
+    timestamp_key: str = "timestamp",
 ) -> str:
     """Rewrite a draft answer with exact names from candidate memories.
 
@@ -151,6 +153,7 @@ def resolve_specificity(
         draft_answer=draft_answer,
         placeholders=placeholders,
         candidate_memories=candidate_memories,
+        timestamp_key=timestamp_key,
     )
     try:
         resp = llm.generate(prompt, max_tokens=200)
@@ -183,8 +186,9 @@ def _build_specificity_prompt(
     draft_answer: str,
     placeholders: list[tuple[str, str]],
     candidate_memories: Iterable[RecallResult | str],
+    timestamp_key: str = "timestamp",
 ) -> str:
-    memories = _format_memories(candidate_memories)
+    memories = _format_memories(candidate_memories, timestamp_key=timestamp_key)
     placeholder_lines = "\n".join(
         f"- {placeholder}: {candidate_query}" for placeholder, candidate_query in placeholders
     )
@@ -207,7 +211,12 @@ RULES:
 REWRITTEN_ANSWER:"""
 
 
-def _format_memories(candidate_memories: Iterable[RecallResult | str]) -> str:
+def _format_memories(
+    candidate_memories: Iterable[RecallResult | str],
+    timestamp_key: str = "timestamp",
+) -> str:
+    from .validity import parse_payload_instant
+
     lines: list[str] = []
     for i, memory in enumerate(candidate_memories, 1):
         if isinstance(memory, str):
@@ -216,10 +225,14 @@ def _format_memories(candidate_memories: Iterable[RecallResult | str]) -> str:
             continue
         text = memory.text.strip().replace("\n", " ")
         source = memory.payload.get("source", "")
-        ts = memory.payload.get("timestamp", "")
+        ts = memory.payload.get(timestamp_key, "")
         prefix = f"[{i}]"
         if ts:
-            prefix = f"{prefix} [{ts[:10]}]"
+            # Tolerant of a foreign schema's epoch int/datetime — slicing a
+            # non-string would TypeError out of the whole answer path.
+            dt = parse_payload_instant(ts)
+            date_str = dt.strftime("%Y-%m-%d") if dt is not None else str(ts)[:10]
+            prefix = f"{prefix} [{date_str}]"
         if source:
             prefix = f"{prefix} ({source})"
         lines.append(f"{prefix} {text[:500]}")

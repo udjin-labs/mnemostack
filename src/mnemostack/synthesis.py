@@ -234,12 +234,19 @@ def _build_recaller_from_kwargs(
     retrievers: list[Retriever] = []
     embedding = kwargs.get("embedding_provider") or kwargs.get("embedding")
     vector_store = kwargs.get("vector_store")
+    # Payload schema of a pre-existing collection — same kwargs the other
+    # surfaces expose (text_key / timestamp_key / timestamp_format).
+    text_key = kwargs.get("text_key", "text")
+    timestamp_key = kwargs.get("timestamp_key", "timestamp")
+    timestamp_format = kwargs.get("timestamp_format", "iso")
     if (
         _source_enabled("vector", source_filter)
         and embedding is not None
         and vector_store is not None
     ):
-        retrievers.append(VectorRetriever(embedding=embedding, vector_store=vector_store))
+        retrievers.append(
+            VectorRetriever(embedding=embedding, vector_store=vector_store, text_key=text_key)
+        )
     if _source_enabled("bm25", source_filter) and kwargs.get("bm25_docs"):
         retrievers.append(BM25Retriever(docs=list(kwargs["bm25_docs"])))
     memgraph_uri = kwargs.get("memgraph_uri")
@@ -259,10 +266,18 @@ def _build_recaller_from_kwargs(
         and embedding is not None
         and vector_store is not None
     ):
-        retrievers.append(TemporalRetriever(embedding=embedding, vector_store=vector_store))
+        retrievers.append(
+            TemporalRetriever(
+                embedding=embedding,
+                vector_store=vector_store,
+                text_key=text_key,
+                timestamp_key=timestamp_key,
+                timestamp_format=timestamp_format,
+            )
+        )
     if not retrievers:
         return None
-    return Recaller(retrievers=retrievers)
+    return Recaller(retrievers=retrievers, text_key=text_key)
 
 
 def _source_enabled(name: str, source_filter: set[str] | None) -> bool:

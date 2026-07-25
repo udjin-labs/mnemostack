@@ -60,6 +60,10 @@ class GraphResurrection(Stage):
         timeout: float = 5.0,
         # database appended at the tail to preserve positional back-compat.
         database: str | None = None,
+        # Keyword-only: the positional surface above is frozen (see
+        # test_new_graph_params_are_appended_not_inserted).
+        *,
+        text_key: str = "text",
     ):
         self.uri = uri
         self.user = user
@@ -72,6 +76,9 @@ class GraphResurrection(Stage):
         self.timeout = timeout
         self._driver = driver
         self._own_driver = driver is None
+        #: Payload key for the dedup haystack — a foreign collection's own
+        #: text key, so resurrected seeds dedup against the real chunk text.
+        self.text_key = text_key
 
     def _get_driver(self):
         if self._driver is not None:
@@ -138,7 +145,8 @@ class GraphResurrection(Stage):
             extra_params["tenant"] = tenant
 
         existing = " ".join(
-            (r.text or "") + " " + (r.payload.get("text", "") if r.payload else "") for r in results
+            (r.text or "") + " " + (r.payload.get(self.text_key, "") if r.payload else "")
+            for r in results
         ).lower()
 
         seed_match: dict[str, dict[str, Any]] = {}

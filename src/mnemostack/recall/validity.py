@@ -34,6 +34,48 @@ def is_current(payload: dict[str, Any] | None) -> bool:
     return not payload.get(INVALIDATED_AT)
 
 
+#: Numeric epoch values at/above this are treated as MILLISECONDS: epoch
+#: seconds don't reach 1e12 until the year 33658, while every real ms epoch
+#: since 2001 exceeds it — so the two ranges cannot collide in practice.
+_EPOCH_MS_THRESHOLD = 1e12
+
+
+def parse_payload_instant(value: Any) -> datetime | None:
+    """Parse a payload timestamp of ANY common shape to an aware UTC datetime.
+
+    A pre-existing (foreign) collection stores time however its writer chose:
+    an ISO-8601 string, an aware/naive datetime, or a numeric epoch — seconds,
+    or milliseconds (detected by magnitude, see ``_EPOCH_MS_THRESHOLD``); a
+    numeric string (``"1719834000"``) parses like the number it holds. Returns
+    None for anything unparseable so callers degrade (skip the boost, drop the
+    prefix) instead of crashing recall on a schema they don't own. Booleans are
+    rejected explicitly — ``True`` is an ``int`` in Python but never a time.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, (int, float)):
+        v = float(value)
+        if v != v or v in (float("inf"), float("-inf")):  # NaN/inf: not a time
+            return None
+        if abs(v) >= _EPOCH_MS_THRESHOLD:
+            v /= 1000.0
+        try:
+            return datetime.fromtimestamp(v, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if isinstance(value, str):
+        dt = _to_instant(value)
+        if dt is not None:
+            return dt
+        try:
+            return parse_payload_instant(float(value))
+        except ValueError:
+            return None
+    return None
+
+
 def _to_instant(value: Any) -> datetime | None:
     """Parse an ISO-8601 date or datetime to an aware UTC datetime.
 

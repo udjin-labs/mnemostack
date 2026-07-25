@@ -32,13 +32,13 @@ from ..observability import counter
 from ..vector import VectorStore
 
 try:
-    from qdrant_client.models import DatetimeRange, FieldCondition, Filter
+    from qdrant_client.models import DatetimeRange, FieldCondition, Filter, Range
 except ImportError:  # pragma: no cover - qdrant-client is a runtime dependency
-    DatetimeRange = FieldCondition = Filter = None  # type: ignore[assignment,misc]
+    DatetimeRange = FieldCondition = Filter = Range = None  # type: ignore[assignment,misc]
 from .bm25 import BM25, BM25Doc, Tokenizer, tokenize
 from .filters import payload_matches
 from .recaller import RecallResult
-from .validity import graph_as_of_predicate, to_utc_instant
+from .validity import graph_as_of_predicate, parse_payload_instant, to_utc_instant
 
 logger = logging.getLogger(__name__)
 
@@ -71,9 +71,18 @@ class VectorRetriever(Retriever):
 
     name = "vector"
 
-    def __init__(self, embedding: EmbeddingProvider, vector_store: VectorStore):
+    def __init__(
+        self,
+        embedding: EmbeddingProvider,
+        vector_store: VectorStore,
+        text_key: str = "text",
+    ):
         self.embedding = embedding
         self.vector_store = vector_store
+        #: Payload key holding the chunk text — configurable so recall works
+        #: over a pre-existing collection's own schema (same knob as
+        #: ``bm25_docs_from_qdrant(text_key=...)``).
+        self.text_key = text_key
 
     #: Advertise validity-awareness so the recaller passes as_of/include_invalidated.
     #: The default view (hide invalidated) is pushed into Qdrant; as_of stays in
@@ -103,7 +112,7 @@ class VectorRetriever(Retriever):
             results.append(
                 RecallResult(
                     id=h.id,
-                    text=payload.get("text", ""),
+                    text=payload.get(self.text_key, ""),
                     score=h.score,
                     payload=payload,
                     sources=["vector"],
@@ -115,23 +124,36 @@ class VectorRetriever(Retriever):
 def _with_timestamp_range_filter(
     scroll_filter: Any | None,
     *,
-    newer_than: str | None,
-    older_than: str | None,
+    newer_than: str | int | float | None,
+    older_than: str | int | float | None,
+    timestamp_key: str = "timestamp",
 ) -> Any | None:
     if newer_than is None and older_than is None:
         return scroll_filter
     if Filter is None or FieldCondition is None or DatetimeRange is None:
         raise RuntimeError("qdrant-client is required for timestamp range filters")
 
-    timestamp_condition = FieldCondition(
-        key="timestamp",
-        # ISO strings are accepted by Qdrant at runtime; the stubs only admit
-        # datetime/date, hence the casts.
-        range=DatetimeRange(
-            gte=cast("datetime | None", newer_than),
-            lte=cast("datetime | None", older_than),
-        ),
-    )
+    # Numeric bounds → numeric Range (an epoch payload field never matches a
+    # DatetimeRange); string bounds → DatetimeRange, as before. Mirrors
+    # VectorStore._build_filter's dispatch.
+    if isinstance(newer_than, (int, float)) or isinstance(older_than, (int, float)):
+        timestamp_condition = FieldCondition(
+            key=timestamp_key,
+            range=Range(
+                gte=cast("float | None", newer_than),
+                lte=cast("float | None", older_than),
+            ),
+        )
+    else:
+        timestamp_condition = FieldCondition(
+            key=timestamp_key,
+            # ISO strings are accepted by Qdrant at runtime; the stubs only admit
+            # datetime/date, hence the casts.
+            range=DatetimeRange(
+                gte=cast("datetime | None", newer_than),
+                lte=cast("datetime | None", older_than),
+            ),
+        )
     if scroll_filter is None:
         return Filter(must=[timestamp_condition])
     if isinstance(scroll_filter, Filter):
@@ -150,9 +172,10 @@ def bm25_docs_from_qdrant(
     text_key: str = "text",
     id_prefix: str | None = None,
     payload_filter: Callable[[dict[str, Any]], bool] | None = None,
-    newer_than: str | None = None,
-    older_than: str | None = None,
+    newer_than: str | int | float | None = None,
+    older_than: str | int | float | None = None,
     tokenizer: Tokenizer | None = None,
+    timestamp_key: str = "timestamp",
 ) -> list[BM25Doc]:
     """Create BM25 documents from Qdrant payload text.
 
@@ -172,10 +195,13 @@ def bm25_docs_from_qdrant(
         text_key: Payload key containing searchable text.
         id_prefix: Optional prefix for generated BM25Doc IDs.
         payload_filter: Optional predicate to skip payloads client-side.
-        newer_than: Optional ISO timestamp; keep chunks with
-            ``payload["timestamp"] >= newer_than``.
-        older_than: Optional ISO timestamp; keep chunks with
-            ``payload["timestamp"] <= older_than``.
+        newer_than: Optional ISO timestamp — or a numeric epoch, for a
+            collection that stores numeric timestamps; keep chunks with
+            ``payload[timestamp_key] >= newer_than``.
+        older_than: Same shapes; keep chunks with
+            ``payload[timestamp_key] <= older_than``.
+        timestamp_key: Payload key the newer_than/older_than window filters
+            on (a pre-existing collection's own schema).
         tokenizer: Optional analyzer used to pre-tokenize document text. If you
             pass these docs to ``BM25``/``BM25Retriever`` with the same
             tokenizer directly, use ``retokenize=False`` there to avoid a
@@ -191,7 +217,7 @@ def bm25_docs_from_qdrant(
     docs: list[BM25Doc] = []
     offset = None
     effective_filter = _with_timestamp_range_filter(
-        scroll_filter, newer_than=newer_than, older_than=older_than
+        scroll_filter, newer_than=newer_than, older_than=older_than, timestamp_key=timestamp_key
     )
     while limit is None or len(docs) < limit:
         current_limit = batch_size if limit is None else min(batch_size, limit - len(docs))
@@ -265,9 +291,10 @@ class BM25Retriever(Retriever):
         text_key: str = "text",
         id_prefix: str | None = None,
         payload_filter: Callable[[dict[str, Any]], bool] | None = None,
-        newer_than: str | None = None,
-        older_than: str | None = None,
+        newer_than: str | int | float | None = None,
+        older_than: str | int | float | None = None,
         tokenizer: Tokenizer | None = None,
+        timestamp_key: str = "timestamp",
     ) -> BM25Retriever:
         """Build a BM25 retriever from Qdrant payload text.
 
@@ -317,6 +344,7 @@ class BM25Retriever(Retriever):
             newer_than=newer_than,
             older_than=older_than,
             tokenizer=tokenizer,
+            timestamp_key=timestamp_key,
         )
         return cls(docs=docs, tokenizer=tokenizer or tokenize, retokenize=False)
 
@@ -397,11 +425,13 @@ class HyDERetriever(Retriever):
         embedding: EmbeddingProvider,
         vector_store: VectorStore,
         max_tokens: int = 120,
+        text_key: str = "text",
     ):
         self.llm = llm
         self.embedding = embedding
         self.vector_store = vector_store
         self.max_tokens = max_tokens
+        self.text_key = text_key
 
     def _generate_hypothetical(self, query: str) -> str | None:
         try:
@@ -426,7 +456,7 @@ class HyDERetriever(Retriever):
         return [
             RecallResult(
                 id=h.id,
-                text=h.payload.get("text", ""),
+                text=h.payload.get(self.text_key, ""),
                 score=h.score,
                 payload=h.payload,
                 sources=["hyde"],
@@ -905,43 +935,41 @@ def _around_slack(q: str, match_start: int) -> int:
     return 3 if _AROUND_QUALIFIER_RE.search(prefix) else 1
 
 
-def _intersect_timestamp_window(
-    start: str,
-    end: str,
+def _intersect_instant_window(
+    start: datetime,
+    end: datetime,
     caller_condition: Any,
-) -> tuple[str, str] | None:
+) -> tuple[datetime, datetime] | None:
     """Intersect the parsed query window with a caller timestamp filter.
 
-    The caller condition may be a `{"gte"/"lte"}` range or an exact value
-    (treated as a degenerate range). Returns None when the intersection is
-    empty or the bounds are incomparable — the temporal retriever must then
-    contribute nothing rather than hits outside the caller's scope.
+    The caller condition may be a ``{"gte"/"lte"}`` range or an exact value
+    (a degenerate range), in ANY timestamp domain — ISO string, datetime, or
+    epoch number — since the comparison runs on the time line, not on raw
+    values (a mixed-domain compare used to TypeError the whole window away).
+    Returns None when the intersection is empty or a caller bound doesn't
+    parse as an instant — the temporal retriever must then contribute nothing
+    rather than hits outside a scope it couldn't understand.
     """
     if caller_condition is None:
         return start, end
     if isinstance(caller_condition, dict) and (
         "gte" in caller_condition or "lte" in caller_condition
     ):
-        gte = caller_condition.get("gte")
-        lte = caller_condition.get("lte")
+        raw_gte = caller_condition.get("gte")
+        raw_lte = caller_condition.get("lte")
     else:
-        gte = lte = caller_condition
-    try:
-        if gte is not None and gte > start:
-            start = gte
-        if lte is not None and lte < end:
-            end = lte
-        if start > end:
-            return None
-    except TypeError:
+        raw_gte = raw_lte = caller_condition
+    gte = parse_payload_instant(raw_gte) if raw_gte is not None else None
+    lte = parse_payload_instant(raw_lte) if raw_lte is not None else None
+    if (raw_gte is not None and gte is None) or (raw_lte is not None and lte is None):
+        return None
+    if gte is not None and gte > start:
+        start = gte
+    if lte is not None and lte < end:
+        end = lte
+    if start > end:
         return None
     return start, end
-
-
-def _strict_day_window(day: date) -> tuple[str, str]:
-    start = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
-    end = datetime.combine(day, datetime.max.time(), tzinfo=timezone.utc)
-    return start.isoformat(), end.isoformat()
 
 
 def _month_window(year: int, month: int) -> tuple[str, str]:
@@ -1134,15 +1162,41 @@ class TemporalRetriever(Retriever):
     DATE_FOCUSED_SCROLL_BUFFER_MIN = 25
     DATE_FOCUSED_SCROLL_BUFFER_MULTIPLIER = 5
 
+    #: Bound-emission formats for the Qdrant window filter. "iso" (default)
+    #: emits RFC3339 strings (DatetimeRange semantics); "epoch"/"epoch_ms"
+    #: emit numbers so the filter compares against a NUMERIC payload field —
+    #: a DatetimeRange never matches an epoch-int field, so a collection that
+    #: stores numeric timestamps would silently get zero temporal hits.
+    TIMESTAMP_FORMATS = ("iso", "epoch", "epoch_ms")
+
     def __init__(
         self,
         embedding: EmbeddingProvider,
         vector_store: VectorStore,
         extractor=extract_temporal_query,
+        text_key: str = "text",
+        timestamp_key: str = "timestamp",
+        timestamp_format: str = "iso",
     ):
+        if timestamp_format not in self.TIMESTAMP_FORMATS:
+            raise ValueError(
+                f"timestamp_format must be one of {self.TIMESTAMP_FORMATS}, "
+                f"got {timestamp_format!r}"
+            )
         self.embedding = embedding
         self.vector_store = vector_store
         self.extractor = extractor
+        self.text_key = text_key
+        self.timestamp_key = timestamp_key
+        self.timestamp_format = timestamp_format
+
+    def _bound(self, dt: datetime) -> str | int:
+        """A window bound in the collection's own timestamp domain."""
+        if self.timestamp_format == "epoch":
+            return int(dt.timestamp())
+        if self.timestamp_format == "epoch_ms":
+            return int(dt.timestamp() * 1000)
+        return dt.isoformat()
 
     def explain_empty(self, query: str) -> str | None:
         """Why an empty result is a degradation, not an absence of data.
@@ -1172,30 +1226,49 @@ class TemporalRetriever(Retriever):
         # Flat filter shape understood by VectorStore._build_filter. Preserve
         # caller filters (workspace/source/tenant scope) and INTERSECT any
         # caller timestamp constraint with the parsed query window — replacing
-        # it would return hits outside the caller's advertised scope.
+        # it would return hits outside the caller's advertised scope. The
+        # intersection runs on the TIME LINE (datetimes), so a caller bound in
+        # a different domain than the window (an epoch number vs the
+        # extractor's ISO strings) still intersects instead of erroring out;
+        # the final filter bounds are emitted in the collection's own domain
+        # (see _bound), so the Qdrant condition matches the field's real type.
         temporal_filter = dict(filters or {})
-        window = _intersect_timestamp_window(start, end, temporal_filter.get("timestamp"))
+        start_dt = parse_payload_instant(start)
+        end_dt = parse_payload_instant(end)
+        if start_dt is None or end_dt is None:  # defensive: the extractor emits ISO
+            return []
+        window = _intersect_instant_window(
+            start_dt, end_dt, temporal_filter.get(self.timestamp_key)
+        )
         if window is None:
             # The query's date range lies entirely outside the caller's
-            # timestamp scope — no temporal hit can satisfy both.
+            # timestamp scope (or that scope is unparseable — honoring an
+            # unknown constraint loosely could leak out-of-scope hits).
             return []
-        start, end = window
-        temporal_filter["timestamp"] = {"gte": start, "lte": end}
+        start_dt, end_dt = window
+        temporal_filter[self.timestamp_key] = {
+            "gte": self._bound(start_dt),
+            "lte": self._bound(end_dt),
+        }
 
         strict_bounds = None
         if date_focused and target_date is not None:
             # The target day must itself fall inside the (already intersected)
             # window; otherwise skip the date-focused pass and keep only the
             # in-scope neighborhood search below.
-            strict_start, strict_end = _strict_day_window(target_date)
-            strict_bounds = _intersect_timestamp_window(
-                strict_start, strict_end, {"gte": start, "lte": end}
+            day_start = datetime.combine(target_date, datetime.min.time(), tzinfo=timezone.utc)
+            day_end = datetime.combine(target_date, datetime.max.time(), tzinfo=timezone.utc)
+            strict_bounds = _intersect_instant_window(
+                day_start, day_end, {"gte": start_dt, "lte": end_dt}
             )
 
         if strict_bounds is not None and hasattr(self.vector_store, "scroll"):
             try:
                 strict_filter = dict(temporal_filter)
-                strict_filter["timestamp"] = {"gte": strict_bounds[0], "lte": strict_bounds[1]}
+                strict_filter[self.timestamp_key] = {
+                    "gte": self._bound(strict_bounds[0]),
+                    "lte": self._bound(strict_bounds[1]),
+                }
 
                 buffer_limit = max(
                     limit * self.DATE_FOCUSED_SCROLL_BUFFER_MULTIPLIER,
@@ -1233,8 +1306,8 @@ class TemporalRetriever(Retriever):
             except Exception as exc:  # noqa: BLE001 — defensive; log then fall back
                 logger.warning(
                     "TemporalRetriever: vector_store.scroll failed (window=%s..%s): %s",
-                    start,
-                    end,
+                    start_dt,
+                    end_dt,
                     exc,
                 )
 
@@ -1246,32 +1319,26 @@ class TemporalRetriever(Retriever):
         except Exception as exc:  # noqa: BLE001 — defensive; log instead of silent
             logger.warning(
                 "TemporalRetriever: vector_store.search failed (window=%s..%s): %s",
-                start,
-                end,
+                start_dt,
+                end_dt,
                 exc,
             )
             return []
         return self._to_results(hits)
 
-    @staticmethod
-    def _hit_date(hit) -> date | None:
-        timestamp = (hit.payload or {}).get("timestamp")
-        if isinstance(timestamp, datetime):
-            return (
-                timestamp.astimezone(timezone.utc).date() if timestamp.tzinfo else timestamp.date()
-            )
+    def _hit_date(self, hit) -> date | None:
+        timestamp = (hit.payload or {}).get(self.timestamp_key)
+        # Any domain the collection stores (ISO, datetime, epoch seconds/ms).
+        dt = parse_payload_instant(timestamp)
+        if dt is not None:
+            return dt.astimezone(timezone.utc).date()
         if isinstance(timestamp, str) and len(timestamp) >= 10:
+            # Historical fallback: a date-prefixed non-ISO string still yields
+            # its calendar date.
             try:
-                return (
-                    datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-                    .astimezone(timezone.utc)
-                    .date()
-                )
+                return date.fromisoformat(timestamp[:10])
             except ValueError:
-                try:
-                    return date.fromisoformat(timestamp[:10])
-                except ValueError:
-                    return None
+                return None
         return None
 
     @staticmethod
@@ -1284,9 +1351,8 @@ class TemporalRetriever(Retriever):
                 return True
         return False
 
-    @classmethod
     def _collect_sorted_date_focused_hits(
-        cls,
+        self,
         hits,
         target_date: date,
         *,
@@ -1299,49 +1365,39 @@ class TemporalRetriever(Retriever):
         for hit in hits:
             if hit.id in skip_ids:
                 continue
-            if exclude_target_date and cls._hit_date(hit) == target_date:
+            if exclude_target_date and self._hit_date(hit) == target_date:
                 continue
             collected.append(hit)
             if len(collected) >= max_hits:
                 break
-        return cls._sort_date_focused_hits(collected, target_date)
+        return self._sort_date_focused_hits(collected, target_date)
 
-    @classmethod
-    def _sort_date_focused_hits(cls, hits, target_date: date):
+    def _sort_date_focused_hits(self, hits, target_date: date):
         noon = datetime.combine(target_date, datetime.min.time(), tzinfo=timezone.utc) + timedelta(
             hours=12
         )
 
         def timestamp_distance(hit) -> float:
-            timestamp = (hit.payload or {}).get("timestamp")
-            if isinstance(timestamp, datetime):
-                dt = timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
-            elif isinstance(timestamp, str):
-                try:
-                    dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                except ValueError:
-                    return float("inf")
-            else:
+            # Any stored domain; unparseable sorts last, as before.
+            dt = parse_payload_instant((hit.payload or {}).get(self.timestamp_key))
+            if dt is None:
                 return float("inf")
             return abs((dt.astimezone(timezone.utc) - noon).total_seconds())
 
         return sorted(
             hits,
             key=lambda hit: (
-                cls._hit_date(hit) != target_date,
-                not cls._is_diary_source_for_date(hit, target_date),
+                self._hit_date(hit) != target_date,
+                not self._is_diary_source_for_date(hit, target_date),
                 timestamp_distance(hit),
             ),
         )
 
-    @staticmethod
-    def _to_results(hits) -> list[RecallResult]:
+    def _to_results(self, hits) -> list[RecallResult]:
         return [
             RecallResult(
                 id=h.id,
-                text=(h.payload or {}).get("text", ""),
+                text=(h.payload or {}).get(self.text_key, ""),
                 score=h.score,
                 payload={**(h.payload or {}), "temporal_match": True},
                 sources=["temporal"],

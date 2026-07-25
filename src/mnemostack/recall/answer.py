@@ -11,7 +11,6 @@ import json
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
@@ -23,17 +22,21 @@ from .specificity import detect_placeholders, resolve_specificity
 from .tokens import TokenCounter, apply_token_budget, sum_tokens
 
 
-def _display_ts(ts: str) -> str:
+def _display_ts(ts: Any) -> str:
     """Render a payload timestamp for the answer prompt.
 
-    Keeps the time of day when it carries information; a bare date or an
-    exact-midnight timestamp renders as date-only. Non-ISO strings fall back
-    to the first 10 characters (the historical behavior).
+    Accepts every shape a (possibly foreign) collection stores — ISO string,
+    datetime, epoch seconds/ms — an int must render as its date, not
+    AttributeError the whole /answer request. Keeps the time of day when it
+    carries information; a bare date or an exact-midnight timestamp renders as
+    date-only. Unparseable values fall back to their first 10 characters (the
+    historical behavior for non-ISO strings).
     """
-    try:
-        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    except ValueError:
-        return ts[:10]
+    from .validity import parse_payload_instant
+
+    dt = parse_payload_instant(ts)
+    if dt is None:
+        return str(ts)[:10]
     if (dt.hour, dt.minute, dt.second) == (0, 0, 0):
         return dt.strftime("%Y-%m-%d")
     return dt.strftime("%Y-%m-%d %H:%M")
@@ -422,6 +425,7 @@ class AnswerGenerator:
         list_extract_batch_size: int = 40,
         list_finalize: str = "llm",
         context_fields: Sequence[str] | None = None,
+        timestamp_key: str = "timestamp",
     ):
         self.llm = llm
         self.max_memories = max_memories
@@ -452,6 +456,9 @@ class AnswerGenerator:
         # retrieval ranks by text, so content that must be findable (image
         # captions and the like) belongs in the text itself.
         self.context_fields: tuple[str, ...] = tuple(context_fields or ())
+        #: Payload key holding each memory's timestamp — configurable so the
+        #: dated context prefix works over a pre-existing collection's schema.
+        self.timestamp_key = timestamp_key
         self.specificity_resolver = specificity_resolver
         self.inference_retry = inference_retry
         self.recaller = recaller
@@ -844,6 +851,7 @@ class AnswerGenerator:
             draft_answer=answer.text,
             candidate_memories=memories[: self.max_memories],
             llm=tracking_llm,
+            timestamp_key=self.timestamp_key,
         )
         if rewritten == answer.text:
             return answer
@@ -1035,7 +1043,7 @@ class AnswerGenerator:
             batch = memories[start : start + self.list_extract_batch_size]
             prompt = template.format(
                 n_memories=len(batch),
-                context=self._format_context(batch, self.context_fields),
+                context=self._format_context(batch, self.context_fields, self.timestamp_key),
                 query=query,
             )
             with histogram("mnemostack.answer.llm_latency_ms"):
@@ -1082,7 +1090,7 @@ class AnswerGenerator:
         memories: list[RecallResult],
         prompt_template: str,
     ) -> Answer:
-        context = self._format_context(memories, self.context_fields)
+        context = self._format_context(memories, self.context_fields, self.timestamp_key)
         prompt = prompt_template.format(
             context=context,
             query=query,
@@ -1125,12 +1133,13 @@ class AnswerGenerator:
     def _format_context(
         memories: list[RecallResult],
         context_fields: Sequence[str] = (),
+        timestamp_key: str = "timestamp",
     ) -> str:
         lines = []
         for i, m in enumerate(memories, 1):
             text = m.text.strip().replace("\n", " ")[:400]
             source = m.payload.get("source", "")
-            ts = m.payload.get("timestamp", "")
+            ts = m.payload.get(timestamp_key, "")
             prefix = f"[{i}]"
             if ts:
                 prefix = f"{prefix} [{_display_ts(ts)}]"
