@@ -371,3 +371,95 @@ def test_doctor_reports_sparse_readiness(monkeypatch, capsys):
     )
     out = capsys.readouterr().out
     assert "sparse_space" in out
+
+
+# ---------- PR round-1 regressions ----------
+
+
+def test_scroll_preserves_dense_vector_under_sparse_mode():
+    # A sparse_text collection stores NAMED vectors — a backup scroll must
+    # still carry the dense vector (tenant-export was silently losing it).
+    s = _store(sparse=True)
+    _seed(s)
+    hits = list(s.scroll(with_vectors=True, tenant="acme"))
+    assert hits and all(h.vector is not None and len(h.vector) == 4 for h in hits)
+
+
+def test_sparse_backfill_command_ignores_dense_dimension(monkeypatch, capsys):
+    import argparse
+
+    import mnemostack.cli as cli
+
+    # The command runs with a placeholder dimension=1 against a REAL 4-dim
+    # collection: the sparse-only ensure must not trip dense validation.
+    real = _store(sparse=True)
+    _seed(real)
+    cmd_store = VectorStore.__new__(VectorStore)
+    cmd_store.collection = "ts"
+    cmd_store.dimension = 1  # placeholder, exactly as cmd_sparse_backfill builds
+    cmd_store.distance = Distance.COSINE
+    cmd_store.client = real.client
+    cmd_store.sparse_text = True
+    cmd_store.text_key = "text"
+    cmd_store._sparse_encoder = SparseTextEncoder()
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: cmd_store)
+    cli._payload_schema.cache_clear()
+    rc = cli.cmd_sparse_backfill(argparse.Namespace(collection="ts", qdrant="http://x"))
+    assert rc == 0
+    assert "3 point(s)" in capsys.readouterr().out
+
+
+def test_gate_token_tiebreak_is_deterministic():
+    r = QdrantTextRetriever(
+        embedding=_FakeEmbedder(), vector_store=_store(), max_gate_tokens=3
+    )
+    toks = r._gate_tokens("zebra amber corgi delta")  # all len 5, no exacts
+    assert toks == sorted(toks)  # lexicographic among equal lengths — no hash order
+
+
+def test_qdrant_bm25_is_tenant_aware_but_file_bm25_is_not():
+    from mnemostack.recall.bm25 import BM25Doc
+    from mnemostack.recall.retrievers import BM25Retriever
+
+    s = _store()
+    _seed(s)
+    qdr = BM25Retriever.from_qdrant(s.client, "ts")
+    assert qdr.accepts_tenant is True
+    acme = qdr.search("postgres", tenant="acme")
+    assert acme and all(h.payload.get("tenant_id") == "acme" for h in acme)
+    assert 3 not in {h.id for h in acme}  # globex point excluded... (bm25 ids are str)
+    files = BM25Retriever(docs=[BM25Doc(id="1", text="postgres", payload={})])
+    assert files.accepts_tenant is False  # file corpus: no tenant metadata
+
+
+def test_cmd_serve_forwards_text_search(monkeypatch):
+    pytest.importorskip("fastapi")
+    pytest.importorskip("uvicorn")
+    import argparse
+
+    import mnemostack.cli as cli
+
+    monkeypatch.setenv("MNEMOSTACK_TEXT_SEARCH", "off")
+    cli._text_search_mode.cache_clear()
+    cli._payload_schema.cache_clear()
+    captured = {}
+
+    def _fake_build_app(cfg):
+        captured["cfg"] = cfg
+        raise SystemExit(0)
+
+    monkeypatch.setattr("mnemostack.server.build_app", _fake_build_app)
+    ns = argparse.Namespace(
+        provider="gemini", embedding_model=None, llm="gemini", llm_model=None,
+        collection="mt", qdrant="http://localhost:6333", memgraph_uri=None,
+        graph_timeout=5.0, graph_user=None, graph_password=None,
+        graph_database=None, bm25_path=[], vector_floor=0,
+        rerank_mode="relevant_only", token_budget=None, state_path=None,
+        auto_record_ior=False, host="127.0.0.1", port=8000, auth=False,
+        keys_file=None, quotas_file=None, qdrant_health_timeout=2,
+    )
+    with pytest.raises(SystemExit):
+        cli.cmd_serve(ns)
+    assert captured["cfg"].text_search == "off"
+    cli._text_search_mode.cache_clear()
+    cli._payload_schema.cache_clear()

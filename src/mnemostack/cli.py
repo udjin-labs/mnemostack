@@ -1329,13 +1329,10 @@ def cmd_sparse_backfill(args: argparse.Namespace) -> int:
         if not store.collection_exists():
             print(f"error: collection '{args.collection}' does not exist", file=sys.stderr)
             return 1
-        store.ensure_collection()  # adds the sparse space if missing
-    except RuntimeError as e:
-        # ensure_collection's "backfill needed" refusal is exactly what this
-        # command exists to resolve — fall through to the backfill.
-        if "sparse-backfill" not in str(e):
-            print(f"error: {e}", file=sys.stderr)
-            return 1
+        # Sparse-only ensure: this command runs with a placeholder dense
+        # dimension, so it must never trip the dense-dimension validation.
+        # The backfill-needed refusal is exactly what we're here to resolve.
+        store.ensure_sparse_space(require_backfilled=False)
     except Exception as e:  # noqa: BLE001
         print(f"error: {e}", file=sys.stderr)
         return 1
@@ -3633,6 +3630,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         text_key=_schema_text,
         timestamp_key=_schema_ts,
         timestamp_format=_schema_fmt,
+        text_search=_text_search_mode(),
     )
     app = build_app(cfg)
 
@@ -3737,6 +3735,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         text_key=_schema_text,
         timestamp_key=_schema_ts,
         timestamp_format=_schema_fmt,
+        text_search=_text_search_mode(),
     )
     app = build_inspector_app(cfg)
     admin = cfg.auth_enabled
@@ -3794,6 +3793,7 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
         text_key=_schema_text,
         timestamp_key=_schema_ts,
         timestamp_format=_schema_fmt,
+        text_search=_text_search_mode(),
     )
     mcp.run()
     return 0

@@ -207,37 +207,46 @@ class VectorStore:
             return True
         self._validate_dimension()
         if sparse_cfg is not None:
-            # An existing collection: adding a sparse space is a non-destructive
-            # config update on servers that support it; where it isn't, fail
-            # LOUD — a silently missing sparse space would make every
-            # sparse_search return nothing.
-            info = self.client.get_collection(self.collection)
-            existing_sparse = getattr(info.config.params, "sparse_vectors", None) or {}
-            if SPARSE_TEXT_VECTOR not in existing_sparse:
-                try:
-                    self.client.update_collection(
-                        collection_name=self.collection,
-                        sparse_vectors_config=sparse_cfg,
-                    )
-                except Exception as e:  # noqa: BLE001 — surface, don't guess
-                    raise RuntimeError(
-                        f"collection '{self.collection}' has no '{SPARSE_TEXT_VECTOR}' "
-                        "sparse space and the server refused to add one "
-                        f"({e}); re-create the collection (or re-index) to use "
-                        "sparse text search"
-                    ) from e
-                # The space now exists but EXISTING points carry no sparse
-                # vectors — sparse recall would silently see only future
-                # writes. Refuse to pretend the collection is sparse-ready.
-                if self.count() > 0:
-                    raise RuntimeError(
-                        f"collection '{self.collection}' gained the "
-                        f"'{SPARSE_TEXT_VECTOR}' space, but its existing points "
-                        "have no sparse vectors yet — run "
-                        "`mnemostack sparse-backfill` (or a full re-index) "
-                        "before using sparse text search"
-                    )
+            self.ensure_sparse_space()
         return False
+
+    def ensure_sparse_space(self, *, require_backfilled: bool = True) -> None:
+        """Ensure the existing collection carries the sparse text space.
+
+        A sparse-ONLY operation — no dense-dimension validation (the backfill
+        CLI runs with a placeholder dimension). Adding the space is a
+        non-destructive config update on servers that support it; where it
+        isn't, fail LOUD — a silently missing sparse space would make every
+        sparse_search return nothing. With ``require_backfilled`` (default),
+        adding the space to a POPULATED collection also refuses: the existing
+        points carry no sparse vectors yet, and sparse recall would silently
+        see only future writes."""
+        info = self.client.get_collection(self.collection)
+        existing_sparse = getattr(info.config.params, "sparse_vectors", None) or {}
+        if SPARSE_TEXT_VECTOR in existing_sparse:
+            return
+        try:
+            self.client.update_collection(
+                collection_name=self.collection,
+                sparse_vectors_config={
+                    SPARSE_TEXT_VECTOR: SparseVectorParams(modifier=Modifier.IDF)
+                },
+            )
+        except Exception as e:  # noqa: BLE001 — surface, don't guess
+            raise RuntimeError(
+                f"collection '{self.collection}' has no '{SPARSE_TEXT_VECTOR}' "
+                "sparse space and the server refused to add one "
+                f"({e}); re-create the collection (or re-index) to use "
+                "sparse text search"
+            ) from e
+        if require_backfilled and self.count() > 0:
+            raise RuntimeError(
+                f"collection '{self.collection}' gained the "
+                f"'{SPARSE_TEXT_VECTOR}' space, but its existing points "
+                "have no sparse vectors yet — run "
+                "`mnemostack sparse-backfill` (or a full re-index) "
+                "before using sparse text search"
+            )
 
     def backfill_sparse_text(self, batch_size: int = 256) -> int:
         """Write the sparse text encoding onto EVERY existing point.
@@ -399,10 +408,16 @@ class VectorStore:
             for pt in points:
                 pid = str(pt.id) if isinstance(pt.id, UUID) else pt.id
                 # qdrant-client types .vector as a union covering named/multi
-                # vectors; a single-vector collection yields a flat float list.
+                # vectors; a single-vector collection yields a flat float list,
+                # while a sparse_text collection yields a NAMED mapping whose
+                # "" entry is the dense vector — a backup (tenant-export) must
+                # not silently lose it.
+                raw_vec: Any = pt.vector
+                if isinstance(raw_vec, dict):
+                    raw_vec = raw_vec.get("")
                 vec = (
-                    cast("list[float]", list(pt.vector))
-                    if with_vectors and isinstance(pt.vector, list)
+                    cast("list[float]", list(raw_vec))
+                    if with_vectors and isinstance(raw_vec, list)
                     else None
                 )
                 yield Hit(id=pid, score=1.0, payload=pt.payload or {}, vector=vec)

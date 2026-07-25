@@ -429,7 +429,10 @@ class QdrantTextRetriever(Retriever):
             for t in tokenize(query)
             if len(t) >= self.min_token_len and t not in STOPWORDS
         ]
-        rest = sorted(set(words) - set(exact), key=len, reverse=True)
+        # Deterministic across processes: length desc (rarity proxy), then
+        # lexicographic — a set() sort keyed on length alone would let hash
+        # seeds decide which same-length tokens make the capped gate.
+        rest = sorted(set(words) - set(exact), key=lambda t: (-len(t), t))
         return (exact + rest)[: self.max_gate_tokens]
 
     def explain_empty(self, query: str) -> str | None:
@@ -538,6 +541,11 @@ class BM25Retriever(Retriever):
 
     name = "bm25"
 
+    #: File-corpus BM25 has no tenant metadata, so it cannot be tenant-scoped
+    #: (the recaller skips it under a tenant). A corpus scrolled from Qdrant
+    #: payloads DOES carry tenant_id — from_qdrant flips this on.
+    accepts_tenant = False
+
     def __init__(
         self,
         docs: list[BM25Doc],
@@ -546,6 +554,7 @@ class BM25Retriever(Retriever):
         retokenize: bool | None = None,
         timestamp_key: str = "timestamp",
         timestamp_format: str = "iso",
+        tenant_aware: bool = False,
     ):
         self.bm25 = BM25(docs, tokenizer=tokenizer, retokenize=retokenize)
         #: The one payload key whose range filters may cross timestamp domains
@@ -553,6 +562,10 @@ class BM25Retriever(Retriever):
         #: its numeric values are read.
         self.timestamp_key = timestamp_key
         self.timestamp_format = timestamp_format
+        if tenant_aware:
+            # Instance-level capability marker: the recaller only routes a
+            # tenant to retrievers that advertise it.
+            self.accepts_tenant = True
 
     @classmethod
     def from_qdrant(
@@ -629,17 +642,26 @@ class BM25Retriever(Retriever):
             retokenize=False,
             timestamp_key=timestamp_key,
             timestamp_format=timestamp_format,
+            # Qdrant payloads carry tenant_id — this corpus CAN be scoped.
+            tenant_aware=True,
         )
 
-    def search(self, query, limit=20, filters=None):
+    def search(self, query, limit=20, filters=None, tenant=None):
         # Same filter semantics the vector store applies natively. Without
         # this, a fused recall with filters= mixed unfiltered BM25 candidates
         # into the output — in multi-tenant deployments that is an isolation
-        # leak. The candidate set is restricted before the top-K cut.
+        # leak. The candidate set is restricted before the top-K cut. A tenant
+        # (only ever routed here when tenant_aware) is a STRICT gate: a doc
+        # without the tenant marker never matches a scoped search.
         predicate = None
-        if filters:
+        if filters or tenant is not None:
 
             def predicate(d: BM25Doc) -> bool:
+                if tenant is not None:
+                    from ..vector.qdrant import TENANT_ID_KEY
+
+                    if (d.payload or {}).get(TENANT_ID_KEY) != tenant:
+                        return False
                 return payload_matches(
                     d.payload,
                     filters,
