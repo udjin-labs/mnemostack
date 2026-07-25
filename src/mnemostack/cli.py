@@ -1424,13 +1424,14 @@ def _recall_for_cli(args: argparse.Namespace, recaller, query: str, limit: int):
             include_invalidated=include_invalidated,
             as_of=as_of,
         )
-    _text_key, _ts_key, _ = _payload_schema()
+    _text_key, _ts_key, _ts_fmt = _payload_schema()
     pipeline = build_full_pipeline(
         state_store=FileStateStore(default_state_path()),
         graph_uri=getattr(args, "memgraph_uri", None) or None,
         graph_timeout=getattr(args, "graph_timeout", 5.0),
         text_key=_text_key,
         timestamp_key=_ts_key,
+        timestamp_format=_ts_fmt,
         **{f"graph_{k}": v for k, v in _graph_auth(args).items()},
     )
     reranker = None
@@ -1613,6 +1614,7 @@ def cmd_answer(args: argparse.Namespace) -> int:
         "llm": llm,
         "confidence_threshold": args.min_confidence,
         "timestamp_key": _payload_schema()[1],
+        "timestamp_format": _payload_schema()[2],
     }
     if getattr(args, "query_expansion", False):
         answer_generator_kwargs.update(
@@ -1807,6 +1809,7 @@ def _build_recaller(
         vector_floor=max(0, int(getattr(args, "vector_floor", 0))),
         text_key=text_key,
         timestamp_key=timestamp_key,
+        timestamp_format=timestamp_format,
     )
 
 

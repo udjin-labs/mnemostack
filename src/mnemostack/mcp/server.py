@@ -222,6 +222,7 @@ def build_server(
             vector_floor=max(0, int(vector_floor)),
             text_key=text_key,
             timestamp_key=timestamp_key,
+            timestamp_format=timestamp_format,
         )
 
     def _get_recaller():
@@ -234,6 +235,7 @@ def build_server(
                 llm=get_llm(llm_provider, **model_kwargs(llm_model)),
                 recaller=_get_recaller(),
                 timestamp_key=timestamp_key,
+                timestamp_format=timestamp_format,
             ),
         )
 
@@ -253,6 +255,7 @@ def build_server(
                 graph_timeout=graph_timeout,
                 text_key=text_key,
                 timestamp_key=timestamp_key,
+                timestamp_format=timestamp_format,
             ),
         )
 
@@ -309,6 +312,7 @@ def build_server(
                 graph_uri=None,
                 text_key=text_key,
                 timestamp_key=timestamp_key,
+                timestamp_format=timestamp_format,
             )
         return _components["feedback_pipeline"]
 
@@ -829,6 +833,9 @@ def main() -> None:
         state_path=os.environ.get("MNEMOSTACK_STATE_PATH"),
         vector_floor=max(0, int(cfg.recall.vector_floor)),
         rerank_mode=cfg.recall.rerank_mode,
+        text_key=cfg.recall.text_key,
+        timestamp_key=cfg.recall.timestamp_key,
+        timestamp_format=cfg.recall.timestamp_format,
         token_budget=cfg.recall.token_budget,
         auth_enabled=auth_enabled,
         api_key=os.environ.get("MNEMOSTACK_API_KEY") or None,

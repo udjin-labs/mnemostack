@@ -17,6 +17,7 @@ def payload_matches(
     filters: dict[str, Any] | None,
     *,
     timestamp_key: str = "timestamp",
+    numeric_unit: str = "auto",
 ) -> bool:
     """True when *payload* satisfies every condition in *filters*.
 
@@ -45,37 +46,53 @@ def payload_matches(
         candidates = value if isinstance(value, list) else [value]
         if isinstance(condition, dict) and ("gte" in condition or "lte" in condition):
             instant_ok = key == timestamp_key
-            if not any(_in_range(c, condition, instant_ok=instant_ok) for c in candidates):
+            if not any(
+                _in_range(c, condition, instant_ok=instant_ok, numeric_unit=numeric_unit)
+                for c in candidates
+            ):
                 return False
         elif condition not in candidates:
             return False
     return True
 
 
-def _in_range(value: Any, condition: dict[str, Any], *, instant_ok: bool = False) -> bool:
+def _in_range(
+    value: Any,
+    condition: dict[str, Any],
+    *,
+    instant_ok: bool = False,
+    numeric_unit: str = "auto",
+) -> bool:
     gte = condition.get("gte")
     lte = condition.get("lte")
+    if instant_ok:
+        # The timestamp field compares ON THE TIME LINE whenever value and
+        # bounds all parse as instants — not merely on TypeError: two STRINGS
+        # from different domains (an ISO payload vs a numeric-string bound)
+        # compare lexicographically without raising, silently passing scope
+        # they shouldn't. Unparseable pieces fall through to the native
+        # compare below (preserving plain string/number semantics).
+        from .validity import parse_payload_instant
+
+        v = parse_payload_instant(value, numeric_unit=numeric_unit)
+        g = parse_payload_instant(gte, numeric_unit=numeric_unit) if gte is not None else None
+        t = parse_payload_instant(lte, numeric_unit=numeric_unit) if lte is not None else None
+        if (
+            v is not None
+            and (gte is None or g is not None)
+            and (lte is None or t is not None)
+        ):
+            if g is not None and v < g:
+                return False
+            if t is not None and v > t:
+                return False
+            return True
     try:
         if gte is not None and value < gte:
             return False
         if lte is not None and value > lte:
             return False
     except TypeError:
-        # Incomparable types. For the timestamp field ONLY (instant_ok), this
-        # is most commonly a TIME range crossing domains — try to read all
-        # three as instants and compare on the time line. Any other field
-        # keeps the strict exclusion: cannot be proven inside the range.
-        if not instant_ok:
-            return False
-        from .validity import parse_payload_instant
-
-        v = parse_payload_instant(value)
-        g = parse_payload_instant(gte) if gte is not None else None
-        t = parse_payload_instant(lte) if lte is not None else None
-        if v is None or (gte is not None and g is None) or (lte is not None and t is None):
-            return False
-        if g is not None and v < g:
-            return False
-        if t is not None and v > t:
-            return False
+        # Incomparable types: cannot be proven inside the range — exclude.
+        return False
     return True

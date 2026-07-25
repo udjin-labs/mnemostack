@@ -47,6 +47,7 @@ def build_full_pipeline(
     *,
     text_key: str = "text",
     timestamp_key: str = "timestamp",
+    timestamp_format: str = "iso",
 ) -> Pipeline:
     """Build the full 8-stage reranking pipeline.
 
@@ -90,9 +91,21 @@ def build_full_pipeline(
         stages.append(QLearningReranker(state_store=store))
 
     if enable_curiosity:
-        stages.append(CuriosityBoost(state_store=store, timestamp_key=timestamp_key))
+        stages.append(
+            CuriosityBoost(
+                state_store=store,
+                timestamp_key=timestamp_key,
+                timestamp_format=timestamp_format,
+            )
+        )
 
-    stages.append(FreshnessBlend(weight=freshness_weight, timestamp_key=timestamp_key))
+    stages.append(
+        FreshnessBlend(
+            weight=freshness_weight,
+            timestamp_key=timestamp_key,
+            timestamp_format=timestamp_format,
+        )
+    )
 
     if enable_ior:
         stages.append(InhibitionOfReturn(state_store=store))
@@ -122,6 +135,7 @@ def build_stateless_pipeline(
     rescue_boost: float = 0.5,
     *,
     timestamp_key: str = "timestamp",
+    timestamp_format: str = "iso",
 ) -> Pipeline:
     """Minimal pipeline with stateless stages only.
 
@@ -137,6 +151,12 @@ def build_stateless_pipeline(
     ]
     if hub_degrees:
         stages.append(HubDampen(hub_degrees=hub_degrees))
-    stages.append(FreshnessBlend(weight=freshness_weight, timestamp_key=timestamp_key))
+    stages.append(
+        FreshnessBlend(
+            weight=freshness_weight,
+            timestamp_key=timestamp_key,
+            timestamp_format=timestamp_format,
+        )
+    )
     stages.append(ExactTokenProtection())
     return Pipeline(stages)

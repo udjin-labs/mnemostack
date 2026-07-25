@@ -183,17 +183,27 @@ def synthesize(
     )
     raw_results = [r for r in raw_results if _result_source_enabled(r, source_filter)]
 
+    # Schema resolution: explicit kwargs win; otherwise a SUPPLIED recaller
+    # already configured for a foreign collection carries the schema — the
+    # facts/timeline must read the same keys the retrieval used.
+    text_key = str(kwargs.get("text_key") or getattr(recaller, "text_key", "text"))
+    timestamp_key = str(
+        kwargs.get("timestamp_key") or getattr(recaller, "timestamp_key", "timestamp")
+    )
+    timestamp_format = str(
+        kwargs.get("timestamp_format") or getattr(recaller, "timestamp_format", "iso")
+    )
     facts = _dedupe_facts(
         _facts_from_results(
             raw_results,
-            text_key=str(kwargs.get("text_key", "text")),
-            timestamp_key=str(kwargs.get("timestamp_key", "timestamp")),
+            text_key=text_key,
+            timestamp_key=timestamp_key,
         ),
         max_results=max_results,
     )
     if len(facts) >= int(kwargs.get("cluster_min_results", 8)):
         _assign_subtopics(facts, entity)
-    timeline = _timeline(facts)
+    timeline = _timeline(facts, timestamp_format)
     related_entities = _related_entities(entity, raw_results, kwargs)
     summary = _summarize(entity, facts, related_entities, kwargs) if llm_summarize else None
 
@@ -283,7 +293,12 @@ def _build_recaller_from_kwargs(
         )
     if not retrievers:
         return None
-    return Recaller(retrievers=retrievers, text_key=text_key, timestamp_key=timestamp_key)
+    return Recaller(
+        retrievers=retrievers,
+        text_key=text_key,
+        timestamp_key=timestamp_key,
+        timestamp_format=timestamp_format,
+    )
 
 
 def _source_enabled(name: str, source_filter: set[str] | None) -> bool:
@@ -470,20 +485,21 @@ def _tokens(text: str) -> list[str]:
     return re.findall(r"[\w@-]+", text.lower(), flags=re.UNICODE)
 
 
-def _timeline(facts: list[SynthesisFact]) -> list[SynthesisFact]:
+def _timeline(facts: list[SynthesisFact], timestamp_format: str = "iso") -> list[SynthesisFact]:
     stamped = [f for f in facts if f.timestamp]
-    return sorted(stamped, key=lambda f: _timestamp_sort_key(f.timestamp))
+    return sorted(stamped, key=lambda f: _timestamp_sort_key(f.timestamp, timestamp_format))
 
 
-def _timestamp_sort_key(timestamp: str | None) -> tuple[int, str]:
+def _timestamp_sort_key(timestamp: str | None, timestamp_format: str = "iso") -> tuple[int, str]:
     if not timestamp:
         return (1, "")
     raw = timestamp.strip()
-    # Any stored domain (ISO, numeric epoch string) sorts chronologically; a
-    # non-instant string keeps its raw lexicographic slot, as before.
-    from .recall.validity import parse_payload_instant
+    # Any stored domain (ISO, numeric epoch string) sorts chronologically —
+    # numerics read in the CONFIGURED unit; a non-instant string keeps its raw
+    # lexicographic slot, as before.
+    from .recall.validity import numeric_unit_for, parse_payload_instant
 
-    dt = parse_payload_instant(raw)
+    dt = parse_payload_instant(raw, numeric_unit=numeric_unit_for(timestamp_format))
     if dt is not None:
         return (0, dt.isoformat())
     return (0, raw)

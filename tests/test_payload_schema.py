@@ -402,6 +402,102 @@ def test_cmd_serve_threads_the_schema_into_server_config(monkeypatch, tmp_path):
     cli._payload_schema.cache_clear()
 
 
+def test_parse_payload_instant_configured_unit_beats_heuristic():
+    # 86400000 = 1970-01-02 in ms, but a plausible 1972 as seconds — only the
+    # CONFIGURED unit can disambiguate early millisecond epochs.
+    dt = parse_payload_instant(86400000, numeric_unit="ms")
+    assert dt is not None and dt.strftime("%Y-%m-%d") == "1970-01-02"
+    dt = parse_payload_instant(86400000, numeric_unit="s")
+    assert dt is not None and dt.year == 1972  # explicit seconds honored too
+    from mnemostack.recall.validity import numeric_unit_for
+
+    assert numeric_unit_for("epoch_ms") == "ms"
+    assert numeric_unit_for("epoch") == "s"
+    assert numeric_unit_for("iso") == "auto"
+
+
+def test_temporal_bound_rounds_inward_on_fractional_edges():
+    # int() truncation of a fractional bound WIDENS the window: gte .5 must
+    # round UP, lte .5 must round DOWN — never admit the excluded half-second.
+    r = TemporalRetriever(
+        embedding=_FakeEmbedder(),
+        vector_store=_foreign_store(),
+        timestamp_format="epoch",
+    )
+    half = datetime(2026, 4, 15, 12, 0, 0, 500000, tzinfo=timezone.utc)
+    assert r._bound(half, "gte") == int(half.timestamp()) + 1  # rounds up
+    assert r._bound(half, "lte") == int(half.timestamp())  # rounds down
+    whole = datetime(2026, 4, 15, 12, tzinfo=timezone.utc)
+    assert r._bound(whole, "gte") == r._bound(whole, "lte")  # exact unchanged
+
+
+def test_filters_cross_domain_strings_compare_as_instants():
+    # Two STRINGS from different domains compare lexicographically without a
+    # TypeError — the timestamp key must compare on the time line instead:
+    # an ISO 2025 payload is NOT >= a numeric-string bound meaning Apr 2026.
+    assert not payload_matches(
+        {"timestamp": "2025-01-01T00:00:00Z"},
+        {"timestamp": {"gte": str(_EPOCH)}},
+    )
+    assert payload_matches(
+        {"timestamp": "2026-05-01T00:00:00Z"},
+        {"timestamp": {"gte": str(_EPOCH)}},
+    )
+
+
+def test_mcp_standalone_main_threads_the_schema(monkeypatch):
+    pytest.importorskip("mcp")
+    import mnemostack.mcp.server as mcp_mod
+
+    monkeypatch.setenv("MNEMOSTACK_TEXT_KEY", "content")
+    monkeypatch.setenv("MNEMOSTACK_TIMESTAMP_KEY", "updated_at")
+    monkeypatch.setenv("MNEMOSTACK_TIMESTAMP_FORMAT", "epoch")
+    captured = {}
+
+    class _FakeServer:
+        def run(self):
+            pass
+
+    def _fake_build_server(**kwargs):
+        captured.update(kwargs)
+        return _FakeServer()
+
+    monkeypatch.setattr(mcp_mod, "build_server", _fake_build_server)
+    mcp_mod.main()
+    assert captured["text_key"] == "content"
+    assert captured["timestamp_key"] == "updated_at"
+    assert captured["timestamp_format"] == "epoch"
+
+
+def test_synthesis_derives_schema_from_a_supplied_recaller():
+    # A caller passing a Recaller already configured for a foreign collection
+    # (as the CLI does) must not have to repeat the keys — the facts/timeline
+    # read the recaller's schema.
+    from mnemostack.recall.recaller import RecallResult
+    from mnemostack.synthesis import synthesize
+
+    class _SchemaRecaller:
+        text_key = "content"
+        timestamp_key = "updated_at"
+        timestamp_format = "epoch"
+        retrievers: list = []
+
+        def recall(self, query, limit=10, filters=None):
+            return [
+                RecallResult(
+                    id=1,
+                    text="acme launched the beta",
+                    score=0.9,
+                    payload={"content": "acme launched the beta", "updated_at": _EPOCH},
+                )
+            ]
+
+    result = synthesize("acme", recaller=_SchemaRecaller())
+    assert result.facts and result.facts[0].timestamp == str(_EPOCH)  # key was read
+    assert all("content" not in f.metadata for f in result.facts)
+    assert result.timeline  # epoch timestamp sorted, not dropped
+
+
 def test_cli_payload_schema_warns_on_broken_config(monkeypatch, tmp_path, capsys):
     import mnemostack.cli as cli
     from mnemostack.config import Config

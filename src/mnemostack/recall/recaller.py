@@ -18,7 +18,7 @@ from .mca_prefilter import mca_prefilter as run_mca_prefilter
 from .query_expansion import expand_query
 from .tokens import TokenCounter, apply_token_budget
 from .trace import RecallTrace, RetrieverTrace
-from .validity import filter_by_tenant, filter_by_validity, keep_payload
+from .validity import filter_by_tenant, filter_by_validity, keep_payload, numeric_unit_for
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +100,7 @@ class Recaller:
     #: __new__-style construction) still read the standard schema.
     text_key = "text"
     timestamp_key = "timestamp"
+    timestamp_format = "iso"
 
     # Default weight profiles per detected query shape. Picked conservatively
     # so that switching `adaptive_weights=True` cannot lower recall@K by more
@@ -170,6 +171,7 @@ class Recaller:
         vector_floor: int = 0,
         text_key: str = "text",
         timestamp_key: str = "timestamp",
+        timestamp_format: str = "iso",
     ):
         """Two modes:
 
@@ -219,6 +221,7 @@ class Recaller:
         #: Retrievers-mode sources carry their own text_key.
         self.text_key = text_key
         self.timestamp_key = timestamp_key
+        self.timestamp_format = timestamp_format
         self._query_expansion_cache: dict[str, list[str]] = {}
 
     # --- adaptive weight helpers ---
@@ -450,7 +453,12 @@ class Recaller:
                 if filters:
 
                     def predicate(d: BM25Doc) -> bool:
-                        return payload_matches(d.payload, filters, timestamp_key=self.timestamp_key)
+                        return payload_matches(
+                            d.payload,
+                            filters,
+                            timestamp_key=self.timestamp_key,
+                            numeric_unit=numeric_unit_for(self.timestamp_format),
+                        )
 
                 with histogram("mnemostack.recall.bm25_latency_ms"):
                     bm25_hits = self.bm25.search(query, limit=bm25_fetch, predicate=predicate)
@@ -1073,7 +1081,12 @@ class Recaller:
         if bm25 is None:
             return []
         return run_mca_prefilter(
-            query, bm25, limit=limit, filters=filters, timestamp_key=self.timestamp_key
+            query,
+            bm25,
+            limit=limit,
+            filters=filters,
+            timestamp_key=self.timestamp_key,
+            numeric_unit=numeric_unit_for(self.timestamp_format),
         )
 
     def _vector_fallback_hits(

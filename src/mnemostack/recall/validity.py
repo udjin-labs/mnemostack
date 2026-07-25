@@ -40,16 +40,30 @@ def is_current(payload: dict[str, Any] | None) -> bool:
 _EPOCH_MS_THRESHOLD = 1e12
 
 
-def parse_payload_instant(value: Any) -> datetime | None:
+def numeric_unit_for(timestamp_format: str) -> str:
+    """The ``parse_payload_instant`` numeric unit for a configured
+    ``timestamp_format``: an explicit format beats the magnitude heuristic."""
+    return {"epoch": "s", "epoch_ms": "ms"}.get(timestamp_format, "auto")
+
+
+def parse_payload_instant(value: Any, *, numeric_unit: str = "auto") -> datetime | None:
     """Parse a payload timestamp of ANY common shape to an aware UTC datetime.
 
     A pre-existing (foreign) collection stores time however its writer chose:
-    an ISO-8601 string, an aware/naive datetime, or a numeric epoch — seconds,
-    or milliseconds (detected by magnitude, see ``_EPOCH_MS_THRESHOLD``); a
-    numeric string (``"1719834000"``) parses like the number it holds. Returns
-    None for anything unparseable so callers degrade (skip the boost, drop the
+    an ISO-8601 string, an aware/naive datetime, or a numeric epoch; a numeric
+    string (``"1719834000"``) parses like the number it holds. Returns None
+    for anything unparseable so callers degrade (skip the boost, drop the
     prefix) instead of crashing recall on a schema they don't own. Booleans are
     rejected explicitly — ``True`` is an ``int`` in Python but never a time.
+
+    ``numeric_unit`` disambiguates NUMERIC values: ``"s"``/``"ms"`` (a caller
+    that knows the configured ``timestamp_format`` — see
+    :func:`numeric_unit_for`) parse exactly in that unit, with no guessing —
+    an early millisecond epoch like ``86400000`` (1970-01-02) is only
+    parseable correctly this way, since as seconds it is a plausible 1972.
+    ``"auto"`` (callers with no format knowledge) uses the magnitude
+    heuristic: values ≥ 1e12 are milliseconds, a seconds-reading that
+    overflows datetime or lands past year 3000 retries as milliseconds.
     """
     if value is None or isinstance(value, bool):
         return None
@@ -59,6 +73,16 @@ def parse_payload_instant(value: Any) -> datetime | None:
         v = float(value)
         if v != v or v in (float("inf"), float("-inf")):  # NaN/inf: not a time
             return None
+        if numeric_unit == "ms":
+            try:
+                return datetime.fromtimestamp(v / 1000.0, tz=timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                return None
+        if numeric_unit == "s":
+            try:
+                return datetime.fromtimestamp(v, tz=timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                return None
         if abs(v) >= _EPOCH_MS_THRESHOLD:
             v /= 1000.0
         try:
@@ -87,7 +111,7 @@ def parse_payload_instant(value: Any) -> datetime | None:
         if parsed is not None:
             return parsed
         try:
-            return parse_payload_instant(float(value))
+            return parse_payload_instant(float(value), numeric_unit=numeric_unit)
         except ValueError:
             return None
     return None

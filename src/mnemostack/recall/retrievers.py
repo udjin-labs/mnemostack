@@ -16,6 +16,7 @@ Built-in retrievers:
 from __future__ import annotations
 
 import logging
+import math
 import re
 from abc import ABC, abstractmethod
 from calendar import monthrange
@@ -38,7 +39,12 @@ except ImportError:  # pragma: no cover - qdrant-client is a runtime dependency
 from .bm25 import BM25, BM25Doc, Tokenizer, tokenize
 from .filters import payload_matches
 from .recaller import RecallResult
-from .validity import graph_as_of_predicate, parse_payload_instant, to_utc_instant
+from .validity import (
+    graph_as_of_predicate,
+    numeric_unit_for,
+    parse_payload_instant,
+    to_utc_instant,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -277,11 +283,14 @@ class BM25Retriever(Retriever):
         *,
         retokenize: bool | None = None,
         timestamp_key: str = "timestamp",
+        timestamp_format: str = "iso",
     ):
         self.bm25 = BM25(docs, tokenizer=tokenizer, retokenize=retokenize)
         #: The one payload key whose range filters may cross timestamp domains
-        #: (see payload_matches) — a foreign collection's own schema.
+        #: (see payload_matches) — a foreign collection's own schema — and how
+        #: its numeric values are read.
         self.timestamp_key = timestamp_key
+        self.timestamp_format = timestamp_format
 
     @classmethod
     def from_qdrant(
@@ -366,7 +375,12 @@ class BM25Retriever(Retriever):
         if filters:
 
             def predicate(d: BM25Doc) -> bool:
-                return payload_matches(d.payload, filters, timestamp_key=self.timestamp_key)
+                return payload_matches(
+                    d.payload,
+                    filters,
+                    timestamp_key=self.timestamp_key,
+                    numeric_unit=numeric_unit_for(self.timestamp_format),
+                )
 
         hits = self.bm25.search(query, limit=limit, predicate=predicate)
         return [
@@ -948,6 +962,8 @@ def _intersect_instant_window(
     start: datetime,
     end: datetime,
     caller_condition: Any,
+    *,
+    numeric_unit: str = "auto",
 ) -> tuple[datetime, datetime] | None:
     """Intersect the parsed query window with a caller timestamp filter.
 
@@ -968,8 +984,8 @@ def _intersect_instant_window(
         raw_lte = caller_condition.get("lte")
     else:
         raw_gte = raw_lte = caller_condition
-    gte = parse_payload_instant(raw_gte) if raw_gte is not None else None
-    lte = parse_payload_instant(raw_lte) if raw_lte is not None else None
+    gte = parse_payload_instant(raw_gte, numeric_unit=numeric_unit) if raw_gte is not None else None
+    lte = parse_payload_instant(raw_lte, numeric_unit=numeric_unit) if raw_lte is not None else None
     if (raw_gte is not None and gte is None) or (raw_lte is not None and lte is None):
         return None
     if gte is not None and gte > start:
@@ -1199,13 +1215,22 @@ class TemporalRetriever(Retriever):
         self.text_key = text_key
         self.timestamp_key = timestamp_key
         self.timestamp_format = timestamp_format
+        #: How NUMERIC payload/caller timestamps are read: the configured
+        #: format beats the magnitude heuristic (early ms epochs are only
+        #: unambiguous this way).
+        self._numeric_unit = numeric_unit_for(timestamp_format)
 
-    def _bound(self, dt: datetime) -> str | int:
-        """A window bound in the collection's own timestamp domain."""
-        if self.timestamp_format == "epoch":
-            return int(dt.timestamp())
-        if self.timestamp_format == "epoch_ms":
-            return int(dt.timestamp() * 1000)
+    def _bound(self, dt: datetime, side: str) -> str | int:
+        """A window bound in the collection's own timestamp domain.
+
+        Numeric bounds are rounded INWARD by ``side`` (``gte`` up, ``lte``
+        down): plain truncation of a fractional bound (an ISO caller
+        constraint ending ``.500Z``) would WIDEN the scope and admit a point
+        from the excluded half-second. Exact-integer bounds are unchanged.
+        """
+        if self.timestamp_format in ("epoch", "epoch_ms"):
+            ts = dt.timestamp() * (1000 if self.timestamp_format == "epoch_ms" else 1)
+            return int(math.ceil(ts)) if side == "gte" else int(math.floor(ts))
         return dt.isoformat()
 
     def explain_empty(self, query: str) -> str | None:
@@ -1248,7 +1273,10 @@ class TemporalRetriever(Retriever):
         if start_dt is None or end_dt is None:  # defensive: the extractor emits ISO
             return []
         window = _intersect_instant_window(
-            start_dt, end_dt, temporal_filter.get(self.timestamp_key)
+            start_dt,
+            end_dt,
+            temporal_filter.get(self.timestamp_key),
+            numeric_unit=self._numeric_unit,
         )
         if window is None:
             # The query's date range lies entirely outside the caller's
@@ -1257,8 +1285,8 @@ class TemporalRetriever(Retriever):
             return []
         start_dt, end_dt = window
         temporal_filter[self.timestamp_key] = {
-            "gte": self._bound(start_dt),
-            "lte": self._bound(end_dt),
+            "gte": self._bound(start_dt, "gte"),
+            "lte": self._bound(end_dt, "lte"),
         }
 
         strict_bounds = None
@@ -1276,8 +1304,8 @@ class TemporalRetriever(Retriever):
             try:
                 strict_filter = dict(temporal_filter)
                 strict_filter[self.timestamp_key] = {
-                    "gte": self._bound(strict_bounds[0]),
-                    "lte": self._bound(strict_bounds[1]),
+                    "gte": self._bound(strict_bounds[0], "gte"),
+                    "lte": self._bound(strict_bounds[1], "lte"),
                 }
 
                 buffer_limit = max(
@@ -1338,8 +1366,9 @@ class TemporalRetriever(Retriever):
 
     def _hit_date(self, hit) -> date | None:
         timestamp = (hit.payload or {}).get(self.timestamp_key)
-        # Any domain the collection stores (ISO, datetime, epoch seconds/ms).
-        dt = parse_payload_instant(timestamp)
+        # Any domain the collection stores; numerics read in the CONFIGURED
+        # unit (an early ms epoch is ambiguous under the heuristic).
+        dt = parse_payload_instant(timestamp, numeric_unit=self._numeric_unit)
         if dt is not None:
             return dt.astimezone(timezone.utc).date()
         if isinstance(timestamp, str) and len(timestamp) >= 10:
@@ -1389,7 +1418,9 @@ class TemporalRetriever(Retriever):
 
         def timestamp_distance(hit) -> float:
             # Any stored domain; unparseable sorts last, as before.
-            dt = parse_payload_instant((hit.payload or {}).get(self.timestamp_key))
+            dt = parse_payload_instant(
+                (hit.payload or {}).get(self.timestamp_key), numeric_unit=self._numeric_unit
+            )
             if dt is None:
                 return float("inf")
             return abs((dt.astimezone(timezone.utc) - noon).total_seconds())

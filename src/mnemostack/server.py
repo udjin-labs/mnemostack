@@ -658,6 +658,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         vector_floor=cfg.vector_floor,
         text_key=cfg.text_key,
         timestamp_key=cfg.timestamp_key,
+        timestamp_format=cfg.timestamp_format,
     )
 
     from pathlib import Path
@@ -673,12 +674,16 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         graph_timeout=cfg.graph_timeout,
         text_key=cfg.text_key,
         timestamp_key=cfg.timestamp_key,
+        timestamp_format=cfg.timestamp_format,
     )
 
     try:
         llm = get_llm(cfg.llm_name, **model_kwargs(cfg.llm_model))
         answer_gen: AnswerGenerator | None = AnswerGenerator(
-            llm=llm, recaller=recaller, timestamp_key=cfg.timestamp_key
+            llm=llm,
+            recaller=recaller,
+            timestamp_key=cfg.timestamp_key,
+            timestamp_format=cfg.timestamp_format,
         )
         reranker: Reranker | None = Reranker(
             llm=llm,

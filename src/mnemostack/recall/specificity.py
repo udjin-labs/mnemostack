@@ -138,6 +138,7 @@ def resolve_specificity(
     llm: LLMProvider,
     *,
     timestamp_key: str = "timestamp",
+    timestamp_format: str = "iso",
 ) -> str:
     """Rewrite a draft answer with exact names from candidate memories.
 
@@ -154,6 +155,7 @@ def resolve_specificity(
         placeholders=placeholders,
         candidate_memories=candidate_memories,
         timestamp_key=timestamp_key,
+        timestamp_format=timestamp_format,
     )
     try:
         resp = llm.generate(prompt, max_tokens=200)
@@ -187,8 +189,11 @@ def _build_specificity_prompt(
     placeholders: list[tuple[str, str]],
     candidate_memories: Iterable[RecallResult | str],
     timestamp_key: str = "timestamp",
+    timestamp_format: str = "iso",
 ) -> str:
-    memories = _format_memories(candidate_memories, timestamp_key=timestamp_key)
+    memories = _format_memories(
+        candidate_memories, timestamp_key=timestamp_key, timestamp_format=timestamp_format
+    )
     placeholder_lines = "\n".join(
         f"- {placeholder}: {candidate_query}" for placeholder, candidate_query in placeholders
     )
@@ -214,8 +219,11 @@ REWRITTEN_ANSWER:"""
 def _format_memories(
     candidate_memories: Iterable[RecallResult | str],
     timestamp_key: str = "timestamp",
+    timestamp_format: str = "iso",
 ) -> str:
-    from .validity import parse_payload_instant
+    from .validity import numeric_unit_for, parse_payload_instant
+
+    unit = numeric_unit_for(timestamp_format)
 
     lines: list[str] = []
     for i, memory in enumerate(candidate_memories, 1):
@@ -230,7 +238,7 @@ def _format_memories(
         if ts is not None and ts != "":  # epoch 0 is a real instant, keep it
             # Tolerant of a foreign schema's epoch int/datetime — slicing a
             # non-string would TypeError out of the whole answer path.
-            dt = parse_payload_instant(ts)
+            dt = parse_payload_instant(ts, numeric_unit=unit)
             date_str = dt.strftime("%Y-%m-%d") if dt is not None else str(ts)[:10]
             prefix = f"{prefix} [{date_str}]"
         if source:
