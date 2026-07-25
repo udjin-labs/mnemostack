@@ -28,7 +28,7 @@ pip install 'mnemostack[mcp]'
 Run a local Qdrant for the vector store:
 
 ```bash
-docker run -p 6333:6333 qdrant/qdrant:latest
+docker run -p 6333:6333 qdrant/qdrant:v1.18.3
 ```
 
 Optional: run Memgraph for graph-backed memory:
@@ -393,7 +393,7 @@ pip install 'mnemostack[dev]'          # tests + linters
 Run a local Qdrant for the vector store:
 
 ```bash
-docker run -p 6333:6333 qdrant/qdrant:latest
+docker run -p 6333:6333 qdrant/qdrant:v1.18.3
 ```
 
 Optionally a Memgraph for the knowledge graph:
@@ -850,7 +850,7 @@ If you run an OpenClaw-style assistant with its own `scripts/recall.sh` or simil
 2. **Make sure Qdrant and (optionally) Memgraph are reachable.** If either is missing, start them:
 
    ```bash
-   docker run -d -p 6333:6333 --name qdrant qdrant/qdrant:latest
+   docker run -d -p 6333:6333 --name qdrant qdrant/qdrant:v1.18.3
    docker run -d -p 7687:7687 --name memgraph memgraph/memgraph:latest   # optional
    ```
 
