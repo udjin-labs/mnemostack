@@ -37,12 +37,28 @@ _V2 = [0.0, 1.0, 0.0, 0.0]
 def _server_reachable():
     if not SERVER_URL:  # pragma: no cover - module already skipped
         return
+    import time
+
     import httpx
 
-    try:
-        httpx.get(SERVER_URL, timeout=5).raise_for_status()
-    except Exception as e:  # noqa: BLE001
-        pytest.skip(f"Qdrant server at {SERVER_URL} unreachable: {e}")
+    # The URL being SET is a promise that a server exists (CI provides the
+    # container): an unreachable endpoint is an infrastructure FAILURE, not a
+    # skip — a green smoke job that exercised nothing would be exactly the
+    # false signal this module exists to prevent. Bounded readiness retries
+    # absorb container startup races.
+    deadline = time.monotonic() + 30
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            httpx.get(SERVER_URL, timeout=5).raise_for_status()
+            return
+        except Exception as e:  # noqa: BLE001
+            last_error = e
+            time.sleep(1)
+    pytest.fail(
+        f"MNEMOSTACK_TEST_QDRANT_URL is set but Qdrant at {SERVER_URL} never "
+        f"became ready within 30s: {last_error}"
+    )
 
 
 @pytest.fixture
