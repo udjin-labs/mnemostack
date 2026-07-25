@@ -79,7 +79,7 @@ jobs:
     # difference > 1) and turns the smoke into a non-reproducible check.
     # Pairs: the declared client MINIMUM against the newest server in its
     # support window, that server with its version-ALIGNED client, and the
-    # docs-pinned current server with the client a fresh install resolves to.
+    # docs-pinned current server with its aligned client.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -90,7 +90,7 @@ jobs:
           - server: v1.15.4
             client: 1.15.1    # version-aligned with that server
           - server: v1.18.3   # deployment docs' compose pin
-            client: 1.18.0    # what a fresh install resolves to today
+            client: 1.18.0    # version-aligned with that server
     services:
       qdrant:
         image: qdrant/qdrant:${{ matrix.server }}

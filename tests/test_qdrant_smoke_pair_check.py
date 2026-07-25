@@ -45,7 +45,7 @@ def test_unsupported_pairs_fail(monkeypatch, client, server):
         _assert_supported_pair(server)
 
 
-@pytest.mark.parametrize("server", ["", "dev", "unknown.version"])
+@pytest.mark.parametrize("server", ["", "dev", "unknown.version", "1.18.garbage"])
 def test_unparseable_server_version_fails_closed(monkeypatch, server):
     _with_client(monkeypatch, "1.18.0")
     with pytest.raises(pytest.fail.Exception, match="cannot parse versions"):

@@ -676,9 +676,9 @@ arm; pick by collection size and whether you can re-index:
 - Server version minimums for the new arms: full-text `MatchText` filtering
   is long-standing, the sparse IDF modifier needs Qdrant server ≥ 1.10, and
   the coverage check (`has_vector`) needs ≥ 1.13 — the compose example pins
-  `v1.18.3`, aligned with the `qdrant-client` version a fresh
-  `pip install mnemostack` resolves to today; CI replays the real-server
-  scenarios against both `v1.15.4` and `v1.18.3`.
+  `v1.18.3`; pick the tag matching your installed `qdrant-client` (same
+  major, minor within 1). CI replays the real-server scenarios against both
+  `v1.15.4` and `v1.18.3`.
 - All modes respect the tenant boundary and validity view exactly like dense
   search, and follow the configured payload schema.
 - **`sparse` writes are sync-only today**: `AsyncVectorStore` does not
