@@ -77,7 +77,7 @@ Save as `docker-compose.yml` and keep secrets in `.env` or your deployment secre
 ```yaml
 services:
   qdrant:
-    image: qdrant/qdrant:v1.18.3
+    image: qdrant/qdrant:v1.18.3  # match your qdrant-client: same major, minor within 1
     restart: unless-stopped
     volumes:
       - qdrant_storage:/qdrant/storage
