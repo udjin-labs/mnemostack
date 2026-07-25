@@ -347,7 +347,11 @@ def bm25_docs_from_qdrant(
             text = payload.get(text_key) or ""
             if not isinstance(text, str) or not text.strip():
                 continue
-            qdrant_id = str(getattr(point, "id", len(docs)))
+            # Keep the NATIVE id (int stays int): the recaller fuses and
+            # dedups by exact id equality, so a stringified copy of a dense
+            # hit's integer id would double the memory instead of boosting it.
+            native_id = getattr(point, "id", len(docs))
+            qdrant_id = str(native_id)
             doc_payload = dict(payload)
             doc_payload.setdefault("qdrant_id", qdrant_id)
             # Only set a source when one actually exists — Qdrant points often
@@ -356,7 +360,7 @@ def bm25_docs_from_qdrant(
             src = payload.get("source_file") or payload.get("source")
             if src is not None:
                 doc_payload.setdefault("source", src)
-            doc_id = qdrant_id if id_prefix is None else f"bm25:{id_prefix}:{qdrant_id}"
+            doc_id = native_id if id_prefix is None else f"bm25:{id_prefix}:{qdrant_id}"
             docs.append(
                 BM25Doc(
                     id=doc_id,
@@ -372,10 +376,179 @@ def bm25_docs_from_qdrant(
     return docs
 
 
+class QdrantTextRetriever(Retriever):
+    """Lexical-gated dense search — the scalable replacement for in-process BM25.
+
+    Instead of holding a lexical corpus in client memory (the in-process BM25's
+    documented "<100K documents" ceiling), the GATE runs inside Qdrant: the
+    query's salient tokens become a full-text ``MatchText`` should-clause, and
+    dense similarity ranks *within* the lexically-matching subset. Exact-token
+    recall (IDs, error codes, names) at any collection size, no reindex — the
+    one server-side prerequisite is a full-text payload index on the text
+    field (``VectorStore.ensure_text_index()`` / ``mnemostack text-index``);
+    without it a real server rejects MatchText filters.
+
+    Scoring note: the gate FILTERS, it does not score (Qdrant's full-text
+    match carries no relevance weight) — ranking inside the gate is dense
+    similarity. For server-side lexical *scoring*, see
+    ``QdrantSparseRetriever``.
+    """
+
+    name = "qdrant_text"
+
+    accepts_as_of = True
+    accepts_include_invalidated = True
+    accepts_tenant = True
+
+    def __init__(
+        self,
+        embedding: EmbeddingProvider,
+        vector_store: VectorStore,
+        *,
+        text_key: str = "text",
+        timestamp_key: str = "timestamp",
+        timestamp_format: str = "iso",
+        max_gate_tokens: int = 8,
+        min_token_len: int = 3,
+    ):
+        self.embedding = embedding
+        self.vector_store = vector_store
+        self.text_key = text_key
+        self.timestamp_key = timestamp_key
+        self.timestamp_format = timestamp_format
+        self.max_gate_tokens = max_gate_tokens
+        self.min_token_len = min_token_len
+
+    def _gate_tokens(self, query: str) -> list[str]:
+        """Salient tokens for the lexical gate: exact technical tokens first
+        (IDs, IPs, versions — the queries this arm exists for), then content
+        words, longest first (a cheap rarity proxy with no corpus statistics),
+        capped so a verbose query can't turn the gate into match-anything."""
+        from .mca_prefilter import extract_exact_tokens
+        from .pipeline.stages import STOPWORDS
+
+        exact = extract_exact_tokens(query)
+        words = [
+            t
+            for t in tokenize(query)
+            if len(t) >= self.min_token_len and t not in STOPWORDS
+        ]
+        # Deterministic across processes: length desc (rarity proxy), then
+        # lexicographic — a set() sort keyed on length alone would let hash
+        # seeds decide which same-length tokens make the capped gate.
+        rest = sorted(set(words) - set(exact), key=lambda t: (-len(t), t))
+        return (exact + rest)[: self.max_gate_tokens]
+
+    def explain_empty(self, query: str) -> str | None:
+        return "qdrant_text:no_tokens" if not self._gate_tokens(query) else None
+
+    def search(
+        self, query, limit=20, filters=None, as_of=None, include_invalidated=False, tenant=None
+    ):
+        tokens = self._gate_tokens(query)
+        if not tokens:
+            return []
+        vec = self.embedding.embed(query)
+        if not vec:
+            return []
+        filters = convert_timestamp_filter(
+            filters, timestamp_key=self.timestamp_key, timestamp_format=self.timestamp_format
+        )
+        tkw = {"tenant": tenant} if tenant is not None else {}
+        hits = self.vector_store.search(
+            vec,
+            limit=limit,
+            filters=filters,
+            hide_invalidated=as_of is None and not include_invalidated,
+            text_any=tokens,
+            text_any_key=self.text_key,
+            **tkw,
+        )
+        return [
+            RecallResult(
+                id=h.id,
+                text=(h.payload or {}).get(self.text_key, ""),
+                score=h.score,
+                payload=dict(h.payload or {}),
+                sources=["qdrant_text"],
+            )
+            for h in hits
+        ]
+
+
+class QdrantSparseRetriever(Retriever):
+    """Server-side lexical scoring over Qdrant sparse vectors.
+
+    The counterpart to ``QdrantTextRetriever`` for deployments that CAN
+    (re)index: writes maintain a sparse tf encoding of each chunk's text
+    (``VectorStore(sparse_text=True)``), Qdrant's ``Modifier.IDF`` supplies
+    collection-wide term weighting at query time, and this retriever ranks by
+    that tf·idf-like score — true lexical *scoring* (not just a gate) with no
+    client-side corpus, at any collection size. Requires the collection to
+    carry the sparse space (created by ``ensure_collection`` on a
+    ``sparse_text=True`` store; existing collections need a re-index or a
+    server that accepts the config update).
+    """
+
+    name = "sparse"
+
+    accepts_as_of = True
+    accepts_include_invalidated = True
+    accepts_tenant = True
+
+    def __init__(
+        self,
+        vector_store: VectorStore,
+        *,
+        text_key: str = "text",
+        timestamp_key: str = "timestamp",
+        timestamp_format: str = "iso",
+    ):
+        if not getattr(vector_store, "sparse_text", False):
+            raise ValueError(
+                "QdrantSparseRetriever needs a VectorStore(sparse_text=True) — "
+                "this store does not maintain the sparse text space"
+            )
+        self.vector_store = vector_store
+        self.text_key = text_key
+        self.timestamp_key = timestamp_key
+        self.timestamp_format = timestamp_format
+
+    def search(
+        self, query, limit=20, filters=None, as_of=None, include_invalidated=False, tenant=None
+    ):
+        filters = convert_timestamp_filter(
+            filters, timestamp_key=self.timestamp_key, timestamp_format=self.timestamp_format
+        )
+        tkw = {"tenant": tenant} if tenant is not None else {}
+        hits = self.vector_store.sparse_search(
+            query,
+            limit=limit,
+            filters=filters,
+            hide_invalidated=as_of is None and not include_invalidated,
+            **tkw,
+        )
+        return [
+            RecallResult(
+                id=h.id,
+                text=(h.payload or {}).get(self.text_key, ""),
+                score=h.score,
+                payload=dict(h.payload or {}),
+                sources=["sparse"],
+            )
+            for h in hits
+        ]
+
+
 class BM25Retriever(Retriever):
     """Exact token match via BM25."""
 
     name = "bm25"
+
+    #: File-corpus BM25 has no tenant metadata, so it cannot be tenant-scoped
+    #: (the recaller skips it under a tenant). A corpus scrolled from Qdrant
+    #: payloads DOES carry tenant_id — from_qdrant flips this on.
+    accepts_tenant = False
 
     def __init__(
         self,
@@ -385,6 +558,7 @@ class BM25Retriever(Retriever):
         retokenize: bool | None = None,
         timestamp_key: str = "timestamp",
         timestamp_format: str = "iso",
+        tenant_aware: bool = False,
     ):
         self.bm25 = BM25(docs, tokenizer=tokenizer, retokenize=retokenize)
         #: The one payload key whose range filters may cross timestamp domains
@@ -392,6 +566,10 @@ class BM25Retriever(Retriever):
         #: its numeric values are read.
         self.timestamp_key = timestamp_key
         self.timestamp_format = timestamp_format
+        if tenant_aware:
+            # Instance-level capability marker: the recaller only routes a
+            # tenant to retrievers that advertise it.
+            self.accepts_tenant = True
 
     @classmethod
     def from_qdrant(
@@ -468,17 +646,26 @@ class BM25Retriever(Retriever):
             retokenize=False,
             timestamp_key=timestamp_key,
             timestamp_format=timestamp_format,
+            # Qdrant payloads carry tenant_id — this corpus CAN be scoped.
+            tenant_aware=True,
         )
 
-    def search(self, query, limit=20, filters=None):
+    def search(self, query, limit=20, filters=None, tenant=None):
         # Same filter semantics the vector store applies natively. Without
         # this, a fused recall with filters= mixed unfiltered BM25 candidates
         # into the output — in multi-tenant deployments that is an isolation
-        # leak. The candidate set is restricted before the top-K cut.
+        # leak. The candidate set is restricted before the top-K cut. A tenant
+        # (only ever routed here when tenant_aware) is a STRICT gate: a doc
+        # without the tenant marker never matches a scoped search.
         predicate = None
-        if filters:
+        if filters or tenant is not None:
 
             def predicate(d: BM25Doc) -> bool:
+                if tenant is not None:
+                    from ..vector.qdrant import TENANT_ID_KEY
+
+                    if (d.payload or {}).get(TENANT_ID_KEY) != tenant:
+                        return False
                 return payload_matches(
                     d.payload,
                     filters,
