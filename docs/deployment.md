@@ -745,7 +745,7 @@ Before upgrade:
 Pin Qdrant versions in compose instead of using `latest` in production:
 
 ```yaml
-image: qdrant/qdrant:v1.18.3
+image: qdrant/qdrant:v1.18.3  # match your qdrant-client: same major, minor within 1
 ```
 
 Read Qdrant release notes before upgrading. Test snapshots and collection compatibility on staging.

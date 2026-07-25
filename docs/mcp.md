@@ -15,6 +15,7 @@ pip install 'mnemostack[mcp]'
 Run Qdrant for vector storage:
 
 ```bash
+# tag rule: match your installed qdrant-client - same major, minor within 1 (v1.18.3 pairs with the client a fresh install resolves to)
 docker run -p 6333:6333 qdrant/qdrant:v1.18.3
 ```
 
@@ -683,6 +684,7 @@ Symptoms: `components.vector.ok=false`, connection refused, timeout, or DNS erro
 Fix:
 
 ```bash
+# tag rule: match your installed qdrant-client - same major, minor within 1 (v1.18.3 pairs with the client a fresh install resolves to)
 docker run -p 6333:6333 qdrant/qdrant:v1.18.3
 mnemostack health --provider gemini --collection my-memory --qdrant http://localhost:6333
 ```
