@@ -609,6 +609,50 @@ def test_synthesis_derives_schema_from_direct_retrievers():
     assert result.timeline
 
 
+def test_recaller_derives_schema_from_its_retrievers():
+    # Retriever-mode: a schema configured on the INNER retriever must reach
+    # the outer Recaller (filter mirrors, post-pipeline backstop) without the
+    # caller repeating it.
+    store = _foreign_store()
+    inner = VectorRetriever(
+        embedding=_FakeEmbedder(), vector_store=store, text_key="content",
+        timestamp_key="updated_at", timestamp_format="epoch",
+    )
+    rec = Recaller(retrievers=[inner])
+    assert (rec.text_key, rec.timestamp_key, rec.timestamp_format) == (
+        "content", "updated_at", "epoch",
+    )
+    # explicit outer args still win
+    rec2 = Recaller(retrievers=[inner], timestamp_key="ts")
+    assert rec2.timestamp_key == "ts"
+    # post-pipeline flow backstop keeps the epoch hit under an ISO range
+    from mnemostack.recall.flow import recall_flow
+
+    results = recall_flow(
+        rec, "april", limit=5,
+        filters={"updated_at": {"gte": "2026-04-01", "lte": "2026-04-30"}},
+    )
+    assert [r.text for r in results] == ["april note"]
+
+
+def test_exact_fractional_epoch_becomes_degenerate_range():
+    from mnemostack.recall.retrievers import convert_timestamp_filter
+
+    # Qdrant MatchValue rejects floats — a same-domain fractional exact value
+    # must ride as a degenerate numeric range instead.
+    out = convert_timestamp_filter(
+        {"updated_at": 1776254400.5},
+        timestamp_key="updated_at",
+        timestamp_format="epoch",
+    )
+    assert out["updated_at"] == {"gte": 1776254400.5, "lte": 1776254400.5}
+    # Same-domain INT exacts stay scalar (MatchValue admits ints).
+    out = convert_timestamp_filter(
+        {"updated_at": _EPOCH}, timestamp_key="updated_at", timestamp_format="epoch"
+    )
+    assert out["updated_at"] == _EPOCH
+
+
 def test_answer_generator_derives_schema_from_recaller():
     from mnemostack.recall.answer import AnswerGenerator
 

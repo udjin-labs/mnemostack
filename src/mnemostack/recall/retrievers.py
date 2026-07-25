@@ -241,12 +241,14 @@ def convert_timestamp_filter(
                 new_cond[side] = _conv(cond[side])
     else:
         converted = _conv(cond)
-        if converted is not cond and converted != cond:
+        if (converted is not cond and converted != cond) or isinstance(converted, float):
             # A CROSS-domain exact value becomes a degenerate range: scalar
             # MatchValue equality is representation-sensitive (a stored
             # "...Z" string never equals a generated "...+00:00"; an int
             # payload need not equal a float), while a range condition
-            # compares as instants/numbers on the server.
+            # compares as instants/numbers on the server. A same-domain FLOAT
+            # gets the same treatment — Qdrant's MatchValue admits ints,
+            # strings and bools but rejects floats outright.
             new_cond = {"gte": converted, "lte": converted}
         else:
             new_cond = cond

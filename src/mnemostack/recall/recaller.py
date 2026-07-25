@@ -169,9 +169,9 @@ class Recaller:
         fallback_threshold: float = 0.35,
         mca_prefilter: bool = False,
         vector_floor: int = 0,
-        text_key: str = "text",
-        timestamp_key: str = "timestamp",
-        timestamp_format: str = "iso",
+        text_key: str | None = None,
+        timestamp_key: str | None = None,
+        timestamp_format: str | None = None,
     ):
         """Two modes:
 
@@ -215,13 +215,26 @@ class Recaller:
         self.fallback_threshold = fallback_threshold
         self.mca_prefilter_enabled = mca_prefilter
         self.vector_floor = max(0, int(vector_floor))
-        #: Payload key holding the chunk text on the legacy vector paths
-        #: (_recall_once / search_many / vector-floor / fallback) — configurable
-        #: so recall works over a pre-existing collection's own schema.
-        #: Retrievers-mode sources carry their own text_key.
-        self.text_key = text_key
-        self.timestamp_key = timestamp_key
-        self.timestamp_format = timestamp_format
+        # Payload schema for the legacy vector paths, the in-memory filter
+        # mirrors, and the post-pipeline backstop. When omitted, a
+        # schema-aware retriever in retrievers-mode carries it — a caller who
+        # configured the inner retriever shouldn't have to repeat the schema
+        # on the outer Recaller. Explicit arguments always win.
+        schema_src = next(
+            (
+                r
+                for r in (retrievers or [])
+                if getattr(r, "text_key", None) or getattr(r, "timestamp_key", None)
+            ),
+            None,
+        )
+        self.text_key = text_key or getattr(schema_src, "text_key", None) or "text"
+        self.timestamp_key = (
+            timestamp_key or getattr(schema_src, "timestamp_key", None) or "timestamp"
+        )
+        self.timestamp_format = (
+            timestamp_format or getattr(schema_src, "timestamp_format", None) or "iso"
+        )
         self._query_expansion_cache: dict[str, list[str]] = {}
 
     def _vector_filters(self, filters: dict[str, Any] | None) -> dict[str, Any] | None:
