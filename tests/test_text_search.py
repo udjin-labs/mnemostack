@@ -463,3 +463,35 @@ def test_cmd_serve_forwards_text_search(monkeypatch):
     assert captured["cfg"].text_search == "off"
     cli._text_search_mode.cache_clear()
     cli._payload_schema.cache_clear()
+
+
+def test_sparse_space_with_uncovered_points_still_demands_backfill():
+    # P1 regression: the space EXISTING must not bypass the coverage check —
+    # a retry after the first refusal (or dense-only writes) leaves points
+    # invisible to sparse recall.
+    sparse_store = _store(sparse=True)
+    dense_writer = VectorStore.__new__(VectorStore)
+    dense_writer.collection = "ts"
+    dense_writer.dimension = 4
+    dense_writer.distance = Distance.COSINE
+    dense_writer.client = sparse_store.client
+    dense_writer.sparse_text = False
+    dense_writer.text_key = "text"
+    dense_writer._sparse_encoder = None
+    _seed(dense_writer)
+    assert sparse_store.sparse_coverage_gap() == 3
+    with pytest.raises(RuntimeError, match="carry no sparse vector"):
+        sparse_store.ensure_sparse_space()
+    sparse_store.backfill_sparse_text()
+    assert sparse_store.sparse_coverage_gap() == 0
+    sparse_store.ensure_sparse_space()  # now clean
+
+
+def test_qdrant_bm25_keeps_native_integer_ids():
+    from mnemostack.recall.retrievers import bm25_docs_from_qdrant
+
+    s = _store()
+    _seed(s)
+    docs = bm25_docs_from_qdrant(s.client, "ts")
+    assert {d.id for d in docs} == {1, 2, 3}  # ints, fusable with dense hits
+    assert all(isinstance(d.id, int) for d in docs)

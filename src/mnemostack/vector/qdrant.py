@@ -15,6 +15,7 @@ from qdrant_client.models import (
     FieldCondition,
     Filter,
     FilterSelector,
+    HasVectorCondition,
     IsEmptyCondition,
     MatchText,
     MatchValue,
@@ -224,6 +225,17 @@ class VectorStore:
         info = self.client.get_collection(self.collection)
         existing_sparse = getattr(info.config.params, "sparse_vectors", None) or {}
         if SPARSE_TEXT_VECTOR in existing_sparse:
+            # The SPACE existing says nothing about the POINTS: a first
+            # migration attempt (or dense-only writes, e.g. the async store)
+            # leaves uncovered points that sparse recall silently omits — a
+            # retry must not sail past the backfill requirement.
+            if require_backfilled and (gap := self.sparse_coverage_gap()) > 0:
+                raise RuntimeError(
+                    f"collection '{self.collection}' has the "
+                    f"'{SPARSE_TEXT_VECTOR}' space but {gap} point(s) carry no "
+                    "sparse vector — run `mnemostack sparse-backfill` (or a "
+                    "full re-index) before using sparse text search"
+                )
             return
         try:
             self.client.update_collection(
@@ -247,6 +259,19 @@ class VectorStore:
                 "`mnemostack sparse-backfill` (or a full re-index) "
                 "before using sparse text search"
             )
+
+    def sparse_coverage_gap(self) -> int:
+        """How many points carry NO sparse text vector (0 = fully covered).
+        The honesty check behind enabling/diagnosing sparse mode."""
+        covered = self.client.count(
+            collection_name=self.collection,
+            count_filter=Filter(
+                must=[HasVectorCondition(has_vector=SPARSE_TEXT_VECTOR)]
+            ),
+            exact=True,
+        ).count
+        total = self.client.count(collection_name=self.collection, exact=True).count
+        return max(0, total - covered)
 
     def backfill_sparse_text(self, batch_size: int = 256) -> int:
         """Write the sparse text encoding onto EVERY existing point.

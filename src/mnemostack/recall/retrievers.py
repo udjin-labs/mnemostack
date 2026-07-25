@@ -347,7 +347,11 @@ def bm25_docs_from_qdrant(
             text = payload.get(text_key) or ""
             if not isinstance(text, str) or not text.strip():
                 continue
-            qdrant_id = str(getattr(point, "id", len(docs)))
+            # Keep the NATIVE id (int stays int): the recaller fuses and
+            # dedups by exact id equality, so a stringified copy of a dense
+            # hit's integer id would double the memory instead of boosting it.
+            native_id = getattr(point, "id", len(docs))
+            qdrant_id = str(native_id)
             doc_payload = dict(payload)
             doc_payload.setdefault("qdrant_id", qdrant_id)
             # Only set a source when one actually exists — Qdrant points often
@@ -356,7 +360,7 @@ def bm25_docs_from_qdrant(
             src = payload.get("source_file") or payload.get("source")
             if src is not None:
                 doc_payload.setdefault("source", src)
-            doc_id = qdrant_id if id_prefix is None else f"bm25:{id_prefix}:{qdrant_id}"
+            doc_id = native_id if id_prefix is None else f"bm25:{id_prefix}:{qdrant_id}"
             docs.append(
                 BM25Doc(
                     id=doc_id,

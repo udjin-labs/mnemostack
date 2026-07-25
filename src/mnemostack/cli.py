@@ -223,7 +223,31 @@ def _doctor_qdrant(
 
         sparse_spaces = getattr(info.config.params, "sparse_vectors", None) or {}
         if SPARSE_TEXT_VECTOR in sparse_spaces:
-            add("qdrant.sparse_space", "ok", f"'{SPARSE_TEXT_VECTOR}' space present")
+            # The space existing isn't readiness — uncovered points are
+            # silently invisible to sparse recall.
+            try:
+                from qdrant_client.models import Filter as _F
+                from qdrant_client.models import HasVectorCondition as _HV
+
+                covered = client.count(
+                    collection,
+                    count_filter=_F(must=[_HV(has_vector=SPARSE_TEXT_VECTOR)]),
+                    exact=True,
+                ).count
+                gap = max(0, count - covered)
+            except Exception:  # noqa: BLE001 — older server: can't verify
+                gap = -1
+            if gap == 0:
+                add("qdrant.sparse_space", "ok", f"'{SPARSE_TEXT_VECTOR}' space present, all points covered")
+            elif gap > 0:
+                add(
+                    "qdrant.sparse_space",
+                    "misconfig",
+                    f"'{SPARSE_TEXT_VECTOR}' space present but {gap} point(s) have no sparse vector",
+                    "run `mnemostack sparse-backfill`",
+                )
+            else:
+                add("qdrant.sparse_space", "warn", f"'{SPARSE_TEXT_VECTOR}' space present (coverage not verifiable on this server)")
         else:
             add(
                 "qdrant.sparse_space",
@@ -1691,20 +1715,27 @@ def cmd_synthesize(args: argparse.Namespace) -> int:
 
     provider = None
     store = None
-    _needs_qdrant_lexical = _source_enabled_for_cli(
-        "bm25", source_filter
-    ) and resolve_text_search_mode(
+    _lexical_mode = resolve_text_search_mode(
         _text_search_mode(), list(getattr(args, "bm25_path", []) or [])
-    ) in ("qdrant_bm25", "lexical")
-    if (
+    )
+    _lexical_selected = _source_enabled_for_cli("bm25", source_filter)
+    # `lexical` embeds the query, so it needs the provider; `qdrant_bm25` and
+    # `sparse` only need a reachable store — constructing an embedding
+    # provider for them would demand API keys a payload-only operation never
+    # uses. ALL Qdrant-backed modes get the same loud collection preflight
+    # (a typo'd collection must exit 2, not degrade to an empty report).
+    _needs_provider = (
         _source_enabled_for_cli("vector", source_filter)
         or _source_enabled_for_cli("temporal", source_filter)
-        or _needs_qdrant_lexical
-    ):
+        or (_lexical_selected and _lexical_mode == "lexical")
+    )
+    _needs_store_only = _lexical_selected and _lexical_mode in ("qdrant_bm25", "sparse")
+    if _needs_provider:
         provider = get_provider(args.provider, **model_kwargs(_embedding_model(args)))
+    if _needs_provider or _needs_store_only:
         store = VectorStore(
             collection=args.collection,
-            dimension=provider.dimension,
+            dimension=provider.dimension if provider is not None else 1,
             host=args.qdrant,
         )
         if not store.collection_exists():
