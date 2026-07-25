@@ -128,7 +128,13 @@ this is purely additive. See [Multi-tenancy & authentication](#multi-tenancy--au
 `recall.{bm25_paths,vector_floor,rerank_mode,token_budget}`,
 `recall.{text_key,timestamp_key,timestamp_format}` (payload schema of the
 collection recall reads — mounts a pre-existing collection with its own field
-names / numeric epoch timestamps; `timestamp_format` ∈ `iso|epoch|epoch_ms`).
+names / numeric epoch timestamps; `timestamp_format` ∈ `iso|epoch|epoch_ms`),
+`recall.text_search` (lexical-arm selector ∈
+`auto|off|bm25|qdrant_bm25|lexical|sparse` — the mode names and their
+semantics are the stable contract; `QdrantTextRetriever` /
+`QdrantSparseRetriever` / `SparseTextEncoder` class shapes are 🟡
+experimental; `sparse` writes are maintained by the SYNC `VectorStore`
+only — `AsyncVectorStore` does not write sparse encodings).
 
 🟡 **Accepted but not yet wired** — present in the config schema, but the runtime
 does not consume them today, so don't depend on them until they are:

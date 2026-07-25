@@ -25,7 +25,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "qdrant-client>=1.7,<2",
+    "qdrant-client>=1.10,<2",  # Modifier(IDF)/sparse models + query_points need 1.10
     "neo4j>=5.15,<7",
     "pyyaml>=6.0,<7",
     "requests>=2.31,<3",

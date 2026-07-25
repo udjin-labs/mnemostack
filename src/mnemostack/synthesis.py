@@ -327,7 +327,21 @@ def _build_recaller_from_kwargs(
     )
 
 
+#: The "bm25" source selector is an UMBRELLA for the configured lexical arm:
+#: whatever recall.text_search chose (in-process BM25, the Qdrant-gated dense
+#: retriever, or sparse scoring) answers to it — operators select "the lexical
+#: arm", not an implementation name.
+_LEXICAL_SOURCE_ALIASES = {"bm25", "qdrant_text", "sparse"}
+
+
+def _expand_source_filter(source_filter: set[str] | None) -> set[str] | None:
+    if source_filter is not None and "bm25" in source_filter:
+        return set(source_filter) | _LEXICAL_SOURCE_ALIASES
+    return source_filter
+
+
 def _source_enabled(name: str, source_filter: set[str] | None) -> bool:
+    source_filter = _expand_source_filter(source_filter)
     return source_filter is None or name in source_filter
 
 
@@ -358,6 +372,7 @@ def _filter_recaller(recaller: Any, source_filter: set[str] | None) -> Any:
 def _result_source_enabled(result: RecallResult, source_filter: set[str] | None) -> bool:
     if source_filter is None:
         return True
+    source_filter = _expand_source_filter(source_filter) or source_filter
     sources = {str(s).lower() for s in (getattr(result, "sources", []) or [])}
     if "graph" in source_filter:
         source_filter = {*source_filter, "memgraph"}

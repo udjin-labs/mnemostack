@@ -647,6 +647,38 @@ For Mnemostack, start with normal application logs. Increase verbosity only whil
 
 ## Scaling
 
+### Lexical search beyond the in-process BM25
+
+The default lexical arm (in-process BM25 over `bm25_paths`) holds its corpus
+in client memory — fine to roughly 100K documents, not for a million-chunk
+collection. `recall.text_search` (env `MNEMOSTACK_TEXT_SEARCH`) selects the
+arm; pick by collection size and whether you can re-index:
+
+| Mode | Corpus lives | Scoring | Scale | Reindex needed |
+|---|---|---|---|---|
+| `bm25` (auto-default with `bm25_paths`) | client RAM, from files | true BM25 | <~100K | — |
+| `qdrant_bm25` | client RAM, scrolled from payloads | true BM25 | <~100K | no |
+| `lexical` | Qdrant full-text index | dense (gate filters, doesn't score) | any | **no** |
+| `sparse` | Qdrant sparse vectors | server tf·idf-like (IDF modifier) | any | **yes** (space written at ingest) |
+
+- `lexical` needs the full-text payload index on a real server: run
+  `mnemostack text-index` once (idempotent, non-destructive — safe on a
+  mounted pre-existing collection).
+- `sparse` is the strongest lexical arm at scale: new collections indexed
+  under this mode get the sparse space automatically; switching an existing
+  deployment means a config-update attempt (fails loud where unsupported) or
+  a re-index.
+- All modes respect the tenant boundary and validity view exactly like dense
+  search, and follow the configured payload schema.
+- **`sparse` writes are sync-only today**: `AsyncVectorStore` does not
+  maintain the sparse space — a deployment ingesting through the async store
+  under `text_search: sparse` would write dense-only points that never
+  surface from sparse recall. Ingest through the sync `VectorStore`/CLI, or
+  run `mnemostack sparse-backfill` after async writes.
+- Editing a chunk's text via `set_payload` (`index --refresh-payloads`)
+  leaves its sparse encoding stale (like the dense vector): re-upsert or run
+  `mnemostack sparse-backfill` after bulk text edits.
+
 ### Single-node vs distributed Qdrant
 
 Start single-node unless you already know you need more. Single-node Qdrant with persistent disk is simpler to back up, restore, and reason about.
