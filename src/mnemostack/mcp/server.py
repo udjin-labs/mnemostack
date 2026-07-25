@@ -74,6 +74,11 @@ def build_server(
     auth_enabled: bool = False,
     api_key: str | None = None,
     keys_file: str | None = None,
+    # Payload schema of the collection recall reads (keyword-position tail;
+    # a pre-existing collection keeps its own field names / numeric epochs).
+    text_key: str = "text",
+    timestamp_key: str = "timestamp",
+    timestamp_format: str = "iso",
 ) -> Any:
     """Build and return a configured FastMCP server.
 
@@ -193,7 +198,13 @@ def build_server(
         vec = _get_vector()
         bm25_docs = build_bm25_docs(bm25_paths)
         retrievers = [
-            VectorRetriever(embedding=emb, vector_store=vec),
+            VectorRetriever(
+                embedding=emb,
+                vector_store=vec,
+                text_key=text_key,
+                timestamp_key=timestamp_key,
+                timestamp_format=timestamp_format,
+            ),
             BM25Retriever(docs=bm25_docs) if bm25_docs else None,
             MemgraphRetriever(
                 uri=memgraph_uri,
@@ -204,11 +215,20 @@ def build_server(
             )
             if memgraph_uri
             else None,
-            TemporalRetriever(embedding=emb, vector_store=vec),
+            TemporalRetriever(
+                embedding=emb,
+                vector_store=vec,
+                text_key=text_key,
+                timestamp_key=timestamp_key,
+                timestamp_format=timestamp_format,
+            ),
         ]
         return Recaller(
             retrievers=[r for r in retrievers if r is not None],
             vector_floor=max(0, int(vector_floor)),
+            text_key=text_key,
+            timestamp_key=timestamp_key,
+            timestamp_format=timestamp_format,
         )
 
     def _get_recaller():
@@ -220,6 +240,8 @@ def build_server(
             lambda: AnswerGenerator(
                 llm=get_llm(llm_provider, **model_kwargs(llm_model)),
                 recaller=_get_recaller(),
+                timestamp_key=timestamp_key,
+                timestamp_format=timestamp_format,
             ),
         )
 
@@ -237,6 +259,9 @@ def build_server(
                 graph_password=graph_password,
                 graph_database=graph_database,
                 graph_timeout=graph_timeout,
+                text_key=text_key,
+                timestamp_key=timestamp_key,
+                timestamp_format=timestamp_format,
             ),
         )
 
@@ -291,6 +316,9 @@ def build_server(
             _components["feedback_pipeline"] = build_full_pipeline(
                 state_store=FileStateStore(resolved_state_path),
                 graph_uri=None,
+                text_key=text_key,
+                timestamp_key=timestamp_key,
+                timestamp_format=timestamp_format,
             )
         return _components["feedback_pipeline"]
 
@@ -811,6 +839,9 @@ def main() -> None:
         state_path=os.environ.get("MNEMOSTACK_STATE_PATH"),
         vector_floor=max(0, int(cfg.recall.vector_floor)),
         rerank_mode=cfg.recall.rerank_mode,
+        text_key=cfg.recall.text_key,
+        timestamp_key=cfg.recall.timestamp_key,
+        timestamp_format=cfg.recall.timestamp_format,
         token_budget=cfg.recall.token_budget,
         auth_enabled=auth_enabled,
         api_key=os.environ.get("MNEMOSTACK_API_KEY") or None,

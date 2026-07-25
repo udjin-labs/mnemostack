@@ -499,7 +499,7 @@ def test_duck_typed_llm_response_without_usage_field(sample_memories):
 def test_specificity_rewrite_adds_resolver_usage(monkeypatch, sample_memories):
     import mnemostack.recall.answer as answer_mod
 
-    def _fake_resolver(query, draft_answer, candidate_memories, llm):
+    def _fake_resolver(query, draft_answer, candidate_memories, llm, **kwargs):
         llm.generate("rewrite it")  # tracked call, reports tokens_used=50
         return "rewritten answer"
 

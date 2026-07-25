@@ -43,6 +43,11 @@ def build_full_pipeline(
     # graph_database appended at the tail to preserve positional back-compat for
     # library callers passing graph_limit/graph_timeout positionally.
     graph_database: str | None = None,
+    # Keyword-only: the positional surface above is frozen.
+    *,
+    text_key: str = "text",
+    timestamp_key: str = "timestamp",
+    timestamp_format: str = "iso",
 ) -> Pipeline:
     """Build the full 8-stage reranking pipeline.
 
@@ -86,9 +91,21 @@ def build_full_pipeline(
         stages.append(QLearningReranker(state_store=store))
 
     if enable_curiosity:
-        stages.append(CuriosityBoost(state_store=store))
+        stages.append(
+            CuriosityBoost(
+                state_store=store,
+                timestamp_key=timestamp_key,
+                timestamp_format=timestamp_format,
+            )
+        )
 
-    stages.append(FreshnessBlend(weight=freshness_weight))
+    stages.append(
+        FreshnessBlend(
+            weight=freshness_weight,
+            timestamp_key=timestamp_key,
+            timestamp_format=timestamp_format,
+        )
+    )
 
     if enable_ior:
         stages.append(InhibitionOfReturn(state_store=store))
@@ -104,6 +121,7 @@ def build_full_pipeline(
                 database=graph_database,
                 limit=graph_limit,
                 timeout=graph_timeout,
+                text_key=text_key,
             )
         )
 
@@ -115,6 +133,9 @@ def build_stateless_pipeline(
     freshness_weight: float = 0.2,
     gravity_penalty: float = 0.5,
     rescue_boost: float = 0.5,
+    *,
+    timestamp_key: str = "timestamp",
+    timestamp_format: str = "iso",
 ) -> Pipeline:
     """Minimal pipeline with stateless stages only.
 
@@ -130,6 +151,12 @@ def build_stateless_pipeline(
     ]
     if hub_degrees:
         stages.append(HubDampen(hub_degrees=hub_degrees))
-    stages.append(FreshnessBlend(weight=freshness_weight))
+    stages.append(
+        FreshnessBlend(
+            weight=freshness_weight,
+            timestamp_key=timestamp_key,
+            timestamp_format=timestamp_format,
+        )
+    )
     stages.append(ExactTokenProtection())
     return Pipeline(stages)

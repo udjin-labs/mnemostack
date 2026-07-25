@@ -298,7 +298,7 @@ def test_answer_passes_llm_model_to_provider():
         ok = True
 
     class _FakeAnswerGenerator:
-        def __init__(self, llm, confidence_threshold):
+        def __init__(self, llm, confidence_threshold, **kwargs):
             self.llm = llm
             self.confidence_threshold = confidence_threshold
 

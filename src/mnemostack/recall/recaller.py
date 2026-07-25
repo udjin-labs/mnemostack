@@ -18,7 +18,7 @@ from .mca_prefilter import mca_prefilter as run_mca_prefilter
 from .query_expansion import expand_query
 from .tokens import TokenCounter, apply_token_budget
 from .trace import RecallTrace, RetrieverTrace
-from .validity import filter_by_tenant, filter_by_validity, keep_payload
+from .validity import filter_by_tenant, filter_by_validity, keep_payload, numeric_unit_for
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +81,46 @@ class RecallResult:
     sources: list[str] = field(default_factory=list)  # ['bm25', 'vector']
 
 
+_SCHEMA_FIELD_DEFAULTS = (
+    ("text_key", "text"),
+    ("timestamp_key", "timestamp"),
+    ("timestamp_format", "iso"),
+)
+
+
+def derive_payload_schema(
+    retrievers: list[Any] | None,
+    fields: tuple[str, ...] = ("text_key", "timestamp_key", "timestamp_format"),
+) -> dict[str, str]:
+    """The payload-schema fields declared by ``retrievers`` (only ``fields``).
+
+    Each field resolves INDEPENDENTLY: a retriever whose attribute equals the
+    standard default has simply not declared that field (a BM25Retriever
+    always carries ``timestamp_key="timestamp"``), so list order can never
+    mask another retriever's foreign schema. Two retrievers declaring
+    DIFFERENT non-default values for one field is ambiguous — that raises,
+    directing the caller to pass the field explicitly. A field the caller
+    already set explicitly should be omitted from ``fields`` — an explicit
+    choice resolves any retriever disagreement.
+    """
+    out: dict[str, str] = {}
+    for field_name, default in _SCHEMA_FIELD_DEFAULTS:
+        if field_name not in fields:
+            continue
+        declared = {
+            v
+            for r in retrievers or []
+            if (v := getattr(r, field_name, None)) is not None and v != default
+        }
+        if len(declared) > 1:
+            raise ValueError(
+                f"retrievers declare conflicting {field_name} values "
+                f"{sorted(declared)}; pass {field_name}= explicitly on the Recaller"
+            )
+        out[field_name] = declared.pop() if declared else default
+    return out
+
+
 class Recaller:
     """Hybrid recall: BM25 + semantic search + RRF fusion.
 
@@ -95,6 +135,12 @@ class Recaller:
         )
         results = recaller.recall("query", limit=10)
     """
+
+    #: Class-level defaults so instances built without __init__ (test fakes,
+    #: __new__-style construction) still read the standard schema.
+    text_key = "text"
+    timestamp_key = "timestamp"
+    timestamp_format = "iso"
 
     # Default weight profiles per detected query shape. Picked conservatively
     # so that switching `adaptive_weights=True` cannot lower recall@K by more
@@ -163,6 +209,9 @@ class Recaller:
         fallback_threshold: float = 0.35,
         mca_prefilter: bool = False,
         vector_floor: int = 0,
+        text_key: str | None = None,
+        timestamp_key: str | None = None,
+        timestamp_format: str | None = None,
     ):
         """Two modes:
 
@@ -206,7 +255,38 @@ class Recaller:
         self.fallback_threshold = fallback_threshold
         self.mca_prefilter_enabled = mca_prefilter
         self.vector_floor = max(0, int(vector_floor))
+        # Payload schema for the legacy vector paths, the in-memory filter
+        # mirrors, and the post-pipeline backstop. When omitted, the schema
+        # DECLARED by retrievers-mode sources applies, resolved per-field so
+        # list order can't mask a foreign schema (see derive_payload_schema).
+        # Explicit arguments always win.
+        missing = tuple(
+            name
+            for name, val in (
+                ("text_key", text_key),
+                ("timestamp_key", timestamp_key),
+                ("timestamp_format", timestamp_format),
+            )
+            if not val
+        )
+        derived = derive_payload_schema(retrievers, missing) if missing else {}
+        self.text_key = text_key or derived.get("text_key", "text")
+        self.timestamp_key = timestamp_key or derived.get("timestamp_key", "timestamp")
+        self.timestamp_format = timestamp_format or derived.get("timestamp_format", "iso")
         self._query_expansion_cache: dict[str, list[str]] = {}
+
+    def _vector_filters(self, filters: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Caller filters with the timestamp condition converted into the
+        collection's own domain (see ``convert_timestamp_filter``) — the
+        legacy vector paths talk to Qdrant directly, so an ISO bound over a
+        numeric field would otherwise silently match nothing."""
+        from .retrievers import convert_timestamp_filter
+
+        return convert_timestamp_filter(
+            filters,
+            timestamp_key=self.timestamp_key,
+            timestamp_format=self.timestamp_format,
+        )
 
     # --- adaptive weight helpers ---
 
@@ -411,7 +491,7 @@ class Recaller:
                     vector_hits = self.vector.search(
                         query_vec,
                         limit=vector_fetch,
-                        filters=filters,
+                        filters=self._vector_filters(filters),
                         hide_invalidated=_push_hide_invalidated(include_invalidated, as_of),
                         **tkw,
                     )
@@ -437,7 +517,12 @@ class Recaller:
                 if filters:
 
                     def predicate(d: BM25Doc) -> bool:
-                        return payload_matches(d.payload, filters)
+                        return payload_matches(
+                            d.payload,
+                            filters,
+                            timestamp_key=self.timestamp_key,
+                            numeric_unit=numeric_unit_for(self.timestamp_format),
+                        )
 
                 with histogram("mnemostack.recall.bm25_latency_ms"):
                     bm25_hits = self.bm25.search(query, limit=bm25_fetch, predicate=predicate)
@@ -490,7 +575,7 @@ class Recaller:
                     results.append(
                         RecallResult(
                             id=item.id,
-                            text=payload.get("text", ""),
+                            text=payload.get(self.text_key, ""),
                             score=rrf_score,
                             payload=payload,
                             sources=self._sources_for(item, vector_hits, bm25_hits),
@@ -574,7 +659,7 @@ class Recaller:
                 hits = self.vector.search(
                     vector,
                     limit=fetch,
-                    filters=filters,
+                    filters=self._vector_filters(filters),
                     hide_invalidated=_push_hide_invalidated(include_invalidated, as_of),
                     **tkw,
                 )
@@ -603,7 +688,7 @@ class Recaller:
             results.append(
                 RecallResult(
                     id=hit.id,
-                    text=payload.get("text", ""),
+                    text=payload.get(self.text_key, ""),
                     score=rrf_score,
                     payload=payload,
                     sources=["vector"],
@@ -929,7 +1014,7 @@ class Recaller:
             candidates.append(
                 RecallResult(
                     id=hit.id,
-                    text=payload.get("text", ""),
+                    text=payload.get(self.text_key, ""),
                     score=hit.score,
                     payload=payload,
                     sources=["vector"],
@@ -1059,7 +1144,14 @@ class Recaller:
                     break
         if bm25 is None:
             return []
-        return run_mca_prefilter(query, bm25, limit=limit, filters=filters)
+        return run_mca_prefilter(
+            query,
+            bm25,
+            limit=limit,
+            filters=filters,
+            timestamp_key=self.timestamp_key,
+            numeric_unit=numeric_unit_for(self.timestamp_format),
+        )
 
     def _vector_fallback_hits(
         self,
@@ -1083,7 +1175,7 @@ class Recaller:
                 return []
             try:
                 hits = self.vector.search(
-                    query_vec, limit=limit, filters=filters,
+                    query_vec, limit=limit, filters=self._vector_filters(filters),
                     hide_invalidated=hide_invalidated, **tkw
                 )
             except Exception:
@@ -1095,7 +1187,7 @@ class Recaller:
                 results.append(
                     RecallResult(
                         id=hit.id,
-                        text=payload.get("text", ""),
+                        text=payload.get(self.text_key, ""),
                         score=hit.score,
                         payload=payload,
                         sources=["vector"],

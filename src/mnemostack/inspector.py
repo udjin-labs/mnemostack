@@ -703,6 +703,17 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
                     return {"records": [], "error": "filters must be a JSON object"}
             except json.JSONDecodeError as e:
                 return {"records": [], "error": f"invalid filters JSON: {e}"}
+            # An operator's timestamp condition must reach Qdrant in the
+            # collection's own domain (an ISO range over a numeric field
+            # matches nothing) — one conversion covers every branch below,
+            # including the legacy-only filter.
+            from mnemostack.recall.retrievers import convert_timestamp_filter
+
+            parsed = convert_timestamp_filter(
+                parsed,
+                timestamp_key=cfg.timestamp_key,
+                timestamp_format=cfg.timestamp_format,
+            )
 
         rows: list[dict[str, Any]] = []
         try:
@@ -710,7 +721,7 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
                 vec = _embed(q)
                 if scoped:
                     for hit in store.search(vec, limit=limit, filters=parsed, tenant=scoped):
-                        rows.append(_row(hit.id, hit.payload, score=hit.score))
+                        rows.append(_row(hit.id, hit.payload, score=hit.score, text_key=cfg.text_key))
                 else:  # unscoped = legacy points only (no tenant_id)
                     res = store.client.query_points(
                         collection_name=cfg.collection,
@@ -720,12 +731,12 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
                         with_payload=True,
                     )
                     for pt in res.points:
-                        rows.append(_row(pt.id, pt.payload or {}, score=pt.score))
+                        rows.append(_row(pt.id, pt.payload or {}, score=pt.score, text_key=cfg.text_key))
                 mode = "vector search"
             else:
                 if scoped:
                     for hit in store.scroll(filters=parsed, tenant=scoped):
-                        rows.append(_row(hit.id, hit.payload))
+                        rows.append(_row(hit.id, hit.payload, text_key=cfg.text_key))
                         if len(rows) >= limit:
                             break
                 else:  # unscoped browse: legacy points only
@@ -736,7 +747,7 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
                         limit=limit,
                     )
                     for rec in points:
-                        rows.append(_row(rec.id, rec.payload or {}))
+                        rows.append(_row(rec.id, rec.payload or {}, text_key=cfg.text_key))
                 mode = "browse"
         except Exception as e:  # noqa: BLE001 — a malformed filter/embed error is a
             # user/runtime problem, not a server bug: return a clean message like
@@ -966,11 +977,19 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
     return app
 
 
-def _row(pid: Any, payload: dict[str, Any], *, score: float | None = None) -> dict[str, Any]:
+def _row(
+    pid: Any,
+    payload: dict[str, Any],
+    *,
+    score: float | None = None,
+    text_key: str = "text",
+) -> dict[str, Any]:
     p = payload or {}
     row: dict[str, Any] = {
         "id": str(pid),
-        "text": p.get("text", ""),
+        # The collection's own text key (a foreign-schema mount) — otherwise
+        # the browse table shows every record with an empty text column.
+        "text": p.get(text_key, ""),
         "source": p.get("source", ""),
         "invalidated": "invalidated_at" in p,
         "payload": p,
