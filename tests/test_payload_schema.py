@@ -11,6 +11,7 @@ Range for epoch fields — a DatetimeRange never matches them).
 from __future__ import annotations
 
 import argparse
+import sys
 from datetime import datetime, timezone
 
 import pytest
@@ -460,8 +461,12 @@ def test_string_epoch_beats_iso_lookalike_under_explicit_unit():
     # field is numeric, so the numeric reading wins; auto keeps ISO-first.
     dt = parse_payload_instant("20240101", numeric_unit="ms")
     assert dt is not None and dt.year == 1970
+    # auto mode: ISO-first — but basic-format ISO ("20240101") is only parsed
+    # by fromisoformat on 3.11+; on 3.10 auto legitimately reads it numerically.
     dt = parse_payload_instant("20240101")
-    assert dt is not None and dt.strftime("%Y-%m-%d") == "2024-01-01"
+    assert dt is not None
+    if sys.version_info >= (3, 11):
+        assert dt.strftime("%Y-%m-%d") == "2024-01-01"
 
 
 def test_synthesis_bm25_docs_get_the_schema():
