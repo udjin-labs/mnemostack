@@ -16,14 +16,23 @@ from qdrant_client.models import (
     Filter,
     FilterSelector,
     IsEmptyCondition,
+    MatchText,
     MatchValue,
+    Modifier,
     PayloadField,
     PayloadSchemaType,
     PointIdsList,
     PointStruct,
     Range,
+    SparseVector,
+    SparseVectorParams,
+    TextIndexParams,
+    TextIndexType,
+    TokenizerType,
     VectorParams,
 )
+
+from .sparse import SPARSE_TEXT_VECTOR, SparseTextEncoder
 
 #: Payload key marking a fact as stale (system-time). Kept as a literal here so
 #: the vector layer doesn't depend on the recall layer; mirrors
@@ -109,6 +118,13 @@ class VectorStore:
     consistent Hit dataclass output.
     """
 
+    #: Class-level defaults so instances built without __init__ (the
+    #: widespread __new__-style test/embedding-free construction) behave as
+    #: plain dense stores with the standard schema.
+    sparse_text = False
+    text_key = "text"
+    _sparse_encoder: SparseTextEncoder | None = None
+
     def __init__(
         self,
         collection: str,
@@ -116,11 +132,36 @@ class VectorStore:
         host: str = "http://localhost:6333",
         distance: Distance = Distance.COSINE,
         timeout: int = 30,
+        *,
+        sparse_text: bool = False,
+        text_key: str = "text",
     ):
         self.collection = collection
         self.dimension = dimension
         self.distance = distance
         self.client = QdrantClient(url=host, timeout=timeout)
+        #: Opt-in server-side lexical index: writes maintain a named sparse
+        #: vector (see vector/sparse.py) next to the dense one, and
+        #: ``sparse_search`` queries it. Off by default — collections and
+        #: writes are byte-identical to before.
+        self.sparse_text = sparse_text
+        self.text_key = text_key
+        self._sparse_encoder = SparseTextEncoder() if sparse_text else None
+
+    def _point_vector(
+        self, vector: list[float], payload: dict[str, Any] | None
+    ) -> list[float] | dict[str, Any]:
+        """The vector value for a PointStruct: plain dense (unchanged layout)
+        unless sparse_text is on, in which case the named sparse encoding of
+        the payload text rides along with the dense vector."""
+        if not self.sparse_text or self._sparse_encoder is None:
+            return vector
+        text = str((payload or {}).get(self.text_key) or "")
+        indices, values = self._sparse_encoder.encode_document(text)
+        return {
+            "": vector,
+            SPARSE_TEXT_VECTOR: SparseVector(indices=indices, values=values),
+        }
 
     # ---------- collection management ----------
 
@@ -148,10 +189,16 @@ class VectorStore:
         if exists and recreate:
             self.client.delete_collection(self.collection)
             exists = False
+        sparse_cfg = (
+            {SPARSE_TEXT_VECTOR: SparseVectorParams(modifier=Modifier.IDF)}
+            if self.sparse_text
+            else None
+        )
         if not exists:
             self.client.create_collection(
                 collection_name=self.collection,
                 vectors_config=VectorParams(size=self.dimension, distance=self.distance),
+                sparse_vectors_config=sparse_cfg,
             )
             # Index tenant_id: it's the mandatory filter on every tenant-scoped
             # read, so in a large shared collection a small-tenant search/count
@@ -159,6 +206,26 @@ class VectorStore:
             self.index_payload_field(TENANT_ID_KEY, PayloadSchemaType.KEYWORD)
             return True
         self._validate_dimension()
+        if sparse_cfg is not None:
+            # An existing collection: adding a sparse space is a non-destructive
+            # config update on servers that support it; where it isn't, fail
+            # LOUD — a silently missing sparse space would make every
+            # sparse_search return nothing.
+            info = self.client.get_collection(self.collection)
+            existing_sparse = getattr(info.config.params, "sparse_vectors", None) or {}
+            if SPARSE_TEXT_VECTOR not in existing_sparse:
+                try:
+                    self.client.update_collection(
+                        collection_name=self.collection,
+                        sparse_vectors_config=sparse_cfg,
+                    )
+                except Exception as e:  # noqa: BLE001 — surface, don't guess
+                    raise RuntimeError(
+                        f"collection '{self.collection}' has no '{SPARSE_TEXT_VECTOR}' "
+                        "sparse space and the server refused to add one "
+                        f"({e}); re-create the collection (or re-index) to use "
+                        "sparse text search"
+                    ) from e
         return False
 
     def _validate_dimension(self) -> None:
@@ -171,6 +238,21 @@ class VectorStore:
                 f"embedding provider produces {self.dimension}-dim vectors. "
                 f"Re-index with --recreate or switch the embedding model."
             )
+
+    def ensure_text_index(self, text_key: str | None = None) -> None:
+        """Create the full-text payload index MatchText filtering REQUIRES on a
+        real Qdrant server (word tokenizer, lowercased — matching the lexical
+        arm's expectations). Idempotent; non-destructive on existing data, so
+        it's safe to run against a pre-existing (mounted) collection. The local
+        in-memory client matches text without an index, hence tests pass either
+        way — production servers do not."""
+        self.client.create_payload_index(
+            collection_name=self.collection,
+            field_name=text_key or self.text_key,
+            field_schema=TextIndexParams(
+                type=TextIndexType.TEXT, tokenizer=TokenizerType.WORD, lowercase=True
+            ),
+        )
 
     def index_payload_field(self, field: str, schema: PayloadSchemaType) -> None:
         """Create a payload index for filtering (e.g. timestamp as DATETIME)."""
@@ -365,7 +447,7 @@ class VectorStore:
             stamped[TENANT_ID_KEY] = owner
         self.client.upsert(
             collection_name=self.collection,
-            points=[PointStruct(id=id, vector=vector, payload=stamped)],
+            points=[PointStruct(id=id, vector=self._point_vector(vector, stamped), payload=stamped)],
         )
 
     def upsert_batch(
@@ -389,10 +471,16 @@ class VectorStore:
             chunk = points[i : i + batch_size]
             if tenant is not None:
                 self._assert_tenant_owned([pid for pid, _, _ in chunk], tenant)
-                structs = [
-                    PointStruct(id=pid, vector=vec, payload=_stamp_tenant(pl, tenant))
-                    for pid, vec, pl in chunk
-                ]
+                structs = []
+                for pid, vec, pl in chunk:
+                    stamped_pl = _stamp_tenant(pl, tenant)
+                    structs.append(
+                        PointStruct(
+                            id=pid,
+                            vector=self._point_vector(vec, stamped_pl),
+                            payload=stamped_pl,
+                        )
+                    )
             else:
                 owners = self._existing_tenants([pid for pid, _, _ in chunk])
                 structs = []
@@ -400,7 +488,9 @@ class VectorStore:
                     p = _stamp_tenant(pl, None)
                     if pid in owners:
                         p[TENANT_ID_KEY] = owners[pid]
-                    structs.append(PointStruct(id=pid, vector=vec, payload=p))
+                    structs.append(
+                        PointStruct(id=pid, vector=self._point_vector(vec, p), payload=p)
+                    )
             self.client.upsert(collection_name=self.collection, points=structs)
             total += len(structs)
         return total
@@ -627,6 +717,8 @@ class VectorStore:
         *,
         hide_invalidated: bool = False,
         tenant: str | None = None,
+        text_any: list[str] | None = None,
+        text_any_key: str | None = None,
     ) -> list[Hit]:
         """Semantic search with optional payload filters.
 
@@ -638,15 +730,91 @@ class VectorStore:
         fetched — cleaner and cheaper than fetching them and dropping them
         client-side. The client-side ``filter_by_validity`` remains the backstop.
         """
+        qfilter = self._assemble_filter(
+            filters,
+            tenant=tenant,
+            hide_invalidated=hide_invalidated,
+            text_any=text_any,
+            text_any_key=text_any_key,
+        )
+        result = self.client.query_points(
+            collection_name=self.collection,
+            query=query_vector,
+            limit=limit,
+            query_filter=qfilter,
+            with_payload=True,
+        )
+        hits = []
+        for pt in result.points:
+            if pt.score < min_score:
+                continue
+            pid = str(pt.id) if isinstance(pt.id, UUID) else pt.id
+            hits.append(Hit(id=pid, score=pt.score, payload=pt.payload or {}))
+        return hits
+
+    def _assemble_filter(
+        self,
+        filters: dict[str, Any] | None,
+        *,
+        tenant: str | None,
+        hide_invalidated: bool,
+        text_any: list[str] | None = None,
+        text_any_key: str | None = None,
+    ) -> Filter | None:
+        """The full server-side filter: caller filters + tenant boundary +
+        validity view + optional lexical gate. ``text_any`` restricts to points
+        whose text field full-text-matches AT LEAST ONE token — expressed as a
+        nested should-clause inside the outer must, so it composes with the
+        other conditions without weakening them (a bare top-level ``should``
+        next to ``must`` would become optional)."""
         must: list[Any] = list(self._build_filter(filters).must or []) if filters else []
         if tenant is not None:
             must.append(_tenant_condition(tenant))
         if hide_invalidated:
             must.append(_hide_invalidated_condition())
-        qfilter = Filter(must=must) if must else None
+        if text_any:
+            gate_key = text_any_key or self.text_key
+            must.append(
+                Filter(
+                    should=[
+                        FieldCondition(key=gate_key, match=MatchText(text=token))
+                        for token in text_any
+                    ]
+                )
+            )
+        return Filter(must=must) if must else None
+
+    def sparse_search(
+        self,
+        query_text: str,
+        limit: int = 10,
+        filters: dict[str, Any] | None = None,
+        min_score: float = 0.0,
+        *,
+        hide_invalidated: bool = False,
+        tenant: str | None = None,
+    ) -> list[Hit]:
+        """Lexical search over the ``text_sparse`` space (sparse_text=True).
+
+        The query rides as a sparse vector of its distinct tokens; the server
+        applies collection-wide IDF (``Modifier.IDF``), so scoring is tf·idf-
+        like without any client-side corpus. Same tenant/validity/filter
+        semantics as :meth:`search`."""
+        if not self.sparse_text or self._sparse_encoder is None:
+            raise RuntimeError(
+                "sparse_search requires VectorStore(sparse_text=True) — this store "
+                "does not maintain the sparse text space"
+            )
+        indices, values = self._sparse_encoder.encode_query(query_text)
+        if not indices:
+            return []
+        qfilter = self._assemble_filter(
+            filters, tenant=tenant, hide_invalidated=hide_invalidated
+        )
         result = self.client.query_points(
             collection_name=self.collection,
-            query=query_vector,
+            query=SparseVector(indices=indices, values=values),
+            using=SPARSE_TEXT_VECTOR,
             limit=limit,
             query_filter=qfilter,
             with_payload=True,

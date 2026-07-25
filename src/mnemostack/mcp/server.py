@@ -79,6 +79,7 @@ def build_server(
     text_key: str = "text",
     timestamp_key: str = "timestamp",
     timestamp_format: str = "iso",
+    text_search: str = "auto",
 ) -> Any:
     """Build and return a configured FastMCP server.
 
@@ -194,9 +195,39 @@ def build_server(
         )
 
     def _build_recaller():
+        from mnemostack.config import resolve_text_search_mode
+        from mnemostack.recall import QdrantSparseRetriever, QdrantTextRetriever
+
         emb = _get_embedding()
         vec = _get_vector()
-        bm25_docs = build_bm25_docs(bm25_paths)
+        schema_kw = {
+            "text_key": text_key,
+            "timestamp_key": timestamp_key,
+            "timestamp_format": timestamp_format,
+        }
+        mode = resolve_text_search_mode(text_search, bm25_paths)
+        lexical_arm: Any = None
+        if mode == "bm25":
+            bm25_docs = build_bm25_docs(bm25_paths)
+            if bm25_docs:
+                lexical_arm = BM25Retriever(
+                    docs=bm25_docs,
+                    timestamp_key=timestamp_key,
+                    timestamp_format=timestamp_format,
+                )
+        elif mode == "qdrant_bm25":
+            lexical_arm = BM25Retriever.from_qdrant(vec.client, collection, text_key=schema_kw["text_key"], timestamp_key=schema_kw["timestamp_key"], timestamp_format=schema_kw["timestamp_format"])
+        elif mode == "lexical":
+            lexical_arm = QdrantTextRetriever(embedding=emb, vector_store=vec, text_key=schema_kw["text_key"], timestamp_key=schema_kw["timestamp_key"], timestamp_format=schema_kw["timestamp_format"])
+        elif mode == "sparse":
+            sparse_store = VectorStore(
+                collection=collection,
+                dimension=1,  # sparse queries never touch the dense space
+                host=qdrant_host,
+                sparse_text=True,
+                text_key=text_key,
+            )
+            lexical_arm = QdrantSparseRetriever(vector_store=sparse_store, text_key=schema_kw["text_key"], timestamp_key=schema_kw["timestamp_key"], timestamp_format=schema_kw["timestamp_format"])
         retrievers = [
             VectorRetriever(
                 embedding=emb,
@@ -205,7 +236,7 @@ def build_server(
                 timestamp_key=timestamp_key,
                 timestamp_format=timestamp_format,
             ),
-            BM25Retriever(docs=bm25_docs) if bm25_docs else None,
+            lexical_arm,
             MemgraphRetriever(
                 uri=memgraph_uri,
                 user=graph_user,
@@ -842,6 +873,7 @@ def main() -> None:
         text_key=cfg.recall.text_key,
         timestamp_key=cfg.recall.timestamp_key,
         timestamp_format=cfg.recall.timestamp_format,
+        text_search=cfg.recall.text_search,
         token_budget=cfg.recall.token_budget,
         auth_enabled=auth_enabled,
         api_key=os.environ.get("MNEMOSTACK_API_KEY") or None,

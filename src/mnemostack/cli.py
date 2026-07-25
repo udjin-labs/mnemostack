@@ -1245,6 +1245,30 @@ def cmd_quota_rm(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_text_index(args: argparse.Namespace) -> int:
+    """Create the full-text payload index the lexical text-search mode needs.
+
+    Idempotent and non-destructive (safe on a pre-existing/mounted
+    collection): a real Qdrant server REQUIRES this index before it will
+    accept MatchText filters, which `recall.text_search: lexical` relies on.
+    """
+    text_key = _payload_schema()[0]
+    store = VectorStore(collection=args.collection, dimension=1, host=args.qdrant)
+    try:
+        if not store.collection_exists():
+            print(f"error: collection '{args.collection}' does not exist", file=sys.stderr)
+            return 1
+        store.ensure_text_index(text_key)
+    except Exception as e:  # noqa: BLE001
+        print(f"error: cannot create text index: {e}", file=sys.stderr)
+        return 1
+    print(
+        f"full-text index ensured on payload field '{text_key}' of "
+        f"'{args.collection}' — `recall.text_search: lexical` is ready"
+    )
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """Diagnose a mnemostack deployment: config, dependencies, versions.
 
@@ -1289,8 +1313,18 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     # timestamp_format is the other stable config enum: a typo here passes
     # config load but makes TemporalRetriever construction raise at serve
     # time — doctor must flag it, not report a false green.
+    from mnemostack.config import TEXT_SEARCH_MODES
     from mnemostack.recall.retrievers import TemporalRetriever as _TR
 
+    if cfg.recall.text_search in TEXT_SEARCH_MODES:
+        add("config.text_search", "ok", cfg.recall.text_search)
+    else:
+        add(
+            "config.text_search",
+            "misconfig",
+            f"invalid text_search '{cfg.recall.text_search}'",
+            "set recall.text_search to one of: " + ", ".join(TEXT_SEARCH_MODES),
+        )
     if cfg.recall.timestamp_format in _TR.TIMESTAMP_FORMATS:
         add("config.timestamp_format", "ok", cfg.recall.timestamp_format)
     else:
@@ -1770,6 +1804,33 @@ def _payload_schema() -> tuple[str, str, str]:
         return "text", "timestamp", "iso"
 
 
+@functools.lru_cache(maxsize=1)
+def _text_search_mode() -> str:
+    """recall.text_search from config/env (same deployment-level resolution
+    as _payload_schema; falls back to the historical default on a broken
+    config, which _payload_schema already warned about loudly)."""
+    try:
+        return Config.load().recall.text_search
+    except Exception:  # noqa: BLE001 — _payload_schema warned already
+        return "auto"
+
+
+def _indexing_store(args: argparse.Namespace, provider) -> VectorStore:
+    """The write-side VectorStore for index commands. Under
+    ``recall.text_search: sparse`` it maintains the sparse text space (the
+    collection gains the space on ensure, every upsert carries the sparse
+    encoding) — one config switch drives ingest AND recall."""
+    text_key = _payload_schema()[0]
+    sparse = _text_search_mode() == "sparse"
+    return VectorStore(
+        collection=args.collection,
+        dimension=provider.dimension,
+        host=args.qdrant,
+        sparse_text=sparse,
+        text_key=text_key,
+    )
+
+
 def _build_recaller(
     args: argparse.Namespace,
     provider,
@@ -1777,7 +1838,17 @@ def _build_recaller(
     source_filter: set[str] | None = None,
 ) -> Recaller:
     """Build the same retriever-mode Recaller used by the service surfaces."""
+    from mnemostack.config import resolve_text_search_mode
+    from mnemostack.recall import QdrantSparseRetriever, QdrantTextRetriever
+
     text_key, timestamp_key, timestamp_format = _payload_schema()
+    schema_kw = {
+        "text_key": text_key,
+        "timestamp_key": timestamp_key,
+        "timestamp_format": timestamp_format,
+    }
+    bm25_paths = list(getattr(args, "bm25_path", []) or [])
+    mode = resolve_text_search_mode(_text_search_mode(), bm25_paths)
     retrievers: list[Retriever] = []
     if (
         provider is not None
@@ -1794,9 +1865,35 @@ def _build_recaller(
             )
         )
     if _source_enabled_for_cli("bm25", source_filter):
-        bm25_docs = build_bm25_docs(list(getattr(args, "bm25_path", []) or []))
-        if bm25_docs:
-            retrievers.append(BM25Retriever(docs=bm25_docs))
+        if mode == "bm25":
+            bm25_docs = build_bm25_docs(bm25_paths)
+            if bm25_docs:
+                retrievers.append(
+                    BM25Retriever(
+                        docs=bm25_docs,
+                        timestamp_key=timestamp_key,
+                        timestamp_format=timestamp_format,
+                    )
+                )
+        elif mode == "qdrant_bm25" and store is not None:
+            retrievers.append(
+                BM25Retriever.from_qdrant(store.client, args.collection, text_key=schema_kw["text_key"], timestamp_key=schema_kw["timestamp_key"], timestamp_format=schema_kw["timestamp_format"])
+            )
+        elif mode == "lexical" and provider is not None and store is not None:
+            retrievers.append(
+                QdrantTextRetriever(embedding=provider, vector_store=store, text_key=schema_kw["text_key"], timestamp_key=schema_kw["timestamp_key"], timestamp_format=schema_kw["timestamp_format"])
+            )
+        elif mode == "sparse":
+            sparse_store = VectorStore(
+                collection=args.collection,
+                dimension=1,  # sparse queries never touch the dense space
+                host=args.qdrant,
+                sparse_text=True,
+                text_key=text_key,
+            )
+            retrievers.append(
+                QdrantSparseRetriever(vector_store=sparse_store, text_key=schema_kw["text_key"], timestamp_key=schema_kw["timestamp_key"], timestamp_format=schema_kw["timestamp_format"])
+            )
     memgraph_uri = getattr(args, "memgraph_uri", None)
     if _source_enabled_for_cli("memgraph", source_filter) and memgraph_uri:
         retrievers.append(MemgraphRetriever(uri=memgraph_uri, **_graph_auth(args)))
@@ -1841,11 +1938,7 @@ def cmd_index(args: argparse.Namespace) -> int:
         return 2
 
     provider = get_provider(args.provider, **model_kwargs(_embedding_model(args)))
-    store = VectorStore(
-        collection=args.collection,
-        dimension=provider.dimension,
-        host=args.qdrant,
-    )
+    store = _indexing_store(args, provider)
     if args.recreate and not args.yes:
         if not sys.stdin.isatty():
             print(
@@ -2101,11 +2194,7 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
         watch_baseline = _scan_mtimes(target)
 
     provider = get_provider(args.provider, **model_kwargs(_embedding_model(args)))
-    store = VectorStore(
-        collection=args.collection,
-        dimension=provider.dimension,
-        host=args.qdrant,
-    )
+    store = _indexing_store(args, provider)
 
     # Collect and validate the file set BEFORE any destructive collection call:
     # --recreate on a mistyped/empty path must not drop the existing collection
@@ -2503,6 +2592,14 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         help="Include a live (billable) LLM generation probe (default: config check only)",
     )
     p_doctor.set_defaults(func=cmd_doctor)
+
+    p_text_index = sub.add_parser(
+        "text-index",
+        parents=[common],
+        help="Create the full-text payload index `recall.text_search: lexical` "
+        "requires on a real Qdrant server (idempotent, non-destructive)",
+    )
+    p_text_index.set_defaults(func=cmd_text_index)
 
     p_tenant_migrate = sub.add_parser(
         "tenant-migrate",

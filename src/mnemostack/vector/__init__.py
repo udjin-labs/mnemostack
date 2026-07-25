@@ -19,8 +19,11 @@ from .qdrant import (
     TenantConflictError,
     VectorStore,
 )
+from .sparse import SPARSE_TEXT_VECTOR, SparseTextEncoder
 
 __all__ = [
+    "SPARSE_TEXT_VECTOR",
+    "SparseTextEncoder",
     "VectorStore",
     "AsyncVectorStore",
     "Hit",

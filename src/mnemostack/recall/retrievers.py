@@ -372,6 +372,167 @@ def bm25_docs_from_qdrant(
     return docs
 
 
+class QdrantTextRetriever(Retriever):
+    """Lexical-gated dense search — the scalable replacement for in-process BM25.
+
+    Instead of holding a lexical corpus in client memory (the in-process BM25's
+    documented "<100K documents" ceiling), the GATE runs inside Qdrant: the
+    query's salient tokens become a full-text ``MatchText`` should-clause, and
+    dense similarity ranks *within* the lexically-matching subset. Exact-token
+    recall (IDs, error codes, names) at any collection size, no reindex — the
+    one server-side prerequisite is a full-text payload index on the text
+    field (``VectorStore.ensure_text_index()`` / ``mnemostack text-index``);
+    without it a real server rejects MatchText filters.
+
+    Scoring note: the gate FILTERS, it does not score (Qdrant's full-text
+    match carries no relevance weight) — ranking inside the gate is dense
+    similarity. For server-side lexical *scoring*, see
+    ``QdrantSparseRetriever``.
+    """
+
+    name = "qdrant_text"
+
+    accepts_as_of = True
+    accepts_include_invalidated = True
+    accepts_tenant = True
+
+    def __init__(
+        self,
+        embedding: EmbeddingProvider,
+        vector_store: VectorStore,
+        *,
+        text_key: str = "text",
+        timestamp_key: str = "timestamp",
+        timestamp_format: str = "iso",
+        max_gate_tokens: int = 8,
+        min_token_len: int = 3,
+    ):
+        self.embedding = embedding
+        self.vector_store = vector_store
+        self.text_key = text_key
+        self.timestamp_key = timestamp_key
+        self.timestamp_format = timestamp_format
+        self.max_gate_tokens = max_gate_tokens
+        self.min_token_len = min_token_len
+
+    def _gate_tokens(self, query: str) -> list[str]:
+        """Salient tokens for the lexical gate: exact technical tokens first
+        (IDs, IPs, versions — the queries this arm exists for), then content
+        words, longest first (a cheap rarity proxy with no corpus statistics),
+        capped so a verbose query can't turn the gate into match-anything."""
+        from .mca_prefilter import extract_exact_tokens
+        from .pipeline.stages import STOPWORDS
+
+        exact = extract_exact_tokens(query)
+        words = [
+            t
+            for t in tokenize(query)
+            if len(t) >= self.min_token_len and t not in STOPWORDS
+        ]
+        rest = sorted(set(words) - set(exact), key=len, reverse=True)
+        return (exact + rest)[: self.max_gate_tokens]
+
+    def explain_empty(self, query: str) -> str | None:
+        return "qdrant_text:no_tokens" if not self._gate_tokens(query) else None
+
+    def search(
+        self, query, limit=20, filters=None, as_of=None, include_invalidated=False, tenant=None
+    ):
+        tokens = self._gate_tokens(query)
+        if not tokens:
+            return []
+        vec = self.embedding.embed(query)
+        if not vec:
+            return []
+        filters = convert_timestamp_filter(
+            filters, timestamp_key=self.timestamp_key, timestamp_format=self.timestamp_format
+        )
+        tkw = {"tenant": tenant} if tenant is not None else {}
+        hits = self.vector_store.search(
+            vec,
+            limit=limit,
+            filters=filters,
+            hide_invalidated=as_of is None and not include_invalidated,
+            text_any=tokens,
+            text_any_key=self.text_key,
+            **tkw,
+        )
+        return [
+            RecallResult(
+                id=h.id,
+                text=(h.payload or {}).get(self.text_key, ""),
+                score=h.score,
+                payload=dict(h.payload or {}),
+                sources=["qdrant_text"],
+            )
+            for h in hits
+        ]
+
+
+class QdrantSparseRetriever(Retriever):
+    """Server-side lexical scoring over Qdrant sparse vectors.
+
+    The counterpart to ``QdrantTextRetriever`` for deployments that CAN
+    (re)index: writes maintain a sparse tf encoding of each chunk's text
+    (``VectorStore(sparse_text=True)``), Qdrant's ``Modifier.IDF`` supplies
+    collection-wide term weighting at query time, and this retriever ranks by
+    that tf·idf-like score — true lexical *scoring* (not just a gate) with no
+    client-side corpus, at any collection size. Requires the collection to
+    carry the sparse space (created by ``ensure_collection`` on a
+    ``sparse_text=True`` store; existing collections need a re-index or a
+    server that accepts the config update).
+    """
+
+    name = "sparse"
+
+    accepts_as_of = True
+    accepts_include_invalidated = True
+    accepts_tenant = True
+
+    def __init__(
+        self,
+        vector_store: VectorStore,
+        *,
+        text_key: str = "text",
+        timestamp_key: str = "timestamp",
+        timestamp_format: str = "iso",
+    ):
+        if not getattr(vector_store, "sparse_text", False):
+            raise ValueError(
+                "QdrantSparseRetriever needs a VectorStore(sparse_text=True) — "
+                "this store does not maintain the sparse text space"
+            )
+        self.vector_store = vector_store
+        self.text_key = text_key
+        self.timestamp_key = timestamp_key
+        self.timestamp_format = timestamp_format
+
+    def search(
+        self, query, limit=20, filters=None, as_of=None, include_invalidated=False, tenant=None
+    ):
+        filters = convert_timestamp_filter(
+            filters, timestamp_key=self.timestamp_key, timestamp_format=self.timestamp_format
+        )
+        tkw = {"tenant": tenant} if tenant is not None else {}
+        hits = self.vector_store.sparse_search(
+            query,
+            limit=limit,
+            filters=filters,
+            hide_invalidated=as_of is None and not include_invalidated,
+            **tkw,
+        )
+        return [
+            RecallResult(
+                id=h.id,
+                text=(h.payload or {}).get(self.text_key, ""),
+                score=h.score,
+                payload=dict(h.payload or {}),
+                sources=["sparse"],
+            )
+            for h in hits
+        ]
+
+
 class BM25Retriever(Retriever):
     """Exact token match via BM25."""
 

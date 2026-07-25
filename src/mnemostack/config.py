@@ -87,6 +87,23 @@ class GraphConfig:
     health_timeout: float = 1.0
 
 
+#: Valid values for ``recall.text_search`` (see the field's docstring).
+TEXT_SEARCH_MODES = ("auto", "off", "bm25", "qdrant_bm25", "lexical", "sparse")
+
+
+def resolve_text_search_mode(mode: str, bm25_paths: list[str] | None) -> str:
+    """Concrete lexical-arm choice: ``auto`` keeps historical behavior
+    (file-corpus BM25 when ``bm25_paths`` is configured, else no lexical arm);
+    anything else passes through. Unknown modes fail loud at build time."""
+    if mode not in TEXT_SEARCH_MODES:
+        raise ValueError(
+            f"text_search must be one of {TEXT_SEARCH_MODES}, got {mode!r}"
+        )
+    if mode == "auto":
+        return "bm25" if bm25_paths else "off"
+    return mode
+
+
 @dataclass
 class RecallConfig:
     rrf_k: int = 60
@@ -106,6 +123,14 @@ class RecallConfig:
     text_key: str = "text"
     timestamp_key: str = "timestamp"
     timestamp_format: str = "iso"
+    #: Which lexical arm joins the recall fleet. "auto" (default) keeps the
+    #: historical behavior: in-process BM25 over bm25_paths when set, else no
+    #: lexical arm. "bm25" = markdown-file corpus; "qdrant_bm25" = in-process
+    #: BM25 loaded FROM the Qdrant payloads (fine under ~100K chunks);
+    #: "lexical" = lexical-gated dense over a Qdrant full-text index (any
+    #: size, no reindex); "sparse" = server-side sparse tf·idf scoring (any
+    #: size, needs the sparse space at ingest); "off" = none.
+    text_search: str = "auto"
 
 
 @dataclass
@@ -215,6 +240,7 @@ def _apply_env_overrides(cfg: Config) -> Config:
         MNEMOSTACK_TEXT_KEY         (payload key holding chunk text)
         MNEMOSTACK_TIMESTAMP_KEY    (payload key holding the timestamp)
         MNEMOSTACK_TIMESTAMP_FORMAT (iso | epoch | epoch_ms)
+        MNEMOSTACK_TEXT_SEARCH      (auto | off | bm25 | qdrant_bm25 | lexical | sparse)
         MNEMOSTACK_QDRANT_HOST  (alias for VECTOR_HOST)
         MNEMOSTACK_COLLECTION   (alias for VECTOR_COLLECTION)
         MNEMOSTACK_MEMGRAPH_URI (alias for GRAPH_URI)
@@ -284,6 +310,8 @@ def _apply_env_overrides(cfg: Config) -> Config:
         cfg.recall.timestamp_key = v
     if v := env.get("MNEMOSTACK_TIMESTAMP_FORMAT"):
         cfg.recall.timestamp_format = v
+    if v := env.get("MNEMOSTACK_TEXT_SEARCH"):
+        cfg.recall.text_search = v
 
     return cfg
 
@@ -332,4 +360,5 @@ recall:
   text_key: text
   timestamp_key: timestamp
   timestamp_format: iso       # iso | epoch | epoch_ms
+  text_search: auto           # auto | off | bm25 | qdrant_bm25 | lexical | sparse
 """
