@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Real-Qdrant smoke tests in CI**: the release-verification scenarios for the text-search arms (MatchText against a real full-text index, sparse IDF ordering, tenant boundaries on both arms, named-layout scrolls, the post-hoc sparse-space refusal, and the `has_vector` coverage-gap → `sparse-backfill` flow) now replay in CI against a `qdrant/qdrant:v1.15.4` service container — the same version the deployment docs pin — instead of being a manual pre-release step. The module (`tests/test_qdrant_server_smoke.py`) is gated by `MNEMOSTACK_TEST_QDRANT_URL`, so local runs without a server are unaffected; point it at any reachable Qdrant to run the smoke against your own deployment.
+
 ## [1.2.0] - 2026-07-25
 
 ### Added
