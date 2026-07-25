@@ -12,6 +12,7 @@ configured embedding provider (GEMINI_API_KEY for gemini, or a running Ollama).
 from __future__ import annotations
 
 import argparse
+import functools
 import importlib
 import json
 import os
@@ -1725,19 +1726,30 @@ def _graph_auth(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+@functools.lru_cache(maxsize=1)
 def _payload_schema() -> tuple[str, str, str]:
     """(text_key, timestamp_key, timestamp_format) from config/env.
 
     The payload schema is a property of the DEPLOYMENT (one collection = one
     schema), not of an individual command, so the CLI reads it from the same
-    config/env the servers use instead of per-command flags. A config that
-    fails to load falls back to the standard schema — the command itself will
-    surface the config error where it matters.
+    config/env the servers use instead of per-command flags. Cached: one
+    Config.load() per process (a CLI process runs one command).
+
+    A config that fails to load falls back to the standard schema WITH a loud
+    stderr warning — for several commands this is the only place the config
+    file is parsed at all, so swallowing the error silently would make a
+    configured `text_key` vanish with no clue why text came back empty.
     """
     try:
         rc = Config.load().recall
         return rc.text_key, rc.timestamp_key, rc.timestamp_format
-    except Exception:  # noqa: BLE001 — schema fallback; the real error surfaces elsewhere
+    except Exception as e:  # noqa: BLE001 — fall back, but never silently
+        print(
+            f"warning: config failed to load ({e}); using the standard payload "
+            "schema (text/timestamp/iso) — a configured text_key/timestamp_key "
+            "is NOT in effect",
+            file=sys.stderr,
+        )
         return "text", "timestamp", "iso"
 
 
@@ -1794,6 +1806,7 @@ def _build_recaller(
         expansion_llm=expansion_llm,
         vector_floor=max(0, int(getattr(args, "vector_floor", 0))),
         text_key=text_key,
+        timestamp_key=timestamp_key,
     )
 
 
@@ -3360,6 +3373,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         )
         return 2
 
+    _schema_text, _schema_ts, _schema_fmt = _payload_schema()
     cfg = ServerConfig(
         provider_name=args.provider,
         embedding_model=_embedding_model(args),
@@ -3385,6 +3399,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
         auth_enabled=args.auth or _env_bool("MNEMOSTACK_AUTH_ENABLED"),
         keys_file=args.keys_file,
         quotas_file=getattr(args, "quotas_file", None),
+        text_key=_schema_text,
+        timestamp_key=_schema_ts,
+        timestamp_format=_schema_fmt,
     )
     app = build_app(cfg)
 
@@ -3464,6 +3481,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         )
         return 2
 
+    _schema_text, _schema_ts, _schema_fmt = _payload_schema()
     cfg = ServerConfig(
         provider_name=args.provider,
         embedding_model=_embedding_model(args),
@@ -3485,6 +3503,9 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         auth_enabled=getattr(args, "auth", False) or _env_bool("MNEMOSTACK_AUTH_ENABLED"),
         keys_file=getattr(args, "keys_file", None),
         quotas_file=getattr(args, "quotas_file", None),
+        text_key=_schema_text,
+        timestamp_key=_schema_ts,
+        timestamp_format=_schema_fmt,
     )
     app = build_inspector_app(cfg)
     admin = cfg.auth_enabled

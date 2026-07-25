@@ -96,9 +96,10 @@ class Recaller:
         results = recaller.recall("query", limit=10)
     """
 
-    #: Class-level default so instances built without __init__ (test fakes,
+    #: Class-level defaults so instances built without __init__ (test fakes,
     #: __new__-style construction) still read the standard schema.
     text_key = "text"
+    timestamp_key = "timestamp"
 
     # Default weight profiles per detected query shape. Picked conservatively
     # so that switching `adaptive_weights=True` cannot lower recall@K by more
@@ -168,6 +169,7 @@ class Recaller:
         mca_prefilter: bool = False,
         vector_floor: int = 0,
         text_key: str = "text",
+        timestamp_key: str = "timestamp",
     ):
         """Two modes:
 
@@ -216,6 +218,7 @@ class Recaller:
         #: so recall works over a pre-existing collection's own schema.
         #: Retrievers-mode sources carry their own text_key.
         self.text_key = text_key
+        self.timestamp_key = timestamp_key
         self._query_expansion_cache: dict[str, list[str]] = {}
 
     # --- adaptive weight helpers ---
@@ -447,7 +450,7 @@ class Recaller:
                 if filters:
 
                     def predicate(d: BM25Doc) -> bool:
-                        return payload_matches(d.payload, filters)
+                        return payload_matches(d.payload, filters, timestamp_key=self.timestamp_key)
 
                 with histogram("mnemostack.recall.bm25_latency_ms"):
                     bm25_hits = self.bm25.search(query, limit=bm25_fetch, predicate=predicate)
@@ -1069,7 +1072,9 @@ class Recaller:
                     break
         if bm25 is None:
             return []
-        return run_mca_prefilter(query, bm25, limit=limit, filters=filters)
+        return run_mca_prefilter(
+            query, bm25, limit=limit, filters=filters, timestamp_key=self.timestamp_key
+        )
 
     def _vector_fallback_hits(
         self,

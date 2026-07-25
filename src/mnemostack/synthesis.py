@@ -11,7 +11,6 @@ import json
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -184,7 +183,14 @@ def synthesize(
     )
     raw_results = [r for r in raw_results if _result_source_enabled(r, source_filter)]
 
-    facts = _dedupe_facts(_facts_from_results(raw_results), max_results=max_results)
+    facts = _dedupe_facts(
+        _facts_from_results(
+            raw_results,
+            text_key=str(kwargs.get("text_key", "text")),
+            timestamp_key=str(kwargs.get("timestamp_key", "timestamp")),
+        ),
+        max_results=max_results,
+    )
     if len(facts) >= int(kwargs.get("cluster_min_results", 8)):
         _assign_subtopics(facts, entity)
     timeline = _timeline(facts)
@@ -277,7 +283,7 @@ def _build_recaller_from_kwargs(
         )
     if not retrievers:
         return None
-    return Recaller(retrievers=retrievers, text_key=text_key)
+    return Recaller(retrievers=retrievers, text_key=text_key, timestamp_key=timestamp_key)
 
 
 def _source_enabled(name: str, source_filter: set[str] | None) -> bool:
@@ -368,7 +374,12 @@ def _query_retrievers(
     return results
 
 
-def _facts_from_results(results: list[RecallResult]) -> list[SynthesisFact]:
+def _facts_from_results(
+    results: list[RecallResult],
+    *,
+    text_key: str = "text",
+    timestamp_key: str = "timestamp",
+) -> list[SynthesisFact]:
     facts: list[SynthesisFact] = []
     for result in results:
         text = (getattr(result, "text", "") or "").strip()
@@ -381,28 +392,35 @@ def _facts_from_results(results: list[RecallResult]) -> list[SynthesisFact]:
             SynthesisFact(
                 text=text,
                 source=source,
-                timestamp=_extract_timestamp(payload),
+                timestamp=_extract_timestamp(payload, timestamp_key=timestamp_key),
                 relevance_score=float(getattr(result, "score", 0.0) or 0.0),
-                metadata={"id": getattr(result, "id", None), **_safe_metadata(payload)},
+                metadata={
+                    "id": getattr(result, "id", None),
+                    **_safe_metadata(payload, text_key=text_key),
+                },
             )
         )
     facts.sort(key=lambda f: f.relevance_score, reverse=True)
     return facts
 
 
-def _extract_timestamp(payload: dict[str, Any]) -> str | None:
-    for key in _TIMESTAMP_KEYS:
+def _extract_timestamp(payload: dict[str, Any], *, timestamp_key: str = "timestamp") -> str | None:
+    # The configured schema key wins; the legacy candidates stay as fallbacks
+    # so mixed corpora keep their timeline.
+    for key in (timestamp_key, *_TIMESTAMP_KEYS):
         value = payload.get(key)
-        if value:
+        if value is not None and value != "":
             return str(value)
     return None
 
 
-def _safe_metadata(payload: dict[str, Any]) -> dict[str, Any]:
+def _safe_metadata(payload: dict[str, Any], *, text_key: str = "text") -> dict[str, Any]:
+    # Exclude the chunk text under WHATEVER key the schema stores it — a
+    # foreign text_key would otherwise duplicate the full text into metadata.
     return {
         k: v
         for k, v in payload.items()
-        if k not in {"text"} and isinstance(v, (str, int, float, bool, type(None)))
+        if k not in {"text", text_key} and isinstance(v, (str, int, float, bool, type(None)))
     }
 
 
@@ -461,10 +479,14 @@ def _timestamp_sort_key(timestamp: str | None) -> tuple[int, str]:
     if not timestamp:
         return (1, "")
     raw = timestamp.strip()
-    try:
-        return (0, datetime.fromisoformat(raw.replace("Z", "+00:00")).isoformat())
-    except ValueError:
-        return (0, raw)
+    # Any stored domain (ISO, numeric epoch string) sorts chronologically; a
+    # non-instant string keeps its raw lexicographic slot, as before.
+    from .recall.validity import parse_payload_instant
+
+    dt = parse_payload_instant(raw)
+    if dt is not None:
+        return (0, dt.isoformat())
+    return (0, raw)
 
 
 def _related_entities(

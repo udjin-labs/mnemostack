@@ -12,7 +12,12 @@ from __future__ import annotations
 from typing import Any
 
 
-def payload_matches(payload: dict[str, Any] | None, filters: dict[str, Any] | None) -> bool:
+def payload_matches(
+    payload: dict[str, Any] | None,
+    filters: dict[str, Any] | None,
+    *,
+    timestamp_key: str = "timestamp",
+) -> bool:
     """True when *payload* satisfies every condition in *filters*.
 
     Mirrors `VectorStore._build_filter`: a plain value is an exact match; a
@@ -22,6 +27,13 @@ def payload_matches(payload: dict[str, Any] | None, filters: dict[str, Any] | No
     condition — the same semantics Qdrant applies to arrays. A missing key
     never matches — a point that cannot be attributed to the filtered scope
     must not pass it.
+
+    ``timestamp_key`` names the ONE field whose range comparisons may cross
+    timestamp domains (an epoch-int payload vs ISO-string bounds, or vice
+    versa, on a foreign collection): only that field falls back to comparing
+    on the time line. Every other field keeps strict Qdrant semantics —
+    incomparable types exclude — so a numeric-looking string in an unrelated
+    field can never sneak past a numeric range as an accidental "instant".
     """
     if not filters:
         return True
@@ -32,14 +44,15 @@ def payload_matches(payload: dict[str, Any] | None, filters: dict[str, Any] | No
         value = payload[key]
         candidates = value if isinstance(value, list) else [value]
         if isinstance(condition, dict) and ("gte" in condition or "lte" in condition):
-            if not any(_in_range(c, condition) for c in candidates):
+            instant_ok = key == timestamp_key
+            if not any(_in_range(c, condition, instant_ok=instant_ok) for c in candidates):
                 return False
         elif condition not in candidates:
             return False
     return True
 
 
-def _in_range(value: Any, condition: dict[str, Any]) -> bool:
+def _in_range(value: Any, condition: dict[str, Any], *, instant_ok: bool = False) -> bool:
     gte = condition.get("gte")
     lte = condition.get("lte")
     try:
@@ -48,11 +61,12 @@ def _in_range(value: Any, condition: dict[str, Any]) -> bool:
         if lte is not None and value > lte:
             return False
     except TypeError:
-        # Incomparable types — most commonly a TIME range crossing domains (an
-        # epoch-int payload vs an ISO-string bound, or vice versa, on a foreign
-        # collection). Before excluding, try to read all three as instants and
-        # compare on the time line; only when that fails too is the value
-        # genuinely unprovable inside the range.
+        # Incomparable types. For the timestamp field ONLY (instant_ok), this
+        # is most commonly a TIME range crossing domains — try to read all
+        # three as instants and compare on the time line. Any other field
+        # keeps the strict exclusion: cannot be proven inside the range.
+        if not instant_ok:
+            return False
         from .validity import parse_payload_instant
 
         v = parse_payload_instant(value)

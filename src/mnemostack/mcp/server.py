@@ -221,6 +221,7 @@ def build_server(
             retrievers=[r for r in retrievers if r is not None],
             vector_floor=max(0, int(vector_floor)),
             text_key=text_key,
+            timestamp_key=timestamp_key,
         )
 
     def _get_recaller():

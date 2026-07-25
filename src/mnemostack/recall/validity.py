@@ -62,13 +62,30 @@ def parse_payload_instant(value: Any) -> datetime | None:
         if abs(v) >= _EPOCH_MS_THRESHOLD:
             v /= 1000.0
         try:
-            return datetime.fromtimestamp(v, tz=timezone.utc)
+            dt = datetime.fromtimestamp(v, tz=timezone.utc)
         except (OverflowError, OSError, ValueError):
-            return None
-    if isinstance(value, str):
-        dt = _to_instant(value)
-        if dt is not None:
+            # Beyond datetime's year-9999 ceiling as seconds — a pre-2001
+            # MILLISECOND epoch sits below the magnitude threshold but still
+            # overflows here (946684800000 = 2000-01-01 in ms). Retry as ms.
+            try:
+                dt = datetime.fromtimestamp(v / 1000.0, tz=timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                return None
             return dt
+        if dt.year > 3000:
+            # Seconds-reading lands implausibly far in the future (year 3000+):
+            # a 1973-2001 millisecond epoch reads as year 5138+ in seconds. A
+            # memory timestamp that far out is far more likely milliseconds —
+            # prefer the ms reading when it parses.
+            try:
+                return datetime.fromtimestamp(v / 1000.0, tz=timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                return dt
+        return dt
+    if isinstance(value, str):
+        parsed = _to_instant(value)
+        if parsed is not None:
+            return parsed
         try:
             return parse_payload_instant(float(value))
         except ValueError:

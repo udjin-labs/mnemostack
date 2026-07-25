@@ -1139,9 +1139,11 @@ class AnswerGenerator:
         for i, m in enumerate(memories, 1):
             text = m.text.strip().replace("\n", " ")[:400]
             source = m.payload.get("source", "")
-            ts = m.payload.get(timestamp_key, "")
+            ts = m.payload.get(timestamp_key)
             prefix = f"[{i}]"
-            if ts:
+            # `is not None` + non-empty, NOT truthiness: epoch 0 is a real
+            # instant (1970-01-01) and must keep its date prefix.
+            if ts is not None and ts != "":
                 prefix = f"{prefix} [{_display_ts(ts)}]"
             if source:
                 prefix = f"{prefix} ({source})"

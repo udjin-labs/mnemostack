@@ -523,17 +523,19 @@ class CuriosityBoost(Stage):
         for r in results:
             if counts.get(str(r.id), 0) > self.max_recalls:
                 continue
-            created = r.payload.get(self.timestamp_key) or r.payload.get("created")
-            if created:
-                # Tolerant of every foreign shape (epoch int/ms, datetime);
-                # unparseable → no bonus, same as the old except-pass.
-                ts = parse_payload_instant(created)
-                if ts is not None:
-                    age_days = (now - ts).days
-                    if age_days >= self.min_age_days:
-                        r.score += self.bonus
-                        r.payload["curiosity_boosted"] = True
-            else:
+            created = r.payload.get(self.timestamp_key)
+            if created is None or created == "":
+                created = r.payload.get("created")
+            # Tolerant of every foreign shape (epoch int/ms, datetime) —
+            # including epoch 0, which is a REAL very-old instant, not
+            # missing data (hence no truthiness test on the value itself).
+            ts = parse_payload_instant(created) if created is not None else None
+            if ts is not None:
+                age_days = (now - ts).days
+                if age_days >= self.min_age_days:
+                    r.score += self.bonus
+                    r.payload["curiosity_boosted"] = True
+            elif created is None or created == "":
                 # No date info — half bonus
                 r.score += self.bonus * 0.5
         results.sort(key=lambda x: -x.score)

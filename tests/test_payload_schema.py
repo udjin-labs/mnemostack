@@ -10,6 +10,7 @@ Range for epoch fields — a DatetimeRange never matches them).
 
 from __future__ import annotations
 
+import argparse
 from datetime import datetime, timezone
 
 import pytest
@@ -142,17 +143,33 @@ def test_curiosity_boost_reads_epoch_age():
 
 def test_payload_matches_intersects_mixed_timestamp_domains():
     payload = {"updated_at": _EPOCH}
+    kw = {"timestamp_key": "updated_at"}
     # ISO bounds vs epoch value — used to TypeError → drop every candidate.
     assert payload_matches(
-        payload, {"updated_at": {"gte": "2026-04-01", "lte": "2026-04-30"}}
+        payload, {"updated_at": {"gte": "2026-04-01", "lte": "2026-04-30"}}, **kw
     )
-    assert not payload_matches(payload, {"updated_at": {"gte": "2026-05-01"}})
+    assert not payload_matches(payload, {"updated_at": {"gte": "2026-05-01"}}, **kw)
     # And the mirror image: epoch bounds vs ISO value.
     assert payload_matches(
-        {"updated_at": "2026-04-15T12:00:00Z"}, {"updated_at": {"gte": _EPOCH - 60}}
+        {"updated_at": "2026-04-15T12:00:00Z"}, {"updated_at": {"gte": _EPOCH - 60}}, **kw
     )
     # Genuinely incomparable stays excluded.
-    assert not payload_matches({"updated_at": "junk"}, {"updated_at": {"gte": _EPOCH}})
+    assert not payload_matches({"updated_at": "junk"}, {"updated_at": {"gte": _EPOCH}}, **kw)
+
+
+def test_payload_matches_never_coerces_non_timestamp_fields():
+    # The instant fallback is scoped to THE timestamp key only: a numeric-
+    # looking string in an unrelated field must not sneak past a numeric range
+    # as an accidental "epoch" — strict Qdrant semantics (incomparable →
+    # excluded) hold everywhere else.
+    assert not payload_matches({"priority": "42"}, {"priority": {"gte": 0, "lte": 100}})
+    assert not payload_matches(
+        {"priority": "42"},
+        {"priority": {"gte": 0, "lte": 100}},
+        timestamp_key="updated_at",  # unrelated schema key changes nothing
+    )
+    # Same-domain comparisons on arbitrary fields still work as before.
+    assert payload_matches({"priority": 42}, {"priority": {"gte": 0, "lte": 100}})
 
 
 # ---------- retriever text_key ----------
@@ -280,3 +297,120 @@ def test_example_config_documents_the_schema_keys():
 
     yaml_text = generate_example_config()
     assert "text_key" in yaml_text and "timestamp_format" in yaml_text
+
+
+# ---------- review-driven regressions ----------
+
+
+def test_parse_payload_instant_pre_2001_milliseconds():
+    # 946684800000 = 2000-01-01 in ms — BELOW the 1e12 magnitude threshold,
+    # and out of datetime range as seconds (year 31969) → must retry as ms.
+    dt = parse_payload_instant(946684800000)
+    assert dt is not None and dt.strftime("%Y-%m-%d") == "2000-01-01"
+    # 1e11 = 1973 in ms but a VALID (implausible) year-5138 datetime in
+    # seconds — the implausible-future guard prefers the ms reading.
+    dt = parse_payload_instant(100000000000)
+    assert dt is not None and dt.year == 1973
+    # Epoch 0 is a real instant, not "missing".
+    dt = parse_payload_instant(0)
+    assert dt is not None and dt.strftime("%Y-%m-%d") == "1970-01-01"
+
+
+def test_epoch_zero_keeps_its_date_prefix():
+    from mnemostack.recall.answer import AnswerGenerator
+    from mnemostack.recall.recaller import RecallResult
+
+    out = AnswerGenerator._format_context(
+        [RecallResult(id=1, text="genesis", score=1.0, payload={"timestamp": 0})]
+    )
+    assert "[1970-01-01]" in out  # epoch 0 is falsy but real
+
+
+def test_curiosity_boost_full_bonus_for_epoch_zero():
+    from mnemostack.recall.pipeline.stages import CuriosityBoost
+    from mnemostack.recall.recaller import RecallResult
+
+    class _Store:
+        def get(self, key):
+            return []
+
+    class _Ctx:
+        extras: dict = {}
+
+    stage = CuriosityBoost(state_store=_Store())
+    results = [RecallResult(id=1, text="x", score=1.0, payload={"timestamp": 0})]
+    out = stage.apply(_Ctx(), results)
+    assert out[0].payload.get("curiosity_boosted") is True  # not the half-bonus path
+
+
+def test_synthesis_facts_and_timeline_respect_the_schema():
+    from mnemostack.recall.recaller import RecallResult
+    from mnemostack.synthesis import _facts_from_results, _timeline
+
+    results = [
+        RecallResult(
+            id=1,
+            text="newer fact",
+            score=0.9,
+            payload={"content": "newer fact", "updated_at": _EPOCH},
+        ),
+        RecallResult(
+            id=2,
+            text="older fact",
+            score=0.8,
+            payload={"content": "older fact", "updated_at": _EPOCH - 86400 * 30},
+        ),
+    ]
+    facts = _facts_from_results(results, text_key="content", timestamp_key="updated_at")
+    assert all(f.timestamp is not None for f in facts)  # configured key was read
+    assert all("content" not in f.metadata for f in facts)  # text not duplicated
+    timeline = _timeline(facts)
+    assert [f.text for f in timeline] == ["older fact", "newer fact"]  # epoch-sorted
+
+
+def test_cmd_serve_threads_the_schema_into_server_config(monkeypatch, tmp_path):
+    pytest.importorskip("fastapi")
+    import mnemostack.cli as cli
+
+    cli._payload_schema.cache_clear()
+    monkeypatch.setenv("MNEMOSTACK_TEXT_KEY", "content")
+    monkeypatch.setenv("MNEMOSTACK_TIMESTAMP_KEY", "updated_at")
+    monkeypatch.setenv("MNEMOSTACK_TIMESTAMP_FORMAT", "epoch")
+    captured = {}
+
+    def _fake_build_app(cfg):
+        captured["cfg"] = cfg
+        raise SystemExit(0)  # stop before uvicorn
+
+    monkeypatch.setattr("mnemostack.server.build_app", _fake_build_app)
+    ns = argparse.Namespace(
+        provider="gemini", embedding_model=None, llm="gemini", llm_model=None,
+        collection="mt", qdrant="http://localhost:6333", memgraph_uri=None,
+        graph_timeout=5.0, graph_user=None, graph_password=None,
+        graph_database=None, bm25_path=[], vector_floor=0,
+        rerank_mode="relevant_only", token_budget=None, state_path=None,
+        auto_record_ior=False, host="127.0.0.1", port=8000, auth=False,
+        keys_file=None, quotas_file=None, qdrant_health_timeout=2,
+    )
+    with pytest.raises(SystemExit):
+        cli.cmd_serve(ns)
+    cfg = captured["cfg"]
+    assert (cfg.text_key, cfg.timestamp_key, cfg.timestamp_format) == (
+        "content", "updated_at", "epoch",
+    )
+    cli._payload_schema.cache_clear()
+
+
+def test_cli_payload_schema_warns_on_broken_config(monkeypatch, tmp_path, capsys):
+    import mnemostack.cli as cli
+    from mnemostack.config import Config
+
+    cli._payload_schema.cache_clear()
+
+    def _boom(cls):
+        raise ValueError("broken yaml")
+
+    monkeypatch.setattr(Config, "load", classmethod(_boom))
+    assert cli._payload_schema() == ("text", "timestamp", "iso")
+    assert "NOT in effect" in capsys.readouterr().err  # loud, not silent
+    cli._payload_schema.cache_clear()

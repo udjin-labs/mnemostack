@@ -80,7 +80,10 @@ def recall_flow(
             # with no tenant/timestamp payload). Enforce the caller's scope
             # on the pipeline output too: anything that cannot be attributed
             # to the scope is dropped, not leaked.
-            results = [r for r in results if payload_matches(r.payload, filters)]
+            _ts_key = getattr(recaller, "timestamp_key", "timestamp")
+            results = [
+                r for r in results if payload_matches(r.payload, filters, timestamp_key=_ts_key)
+            ]
         # Tenant backstop AFTER the pipeline: the graph-resurrection stage can
         # inject graph records that carry no tenant_id and never passed the
         # tenant-scoped retrievers, so re-apply the isolation net here (recall's

@@ -82,6 +82,8 @@ def mca_prefilter(
     bm25: BM25,
     limit: int = 10,
     filters: dict[str, Any] | None = None,
+    *,
+    timestamp_key: str = "timestamp",
 ) -> list[RecallResult]:
     """Run BM25 over extracted technical tokens and return RecallResult hits.
 
@@ -98,7 +100,7 @@ def mca_prefilter(
     if filters:
 
         def predicate(d: BM25Doc) -> bool:
-            return payload_matches(d.payload, filters)
+            return payload_matches(d.payload, filters, timestamp_key=timestamp_key)
 
     hits = bm25.search(" ".join(tokens), limit=limit, predicate=predicate)
     return [

@@ -276,8 +276,12 @@ class BM25Retriever(Retriever):
         tokenizer: Tokenizer = tokenize,
         *,
         retokenize: bool | None = None,
+        timestamp_key: str = "timestamp",
     ):
         self.bm25 = BM25(docs, tokenizer=tokenizer, retokenize=retokenize)
+        #: The one payload key whose range filters may cross timestamp domains
+        #: (see payload_matches) — a foreign collection's own schema.
+        self.timestamp_key = timestamp_key
 
     @classmethod
     def from_qdrant(
@@ -346,7 +350,12 @@ class BM25Retriever(Retriever):
             tokenizer=tokenizer,
             timestamp_key=timestamp_key,
         )
-        return cls(docs=docs, tokenizer=tokenizer or tokenize, retokenize=False)
+        return cls(
+            docs=docs,
+            tokenizer=tokenizer or tokenize,
+            retokenize=False,
+            timestamp_key=timestamp_key,
+        )
 
     def search(self, query, limit=20, filters=None):
         # Same filter semantics the vector store applies natively. Without
@@ -357,7 +366,7 @@ class BM25Retriever(Retriever):
         if filters:
 
             def predicate(d: BM25Doc) -> bool:
-                return payload_matches(d.payload, filters)
+                return payload_matches(d.payload, filters, timestamp_key=self.timestamp_key)
 
         hits = self.bm25.search(query, limit=limit, predicate=predicate)
         return [
@@ -1174,6 +1183,7 @@ class TemporalRetriever(Retriever):
         embedding: EmbeddingProvider,
         vector_store: VectorStore,
         extractor=extract_temporal_query,
+        *,
         text_key: str = "text",
         timestamp_key: str = "timestamp",
         timestamp_format: str = "iso",

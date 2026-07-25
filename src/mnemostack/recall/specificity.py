@@ -225,9 +225,9 @@ def _format_memories(
             continue
         text = memory.text.strip().replace("\n", " ")
         source = memory.payload.get("source", "")
-        ts = memory.payload.get(timestamp_key, "")
+        ts = memory.payload.get(timestamp_key)
         prefix = f"[{i}]"
-        if ts:
+        if ts is not None and ts != "":  # epoch 0 is a real instant, keep it
             # Tolerant of a foreign schema's epoch int/datetime — slicing a
             # non-string would TypeError out of the whole answer path.
             dt = parse_payload_instant(ts)

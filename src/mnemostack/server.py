@@ -654,7 +654,10 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     ]
     retrievers: list[Retriever] = [r for r in maybe_retrievers if r is not None]
     recaller = Recaller(
-        retrievers=retrievers, vector_floor=cfg.vector_floor, text_key=cfg.text_key
+        retrievers=retrievers,
+        vector_floor=cfg.vector_floor,
+        text_key=cfg.text_key,
+        timestamp_key=cfg.timestamp_key,
     )
 
     from pathlib import Path
