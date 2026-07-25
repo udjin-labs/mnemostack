@@ -77,19 +77,23 @@ def _assert_supported_pair(server_version: str) -> None:
     Checked explicitly (not via warning filters): the client emits its warning
     from contexts pytest can't reliably scope, and this also catches the
     'failed to obtain server version' case — we already HAVE the version from
-    the readiness probe."""
+    the readiness probe. Parsing is strict (packaging.Version, a pytest
+    dependency): a mangled version string fails the whole check closed
+    instead of sneaking past a lenient major.minor split."""
     from importlib.metadata import version as _pkg_version
+
+    from packaging.version import InvalidVersion, Version
 
     client_version = _pkg_version("qdrant-client")
     try:
-        c_major, c_minor = (int(x) for x in client_version.split(".")[:2])
-        s_major, s_minor = (int(x) for x in server_version.split(".")[:2])
-    except ValueError:
+        client = Version(client_version)
+        server = Version(server_version)
+    except (InvalidVersion, TypeError):
         pytest.fail(
             f"cannot parse versions for the compatibility check: "
             f"client={client_version!r}, server={server_version!r}"
         )
-    if c_major != s_major or abs(c_minor - s_minor) > 1:
+    if client.major != server.major or abs(client.minor - server.minor) > 1:
         pytest.fail(
             f"qdrant-client {client_version} against server {server_version} is an "
             "officially-unsupported pair (major must match, minor diff ≤ 1) — "
