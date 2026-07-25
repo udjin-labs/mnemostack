@@ -81,6 +81,46 @@ class RecallResult:
     sources: list[str] = field(default_factory=list)  # ['bm25', 'vector']
 
 
+_SCHEMA_FIELD_DEFAULTS = (
+    ("text_key", "text"),
+    ("timestamp_key", "timestamp"),
+    ("timestamp_format", "iso"),
+)
+
+
+def derive_payload_schema(
+    retrievers: list[Any] | None,
+    fields: tuple[str, ...] = ("text_key", "timestamp_key", "timestamp_format"),
+) -> dict[str, str]:
+    """The payload-schema fields declared by ``retrievers`` (only ``fields``).
+
+    Each field resolves INDEPENDENTLY: a retriever whose attribute equals the
+    standard default has simply not declared that field (a BM25Retriever
+    always carries ``timestamp_key="timestamp"``), so list order can never
+    mask another retriever's foreign schema. Two retrievers declaring
+    DIFFERENT non-default values for one field is ambiguous — that raises,
+    directing the caller to pass the field explicitly. A field the caller
+    already set explicitly should be omitted from ``fields`` — an explicit
+    choice resolves any retriever disagreement.
+    """
+    out: dict[str, str] = {}
+    for field_name, default in _SCHEMA_FIELD_DEFAULTS:
+        if field_name not in fields:
+            continue
+        declared = {
+            v
+            for r in retrievers or []
+            if (v := getattr(r, field_name, None)) is not None and v != default
+        }
+        if len(declared) > 1:
+            raise ValueError(
+                f"retrievers declare conflicting {field_name} values "
+                f"{sorted(declared)}; pass {field_name}= explicitly on the Recaller"
+            )
+        out[field_name] = declared.pop() if declared else default
+    return out
+
+
 class Recaller:
     """Hybrid recall: BM25 + semantic search + RRF fusion.
 
@@ -216,25 +256,23 @@ class Recaller:
         self.mca_prefilter_enabled = mca_prefilter
         self.vector_floor = max(0, int(vector_floor))
         # Payload schema for the legacy vector paths, the in-memory filter
-        # mirrors, and the post-pipeline backstop. When omitted, a
-        # schema-aware retriever in retrievers-mode carries it — a caller who
-        # configured the inner retriever shouldn't have to repeat the schema
-        # on the outer Recaller. Explicit arguments always win.
-        schema_src = next(
-            (
-                r
-                for r in (retrievers or [])
-                if getattr(r, "text_key", None) or getattr(r, "timestamp_key", None)
-            ),
-            None,
+        # mirrors, and the post-pipeline backstop. When omitted, the schema
+        # DECLARED by retrievers-mode sources applies, resolved per-field so
+        # list order can't mask a foreign schema (see derive_payload_schema).
+        # Explicit arguments always win.
+        missing = tuple(
+            name
+            for name, val in (
+                ("text_key", text_key),
+                ("timestamp_key", timestamp_key),
+                ("timestamp_format", timestamp_format),
+            )
+            if not val
         )
-        self.text_key = text_key or getattr(schema_src, "text_key", None) or "text"
-        self.timestamp_key = (
-            timestamp_key or getattr(schema_src, "timestamp_key", None) or "timestamp"
-        )
-        self.timestamp_format = (
-            timestamp_format or getattr(schema_src, "timestamp_format", None) or "iso"
-        )
+        derived = derive_payload_schema(retrievers, missing) if missing else {}
+        self.text_key = text_key or derived.get("text_key", "text")
+        self.timestamp_key = timestamp_key or derived.get("timestamp_key", "timestamp")
+        self.timestamp_format = timestamp_format or derived.get("timestamp_format", "iso")
         self._query_expansion_cache: dict[str, list[str]] = {}
 
     def _vector_filters(self, filters: dict[str, Any] | None) -> dict[str, Any] | None:

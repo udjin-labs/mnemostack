@@ -635,6 +635,33 @@ def test_recaller_derives_schema_from_its_retrievers():
     assert [r.text for r in results] == ["april note"]
 
 
+def test_recaller_schema_derivation_is_per_field_not_first_wins():
+    from mnemostack.recall.bm25 import BM25Doc
+    from mnemostack.recall.retrievers import BM25Retriever
+
+    store = _foreign_store()
+    # A default-schema BM25 retriever FIRST must not mask the vector
+    # retriever's foreign schema — defaults mean "not declared".
+    bm25 = BM25Retriever(docs=[BM25Doc(id="1", text="x", payload={})])
+    vec = VectorRetriever(
+        embedding=_FakeEmbedder(), vector_store=store, text_key="content",
+        timestamp_key="updated_at", timestamp_format="epoch",
+    )
+    rec = Recaller(retrievers=[bm25, vec])
+    assert (rec.text_key, rec.timestamp_key, rec.timestamp_format) == (
+        "content", "updated_at", "epoch",
+    )
+    # Conflicting declarations are ambiguous — loud, not order-dependent.
+    vec2 = VectorRetriever(
+        embedding=_FakeEmbedder(), vector_store=store, timestamp_key="modified_at"
+    )
+    with pytest.raises(ValueError, match="conflicting timestamp_key"):
+        Recaller(retrievers=[vec, vec2])
+    # ...unless the caller resolves it explicitly.
+    rec3 = Recaller(retrievers=[vec, vec2], timestamp_key="updated_at")
+    assert rec3.timestamp_key == "updated_at"
+
+
 def test_exact_fractional_epoch_becomes_degenerate_range():
     from mnemostack.recall.retrievers import convert_timestamp_filter
 

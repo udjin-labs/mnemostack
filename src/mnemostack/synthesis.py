@@ -187,22 +187,25 @@ def synthesize(
     # — or, in the documented retrievers=[...] construction, the first
     # schema-aware direct retriever — carries the schema the retrieval used,
     # and the facts/timeline must read the same keys.
-    schema_src: Any = recaller
-    if schema_src is None:
-        schema_src = next(
-            (
-                r
-                for r in (kwargs.get("retrievers") or [])
-                if getattr(r, "text_key", None) or getattr(r, "timestamp_key", None)
-            ),
-            None,
+    if recaller is not None:
+        derived = {
+            "text_key": getattr(recaller, "text_key", "text"),
+            "timestamp_key": getattr(recaller, "timestamp_key", "timestamp"),
+            "timestamp_format": getattr(recaller, "timestamp_format", "iso"),
+        }
+    else:
+        from .recall.recaller import derive_payload_schema
+
+        missing = tuple(
+            f
+            for f in ("text_key", "timestamp_key", "timestamp_format")
+            if not kwargs.get(f)
         )
-    text_key = str(kwargs.get("text_key") or getattr(schema_src, "text_key", "text"))
-    timestamp_key = str(
-        kwargs.get("timestamp_key") or getattr(schema_src, "timestamp_key", "timestamp")
-    )
+        derived = derive_payload_schema(list(kwargs.get("retrievers") or []), missing)
+    text_key = str(kwargs.get("text_key") or derived.get("text_key", "text"))
+    timestamp_key = str(kwargs.get("timestamp_key") or derived.get("timestamp_key", "timestamp"))
     timestamp_format = str(
-        kwargs.get("timestamp_format") or getattr(schema_src, "timestamp_format", "iso")
+        kwargs.get("timestamp_format") or derived.get("timestamp_format", "iso")
     )
     facts = _dedupe_facts(
         _facts_from_results(
