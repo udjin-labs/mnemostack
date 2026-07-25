@@ -19,7 +19,8 @@ You need **Qdrant** (required) and an **embedding provider** (Gemini via
 
 ```bash
 # 1. Qdrant (Docker; or run the binary)
-docker run -d --name qdrant -p 6333:6333 qdrant/qdrant
+# tag rule: match your installed qdrant-client - same major, minor within 1 (v1.18.3 pairs with the client a fresh install resolves to)
+docker run -d --name qdrant -p 6333:6333 qdrant/qdrant:v1.18.3
 
 # 2. Install mnemostack + the HTTP server extra
 pip install 'mnemostack[server]'

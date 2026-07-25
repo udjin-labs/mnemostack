@@ -8,9 +8,10 @@ post-hoc), and version-dependent ``update_vectors`` behavior. These tests
 replay the release-verification scenarios against an actual server.
 
 Gated by ``MNEMOSTACK_TEST_QDRANT_URL`` (e.g. ``http://localhost:6333``):
-unset → the whole module skips, so local runs are unaffected. CI provides a
-`qdrant/qdrant` service container pinned to the same version the deployment
-docs' compose example pins — the documented deployment is the tested one.
+unset → the whole module skips, so local runs are unaffected. CI provides
+service containers across a matrix of PINNED client/server pairs that
+includes the deployment docs' compose pin — the documented deployment is a
+tested one, and only officially-supported pairs get certified.
 """
 
 from __future__ import annotations
@@ -50,7 +51,12 @@ def _server_reachable():
     last_error: Exception | None = None
     while time.monotonic() < deadline:
         try:
-            httpx.get(SERVER_URL, timeout=5).raise_for_status()
+            resp = httpx.get(SERVER_URL, timeout=5)
+            resp.raise_for_status()
+            # The pair check is a verdict, not a readiness retry: its
+            # pytest.fail derives from BaseException, so it propagates past
+            # this except clause instead of being absorbed into the loop.
+            _assert_supported_pair(str(resp.json().get("version", "")))
             return
         except Exception as e:  # noqa: BLE001
             last_error = e
@@ -59,6 +65,37 @@ def _server_reachable():
         f"MNEMOSTACK_TEST_QDRANT_URL is set but Qdrant at {SERVER_URL} never "
         f"became ready within 30s: {last_error}"
     )
+
+
+def _assert_supported_pair(server_version: str) -> None:
+    """Fail on an officially-unsupported client/server pair.
+
+    Qdrant's support rule: major versions equal, minor difference ≤ 1. The
+    client only WARNS on violation and proceeds — but this suite exists to
+    certify real pairs, so a drifted matrix (e.g. a floating client against a
+    pinned server) must fail loudly, not pass with a warning nobody reads.
+    Checked explicitly (not via warning filters): the client emits its warning
+    from contexts pytest can't reliably scope, and this also catches the
+    'failed to obtain server version' case — we already HAVE the version from
+    the readiness probe."""
+    from importlib.metadata import version as _pkg_version
+
+    client_version = _pkg_version("qdrant-client")
+    try:
+        c_major, c_minor = (int(x) for x in client_version.split(".")[:2])
+        s_major, s_minor = (int(x) for x in server_version.split(".")[:2])
+    except ValueError:
+        pytest.fail(
+            f"cannot parse versions for the compatibility check: "
+            f"client={client_version!r}, server={server_version!r}"
+        )
+    if c_major != s_major or abs(c_minor - s_minor) > 1:
+        pytest.fail(
+            f"qdrant-client {client_version} against server {server_version} is an "
+            "officially-unsupported pair (major must match, minor diff ≤ 1) — "
+            "align the CI matrix instead of certifying a combination Qdrant "
+            "doesn't support"
+        )
 
 
 @pytest.fixture
