@@ -308,6 +308,7 @@ class BM25Retriever(Retriever):
         older_than: str | int | float | None = None,
         tokenizer: Tokenizer | None = None,
         timestamp_key: str = "timestamp",
+        timestamp_format: str = "iso",
     ) -> BM25Retriever:
         """Build a BM25 retriever from Qdrant payload text.
 
@@ -364,6 +365,7 @@ class BM25Retriever(Retriever):
             tokenizer=tokenizer or tokenize,
             retokenize=False,
             timestamp_key=timestamp_key,
+            timestamp_format=timestamp_format,
         )
 
     def search(self, query, limit=20, filters=None):

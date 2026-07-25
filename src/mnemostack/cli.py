@@ -1286,6 +1286,21 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             f"invalid rerank_mode '{cfg.recall.rerank_mode}'",
             f"set recall.rerank_mode to one of: {', '.join(sorted(RERANK_MODES))}",
         )
+    # timestamp_format is the other stable config enum: a typo here passes
+    # config load but makes TemporalRetriever construction raise at serve
+    # time — doctor must flag it, not report a false green.
+    from mnemostack.recall.retrievers import TemporalRetriever as _TR
+
+    if cfg.recall.timestamp_format in _TR.TIMESTAMP_FORMATS:
+        add("config.timestamp_format", "ok", cfg.recall.timestamp_format)
+    else:
+        add(
+            "config.timestamp_format",
+            "misconfig",
+            f"invalid timestamp_format '{cfg.recall.timestamp_format}'",
+            "set recall.timestamp_format to one of: "
+            + ", ".join(_TR.TIMESTAMP_FORMATS),
+        )
 
     # Embedding provider (a hard recall dependency).
     provider = None

@@ -498,6 +498,53 @@ def test_synthesis_derives_schema_from_a_supplied_recaller():
     assert result.timeline  # epoch timestamp sorted, not dropped
 
 
+def test_synthesis_source_filter_preserves_the_schema():
+    # sources= rebuilds the recaller — the rebuilt one must carry the
+    # original's schema, or the timeline/metadata silently reset to defaults.
+    from mnemostack.recall.retrievers import VectorRetriever as _VR
+    from mnemostack.synthesis import _filter_recaller
+
+    rec = Recaller(
+        retrievers=[_VR(embedding=_FakeEmbedder(), vector_store=_foreign_store())],
+        text_key="content",
+        timestamp_key="updated_at",
+        timestamp_format="epoch",
+    )
+    rebuilt = _filter_recaller(rec, {"vector"})
+    assert rebuilt is not rec
+    assert (rebuilt.text_key, rebuilt.timestamp_key, rebuilt.timestamp_format) == (
+        "content", "updated_at", "epoch",
+    )
+
+
+def test_bm25_from_qdrant_forwards_timestamp_format():
+    from mnemostack.recall.retrievers import BM25Retriever
+
+    store = _foreign_store()
+    r = BM25Retriever.from_qdrant(
+        store.client, "foreign", text_key="content",
+        timestamp_key="updated_at", timestamp_format="epoch_ms",
+    )
+    assert r.timestamp_key == "updated_at" and r.timestamp_format == "epoch_ms"
+
+
+def test_doctor_flags_invalid_timestamp_format(monkeypatch, capsys):
+    import mnemostack.cli as cli
+
+    monkeypatch.setenv("MNEMOSTACK_TIMESTAMP_FORMAT", "unixtime")
+    rc = cli.cmd_doctor(
+        argparse.Namespace(
+            json=True, provider="gemini", embedding_model=None,
+            qdrant="http://localhost:1", collection="mt",
+            memgraph_uri=None, graph_timeout=1.0, timeout=1,
+        )
+    )
+    out = capsys.readouterr().out
+    assert '"config.timestamp_format"' in out.replace("'", '"') or "timestamp_format" in out
+    assert "unixtime" in out
+    assert rc == 2  # misconfig exit, not a false green
+
+
 def test_cli_payload_schema_warns_on_broken_config(monkeypatch, tmp_path, capsys):
     import mnemostack.cli as cli
     from mnemostack.config import Config

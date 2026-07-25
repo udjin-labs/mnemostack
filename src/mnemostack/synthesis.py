@@ -321,6 +321,11 @@ def _filter_recaller(recaller: Any, source_filter: set[str] | None) -> Any:
         rrf_k=getattr(recaller, "rrf_k", 60),
         retriever_weights=getattr(recaller, "retriever_weights", None),
         adaptive_weights=getattr(recaller, "adaptive_weights", False),
+        # The rebuilt recaller must carry the ORIGINAL's payload schema — a
+        # source filter must not silently reset a foreign-collection mount.
+        text_key=getattr(recaller, "text_key", "text"),
+        timestamp_key=getattr(recaller, "timestamp_key", "timestamp"),
+        timestamp_format=getattr(recaller, "timestamp_format", "iso"),
     )
 
 
