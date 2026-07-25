@@ -198,7 +198,13 @@ def build_server(
         vec = _get_vector()
         bm25_docs = build_bm25_docs(bm25_paths)
         retrievers = [
-            VectorRetriever(embedding=emb, vector_store=vec, text_key=text_key),
+            VectorRetriever(
+                embedding=emb,
+                vector_store=vec,
+                text_key=text_key,
+                timestamp_key=timestamp_key,
+                timestamp_format=timestamp_format,
+            ),
             BM25Retriever(docs=bm25_docs) if bm25_docs else None,
             MemgraphRetriever(
                 uri=memgraph_uri,

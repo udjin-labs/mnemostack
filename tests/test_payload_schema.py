@@ -416,19 +416,73 @@ def test_parse_payload_instant_configured_unit_beats_heuristic():
     assert numeric_unit_for("iso") == "auto"
 
 
-def test_temporal_bound_rounds_inward_on_fractional_edges():
-    # int() truncation of a fractional bound WIDENS the window: gte .5 must
-    # round UP, lte .5 must round DOWN — never admit the excluded half-second.
+def test_temporal_bound_preserves_fractional_precision():
+    # Bounds are emitted as EXACT floats: integral rounding in either
+    # direction is lossy — truncation widens the scope (admits the excluded
+    # half-second), inward rounding narrows it (a time.time() payload at
+    # 23:59:59.5 would fall outside an lte cut to 23:59:59).
     r = TemporalRetriever(
         embedding=_FakeEmbedder(),
         vector_store=_foreign_store(),
         timestamp_format="epoch",
     )
     half = datetime(2026, 4, 15, 12, 0, 0, 500000, tzinfo=timezone.utc)
-    assert r._bound(half, "gte") == int(half.timestamp()) + 1  # rounds up
-    assert r._bound(half, "lte") == int(half.timestamp())  # rounds down
-    whole = datetime(2026, 4, 15, 12, tzinfo=timezone.utc)
-    assert r._bound(whole, "gte") == r._bound(whole, "lte")  # exact unchanged
+    assert r._bound(half) == half.timestamp()  # .5 kept exactly
+    r_ms = TemporalRetriever(
+        embedding=_FakeEmbedder(),
+        vector_store=_foreign_store(),
+        timestamp_format="epoch_ms",
+    )
+    assert r_ms._bound(half) == half.timestamp() * 1000
+
+
+def test_vector_retriever_converts_iso_bounds_for_epoch_field():
+    # The NORMAL vector arm (not just temporal/BM25): an ISO caller constraint
+    # over a numeric field must be converted to the collection domain, or
+    # Qdrant builds a DatetimeRange that matches nothing.
+    store = _foreign_store()
+    r = VectorRetriever(
+        embedding=_FakeEmbedder(),
+        vector_store=store,
+        text_key="content",
+        timestamp_key="updated_at",
+        timestamp_format="epoch",
+    )
+    hits = r.search(
+        "anything", limit=5,
+        filters={"updated_at": {"gte": "2026-04-01", "lte": "2026-04-30"}},
+    )
+    assert [h.text for h in hits] == ["april note"]
+
+
+def test_string_epoch_beats_iso_lookalike_under_explicit_unit():
+    # "20240101" is valid basic-ISO AND a number: an explicit unit means the
+    # field is numeric, so the numeric reading wins; auto keeps ISO-first.
+    dt = parse_payload_instant("20240101", numeric_unit="ms")
+    assert dt is not None and dt.year == 1970
+    dt = parse_payload_instant("20240101")
+    assert dt is not None and dt.strftime("%Y-%m-%d") == "2024-01-01"
+
+
+def test_synthesis_bm25_docs_get_the_schema():
+    from mnemostack.recall.bm25 import BM25Doc
+    from mnemostack.synthesis import _build_recaller_from_kwargs
+
+    rec = _build_recaller_from_kwargs(
+        None,
+        {
+            "bm25_docs": [BM25Doc(id="1", text="acme note", payload={"updated_at": _EPOCH})],
+            "timestamp_key": "updated_at",
+            "timestamp_format": "epoch",
+        },
+    )
+    assert rec is not None
+    bm25_retr = rec.retrievers[0]
+    assert bm25_retr.timestamp_key == "updated_at"
+    assert bm25_retr.timestamp_format == "epoch"
+    # mixed-domain filter now matches through the BM25 predicate
+    hits = bm25_retr.search("acme", filters={"updated_at": {"gte": "2026-04-01"}})
+    assert [h.text for h in hits] == ["acme note"]
 
 
 def test_filters_cross_domain_strings_compare_as_instants():

@@ -16,7 +16,6 @@ Built-in retrievers:
 from __future__ import annotations
 
 import logging
-import math
 import re
 from abc import ABC, abstractmethod
 from calendar import monthrange
@@ -82,13 +81,18 @@ class VectorRetriever(Retriever):
         embedding: EmbeddingProvider,
         vector_store: VectorStore,
         text_key: str = "text",
+        *,
+        timestamp_key: str = "timestamp",
+        timestamp_format: str = "iso",
     ):
         self.embedding = embedding
         self.vector_store = vector_store
-        #: Payload key holding the chunk text — configurable so recall works
-        #: over a pre-existing collection's own schema (same knob as
-        #: ``bm25_docs_from_qdrant(text_key=...)``).
+        #: Payload schema of the collection — configurable so recall works
+        #: over a pre-existing collection's own field names and timestamp
+        #: domain (same knobs as ``bm25_docs_from_qdrant``).
         self.text_key = text_key
+        self.timestamp_key = timestamp_key
+        self.timestamp_format = timestamp_format
 
     #: Advertise validity-awareness so the recaller passes as_of/include_invalidated.
     #: The default view (hide invalidated) is pushed into Qdrant; as_of stays in
@@ -105,6 +109,11 @@ class VectorRetriever(Retriever):
         if not vec:
             return []
         hide_invalidated = as_of is None and not include_invalidated
+        # A caller timestamp constraint is converted into the collection's own
+        # domain first — Qdrant only matches when bound type == field type.
+        filters = convert_timestamp_filter(
+            filters, timestamp_key=self.timestamp_key, timestamp_format=self.timestamp_format
+        )
         # Pass tenant only when set, so a custom store without the parameter
         # still works on the single-tenant path.
         tkw = {"tenant": tenant} if tenant is not None else {}
@@ -166,6 +175,55 @@ def _with_timestamp_range_filter(
         must = list(scroll_filter.must or [])
         return scroll_filter.model_copy(update={"must": [*must, timestamp_condition]})
     raise TypeError("newer_than/older_than can only be combined with a qdrant Filter scroll_filter")
+
+
+def _emit_epoch_bound(dt: datetime, timestamp_format: str) -> str | float:
+    """A bound in the collection's own domain. Numeric domains emit the EXACT
+    float — integral rounding in either direction is lossy against fractional
+    ``time.time()`` payloads (truncation widens; inward rounding excludes a
+    valid ``23:59:59.5`` point at a ``.999999`` window edge)."""
+    if timestamp_format == "epoch":
+        return dt.timestamp()
+    if timestamp_format == "epoch_ms":
+        return dt.timestamp() * 1000
+    return dt.isoformat()
+
+
+def convert_timestamp_filter(
+    filters: dict[str, Any] | None,
+    *,
+    timestamp_key: str,
+    timestamp_format: str,
+) -> dict[str, Any] | None:
+    """A copy of ``filters`` with the timestamp condition's bounds converted
+    into the collection's own domain.
+
+    The caller's constraint arrives in whatever domain the caller thinks in
+    (ISO strings, epoch numbers); Qdrant's range condition only matches when
+    the bound's type matches the FIELD's type — an ISO ``DatetimeRange`` over
+    a numeric field silently returns nothing. Bounds that don't parse as
+    instants are left untouched (strict Qdrant semantics, same as today).
+    Non-timestamp keys pass through verbatim.
+    """
+    if not filters or timestamp_key not in filters:
+        return filters
+    unit = numeric_unit_for(timestamp_format)
+
+    def _conv(v: Any) -> Any:
+        dt = parse_payload_instant(v, numeric_unit=unit)
+        return _emit_epoch_bound(dt, timestamp_format) if dt is not None else v
+
+    cond = filters[timestamp_key]
+    if isinstance(cond, dict) and ("gte" in cond or "lte" in cond):
+        new_cond: Any = dict(cond)
+        for side in ("gte", "lte"):
+            if cond.get(side) is not None:
+                new_cond[side] = _conv(cond[side])
+    else:
+        new_cond = _conv(cond)
+    out = dict(filters)
+    out[timestamp_key] = new_cond
+    return out
 
 
 def bm25_docs_from_qdrant(
@@ -451,12 +509,17 @@ class HyDERetriever(Retriever):
         vector_store: VectorStore,
         max_tokens: int = 120,
         text_key: str = "text",
+        *,
+        timestamp_key: str = "timestamp",
+        timestamp_format: str = "iso",
     ):
         self.llm = llm
         self.embedding = embedding
         self.vector_store = vector_store
         self.max_tokens = max_tokens
         self.text_key = text_key
+        self.timestamp_key = timestamp_key
+        self.timestamp_format = timestamp_format
 
     def _generate_hypothetical(self, query: str) -> str | None:
         try:
@@ -477,7 +540,15 @@ class HyDERetriever(Retriever):
         vec = self.embedding.embed(hypo)
         if not vec:
             return []
-        hits = self.vector_store.search(vec, limit=limit, filters=filters)
+        hits = self.vector_store.search(
+            vec,
+            limit=limit,
+            filters=convert_timestamp_filter(
+                filters,
+                timestamp_key=self.timestamp_key,
+                timestamp_format=self.timestamp_format,
+            ),
+        )
         return [
             RecallResult(
                 id=h.id,
@@ -1222,18 +1293,12 @@ class TemporalRetriever(Retriever):
         #: unambiguous this way).
         self._numeric_unit = numeric_unit_for(timestamp_format)
 
-    def _bound(self, dt: datetime, side: str) -> str | int:
-        """A window bound in the collection's own timestamp domain.
-
-        Numeric bounds are rounded INWARD by ``side`` (``gte`` up, ``lte``
-        down): plain truncation of a fractional bound (an ISO caller
-        constraint ending ``.500Z``) would WIDEN the scope and admit a point
-        from the excluded half-second. Exact-integer bounds are unchanged.
-        """
-        if self.timestamp_format in ("epoch", "epoch_ms"):
-            ts = dt.timestamp() * (1000 if self.timestamp_format == "epoch_ms" else 1)
-            return int(math.ceil(ts)) if side == "gte" else int(math.floor(ts))
-        return dt.isoformat()
+    def _bound(self, dt: datetime) -> str | float:
+        """A window bound in the collection's own timestamp domain — EXACT
+        (floats for numeric domains): rounding in either direction is lossy
+        (truncation widens the scope; inward integral rounding excludes a
+        fractional ``time.time()`` payload at the window edge)."""
+        return _emit_epoch_bound(dt, self.timestamp_format)
 
     def explain_empty(self, query: str) -> str | None:
         """Why an empty result is a degradation, not an absence of data.
@@ -1287,8 +1352,8 @@ class TemporalRetriever(Retriever):
             return []
         start_dt, end_dt = window
         temporal_filter[self.timestamp_key] = {
-            "gte": self._bound(start_dt, "gte"),
-            "lte": self._bound(end_dt, "lte"),
+            "gte": self._bound(start_dt),
+            "lte": self._bound(end_dt),
         }
 
         strict_bounds = None
@@ -1306,8 +1371,8 @@ class TemporalRetriever(Retriever):
             try:
                 strict_filter = dict(temporal_filter)
                 strict_filter[self.timestamp_key] = {
-                    "gte": self._bound(strict_bounds[0], "gte"),
-                    "lte": self._bound(strict_bounds[1], "lte"),
+                    "gte": self._bound(strict_bounds[0]),
+                    "lte": self._bound(strict_bounds[1]),
                 }
 
                 buffer_limit = max(

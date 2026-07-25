@@ -633,7 +633,13 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
 
     bm25_docs = _build_bm25_docs(cfg.bm25_paths)
     maybe_retrievers = [
-        VectorRetriever(embedding=provider, vector_store=store, text_key=cfg.text_key),
+        VectorRetriever(
+            embedding=provider,
+            vector_store=store,
+            text_key=cfg.text_key,
+            timestamp_key=cfg.timestamp_key,
+            timestamp_format=cfg.timestamp_format,
+        ),
         BM25Retriever(docs=bm25_docs) if bm25_docs else None,
         MemgraphRetriever(
             uri=cfg.graph_uri,

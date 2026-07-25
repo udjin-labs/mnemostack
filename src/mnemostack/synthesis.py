@@ -261,10 +261,22 @@ def _build_recaller_from_kwargs(
         and vector_store is not None
     ):
         retrievers.append(
-            VectorRetriever(embedding=embedding, vector_store=vector_store, text_key=text_key)
+            VectorRetriever(
+                embedding=embedding,
+                vector_store=vector_store,
+                text_key=text_key,
+                timestamp_key=timestamp_key,
+                timestamp_format=timestamp_format,
+            )
         )
     if _source_enabled("bm25", source_filter) and kwargs.get("bm25_docs"):
-        retrievers.append(BM25Retriever(docs=list(kwargs["bm25_docs"])))
+        retrievers.append(
+            BM25Retriever(
+                docs=list(kwargs["bm25_docs"]),
+                timestamp_key=timestamp_key,
+                timestamp_format=timestamp_format,
+            )
+        )
     memgraph_uri = kwargs.get("memgraph_uri")
     if _source_enabled("memgraph", source_filter) and (memgraph_uri or kwargs.get("graph_driver")):
         retrievers.append(

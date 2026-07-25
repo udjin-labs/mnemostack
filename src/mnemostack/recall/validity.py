@@ -107,6 +107,14 @@ def parse_payload_instant(value: Any, *, numeric_unit: str = "auto") -> datetime
                 return dt
         return dt
     if isinstance(value, str):
+        if numeric_unit in ("s", "ms"):
+            # An EXPLICIT unit means the field is numeric: a digit string like
+            # "20240101" is that number of seconds/ms, not the basic-ISO date
+            # it happens to spell — numeric interpretation wins.
+            try:
+                return parse_payload_instant(float(value), numeric_unit=numeric_unit)
+            except ValueError:
+                pass
         parsed = _to_instant(value)
         if parsed is not None:
             return parsed

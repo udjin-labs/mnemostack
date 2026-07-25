@@ -224,6 +224,19 @@ class Recaller:
         self.timestamp_format = timestamp_format
         self._query_expansion_cache: dict[str, list[str]] = {}
 
+    def _vector_filters(self, filters: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Caller filters with the timestamp condition converted into the
+        collection's own domain (see ``convert_timestamp_filter``) — the
+        legacy vector paths talk to Qdrant directly, so an ISO bound over a
+        numeric field would otherwise silently match nothing."""
+        from .retrievers import convert_timestamp_filter
+
+        return convert_timestamp_filter(
+            filters,
+            timestamp_key=self.timestamp_key,
+            timestamp_format=self.timestamp_format,
+        )
+
     # --- adaptive weight helpers ---
 
     @classmethod
@@ -427,7 +440,7 @@ class Recaller:
                     vector_hits = self.vector.search(
                         query_vec,
                         limit=vector_fetch,
-                        filters=filters,
+                        filters=self._vector_filters(filters),
                         hide_invalidated=_push_hide_invalidated(include_invalidated, as_of),
                         **tkw,
                     )
@@ -595,7 +608,7 @@ class Recaller:
                 hits = self.vector.search(
                     vector,
                     limit=fetch,
-                    filters=filters,
+                    filters=self._vector_filters(filters),
                     hide_invalidated=_push_hide_invalidated(include_invalidated, as_of),
                     **tkw,
                 )
@@ -1111,7 +1124,7 @@ class Recaller:
                 return []
             try:
                 hits = self.vector.search(
-                    query_vec, limit=limit, filters=filters,
+                    query_vec, limit=limit, filters=self._vector_filters(filters),
                     hide_invalidated=hide_invalidated, **tkw
                 )
             except Exception:

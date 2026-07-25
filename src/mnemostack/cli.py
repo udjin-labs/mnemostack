@@ -1785,7 +1785,13 @@ def _build_recaller(
         and _source_enabled_for_cli("vector", source_filter)
     ):
         retrievers.append(
-            VectorRetriever(embedding=provider, vector_store=store, text_key=text_key)
+            VectorRetriever(
+                embedding=provider,
+                vector_store=store,
+                text_key=text_key,
+                timestamp_key=timestamp_key,
+                timestamp_format=timestamp_format,
+            )
         )
     if _source_enabled_for_cli("bm25", source_filter):
         bm25_docs = build_bm25_docs(list(getattr(args, "bm25_path", []) or []))
