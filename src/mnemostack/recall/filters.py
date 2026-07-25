@@ -44,16 +44,34 @@ def payload_matches(
             return False
         value = payload[key]
         candidates = value if isinstance(value, list) else [value]
+        instant_ok = key == timestamp_key
         if isinstance(condition, dict) and ("gte" in condition or "lte" in condition):
-            instant_ok = key == timestamp_key
             if not any(
                 _in_range(c, condition, instant_ok=instant_ok, numeric_unit=numeric_unit)
                 for c in candidates
             ):
                 return False
-        elif condition not in candidates:
+        elif instant_ok and not _exact_instant_match(condition, candidates, numeric_unit):
+            return False
+        elif not instant_ok and condition not in candidates:
             return False
     return True
+
+
+def _exact_instant_match(condition: Any, candidates: list[Any], numeric_unit: str) -> bool:
+    """Exact match for the timestamp key: equal INSTANTS count as equal even
+    across domains (an ISO condition vs an epoch payload names one moment).
+    When either side doesn't parse, plain equality applies as before."""
+    if condition in candidates:
+        return True
+    from .validity import parse_payload_instant
+
+    want = parse_payload_instant(condition, numeric_unit=numeric_unit)
+    if want is None:
+        return False
+    return any(
+        parse_payload_instant(c, numeric_unit=numeric_unit) == want for c in candidates
+    )
 
 
 def _in_range(

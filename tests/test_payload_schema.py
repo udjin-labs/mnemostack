@@ -530,6 +530,73 @@ def test_inspector_records_convert_timestamp_filters(monkeypatch):
     assert [r["text"] for r in d["records"]] == ["april note"]
 
 
+def test_payload_matches_exact_timestamp_across_domains():
+    # An exact ISO condition and an epoch payload naming the same moment must
+    # match on the timestamp key (BM25/post-pipeline mirror of the vector
+    # arm's converted filter); other keys keep plain equality.
+    assert payload_matches(
+        {"updated_at": _EPOCH},
+        {"updated_at": "2026-04-15T12:00:00Z"},
+        timestamp_key="updated_at",
+    )
+    assert not payload_matches(
+        {"updated_at": _EPOCH},
+        {"updated_at": "2026-04-16T12:00:00Z"},
+        timestamp_key="updated_at",
+    )
+    assert not payload_matches({"kind": "42"}, {"kind": 42})  # non-timestamp: strict
+
+
+def test_convert_filter_exact_cross_domain_becomes_degenerate_range():
+    from mnemostack.recall.retrievers import convert_timestamp_filter
+
+    # ISO collection + numeric exact value: scalar MatchValue would be
+    # representation-sensitive — a degenerate DatetimeRange compares instants.
+    out = convert_timestamp_filter(
+        {"timestamp": _EPOCH}, timestamp_key="timestamp", timestamp_format="iso"
+    )
+    cond = out["timestamp"]
+    assert isinstance(cond, dict) and cond["gte"] == cond["lte"]
+    # Epoch collection + ISO exact value: degenerate numeric Range.
+    out = convert_timestamp_filter(
+        {"updated_at": "2026-04-15T12:00:00Z"},
+        timestamp_key="updated_at",
+        timestamp_format="epoch",
+    )
+    assert out["updated_at"] == {"gte": _EPOCH, "lte": _EPOCH}
+    # Vector e2e: exact ISO over the epoch field finds the point.
+    store = _foreign_store()
+    r = VectorRetriever(
+        embedding=_FakeEmbedder(), vector_store=store, text_key="content",
+        timestamp_key="updated_at", timestamp_format="epoch",
+    )
+    hits = r.search("x", limit=5, filters={"updated_at": "2026-04-15T12:00:00Z"})
+    assert [h.text for h in hits] == ["april note"]
+
+
+def test_answer_generator_derives_schema_from_recaller():
+    from mnemostack.recall.answer import AnswerGenerator
+
+    class _FakeLLM:
+        def generate(self, *a, **k):
+            raise NotImplementedError
+
+    class _SchemaRecaller:
+        timestamp_key = "updated_at"
+        timestamp_format = "epoch"
+
+    gen = AnswerGenerator(llm=_FakeLLM(), recaller=_SchemaRecaller())
+    assert gen.timestamp_key == "updated_at" and gen.timestamp_format == "epoch"
+    # explicit kwargs still win
+    gen2 = AnswerGenerator(
+        llm=_FakeLLM(), recaller=_SchemaRecaller(), timestamp_key="ts"
+    )
+    assert gen2.timestamp_key == "ts"
+    # no recaller: standard defaults
+    gen3 = AnswerGenerator(llm=_FakeLLM())
+    assert gen3.timestamp_key == "timestamp" and gen3.timestamp_format == "iso"
+
+
 def test_synthesis_bm25_docs_get_the_schema():
     from mnemostack.recall.bm25 import BM25Doc
     from mnemostack.synthesis import _build_recaller_from_kwargs

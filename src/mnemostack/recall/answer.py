@@ -425,8 +425,8 @@ class AnswerGenerator:
         list_extract_batch_size: int = 40,
         list_finalize: str = "llm",
         context_fields: Sequence[str] | None = None,
-        timestamp_key: str = "timestamp",
-        timestamp_format: str = "iso",
+        timestamp_key: str | None = None,
+        timestamp_format: str | None = None,
     ):
         self.llm = llm
         self.max_memories = max_memories
@@ -459,9 +459,15 @@ class AnswerGenerator:
         self.context_fields: tuple[str, ...] = tuple(context_fields or ())
         #: Payload key holding each memory's timestamp — configurable so the
         #: dated context prefix works over a pre-existing collection's schema —
-        #: and how its numeric values are read.
-        self.timestamp_key = timestamp_key
-        self.timestamp_format = timestamp_format
+        #: and how its numeric values are read. When omitted, a supplied
+        #: recaller's schema applies (a library caller shouldn't have to
+        #: repeat what its recaller already knows).
+        self.timestamp_key = (
+            timestamp_key or getattr(recaller, "timestamp_key", None) or "timestamp"
+        )
+        self.timestamp_format = (
+            timestamp_format or getattr(recaller, "timestamp_format", None) or "iso"
+        )
         self.specificity_resolver = specificity_resolver
         self.inference_retry = inference_retry
         self.recaller = recaller

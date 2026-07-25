@@ -237,7 +237,16 @@ def convert_timestamp_filter(
             if cond.get(side) is not None:
                 new_cond[side] = _conv(cond[side])
     else:
-        new_cond = _conv(cond)
+        converted = _conv(cond)
+        if converted is not cond and converted != cond:
+            # A CROSS-domain exact value becomes a degenerate range: scalar
+            # MatchValue equality is representation-sensitive (a stored
+            # "...Z" string never equals a generated "...+00:00"; an int
+            # payload need not equal a float), while a range condition
+            # compares as instants/numbers on the server.
+            new_cond = {"gte": converted, "lte": converted}
+        else:
+            new_cond = cond
     out = dict(filters)
     out[timestamp_key] = new_cond
     return out
