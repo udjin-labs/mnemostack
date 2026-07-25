@@ -340,6 +340,8 @@ class FreshnessBlend(Stage):
             "HEALTHCHECK.md",
         ),
         always_current_freshness: float = 0.8,
+        timestamp_key: str = "timestamp",
+        timestamp_format: str = "iso",
     ):
         self.weight = weight
         self.halflife_days = halflife_days
@@ -349,6 +351,11 @@ class FreshnessBlend(Stage):
         self.echo_penalty = echo_penalty
         self.always_current_files = always_current_files
         self.always_current_freshness = always_current_freshness
+        #: Payload key holding the memory's timestamp — configurable so the
+        #: stage reads a pre-existing collection's own schema — and how its
+        #: numeric values are read (configured format beats the heuristic).
+        self.timestamp_key = timestamp_key
+        self.timestamp_format = timestamp_format
 
     def apply(self, context, results):
         now = datetime.now(timezone.utc)
@@ -393,22 +400,17 @@ class FreshnessBlend(Stage):
         results.sort(key=lambda x: -x.score)
         return results
 
-    @staticmethod
-    def _parse_timestamp(payload: dict[str, Any]) -> datetime | None:
-        ts = payload.get("timestamp")
-        if not ts:
-            return None
-        try:
-            if isinstance(ts, str):
-                ts = ts.replace("Z", "+00:00")
-                dt = datetime.fromisoformat(ts)
-            else:
-                dt = ts
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt
-        except (ValueError, TypeError):
-            return None
+    def _parse_timestamp(self, payload: dict[str, Any]) -> datetime | None:
+        # parse_payload_instant accepts every shape a foreign collection may
+        # store (ISO string, datetime, epoch seconds/ms) and returns None for
+        # the rest — an epoch int must decay normally, not AttributeError the
+        # whole recall request (ints have no .tzinfo).
+        from ..validity import numeric_unit_for, parse_payload_instant
+
+        return parse_payload_instant(
+            payload.get(self.timestamp_key),
+            numeric_unit=numeric_unit_for(self.timestamp_format),
+        )
 
     @staticmethod
     def _date_from_source(source: str) -> datetime | None:
@@ -505,13 +507,21 @@ class CuriosityBoost(Stage):
         bonus: float = 0.05,
         min_age_days: int = 7,
         max_recalls: int = 2,
+        timestamp_key: str = "timestamp",
+        timestamp_format: str = "iso",
     ):
         self.store = state_store
         self.bonus = bonus
         self.min_age_days = min_age_days
         self.max_recalls = max_recalls
+        #: Payload key holding the memory's timestamp (a foreign collection's
+        #: own schema); the legacy "created" fallback is kept unconditionally.
+        self.timestamp_key = timestamp_key
+        self.timestamp_format = timestamp_format
 
     def apply(self, context, results):
+        from ..validity import numeric_unit_for, parse_payload_instant
+
         tenant = context.extras.get("tenant")
         log = self.store.get(tenant_state_key(self.IOR_KEY, tenant)) or []
         counts: dict[str, int] = defaultdict(int)
@@ -521,19 +531,25 @@ class CuriosityBoost(Stage):
         for r in results:
             if counts.get(str(r.id), 0) > self.max_recalls:
                 continue
-            created = r.payload.get("timestamp") or r.payload.get("created")
-            if created:
-                try:
-                    ts = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
-                    if ts.tzinfo is None:
-                        ts = ts.replace(tzinfo=timezone.utc)
-                    age_days = (now - ts).days
-                    if age_days >= self.min_age_days:
-                        r.score += self.bonus
-                        r.payload["curiosity_boosted"] = True
-                except (ValueError, TypeError):
-                    pass
-            else:
+            created = r.payload.get(self.timestamp_key)
+            if created is None or created == "":
+                created = r.payload.get("created")
+            # Tolerant of every foreign shape (epoch int/ms, datetime) —
+            # including epoch 0, which is a REAL very-old instant, not
+            # missing data (hence no truthiness test on the value itself).
+            ts = (
+                parse_payload_instant(
+                    created, numeric_unit=numeric_unit_for(self.timestamp_format)
+                )
+                if created is not None
+                else None
+            )
+            if ts is not None:
+                age_days = (now - ts).days
+                if age_days >= self.min_age_days:
+                    r.score += self.bonus
+                    r.payload["curiosity_boosted"] = True
+            elif created is None or created == "":
                 # No date info — half bonus
                 r.score += self.bonus * 0.5
         results.sort(key=lambda x: -x.score)

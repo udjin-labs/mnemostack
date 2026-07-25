@@ -12,6 +12,7 @@ configured embedding provider (GEMINI_API_KEY for gemini, or a running Ollama).
 from __future__ import annotations
 
 import argparse
+import functools
 import importlib
 import json
 import os
@@ -1285,6 +1286,21 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             f"invalid rerank_mode '{cfg.recall.rerank_mode}'",
             f"set recall.rerank_mode to one of: {', '.join(sorted(RERANK_MODES))}",
         )
+    # timestamp_format is the other stable config enum: a typo here passes
+    # config load but makes TemporalRetriever construction raise at serve
+    # time — doctor must flag it, not report a false green.
+    from mnemostack.recall.retrievers import TemporalRetriever as _TR
+
+    if cfg.recall.timestamp_format in _TR.TIMESTAMP_FORMATS:
+        add("config.timestamp_format", "ok", cfg.recall.timestamp_format)
+    else:
+        add(
+            "config.timestamp_format",
+            "misconfig",
+            f"invalid timestamp_format '{cfg.recall.timestamp_format}'",
+            "set recall.timestamp_format to one of: "
+            + ", ".join(_TR.TIMESTAMP_FORMATS),
+        )
 
     # Embedding provider (a hard recall dependency).
     provider = None
@@ -1423,10 +1439,14 @@ def _recall_for_cli(args: argparse.Namespace, recaller, query: str, limit: int):
             include_invalidated=include_invalidated,
             as_of=as_of,
         )
+    _text_key, _ts_key, _ts_fmt = _payload_schema()
     pipeline = build_full_pipeline(
         state_store=FileStateStore(default_state_path()),
         graph_uri=getattr(args, "memgraph_uri", None) or None,
         graph_timeout=getattr(args, "graph_timeout", 5.0),
+        text_key=_text_key,
+        timestamp_key=_ts_key,
+        timestamp_format=_ts_fmt,
         **{f"graph_{k}": v for k, v in _graph_auth(args).items()},
     )
     reranker = None
@@ -1608,6 +1628,8 @@ def cmd_answer(args: argparse.Namespace) -> int:
     answer_generator_kwargs = {
         "llm": llm,
         "confidence_threshold": args.min_confidence,
+        "timestamp_key": _payload_schema()[1],
+        "timestamp_format": _payload_schema()[2],
     }
     if getattr(args, "query_expansion", False):
         answer_generator_kwargs.update(
@@ -1721,6 +1743,33 @@ def _graph_auth(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+@functools.lru_cache(maxsize=1)
+def _payload_schema() -> tuple[str, str, str]:
+    """(text_key, timestamp_key, timestamp_format) from config/env.
+
+    The payload schema is a property of the DEPLOYMENT (one collection = one
+    schema), not of an individual command, so the CLI reads it from the same
+    config/env the servers use instead of per-command flags. Cached: one
+    Config.load() per process (a CLI process runs one command).
+
+    A config that fails to load falls back to the standard schema WITH a loud
+    stderr warning — for several commands this is the only place the config
+    file is parsed at all, so swallowing the error silently would make a
+    configured `text_key` vanish with no clue why text came back empty.
+    """
+    try:
+        rc = Config.load().recall
+        return rc.text_key, rc.timestamp_key, rc.timestamp_format
+    except Exception as e:  # noqa: BLE001 — fall back, but never silently
+        print(
+            f"warning: config failed to load ({e}); using the standard payload "
+            "schema (text/timestamp/iso) — a configured text_key/timestamp_key "
+            "is NOT in effect",
+            file=sys.stderr,
+        )
+        return "text", "timestamp", "iso"
+
+
 def _build_recaller(
     args: argparse.Namespace,
     provider,
@@ -1728,13 +1777,22 @@ def _build_recaller(
     source_filter: set[str] | None = None,
 ) -> Recaller:
     """Build the same retriever-mode Recaller used by the service surfaces."""
+    text_key, timestamp_key, timestamp_format = _payload_schema()
     retrievers: list[Retriever] = []
     if (
         provider is not None
         and store is not None
         and _source_enabled_for_cli("vector", source_filter)
     ):
-        retrievers.append(VectorRetriever(embedding=provider, vector_store=store))
+        retrievers.append(
+            VectorRetriever(
+                embedding=provider,
+                vector_store=store,
+                text_key=text_key,
+                timestamp_key=timestamp_key,
+                timestamp_format=timestamp_format,
+            )
+        )
     if _source_enabled_for_cli("bm25", source_filter):
         bm25_docs = build_bm25_docs(list(getattr(args, "bm25_path", []) or []))
         if bm25_docs:
@@ -1747,7 +1805,15 @@ def _build_recaller(
         and store is not None
         and _source_enabled_for_cli("temporal", source_filter)
     ):
-        retrievers.append(TemporalRetriever(embedding=provider, vector_store=store))
+        retrievers.append(
+            TemporalRetriever(
+                embedding=provider,
+                vector_store=store,
+                text_key=text_key,
+                timestamp_key=timestamp_key,
+                timestamp_format=timestamp_format,
+            )
+        )
     query_expansion = bool(getattr(args, "query_expansion", False))
     expansion_llm = None
     if query_expansion:
@@ -1762,6 +1828,9 @@ def _build_recaller(
         query_expansion=query_expansion,
         expansion_llm=expansion_llm,
         vector_floor=max(0, int(getattr(args, "vector_floor", 0))),
+        text_key=text_key,
+        timestamp_key=timestamp_key,
+        timestamp_format=timestamp_format,
     )
 
 
@@ -3328,6 +3397,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         )
         return 2
 
+    _schema_text, _schema_ts, _schema_fmt = _payload_schema()
     cfg = ServerConfig(
         provider_name=args.provider,
         embedding_model=_embedding_model(args),
@@ -3353,6 +3423,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
         auth_enabled=args.auth or _env_bool("MNEMOSTACK_AUTH_ENABLED"),
         keys_file=args.keys_file,
         quotas_file=getattr(args, "quotas_file", None),
+        text_key=_schema_text,
+        timestamp_key=_schema_ts,
+        timestamp_format=_schema_fmt,
     )
     app = build_app(cfg)
 
@@ -3432,6 +3505,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         )
         return 2
 
+    _schema_text, _schema_ts, _schema_fmt = _payload_schema()
     cfg = ServerConfig(
         provider_name=args.provider,
         embedding_model=_embedding_model(args),
@@ -3453,6 +3527,9 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         auth_enabled=getattr(args, "auth", False) or _env_bool("MNEMOSTACK_AUTH_ENABLED"),
         keys_file=getattr(args, "keys_file", None),
         quotas_file=getattr(args, "quotas_file", None),
+        text_key=_schema_text,
+        timestamp_key=_schema_ts,
+        timestamp_format=_schema_fmt,
     )
     app = build_inspector_app(cfg)
     admin = cfg.auth_enabled
@@ -3483,6 +3560,7 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
         )
         return 2
 
+    _schema_text, _schema_ts, _schema_fmt = _payload_schema()
     mcp = build_server(
         collection=args.collection,
         embedding_provider=args.provider,
@@ -3506,6 +3584,9 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
         in {"1", "true", "yes", "on"},
         api_key=args.api_key or os.environ.get("MNEMOSTACK_API_KEY") or None,
         keys_file=args.keys_file,
+        text_key=_schema_text,
+        timestamp_key=_schema_ts,
+        timestamp_format=_schema_fmt,
     )
     mcp.run()
     return 0

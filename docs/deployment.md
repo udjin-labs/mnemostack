@@ -775,6 +775,44 @@ export MNEMOSTACK_COLLECTION=production-memory
 
 Migration to a new model should use a new collection, not in-place mutation.
 
+## Mounting a pre-existing collection (foreign payload schema)
+
+Recall can run over a Qdrant collection **written by another system** — no
+re-embedding, no payload rewrite. Two things usually differ in such a
+collection: the payload field names, and how timestamps are stored. Both are
+configuration:
+
+```yaml
+recall:
+  text_key: content            # payload key holding the chunk text
+  timestamp_key: updated_at    # payload key holding the timestamp
+  timestamp_format: epoch      # iso (RFC3339 strings) | epoch (seconds) | epoch_ms
+```
+
+(or `MNEMOSTACK_TEXT_KEY` / `MNEMOSTACK_TIMESTAMP_KEY` /
+`MNEMOSTACK_TIMESTAMP_FORMAT` — one deployment, one schema; the CLI, HTTP
+server, and MCP all read the same setting).
+
+Notes for this mode:
+
+- **`timestamp_format` matters for temporal recall correctness**, not just
+  display: window filters are sent to Qdrant in the field's own domain. With
+  `iso` configured against a numeric field (or vice versa) the range condition
+  matches nothing and temporal recall silently contributes zero — which is
+  also the symptom to check first if date-scoped queries return nothing.
+- Timestamp **values** are parsed tolerantly everywhere regardless of the
+  format setting (ISO strings, numeric epochs — milliseconds detected by
+  magnitude — datetimes); unparseable values degrade (no freshness decay, no
+  date prefix) instead of erroring.
+- Validity/invalidation keys (`invalidated_at`, `valid_from`, `valid_until`)
+  need no mapping: absent fields mean "current", so a foreign collection is
+  fully visible by default.
+- This is a **read-side mount**. mnemostack's own ingest keeps writing the
+  standard schema (`text`/`timestamp`) — don't point a writing deployment and
+  a foreign-schema mount at the same collection.
+- The embedding-consistency rule above still applies: query with the same
+  model that produced the collection's vectors.
+
 ## Smoke tests
 
 Run these after first deploy, after every upgrade, and after restore.

@@ -34,6 +34,104 @@ def is_current(payload: dict[str, Any] | None) -> bool:
     return not payload.get(INVALIDATED_AT)
 
 
+#: Numeric epoch values at/above this are treated as MILLISECONDS: epoch
+#: seconds don't reach 1e12 until the year 33658, while every real ms epoch
+#: since 2001 exceeds it — so the two ranges cannot collide in practice.
+_EPOCH_MS_THRESHOLD = 1e12
+
+
+def parses_as_iso(value: Any) -> bool:
+    """Whether ``value`` is an ISO-8601 instant STRING (the native domain of
+    an ``iso`` collection) — used to tell a same-domain value (pass through
+    verbatim) from a numeric-string epoch that needs conversion."""
+    return isinstance(value, str) and _to_instant(value) is not None
+
+
+def numeric_unit_for(timestamp_format: str) -> str:
+    """The ``parse_payload_instant`` numeric unit for a configured
+    ``timestamp_format``: an explicit format beats the magnitude heuristic."""
+    return {"epoch": "s", "epoch_ms": "ms"}.get(timestamp_format, "auto")
+
+
+def parse_payload_instant(value: Any, *, numeric_unit: str = "auto") -> datetime | None:
+    """Parse a payload timestamp of ANY common shape to an aware UTC datetime.
+
+    A pre-existing (foreign) collection stores time however its writer chose:
+    an ISO-8601 string, an aware/naive datetime, or a numeric epoch; a numeric
+    string (``"1719834000"``) parses like the number it holds. Returns None
+    for anything unparseable so callers degrade (skip the boost, drop the
+    prefix) instead of crashing recall on a schema they don't own. Booleans are
+    rejected explicitly — ``True`` is an ``int`` in Python but never a time.
+
+    ``numeric_unit`` disambiguates NUMERIC values: ``"s"``/``"ms"`` (a caller
+    that knows the configured ``timestamp_format`` — see
+    :func:`numeric_unit_for`) parse exactly in that unit, with no guessing —
+    an early millisecond epoch like ``86400000`` (1970-01-02) is only
+    parseable correctly this way, since as seconds it is a plausible 1972.
+    ``"auto"`` (callers with no format knowledge) uses the magnitude
+    heuristic: values ≥ 1e12 are milliseconds, a seconds-reading that
+    overflows datetime or lands past year 3000 retries as milliseconds.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, (int, float)):
+        v = float(value)
+        if v != v or v in (float("inf"), float("-inf")):  # NaN/inf: not a time
+            return None
+        if numeric_unit == "ms":
+            try:
+                return datetime.fromtimestamp(v / 1000.0, tz=timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                return None
+        if numeric_unit == "s":
+            try:
+                return datetime.fromtimestamp(v, tz=timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                return None
+        if abs(v) >= _EPOCH_MS_THRESHOLD:
+            v /= 1000.0
+        try:
+            dt = datetime.fromtimestamp(v, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            # Beyond datetime's year-9999 ceiling as seconds — a pre-2001
+            # MILLISECOND epoch sits below the magnitude threshold but still
+            # overflows here (946684800000 = 2000-01-01 in ms). Retry as ms.
+            try:
+                dt = datetime.fromtimestamp(v / 1000.0, tz=timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                return None
+            return dt
+        if dt.year > 3000:
+            # Seconds-reading lands implausibly far in the future (year 3000+):
+            # a 1973-2001 millisecond epoch reads as year 5138+ in seconds. A
+            # memory timestamp that far out is far more likely milliseconds —
+            # prefer the ms reading when it parses.
+            try:
+                return datetime.fromtimestamp(v / 1000.0, tz=timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                return dt
+        return dt
+    if isinstance(value, str):
+        if numeric_unit in ("s", "ms"):
+            # An EXPLICIT unit means the field is numeric: a digit string like
+            # "20240101" is that number of seconds/ms, not the basic-ISO date
+            # it happens to spell — numeric interpretation wins.
+            try:
+                return parse_payload_instant(float(value), numeric_unit=numeric_unit)
+            except ValueError:
+                pass
+        parsed = _to_instant(value)
+        if parsed is not None:
+            return parsed
+        try:
+            return parse_payload_instant(float(value), numeric_unit=numeric_unit)
+        except ValueError:
+            return None
+    return None
+
+
 def _to_instant(value: Any) -> datetime | None:
     """Parse an ISO-8601 date or datetime to an aware UTC datetime.
 

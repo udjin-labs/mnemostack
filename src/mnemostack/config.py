@@ -98,6 +98,14 @@ class RecallConfig:
     #: Default token budget applied to recall results on the HTTP/MCP/CLI
     #: surfaces when the caller does not pass one. None = no budget.
     token_budget: int | None = None
+    #: Payload schema of the (possibly pre-existing) collection: which payload
+    #: keys hold the chunk text and its timestamp, and how timestamps are
+    #: stored — "iso" (RFC3339 strings, the mnemostack-written default),
+    #: "epoch" (numeric seconds), or "epoch_ms" (numeric milliseconds). Lets
+    #: recall mount a foreign collection without rewriting its payloads.
+    text_key: str = "text"
+    timestamp_key: str = "timestamp"
+    timestamp_format: str = "iso"
 
 
 @dataclass
@@ -204,6 +212,9 @@ def _apply_env_overrides(cfg: Config) -> Config:
         MNEMOSTACK_VECTOR_FLOOR
         MNEMOSTACK_RERANK_MODE      (relevant_only | full_reorder)
         MNEMOSTACK_TOKEN_BUDGET     (default recall token budget; unset = none)
+        MNEMOSTACK_TEXT_KEY         (payload key holding chunk text)
+        MNEMOSTACK_TIMESTAMP_KEY    (payload key holding the timestamp)
+        MNEMOSTACK_TIMESTAMP_FORMAT (iso | epoch | epoch_ms)
         MNEMOSTACK_QDRANT_HOST  (alias for VECTOR_HOST)
         MNEMOSTACK_COLLECTION   (alias for VECTOR_COLLECTION)
         MNEMOSTACK_MEMGRAPH_URI (alias for GRAPH_URI)
@@ -267,6 +278,12 @@ def _apply_env_overrides(cfg: Config) -> Config:
     if v := env.get("MNEMOSTACK_TOKEN_BUDGET"):
         # <= 0 is normalized to "no budget" by Config.load
         cfg.recall.token_budget = int(v)
+    if v := env.get("MNEMOSTACK_TEXT_KEY"):
+        cfg.recall.text_key = v
+    if v := env.get("MNEMOSTACK_TIMESTAMP_KEY"):
+        cfg.recall.timestamp_key = v
+    if v := env.get("MNEMOSTACK_TIMESTAMP_FORMAT"):
+        cfg.recall.timestamp_format = v
 
     return cfg
 
@@ -310,4 +327,9 @@ recall:
   vector_floor: 0
   rerank_mode: relevant_only  # relevant_only | full_reorder
   token_budget: null          # e.g. 2000 = trim recall results to ~2000 text tokens; 0/null = off
+  # Payload schema of the collection recall reads (a pre-existing collection
+  # keeps its own field names; timestamps may be numeric epochs):
+  text_key: text
+  timestamp_key: timestamp
+  timestamp_format: iso       # iso | epoch | epoch_ms
 """

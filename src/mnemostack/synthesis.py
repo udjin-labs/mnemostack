@@ -11,7 +11,6 @@ import json
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -184,10 +183,41 @@ def synthesize(
     )
     raw_results = [r for r in raw_results if _result_source_enabled(r, source_filter)]
 
-    facts = _dedupe_facts(_facts_from_results(raw_results), max_results=max_results)
+    # Schema resolution: explicit kwargs win; otherwise the SUPPLIED recaller
+    # — or, in the documented retrievers=[...] construction, the first
+    # schema-aware direct retriever — carries the schema the retrieval used,
+    # and the facts/timeline must read the same keys.
+    if recaller is not None:
+        derived = {
+            "text_key": getattr(recaller, "text_key", "text"),
+            "timestamp_key": getattr(recaller, "timestamp_key", "timestamp"),
+            "timestamp_format": getattr(recaller, "timestamp_format", "iso"),
+        }
+    else:
+        from .recall.recaller import derive_payload_schema
+
+        missing = tuple(
+            f
+            for f in ("text_key", "timestamp_key", "timestamp_format")
+            if not kwargs.get(f)
+        )
+        derived = derive_payload_schema(list(kwargs.get("retrievers") or []), missing)
+    text_key = str(kwargs.get("text_key") or derived.get("text_key", "text"))
+    timestamp_key = str(kwargs.get("timestamp_key") or derived.get("timestamp_key", "timestamp"))
+    timestamp_format = str(
+        kwargs.get("timestamp_format") or derived.get("timestamp_format", "iso")
+    )
+    facts = _dedupe_facts(
+        _facts_from_results(
+            raw_results,
+            text_key=text_key,
+            timestamp_key=timestamp_key,
+        ),
+        max_results=max_results,
+    )
     if len(facts) >= int(kwargs.get("cluster_min_results", 8)):
         _assign_subtopics(facts, entity)
-    timeline = _timeline(facts)
+    timeline = _timeline(facts, timestamp_format)
     related_entities = _related_entities(entity, raw_results, kwargs)
     summary = _summarize(entity, facts, related_entities, kwargs) if llm_summarize else None
 
@@ -234,14 +264,33 @@ def _build_recaller_from_kwargs(
     retrievers: list[Retriever] = []
     embedding = kwargs.get("embedding_provider") or kwargs.get("embedding")
     vector_store = kwargs.get("vector_store")
+    # Payload schema of a pre-existing collection — same kwargs the other
+    # surfaces expose (text_key / timestamp_key / timestamp_format).
+    text_key = kwargs.get("text_key", "text")
+    timestamp_key = kwargs.get("timestamp_key", "timestamp")
+    timestamp_format = kwargs.get("timestamp_format", "iso")
     if (
         _source_enabled("vector", source_filter)
         and embedding is not None
         and vector_store is not None
     ):
-        retrievers.append(VectorRetriever(embedding=embedding, vector_store=vector_store))
+        retrievers.append(
+            VectorRetriever(
+                embedding=embedding,
+                vector_store=vector_store,
+                text_key=text_key,
+                timestamp_key=timestamp_key,
+                timestamp_format=timestamp_format,
+            )
+        )
     if _source_enabled("bm25", source_filter) and kwargs.get("bm25_docs"):
-        retrievers.append(BM25Retriever(docs=list(kwargs["bm25_docs"])))
+        retrievers.append(
+            BM25Retriever(
+                docs=list(kwargs["bm25_docs"]),
+                timestamp_key=timestamp_key,
+                timestamp_format=timestamp_format,
+            )
+        )
     memgraph_uri = kwargs.get("memgraph_uri")
     if _source_enabled("memgraph", source_filter) and (memgraph_uri or kwargs.get("graph_driver")):
         retrievers.append(
@@ -259,10 +308,23 @@ def _build_recaller_from_kwargs(
         and embedding is not None
         and vector_store is not None
     ):
-        retrievers.append(TemporalRetriever(embedding=embedding, vector_store=vector_store))
+        retrievers.append(
+            TemporalRetriever(
+                embedding=embedding,
+                vector_store=vector_store,
+                text_key=text_key,
+                timestamp_key=timestamp_key,
+                timestamp_format=timestamp_format,
+            )
+        )
     if not retrievers:
         return None
-    return Recaller(retrievers=retrievers)
+    return Recaller(
+        retrievers=retrievers,
+        text_key=text_key,
+        timestamp_key=timestamp_key,
+        timestamp_format=timestamp_format,
+    )
 
 
 def _source_enabled(name: str, source_filter: set[str] | None) -> bool:
@@ -285,6 +347,11 @@ def _filter_recaller(recaller: Any, source_filter: set[str] | None) -> Any:
         rrf_k=getattr(recaller, "rrf_k", 60),
         retriever_weights=getattr(recaller, "retriever_weights", None),
         adaptive_weights=getattr(recaller, "adaptive_weights", False),
+        # The rebuilt recaller must carry the ORIGINAL's payload schema — a
+        # source filter must not silently reset a foreign-collection mount.
+        text_key=getattr(recaller, "text_key", "text"),
+        timestamp_key=getattr(recaller, "timestamp_key", "timestamp"),
+        timestamp_format=getattr(recaller, "timestamp_format", "iso"),
     )
 
 
@@ -353,7 +420,12 @@ def _query_retrievers(
     return results
 
 
-def _facts_from_results(results: list[RecallResult]) -> list[SynthesisFact]:
+def _facts_from_results(
+    results: list[RecallResult],
+    *,
+    text_key: str = "text",
+    timestamp_key: str = "timestamp",
+) -> list[SynthesisFact]:
     facts: list[SynthesisFact] = []
     for result in results:
         text = (getattr(result, "text", "") or "").strip()
@@ -366,28 +438,35 @@ def _facts_from_results(results: list[RecallResult]) -> list[SynthesisFact]:
             SynthesisFact(
                 text=text,
                 source=source,
-                timestamp=_extract_timestamp(payload),
+                timestamp=_extract_timestamp(payload, timestamp_key=timestamp_key),
                 relevance_score=float(getattr(result, "score", 0.0) or 0.0),
-                metadata={"id": getattr(result, "id", None), **_safe_metadata(payload)},
+                metadata={
+                    "id": getattr(result, "id", None),
+                    **_safe_metadata(payload, text_key=text_key),
+                },
             )
         )
     facts.sort(key=lambda f: f.relevance_score, reverse=True)
     return facts
 
 
-def _extract_timestamp(payload: dict[str, Any]) -> str | None:
-    for key in _TIMESTAMP_KEYS:
+def _extract_timestamp(payload: dict[str, Any], *, timestamp_key: str = "timestamp") -> str | None:
+    # The configured schema key wins; the legacy candidates stay as fallbacks
+    # so mixed corpora keep their timeline.
+    for key in (timestamp_key, *_TIMESTAMP_KEYS):
         value = payload.get(key)
-        if value:
+        if value is not None and value != "":
             return str(value)
     return None
 
 
-def _safe_metadata(payload: dict[str, Any]) -> dict[str, Any]:
+def _safe_metadata(payload: dict[str, Any], *, text_key: str = "text") -> dict[str, Any]:
+    # Exclude the chunk text under WHATEVER key the schema stores it — a
+    # foreign text_key would otherwise duplicate the full text into metadata.
     return {
         k: v
         for k, v in payload.items()
-        if k not in {"text"} and isinstance(v, (str, int, float, bool, type(None)))
+        if k not in {"text", text_key} and isinstance(v, (str, int, float, bool, type(None)))
     }
 
 
@@ -437,19 +516,24 @@ def _tokens(text: str) -> list[str]:
     return re.findall(r"[\w@-]+", text.lower(), flags=re.UNICODE)
 
 
-def _timeline(facts: list[SynthesisFact]) -> list[SynthesisFact]:
+def _timeline(facts: list[SynthesisFact], timestamp_format: str = "iso") -> list[SynthesisFact]:
     stamped = [f for f in facts if f.timestamp]
-    return sorted(stamped, key=lambda f: _timestamp_sort_key(f.timestamp))
+    return sorted(stamped, key=lambda f: _timestamp_sort_key(f.timestamp, timestamp_format))
 
 
-def _timestamp_sort_key(timestamp: str | None) -> tuple[int, str]:
+def _timestamp_sort_key(timestamp: str | None, timestamp_format: str = "iso") -> tuple[int, str]:
     if not timestamp:
         return (1, "")
     raw = timestamp.strip()
-    try:
-        return (0, datetime.fromisoformat(raw.replace("Z", "+00:00")).isoformat())
-    except ValueError:
-        return (0, raw)
+    # Any stored domain (ISO, numeric epoch string) sorts chronologically —
+    # numerics read in the CONFIGURED unit; a non-instant string keeps its raw
+    # lexicographic slot, as before.
+    from .recall.validity import numeric_unit_for, parse_payload_instant
+
+    dt = parse_payload_instant(raw, numeric_unit=numeric_unit_for(timestamp_format))
+    if dt is not None:
+        return (0, dt.isoformat())
+    return (0, raw)
 
 
 def _related_entities(

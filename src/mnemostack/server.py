@@ -371,6 +371,11 @@ class ServerConfig:
     # Per-tenant request rate limiting (only meaningful under auth, which resolves
     # the tenant). A tenant with a `max_rps` quota is throttled; others are not.
     quotas_file: str | None = None  # None = FileQuotaStore default path
+    # Payload schema of the collection recall reads (a pre-existing collection
+    # keeps its own field names; timestamps may be numeric epochs).
+    text_key: str = "text"
+    timestamp_key: str = "timestamp"
+    timestamp_format: str = "iso"
 
     def __post_init__(self) -> None:
         if self.rerank_mode not in RERANK_MODES:
@@ -406,6 +411,9 @@ class ServerConfig:
             auth_enabled=_env_bool("MNEMOSTACK_AUTH_ENABLED"),
             keys_file=os.environ.get("MNEMOSTACK_KEYS_FILE") or None,
             quotas_file=os.environ.get("MNEMOSTACK_QUOTAS_FILE") or None,
+            text_key=cfg.recall.text_key,
+            timestamp_key=cfg.recall.timestamp_key,
+            timestamp_format=cfg.recall.timestamp_format,
         )
 
 
@@ -625,7 +633,13 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
 
     bm25_docs = _build_bm25_docs(cfg.bm25_paths)
     maybe_retrievers = [
-        VectorRetriever(embedding=provider, vector_store=store),
+        VectorRetriever(
+            embedding=provider,
+            vector_store=store,
+            text_key=cfg.text_key,
+            timestamp_key=cfg.timestamp_key,
+            timestamp_format=cfg.timestamp_format,
+        ),
         BM25Retriever(docs=bm25_docs) if bm25_docs else None,
         MemgraphRetriever(
             uri=cfg.graph_uri,
@@ -636,10 +650,22 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         )
         if cfg.graph_uri
         else None,
-        TemporalRetriever(embedding=provider, vector_store=store),
+        TemporalRetriever(
+            embedding=provider,
+            vector_store=store,
+            text_key=cfg.text_key,
+            timestamp_key=cfg.timestamp_key,
+            timestamp_format=cfg.timestamp_format,
+        ),
     ]
     retrievers: list[Retriever] = [r for r in maybe_retrievers if r is not None]
-    recaller = Recaller(retrievers=retrievers, vector_floor=cfg.vector_floor)
+    recaller = Recaller(
+        retrievers=retrievers,
+        vector_floor=cfg.vector_floor,
+        text_key=cfg.text_key,
+        timestamp_key=cfg.timestamp_key,
+        timestamp_format=cfg.timestamp_format,
+    )
 
     from pathlib import Path
 
@@ -652,11 +678,19 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         graph_password=cfg.graph_password,
         graph_database=cfg.graph_database,
         graph_timeout=cfg.graph_timeout,
+        text_key=cfg.text_key,
+        timestamp_key=cfg.timestamp_key,
+        timestamp_format=cfg.timestamp_format,
     )
 
     try:
         llm = get_llm(cfg.llm_name, **model_kwargs(cfg.llm_model))
-        answer_gen: AnswerGenerator | None = AnswerGenerator(llm=llm, recaller=recaller)
+        answer_gen: AnswerGenerator | None = AnswerGenerator(
+            llm=llm,
+            recaller=recaller,
+            timestamp_key=cfg.timestamp_key,
+            timestamp_format=cfg.timestamp_format,
+        )
         reranker: Reranker | None = Reranker(
             llm=llm,
             max_items=20,
