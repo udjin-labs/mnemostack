@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mnemostack"
-version = "1.1.0"
+version = "1.2.0"
 description = "Self-hosted hybrid memory & retrieval for AI apps: semantic + BM25 + temporal + graph recall over Qdrant/Memgraph, RRF fusion, 8-stage ranking, multi-tenant filters, answer synthesis."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -25,7 +25,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "qdrant-client>=1.10,<2",  # Modifier(IDF)/sparse models + query_points need 1.10
+    "qdrant-client>=1.14.3,<2",  # HasVectorCondition import needs 1.13; local-mode update_vectors fixed in 1.14.3 (1.13.x-1.14.2 fail the sparse backfill)
     "neo4j>=5.15,<7",
     "pyyaml>=6.0,<7",
     "requests>=2.31,<3",

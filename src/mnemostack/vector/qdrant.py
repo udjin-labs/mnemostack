@@ -215,13 +215,15 @@ class VectorStore:
         """Ensure the existing collection carries the sparse text space.
 
         A sparse-ONLY operation — no dense-dimension validation (the backfill
-        CLI runs with a placeholder dimension). Adding the space is a
-        non-destructive config update on servers that support it; where it
-        isn't, fail LOUD — a silently missing sparse space would make every
-        sparse_search return nothing. With ``require_backfilled`` (default),
-        adding the space to a POPULATED collection also refuses: the existing
-        points carry no sparse vectors yet, and sparse recall would silently
-        see only future writes."""
+        CLI runs with a placeholder dimension). Adding the space post-hoc is
+        attempted via a config update, but real Qdrant servers REFUSE adding a
+        new sparse space to an existing collection (verified on v1.15.4) — the
+        refusal surfaces LOUD with recreate/re-index guidance, because a
+        silently missing sparse space would make every sparse_search return
+        nothing. With ``require_backfilled`` (default), a collection whose
+        space exists but whose points lack sparse vectors (dense-only writes,
+        e.g. the async store) also refuses until backfilled — coverage is
+        verified server-side, never assumed from the space existing."""
         info = self.client.get_collection(self.collection)
         existing_sparse = getattr(info.config.params, "sparse_vectors", None) or {}
         if SPARSE_TEXT_VECTOR in existing_sparse:
