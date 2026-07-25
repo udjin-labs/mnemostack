@@ -469,6 +469,67 @@ def test_string_epoch_beats_iso_lookalike_under_explicit_unit():
         assert dt.strftime("%Y-%m-%d") == "2024-01-01"
 
 
+def test_convert_filter_leaves_same_domain_values_verbatim():
+    from mnemostack.recall.retrievers import convert_timestamp_filter
+
+    # Exact ISO MatchValue is string equality: a same-domain value must pass
+    # through untouched ("...Z" != a rewritten "...+00:00").
+    f = {"timestamp": "2026-04-01T00:00:00Z"}
+    assert convert_timestamp_filter(
+        f, timestamp_key="timestamp", timestamp_format="iso"
+    ) == f
+    # Same-domain numerics on an epoch collection stay verbatim (int stays int).
+    f2 = {"updated_at": _EPOCH}
+    assert convert_timestamp_filter(
+        f2, timestamp_key="updated_at", timestamp_format="epoch"
+    ) == {"updated_at": _EPOCH}
+    # Cross-domain still converts — and an integral instant emits as int.
+    out = convert_timestamp_filter(
+        {"updated_at": {"gte": "2026-04-15T12:00:00Z"}},
+        timestamp_key="updated_at",
+        timestamp_format="epoch",
+    )
+    assert out == {"updated_at": {"gte": _EPOCH}} and isinstance(out["updated_at"]["gte"], int)
+
+
+def test_bm25_from_qdrant_converts_iso_window_for_epoch_collection():
+    from mnemostack.recall.retrievers import bm25_docs_from_qdrant
+
+    store = _foreign_store()
+    docs = bm25_docs_from_qdrant(
+        store.client, "foreign",
+        text_key="content",
+        timestamp_key="updated_at",
+        timestamp_format="epoch",
+        newer_than="2026-04-01T00:00:00Z",  # documented ISO window over epoch field
+    )
+    assert [d.text for d in docs] == ["april note"]  # corpus not silently empty
+
+
+def test_inspector_records_convert_timestamp_filters(monkeypatch):
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    import mnemostack.inspector as insp
+    from mnemostack.server import ServerConfig
+
+    store = _foreign_store()
+    monkeypatch.setattr(insp, "VectorStore", lambda **_: store)
+    monkeypatch.setattr(insp, "_make_probe_client", lambda *a, **k: store.client)
+    app = insp.build_inspector_app(
+        ServerConfig(
+            provider_name="fake", collection="foreign", graph_uri=None,
+            text_key="content", timestamp_key="updated_at", timestamp_format="epoch",
+        )
+    )
+    c = TestClient(app)
+    d = c.get(
+        "/api/records",
+        params={"filters": '{"updated_at": {"gte": "2026-04-01", "lte": "2026-04-30"}}'},
+    ).json()
+    assert [r["text"] for r in d["records"]] == ["april note"]
+
+
 def test_synthesis_bm25_docs_get_the_schema():
     from mnemostack.recall.bm25 import BM25Doc
     from mnemostack.synthesis import _build_recaller_from_kwargs

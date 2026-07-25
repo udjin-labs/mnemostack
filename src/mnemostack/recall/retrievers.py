@@ -210,8 +210,25 @@ def convert_timestamp_filter(
     unit = numeric_unit_for(timestamp_format)
 
     def _conv(v: Any) -> Any:
-        dt = parse_payload_instant(v, numeric_unit=unit)
-        return _emit_epoch_bound(dt, timestamp_format) if dt is not None else v
+        # A value ALREADY in the collection's domain passes through verbatim:
+        # rewriting a same-domain value can only break things — an exact ISO
+        # MatchValue is string equality ("...Z" != "...+00:00"), and an int
+        # payload need not equal a float rewrite of itself.
+        is_num = isinstance(v, (int, float)) and not isinstance(v, bool)
+        if timestamp_format in ("epoch", "epoch_ms"):
+            if is_num:
+                return v
+            dt = parse_payload_instant(v, numeric_unit=unit)
+            if dt is None:
+                return v
+            ts = dt.timestamp() * (1000 if timestamp_format == "epoch_ms" else 1)
+            # Integral instants emit as int so exact matches against int
+            # payloads stay exact; fractional ones keep their float precision.
+            return int(ts) if float(ts).is_integer() else ts
+        if is_num:  # iso collection, numeric caller value
+            dt = parse_payload_instant(v, numeric_unit="auto")
+            return dt.isoformat() if dt is not None else v
+        return v
 
     cond = filters[timestamp_key]
     if isinstance(cond, dict) and ("gte" in cond or "lte" in cond):
@@ -240,6 +257,7 @@ def bm25_docs_from_qdrant(
     older_than: str | int | float | None = None,
     tokenizer: Tokenizer | None = None,
     timestamp_key: str = "timestamp",
+    timestamp_format: str = "iso",
 ) -> list[BM25Doc]:
     """Create BM25 documents from Qdrant payload text.
 
@@ -280,6 +298,17 @@ def bm25_docs_from_qdrant(
     """
     docs: list[BM25Doc] = []
     offset = None
+    if newer_than is not None or older_than is not None:
+        # The window bounds must live in the collection's own domain — an ISO
+        # window over a numeric field builds a DatetimeRange that matches
+        # nothing and silently loads an EMPTY corpus.
+        converted = convert_timestamp_filter(
+            {timestamp_key: {"gte": newer_than, "lte": older_than}},
+            timestamp_key=timestamp_key,
+            timestamp_format=timestamp_format,
+        )
+        window = (converted or {})[timestamp_key]
+        newer_than, older_than = window.get("gte"), window.get("lte")
     effective_filter = _with_timestamp_range_filter(
         scroll_filter, newer_than=newer_than, older_than=older_than, timestamp_key=timestamp_key
     )
@@ -417,6 +446,7 @@ class BM25Retriever(Retriever):
             older_than=older_than,
             tokenizer=tokenizer,
             timestamp_key=timestamp_key,
+            timestamp_format=timestamp_format,
         )
         return cls(
             docs=docs,

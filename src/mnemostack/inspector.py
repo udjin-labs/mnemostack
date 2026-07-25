@@ -703,6 +703,17 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
                     return {"records": [], "error": "filters must be a JSON object"}
             except json.JSONDecodeError as e:
                 return {"records": [], "error": f"invalid filters JSON: {e}"}
+            # An operator's timestamp condition must reach Qdrant in the
+            # collection's own domain (an ISO range over a numeric field
+            # matches nothing) — one conversion covers every branch below,
+            # including the legacy-only filter.
+            from mnemostack.recall.retrievers import convert_timestamp_filter
+
+            parsed = convert_timestamp_filter(
+                parsed,
+                timestamp_key=cfg.timestamp_key,
+                timestamp_format=cfg.timestamp_format,
+            )
 
         rows: list[dict[str, Any]] = []
         try:
