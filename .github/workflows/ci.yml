@@ -73,12 +73,27 @@ jobs:
   test-qdrant-server:
     # Real-server smoke: the in-memory local client cannot represent payload
     # full-text indexes, update_collection refusals, or update_vectors — so
-    # the text-search release scenarios replay here against the SAME server
-    # version the deployment docs' compose example pins.
+    # the text-search release scenarios replay here against real servers.
+    # BOTH sides of the pair are PINNED: a floating client silently drifts
+    # into officially-unsupported client/server combinations (minor-version
+    # difference > 1) and turns the smoke into a non-reproducible check.
+    # Pairs: the declared client MINIMUM against the newest server in its
+    # support window, that server with its version-ALIGNED client, and the
+    # docs-pinned current server with the client a fresh install resolves to.
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - server: v1.15.4   # newest server the minimum client supports
+            client: 1.14.3    # declared dependency minimum
+          - server: v1.15.4
+            client: 1.15.1    # version-aligned with that server
+          - server: v1.18.3   # deployment docs' compose pin
+            client: 1.18.0    # what a fresh install resolves to today
     services:
       qdrant:
-        image: qdrant/qdrant:v1.15.4
+        image: qdrant/qdrant:${{ matrix.server }}
         ports:
           - 6333:6333
     steps:
@@ -86,10 +101,11 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: Install
+      - name: Install (pinned qdrant-client ${{ matrix.client }})
         run: |
           python -m pip install --upgrade pip
           pip install -e '.[dev]'
+          pip install 'qdrant-client==${{ matrix.client }}'
       - name: Real-server smoke tests
         env:
           MNEMOSTACK_TEST_QDRANT_URL: http://localhost:6333

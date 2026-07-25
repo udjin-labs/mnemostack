@@ -147,7 +147,7 @@ llm:
 # docker-compose.yml
 services:
   qdrant:
-    image: qdrant/qdrant:latest
+    image: qdrant/qdrant:v1.18.3  # match your qdrant-client: same major, minor within 1
     ports: ["6333:6333"]
   memgraph:
     image: memgraph/memgraph:latest

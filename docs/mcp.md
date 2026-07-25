@@ -15,7 +15,7 @@ pip install 'mnemostack[mcp]'
 Run Qdrant for vector storage:
 
 ```bash
-docker run -p 6333:6333 qdrant/qdrant:latest
+docker run -p 6333:6333 qdrant/qdrant:v1.18.3
 ```
 
 Optional: run Memgraph to enable graph tools:
@@ -683,7 +683,7 @@ Symptoms: `components.vector.ok=false`, connection refused, timeout, or DNS erro
 Fix:
 
 ```bash
-docker run -p 6333:6333 qdrant/qdrant:latest
+docker run -p 6333:6333 qdrant/qdrant:v1.18.3
 mnemostack health --provider gemini --collection my-memory --qdrant http://localhost:6333
 ```
 
