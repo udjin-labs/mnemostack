@@ -12,3 +12,14 @@ def test_package_version_matches_project_metadata():
 
     assert match is not None
     assert mnemostack.__version__ == match.group(1)
+
+
+def test_current_version_has_dated_changelog_entry():
+    changelog = Path("CHANGELOG.md").read_text()
+    version_heading = re.search(
+        rf"^## \[{re.escape(mnemostack.__version__)}\] - \d{{4}}-\d{{2}}-\d{{2}}$",
+        changelog,
+        re.MULTILINE,
+    )
+
+    assert version_heading is not None
