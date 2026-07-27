@@ -182,6 +182,19 @@ def test_server_refuses_post_hoc_sparse_space(collection_name):
         upgraded.ensure_collection()
 
 
+def test_multi_field_gate_against_real_text_indexes(collection_name):
+    # Multi-field lexical arms: each gate field needs its OWN full-text index
+    # on a real server — and gating on a title field must still return hits
+    # whose bodies never mention the token.
+    s = _sparse_store(collection_name)
+    s.upsert(30, _V1, {"title": "postgres servers", "text": "backup runbook"})
+    s.upsert(31, _V2, {"title": "network map", "text": "postgres in body only"})
+    s.ensure_text_index()  # body field ("text")
+    s.ensure_text_index("title")
+    assert {h.id for h in s.search(_V1, limit=5, text_any=["postgres"], text_any_key="title")} == {30}
+    assert {h.id for h in s.search(_V1, limit=5, text_any=["postgres"], text_any_key="text")} == {31}
+
+
 def test_coverage_gap_and_backfill_flow(collection_name):
     # Space exists, but points were written dense-only (the async-store
     # shape): the gap is detected server-side (has_vector), ensure refuses

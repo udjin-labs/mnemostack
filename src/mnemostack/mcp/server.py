@@ -80,6 +80,7 @@ def build_server(
     timestamp_key: str = "timestamp",
     timestamp_format: str = "iso",
     text_search: str = "auto",
+    text_search_fields: dict[str, float] | None = None,
 ) -> Any:
     """Build and return a configured FastMCP server.
 
@@ -108,6 +109,21 @@ def build_server(
     if rerank_mode not in RERANK_MODES:
         allowed = ", ".join(sorted(RERANK_MODES))
         raise ValueError(f"rerank_mode must be one of: {allowed}")
+    # Validate the fields config at BUILD time, not lazily inside the
+    # recaller factory: a misconfigured deployment must fail before the MCP
+    # server starts advertising tools whose every recall would then error
+    # (possibly behind an unrelated embedding/vector failure). Both halves —
+    # the weights themselves (parse) and the fields/mode pairing (ensure).
+    from mnemostack.config import (
+        ensure_text_fields_mode,
+        parse_text_search_fields,
+        resolve_text_search_mode,
+    )
+
+    text_search_fields = parse_text_search_fields(text_search_fields)
+    ensure_text_fields_mode(
+        resolve_text_search_mode(text_search, bm25_paths), text_search_fields
+    )
 
     mcp = FastMCP("mnemostack")
 
@@ -195,8 +211,8 @@ def build_server(
         )
 
     def _build_recaller():
-        from mnemostack.config import resolve_text_search_mode
-        from mnemostack.recall import QdrantSparseRetriever, QdrantTextRetriever
+        from mnemostack.config import ensure_text_fields_mode, resolve_text_search_mode
+        from mnemostack.recall import QdrantSparseRetriever, build_qdrant_text_arms
 
         emb = _get_embedding()
         vec = _get_vector()
@@ -206,19 +222,28 @@ def build_server(
             "timestamp_format": timestamp_format,
         }
         mode = resolve_text_search_mode(text_search, bm25_paths)
-        lexical_arm: Any = None
+        ensure_text_fields_mode(mode, text_search_fields or {})
+        lexical_arms: list[Any] = []
+        lexical_weights: dict[str, float] = {}
         if mode == "bm25":
             bm25_docs = build_bm25_docs(bm25_paths)
             if bm25_docs:
-                lexical_arm = BM25Retriever(
-                    docs=bm25_docs,
-                    timestamp_key=timestamp_key,
-                    timestamp_format=timestamp_format,
+                lexical_arms.append(
+                    BM25Retriever(
+                        docs=bm25_docs,
+                        timestamp_key=timestamp_key,
+                        timestamp_format=timestamp_format,
+                    )
                 )
         elif mode == "qdrant_bm25":
-            lexical_arm = BM25Retriever.from_qdrant(vec.client, collection, text_key=schema_kw["text_key"], timestamp_key=schema_kw["timestamp_key"], timestamp_format=schema_kw["timestamp_format"])
+            lexical_arms.append(
+                BM25Retriever.from_qdrant(vec.client, collection, text_key=schema_kw["text_key"], timestamp_key=schema_kw["timestamp_key"], timestamp_format=schema_kw["timestamp_format"])
+            )
         elif mode == "lexical":
-            lexical_arm = QdrantTextRetriever(embedding=emb, vector_store=vec, text_key=schema_kw["text_key"], timestamp_key=schema_kw["timestamp_key"], timestamp_format=schema_kw["timestamp_format"])
+            arms, lexical_weights = build_qdrant_text_arms(
+                embedding=emb, vector_store=vec, fields=text_search_fields, **schema_kw
+            )
+            lexical_arms.extend(arms)
         elif mode == "sparse":
             sparse_store = VectorStore(
                 collection=collection,
@@ -227,7 +252,9 @@ def build_server(
                 sparse_text=True,
                 text_key=text_key,
             )
-            lexical_arm = QdrantSparseRetriever(vector_store=sparse_store, text_key=schema_kw["text_key"], timestamp_key=schema_kw["timestamp_key"], timestamp_format=schema_kw["timestamp_format"])
+            lexical_arms.append(
+                QdrantSparseRetriever(vector_store=sparse_store, text_key=schema_kw["text_key"], timestamp_key=schema_kw["timestamp_key"], timestamp_format=schema_kw["timestamp_format"])
+            )
         retrievers = [
             VectorRetriever(
                 embedding=emb,
@@ -236,7 +263,7 @@ def build_server(
                 timestamp_key=timestamp_key,
                 timestamp_format=timestamp_format,
             ),
-            lexical_arm,
+            *lexical_arms,
             MemgraphRetriever(
                 uri=memgraph_uri,
                 user=graph_user,
@@ -257,6 +284,7 @@ def build_server(
         return Recaller(
             retrievers=[r for r in retrievers if r is not None],
             vector_floor=max(0, int(vector_floor)),
+            retriever_weights=lexical_weights or None,
             text_key=text_key,
             timestamp_key=timestamp_key,
             timestamp_format=timestamp_format,
@@ -874,6 +902,7 @@ def main() -> None:
         timestamp_key=cfg.recall.timestamp_key,
         timestamp_format=cfg.recall.timestamp_format,
         text_search=cfg.recall.text_search,
+        text_search_fields=dict(cfg.recall.text_search_fields) or None,
         token_budget=cfg.recall.token_budget,
         auth_enabled=auth_enabled,
         api_key=os.environ.get("MNEMOSTACK_API_KEY") or None,

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from abc import ABC, abstractmethod
 from calendar import monthrange
 from collections import defaultdict
@@ -56,10 +57,42 @@ except ImportError:
     _NEO4J_AVAILABLE = False
 
 
+#: The built-in retriever family names. A ``name=`` override may carry its
+#: OWN family's name (suffixed or not) but never another family's: the
+#: recaller branches on exact identities (``vector`` drives the vector floor
+#: and the no-vector fallback), and the source filters partition by base
+#: name — a BM25 arm named "vector" would masquerade through both.
+_RESERVED_RETRIEVER_NAMES = frozenset(
+    {"vector", "bm25", "sparse", "qdrant_text", "memgraph", "temporal", "hyde", "mca"}
+)
+
+
 class Retriever(ABC):
     """A ranked-list source. Called by Recaller for each query."""
 
     name: str = "retriever"
+
+    def _set_name(self, name: str | None) -> None:
+        """Instance-level name override (shadows the class attribute).
+
+        Everything downstream keys on ``retriever.name``: fusion weights,
+        the adaptive (Q-learning) profile, latency/hit metrics, trace marks
+        and degraded tags. Two arms of the same class (e.g. lexical gates
+        over different payload fields) therefore NEED distinct names — with
+        a shared name they get one merged weight, one merged learning
+        profile, and indistinguishable telemetry."""
+        if name is None:
+            return
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("retriever name must be a non-empty string")
+        base = name.partition(":")[0]
+        if base in _RESERVED_RETRIEVER_NAMES and base != type(self).name:
+            raise ValueError(
+                f"retriever name {name!r} collides with the reserved "
+                f"{base!r} family — the recaller and source filters key "
+                "semantics on that identity"
+            )
+        self.name = name
 
     @abstractmethod
     def search(
@@ -406,18 +439,27 @@ class QdrantTextRetriever(Retriever):
         vector_store: VectorStore,
         *,
         text_key: str = "text",
+        gate_key: str | None = None,
         timestamp_key: str = "timestamp",
         timestamp_format: str = "iso",
         max_gate_tokens: int = 8,
         min_token_len: int = 3,
+        name: str | None = None,
     ):
         self.embedding = embedding
         self.vector_store = vector_store
         self.text_key = text_key
+        # The field the MatchText gate runs on. Distinct from text_key on
+        # purpose: an arm gating on a title/heading field must still RETURN
+        # the chunk body (text_key) — otherwise a point surfaced only by the
+        # title arm would carry its title as the result text into fusion and
+        # synthesis. Needs a full-text index on THIS field on real servers.
+        self.gate_key = gate_key or text_key
         self.timestamp_key = timestamp_key
         self.timestamp_format = timestamp_format
         self.max_gate_tokens = max_gate_tokens
         self.min_token_len = min_token_len
+        self._set_name(name)
 
     def _gate_tokens(self, query: str) -> list[str]:
         """Salient tokens for the lexical gate: exact technical tokens first
@@ -440,7 +482,9 @@ class QdrantTextRetriever(Retriever):
         return (exact + rest)[: self.max_gate_tokens]
 
     def explain_empty(self, query: str) -> str | None:
-        return "qdrant_text:no_tokens" if not self._gate_tokens(query) else None
+        # Instance name, not the class literal: each multi-field arm must
+        # report ITS OWN empty-gate verdict in traces.
+        return f"{self.name}:no_tokens" if not self._gate_tokens(query) else None
 
     def search(
         self, query, limit=20, filters=None, as_of=None, include_invalidated=False, tenant=None
@@ -461,7 +505,7 @@ class QdrantTextRetriever(Retriever):
             filters=filters,
             hide_invalidated=as_of is None and not include_invalidated,
             text_any=tokens,
-            text_any_key=self.text_key,
+            text_any_key=self.gate_key,
             **tkw,
         )
         return [
@@ -470,10 +514,146 @@ class QdrantTextRetriever(Retriever):
                 text=(h.payload or {}).get(self.text_key, ""),
                 score=h.score,
                 payload=dict(h.payload or {}),
-                sources=["qdrant_text"],
+                # The instance name, not the class literal: multi-field arms
+                # must stay distinguishable in result sources and telemetry.
+                sources=[self.name],
             )
             for h in hits
         ]
+
+
+class _SharedQueryEmbedding(EmbeddingProvider):
+    """Memoizing wrapper shared by the arms of one multi-field lexical set.
+
+    The arms differ only in their MatchText gate field — the query vector is
+    identical, yet each ``search()`` would call ``embedding.embed(query)``
+    independently (concurrently, from the recaller's thread pool): N fields =
+    N identical billable provider requests per recall. One bounded memo keyed
+    by query text collapses them to one. Scoped to the factory's arm set on
+    purpose — nothing outside the multi-field feature changes behavior.
+    """
+
+    _MAX_ENTRIES = 32
+
+    def __init__(self, embedding: EmbeddingProvider):
+        self._embedding = embedding
+        self._lock = threading.Lock()
+        self._memo: dict[str, list[float]] = {}
+        self._inflight: dict[str, tuple[threading.Event, list[list[float]]]] = {}
+
+    def embed(self, text: str) -> list[float]:
+        # Single-flight: the arms run CONCURRENTLY from the recaller's thread
+        # pool, so a plain check-then-compute memo lets every arm miss before
+        # any result lands — N identical billable requests on every new query,
+        # exactly what this wrapper exists to prevent. The first caller for a
+        # text becomes the leader; concurrent callers wait on its event.
+        with self._lock:
+            if text in self._memo:
+                return self._memo[text]
+            entry = self._inflight.get(text)
+            if entry is None:
+                entry = (threading.Event(), [])
+                self._inflight[text] = entry
+                leader = True
+            else:
+                leader = False
+        event, box = entry
+        if not leader:
+            event.wait()
+            return box[0] if box else []
+        vec: list[float] = []  # empty = the providers' own failure contract
+        try:
+            vec = self._embedding.embed(text)
+        finally:
+            with self._lock:
+                box.append(vec)
+                # Failures (empty vectors) are NOT memoized: a transient
+                # provider outage must not pin the lexical arms dead for
+                # this query until 32 other queries evict the entry.
+                if vec:
+                    if len(self._memo) >= self._MAX_ENTRIES:
+                        # FIFO eviction — a tiny bound is plenty; this only
+                        # exists to stop growth.
+                        self._memo.pop(next(iter(self._memo)))
+                    self._memo[text] = vec
+                self._inflight.pop(text, None)
+            event.set()
+        return vec
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return self._embedding.embed_batch(texts)
+
+    @property
+    def dimension(self) -> int:
+        return self._embedding.dimension
+
+    @property
+    def name(self) -> str:
+        return self._embedding.name
+
+    def health_check(self) -> tuple[bool, str]:
+        return self._embedding.health_check()
+
+
+def build_qdrant_text_arms(
+    embedding: EmbeddingProvider,
+    vector_store: VectorStore,
+    *,
+    text_key: str = "text",
+    timestamp_key: str = "timestamp",
+    timestamp_format: str = "iso",
+    fields: dict[str, float] | None = None,
+) -> tuple[list[QdrantTextRetriever], dict[str, float]]:
+    """Construct the lexical-gated arm set for ``text_search: lexical``.
+
+    The single shared builder for every surface (HTTP server, MCP, CLI).
+    Without ``fields`` (the default) it returns the one historical arm gating
+    on ``text_key``. With ``fields`` ({payload_field: fusion_weight}) each
+    field becomes its own arm: gating on that field, returning chunk text
+    from ``text_key``, named ``qdrant_text`` for the ``text_key`` field
+    (continuity: an existing deployment adding a title arm keeps the body
+    arm's learned profile) and ``qdrant_text:<field>`` otherwise.
+
+    Returns ``(arms, weights)`` where ``weights`` maps arm name -> fusion
+    weight for ``Recaller(retriever_weights=...)``. Weight 1.0 entries are
+    OMITTED on purpose: a static override always beats the adaptive
+    (Q-learning) profile, so default-weight arms stay adaptive.
+    """
+    from ..config import parse_text_search_fields
+
+    # Validate at THIS public boundary too, not only in Config.load: a
+    # programmatic caller (ServerConfig/build_server/library use) passing
+    # weight 0/-1/NaN would satisfy the type annotation while RRF clamps the
+    # arm to zero — a silently omitted arm instead of a loud config error.
+    fields = parse_text_search_fields(fields)
+    if not fields:
+        fields = {text_key: 1.0}
+    if len(fields) > 1:
+        # The arms run concurrently and embed the SAME query — share one
+        # memoized provider so N fields cost one embedding call per recall.
+        embedding = _SharedQueryEmbedding(embedding)
+    arms: list[QdrantTextRetriever] = []
+    weights: dict[str, float] = {}
+    for gate_field, weight in fields.items():
+        arm_name = (
+            QdrantTextRetriever.name
+            if gate_field == text_key
+            else f"{QdrantTextRetriever.name}:{gate_field}"
+        )
+        arms.append(
+            QdrantTextRetriever(
+                embedding=embedding,
+                vector_store=vector_store,
+                text_key=text_key,
+                gate_key=gate_field,
+                timestamp_key=timestamp_key,
+                timestamp_format=timestamp_format,
+                name=arm_name,
+            )
+        )
+        if weight != 1.0:
+            weights[arm_name] = float(weight)
+    return arms, weights
 
 
 class QdrantSparseRetriever(Retriever):
@@ -503,6 +683,7 @@ class QdrantSparseRetriever(Retriever):
         text_key: str = "text",
         timestamp_key: str = "timestamp",
         timestamp_format: str = "iso",
+        name: str | None = None,
     ):
         if not getattr(vector_store, "sparse_text", False):
             raise ValueError(
@@ -513,6 +694,7 @@ class QdrantSparseRetriever(Retriever):
         self.text_key = text_key
         self.timestamp_key = timestamp_key
         self.timestamp_format = timestamp_format
+        self._set_name(name)
 
     def search(
         self, query, limit=20, filters=None, as_of=None, include_invalidated=False, tenant=None
@@ -534,7 +716,7 @@ class QdrantSparseRetriever(Retriever):
                 text=(h.payload or {}).get(self.text_key, ""),
                 score=h.score,
                 payload=dict(h.payload or {}),
-                sources=["sparse"],
+                sources=[self.name],
             )
             for h in hits
         ]
@@ -559,8 +741,10 @@ class BM25Retriever(Retriever):
         timestamp_key: str = "timestamp",
         timestamp_format: str = "iso",
         tenant_aware: bool = False,
+        name: str | None = None,
     ):
         self.bm25 = BM25(docs, tokenizer=tokenizer, retokenize=retokenize)
+        self._set_name(name)
         #: The one payload key whose range filters may cross timestamp domains
         #: (see payload_matches) — a foreign collection's own schema — and how
         #: its numeric values are read.
@@ -588,6 +772,7 @@ class BM25Retriever(Retriever):
         tokenizer: Tokenizer | None = None,
         timestamp_key: str = "timestamp",
         timestamp_format: str = "iso",
+        name: str | None = None,
     ) -> BM25Retriever:
         """Build a BM25 retriever from Qdrant payload text.
 
@@ -646,6 +831,7 @@ class BM25Retriever(Retriever):
             retokenize=False,
             timestamp_key=timestamp_key,
             timestamp_format=timestamp_format,
+            name=name,
             # Qdrant payloads carry tenant_id — this corpus CAN be scoped.
             tenant_aware=True,
         )
@@ -680,7 +866,7 @@ class BM25Retriever(Retriever):
                 text=d.text,
                 score=s,
                 payload=d.payload or {},
-                sources=["bm25"],
+                sources=[self.name],
             )
             for d, s in hits
         ]

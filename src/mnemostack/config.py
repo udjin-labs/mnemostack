@@ -31,6 +31,7 @@ Example config file:
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -48,6 +49,48 @@ DEFAULT_CONFIG_PATHS = [
 def model_kwargs(model: str | None) -> dict[str, str]:
     """Return provider kwargs for an optional model override."""
     return {"model": model} if model else {}
+
+
+class _StrictYamlLoader(yaml.SafeLoader):
+    """SafeLoader that REJECTS duplicate mapping keys.
+
+    PyYAML's default silently keeps the last duplicate — so a config file
+    repeating a key (two ``title:`` entries under ``text_search_fields``, or
+    two ``collection:`` lines) would drop one value with no signal, before
+    any downstream validation could see it. Duplicates are always an operator
+    error; failing the load matches how every other malformed config value
+    already behaves."""
+
+
+def _reject_duplicate_keys(
+    loader: _StrictYamlLoader, node: yaml.MappingNode, deep: bool = False
+) -> dict[Any, Any]:
+    # Scan BEFORE merge-key flattening and skip `<<` entries: an anchor-based
+    # config (`<<: *defaults` plus an explicit override of one inherited key)
+    # is valid YAML whose override must win — only keys repeated EXPLICITLY
+    # in the same mapping are operator errors. construct_mapping below then
+    # applies the normal merge semantics itself.
+    seen: set[Any] = set()
+    for key_node, _value_node in node.value:
+        if key_node.tag == "tag:yaml.org,2002:merge":
+            continue
+        key = loader.construct_object(key_node, deep=deep)
+        if key in seen:
+            raise ValueError(
+                f"duplicate key {key!r} in config file (PyYAML would silently "
+                "keep only the last value)"
+            )
+        seen.add(key)
+    return yaml.SafeLoader.construct_mapping(loader, node, deep)
+
+
+_StrictYamlLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _reject_duplicate_keys
+)
+
+
+def _load_yaml_strict(stream: Any) -> Any:
+    return yaml.load(stream, Loader=_StrictYamlLoader)  # noqa: S506 - SafeLoader subclass
 
 
 @dataclass
@@ -104,6 +147,103 @@ def resolve_text_search_mode(mode: str, bm25_paths: list[str] | None) -> str:
     return mode
 
 
+def parse_text_search_fields(value: Any) -> dict[str, float]:
+    """Normalize ``recall.text_search_fields`` into ``{payload_field: weight}``.
+
+    Accepts the YAML mapping form (``{title: 2.0, text: 1.0}``) and the env
+    string form (``"title:2.0,text"`` — omitted weight means 1.0). Weights are
+    fusion-level (they weigh the arm's ranked LIST in RRF; the MatchText gate
+    itself cannot score). Invalid shapes fail loud: a typo here silently
+    dropping a lexical arm is exactly the misconfiguration this feature makes
+    expressible.
+    """
+    if value is None:
+        return {}
+    fields: dict[str, float] = {}
+    if isinstance(value, str):
+        if value.strip():
+            # Non-blank string: every comma-separated segment must be real.
+            # ",title" / "title,," / "," are malformed template expansions,
+            # not intent — only a genuinely BLANK string clears the mapping.
+            if not all(p.strip() for p in value.split(",")):
+                raise ValueError(
+                    "text_search_fields has an empty comma-separated segment"
+                )
+        for part in value.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            key, _, w = part.partition(":")
+            key = key.strip()
+            if key in fields:
+                # Last-wins would silently drop a weight — the very class of
+                # absorbed typo (e.g. an env var appended twice by templating)
+                # this parser exists to reject.
+                raise ValueError(
+                    f"text_search_fields lists field {key!r} more than once"
+                )
+            fields[key] = _text_field_weight(key, w.strip() or "1.0")
+    elif isinstance(value, dict):
+        for key, w in value.items():
+            if isinstance(key, bool):
+                # YAML 1.1: unquoted `on`/`off`/`yes`/`no` keys parse as
+                # booleans — str() would silently target a payload field
+                # literally named "True"/"False" that returns zero matches.
+                raise ValueError(
+                    "text_search_fields has a boolean field name (unquoted "
+                    "on/off/yes/no in YAML?) — quote the field name"
+                )
+            norm = str(key).strip()
+            if norm in fields:
+                # Keys distinct only by whitespace collapse after trimming —
+                # last-wins would silently drop a weight, same as the env form.
+                raise ValueError(
+                    f"text_search_fields lists field {norm!r} more than once"
+                )
+            fields[norm] = _text_field_weight(norm, w)
+    else:
+        raise ValueError(
+            "text_search_fields must be a mapping of payload field -> weight "
+            f"(or a 'field:weight,...' string), got {type(value).__name__}"
+        )
+    if any(not k for k in fields):
+        raise ValueError("text_search_fields contains an empty field name")
+    return fields
+
+
+def _text_field_weight(key: str, raw: Any) -> float:
+    if isinstance(raw, bool):
+        # bool is a float subclass, so YAML `title: yes` would silently become
+        # weight 1.0 — almost certainly a typo for a number, not an intent.
+        raise ValueError(
+            f"text_search_fields weight for {key!r} must be a number, got {raw!r}"
+        )
+    try:
+        w = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"text_search_fields weight for {key!r} must be a number, got {raw!r}"
+        ) from None
+    if not math.isfinite(w) or w <= 0:
+        raise ValueError(
+            f"text_search_fields weight for {key!r} must be a positive finite "
+            f"number, got {raw!r}"
+        )
+    return w
+
+
+def ensure_text_fields_mode(resolved_mode: str, fields: dict[str, float]) -> None:
+    """Fail loud when ``text_search_fields`` is configured but the resolved
+    lexical mode is not ``lexical`` — the fields would be silently ignored,
+    and a deployment that configured a title boost deserves an error, not a
+    quietly missing arm."""
+    if fields and resolved_mode != "lexical":
+        raise ValueError(
+            "recall.text_search_fields requires text_search=lexical "
+            f"(resolved mode is {resolved_mode!r})"
+        )
+
+
 @dataclass
 class RecallConfig:
     rrf_k: int = 60
@@ -131,6 +271,17 @@ class RecallConfig:
     #: size, no reindex); "sparse" = server-side sparse tf·idf scoring (any
     #: size, needs the sparse space at ingest); "off" = none.
     text_search: str = "auto"
+    #: Optional multi-field layout for the ``lexical`` arm: a mapping of
+    #: payload field -> fusion weight (e.g. ``{title: 2.0, text: 1.0}``).
+    #: Each field becomes its OWN lexically-gated arm (gating on that field,
+    #: returning chunk text from ``text_key``), fused with the given weight —
+    #: title/heading fields are typically far more precise lexical signals
+    #: than chunk bodies. Empty (default) = the single arm over ``text_key``.
+    #: When set, this REPLACES the arm set — list ``text_key`` explicitly if
+    #: the body arm should stay. Weight 1.0 is left to the adaptive profile;
+    #: any other weight is a static fusion override. Requires
+    #: ``text_search: lexical`` (anything else fails loud at build time).
+    text_search_fields: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -161,7 +312,7 @@ class Config:
         file_path = _resolve_config_path(path)
         if file_path and file_path.exists():
             with open(file_path) as f:
-                data = yaml.safe_load(f) or {}
+                data = _load_yaml_strict(f) or {}
             cfg = _merge_dict_into_config(cfg, data)
 
         # 2. Env vars (MNEMOSTACK_*)
@@ -174,6 +325,12 @@ class Config:
         budget = cfg.recall.token_budget
         if budget is not None and int(budget) <= 0:
             cfg.recall.token_budget = None
+
+        # Normalize whichever shape arrived (YAML mapping or env string) into
+        # {field: weight}; malformed values fail here, at load, not at recall.
+        cfg.recall.text_search_fields = parse_text_search_fields(
+            cfg.recall.text_search_fields
+        )
 
         return cfg
 
@@ -312,6 +469,14 @@ def _apply_env_overrides(cfg: Config) -> Config:
         cfg.recall.timestamp_format = v
     if v := env.get("MNEMOSTACK_TEXT_SEARCH"):
         cfg.recall.text_search = v
+    v = env.get("MNEMOSTACK_TEXT_SEARCH_FIELDS")
+    if v is not None:
+        # Presence, not truthiness: "" parses to an EMPTY mapping, which is a
+        # meaningful override — the env-var way to CLEAR fields a YAML config
+        # sets (e.g. when the env also switches text_search away from
+        # lexical, where inherited fields would refuse startup). Raw string
+        # here; Config.load normalizes (parse_text_search_fields).
+        cfg.recall.text_search_fields = v  # type: ignore[assignment]
 
     return cfg
 
@@ -361,4 +526,11 @@ recall:
   timestamp_key: timestamp
   timestamp_format: iso       # iso | epoch | epoch_ms
   text_search: auto           # auto | off | bm25 | qdrant_bm25 | lexical | sparse
+  # Multi-field lexical arms (text_search: lexical only): one gated arm per
+  # payload field, fused with the given weight — title/heading fields are
+  # usually far more precise lexical signals than chunk bodies. When set,
+  # this REPLACES the arm set (list text_key explicitly to keep the body arm).
+  # text_search_fields:
+  #   title: 2.0
+  #   text: 1.0
 """
