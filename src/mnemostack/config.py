@@ -161,6 +161,14 @@ def parse_text_search_fields(value: Any) -> dict[str, float]:
         return {}
     fields: dict[str, float] = {}
     if isinstance(value, str):
+        if value.strip():
+            # Non-blank string: every comma-separated segment must be real.
+            # ",title" / "title,," / "," are malformed template expansions,
+            # not intent — only a genuinely BLANK string clears the mapping.
+            if not all(p.strip() for p in value.split(",")):
+                raise ValueError(
+                    "text_search_fields has an empty comma-separated segment"
+                )
         for part in value.split(","):
             part = part.strip()
             if not part:

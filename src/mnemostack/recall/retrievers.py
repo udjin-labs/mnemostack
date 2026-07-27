@@ -57,6 +57,16 @@ except ImportError:
     _NEO4J_AVAILABLE = False
 
 
+#: The built-in retriever family names. A ``name=`` override may carry its
+#: OWN family's name (suffixed or not) but never another family's: the
+#: recaller branches on exact identities (``vector`` drives the vector floor
+#: and the no-vector fallback), and the source filters partition by base
+#: name — a BM25 arm named "vector" would masquerade through both.
+_RESERVED_RETRIEVER_NAMES = frozenset(
+    {"vector", "bm25", "sparse", "qdrant_text", "memgraph", "temporal", "hyde", "mca"}
+)
+
+
 class Retriever(ABC):
     """A ranked-list source. Called by Recaller for each query."""
 
@@ -75,6 +85,13 @@ class Retriever(ABC):
             return
         if not isinstance(name, str) or not name.strip():
             raise ValueError("retriever name must be a non-empty string")
+        base = name.partition(":")[0]
+        if base in _RESERVED_RETRIEVER_NAMES and base != type(self).name:
+            raise ValueError(
+                f"retriever name {name!r} collides with the reserved "
+                f"{base!r} family — the recaller and source filters key "
+                "semantics on that identity"
+            )
         self.name = name
 
     @abstractmethod

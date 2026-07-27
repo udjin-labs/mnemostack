@@ -248,6 +248,26 @@ def test_name_override_rejects_empty():
         QdrantTextRetriever(embedding=_FakeEmbedder(), vector_store=s, name="  ")
 
 
+def test_name_override_rejects_cross_family_collisions():
+    # The recaller keys semantics on exact identities ("vector" drives the
+    # vector floor and the no-vector fallback) — a BM25 arm named "vector"
+    # (or "vector:x", which the base-name filters would family-match) would
+    # masquerade through them.
+    for bad in ("vector", "vector:x", "sparse", "memgraph"):
+        with pytest.raises(ValueError, match="reserved"):
+            BM25Retriever(docs=[], name=bad)
+    # A family's OWN name, suffixed or not, stays legal.
+    assert BM25Retriever(docs=[], name="bm25:aux").name == "bm25:aux"
+
+
+@pytest.mark.parametrize("bad", [",", ",,,", "title:2.0,", ",title", "title,,text"])
+def test_parse_fields_rejects_empty_segments(bad):
+    # Only a genuinely blank string clears the mapping — separator-only or
+    # dangling-comma values are malformed template expansions.
+    with pytest.raises(ValueError, match="empty comma-separated segment"):
+        parse_text_search_fields(bad)
+
+
 # ---------- arm factory ----------
 
 
