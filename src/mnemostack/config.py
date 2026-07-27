@@ -461,8 +461,13 @@ def _apply_env_overrides(cfg: Config) -> Config:
         cfg.recall.timestamp_format = v
     if v := env.get("MNEMOSTACK_TEXT_SEARCH"):
         cfg.recall.text_search = v
-    if v := env.get("MNEMOSTACK_TEXT_SEARCH_FIELDS"):
-        # Raw string here; Config.load normalizes (parse_text_search_fields).
+    v = env.get("MNEMOSTACK_TEXT_SEARCH_FIELDS")
+    if v is not None:
+        # Presence, not truthiness: "" parses to an EMPTY mapping, which is a
+        # meaningful override — the env-var way to CLEAR fields a YAML config
+        # sets (e.g. when the env also switches text_search away from
+        # lexical, where inherited fields would refuse startup). Raw string
+        # here; Config.load normalizes (parse_text_search_fields).
         cfg.recall.text_search_fields = v  # type: ignore[assignment]
 
     return cfg

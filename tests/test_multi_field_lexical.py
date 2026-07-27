@@ -167,6 +167,23 @@ def test_config_load_rejects_exact_duplicate_yaml_keys(tmp_path):
         Config.load(p2)
 
 
+def test_empty_env_value_clears_yaml_fields(monkeypatch, tmp_path):
+    # Env has higher precedence than the file, and "" parses to an empty
+    # mapping — the env-var way to clear YAML-configured fields (e.g. when
+    # the env also switches the mode away from lexical, where inherited
+    # fields would refuse startup).
+    p = tmp_path / "c.yaml"
+    p.write_text(
+        "recall:\n  text_search: lexical\n  text_search_fields:\n    title: 2.0\n"
+    )
+    monkeypatch.setenv("MNEMOSTACK_TEXT_SEARCH_FIELDS", "")
+    monkeypatch.setenv("MNEMOSTACK_TEXT_SEARCH", "sparse")
+    cfg = Config.load(p)
+    assert cfg.recall.text_search_fields == {}
+    # The cleared mapping passes the fields/mode check under the new mode.
+    ensure_text_fields_mode("sparse", cfg.recall.text_search_fields)
+
+
 def test_strict_loader_accepts_yaml_merge_key_overrides(tmp_path):
     # An anchor-based config overriding one inherited key is VALID YAML —
     # the explicit override wins over the merged default and must not be
