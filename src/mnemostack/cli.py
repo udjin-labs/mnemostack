@@ -1324,6 +1324,23 @@ def cmd_text_index(args: argparse.Namespace) -> int:
     accept MatchText filters, which `recall.text_search: lexical` relies on.
     """
     gate_fields = _lexical_gate_fields()
+    configured_fields = dict(_text_search_fields())
+    if configured_fields:
+        # Fields configured: refuse the same pairing the servers refuse to
+        # boot on BEFORE mutating Qdrant — indexing the field keys and then
+        # printing "lexical is ready" under text_search=sparse/off would be
+        # a partial configuration change with a false success message.
+        from mnemostack.config import ensure_text_fields_mode, resolve_text_search_mode
+
+        try:
+            rc = Config.load().recall
+            ensure_text_fields_mode(
+                resolve_text_search_mode(rc.text_search, rc.bm25_paths),
+                configured_fields,
+            )
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
     store = VectorStore(collection=args.collection, dimension=1, host=args.qdrant)
     try:
         if not store.collection_exists():

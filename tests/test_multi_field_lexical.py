@@ -253,17 +253,22 @@ def test_metric_names_are_injectively_encoded():
 
     from mnemostack.recall.recaller import _metric_name
 
-    # Historical names pass through VERBATIM — existing dashboards keep
+    # Built-in names pass through VERBATIM — existing dashboards keep
     # their series identifiers.
     assert _metric_name("vector") == "vector"
     assert _metric_name("qdrant_text") == "qdrant_text"
-    # Encoded names stay inside the Prometheus identifier grammar.
-    assert _re.fullmatch(r"[A-Za-z0-9_]+", _metric_name("qdrant_text:metadata/title"))
-    # Escape ENCODING, not substitution or truncated hashing: distinct names
-    # can never merge into one series...
+    # Everything else lands in the disjoint arm_ namespace, inside the
+    # Prometheus identifier grammar.
+    encoded = _metric_name("qdrant_text:metadata/title")
+    assert encoded.startswith("arm_") and _re.fullmatch(r"[A-Za-z0-9_]+", encoded)
+    # Injective by construction: distinct names never merge into one series —
+    # including a name vs the literal escape-text of another (the collision
+    # verbatim passthrough allowed), and punctuation-only differences.
     pairs = [
         ("qdrant_text:metadata/title", "qdrant_text:metadata-title"),
         ("qdrant_text:@a*a^", "qdrant_text:#a.a:"),  # 16-bit-CRC collision pair
+        ("a/", "a_2f"),  # name vs the literal escape encoding of that name
+        ("qdrant_text:/", "qdrant__text_3a_2f"),
     ]
     for a, b in pairs:
         assert _metric_name(a) != _metric_name(b)
@@ -390,6 +395,36 @@ def test_mcp_build_server_validates_fields_mode_eagerly():
         build_server(
             text_search="sparse", text_search_fields={"title": 2.0}
         )
+    # Invalid WEIGHTS must also fail at build time, before the server
+    # advertises tools whose every recall would then error.
+    with pytest.raises(ValueError, match="positive finite"):
+        build_server(
+            text_search="lexical", text_search_fields={"title": 0.0}
+        )
+
+
+def test_cli_text_index_refuses_fields_mode_mismatch(monkeypatch, capsys):
+    import argparse
+
+    cli = _cli_env(
+        monkeypatch,
+        MNEMOSTACK_TEXT_SEARCH="sparse",
+        MNEMOSTACK_TEXT_SEARCH_FIELDS="title:2.0",
+    )
+    store = _store()
+    indexed: list[str] = []
+    monkeypatch.setattr(
+        store, "ensure_text_index", lambda field=None: indexed.append(field)
+    )
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    rc = cli.cmd_text_index(argparse.Namespace(collection="mf", qdrant="http://x"))
+    # Refused BEFORE mutating Qdrant — no index created, no false success.
+    assert rc == 2
+    assert indexed == []
+    assert "text_search=lexical" in capsys.readouterr().err
+    cli._payload_schema.cache_clear()
+    cli._text_search_mode.cache_clear()
+    cli._text_search_fields.cache_clear()
 
 
 def test_cli_fields_reader_propagates_malformed_config(monkeypatch):

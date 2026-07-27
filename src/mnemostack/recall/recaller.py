@@ -27,6 +27,15 @@ if TYPE_CHECKING:
     from .retrievers import Retriever
 
 
+#: The built-in retriever names whose metric series predate configurable arm
+#: names — these pass through verbatim so existing dashboards keep their
+#: identifiers. A CLOSED set on purpose: it is what makes the encoded
+#: namespace below provably disjoint from the passthrough one.
+_LITERAL_METRIC_NAMES = frozenset(
+    {"vector", "bm25", "sparse", "qdrant_text", "memgraph", "temporal", "hyde", "mca"}
+)
+
+
 def _metric_name(retriever_name: str) -> str:
     """Retriever name as a metric-identifier component. Arm names derive from
     operator-configured payload fields (and the public ``name=`` override
@@ -35,16 +44,19 @@ def _metric_name(retriever_name: str) -> str:
     ("qdrant_text:title") is reserved for recording rules, a slash would be
     rejected by the scrape outright.
 
-    Names already inside the grammar pass through VERBATIM (the historical
-    ``qdrant_text``/``vector`` series keep their identifiers). Anything else
-    is escape-ENCODED, not hashed: ``_`` doubles to ``__`` and every invalid
-    character becomes ``_xx`` per UTF-8 byte, so two distinct sanitized
-    names can never merge into one series (a substitution or truncated hash
-    could). Only the metric identifier changes; weights/traces/degraded keep
-    the exact name."""
-    if re.fullmatch(r"[A-Za-z0-9_]+", retriever_name):
+    The mapping is injective by construction, in two DISJOINT namespaces:
+    the closed set of built-in names passes through verbatim (historical
+    series keep their identifiers), and every other name — valid characters
+    or not — is escape-encoded under an ``arm_`` prefix (``_`` doubles,
+    other invalid characters become ``_xx`` per UTF-8 byte). No built-in
+    name starts with ``arm_``, and the escape encoding is itself injective,
+    so two distinct retriever names can never share a series — which plain
+    substitution, truncated hashes, and verbatim-passthrough-of-anything-
+    valid all failed to guarantee. Only the metric identifier changes;
+    weights/traces/degraded keep the exact name."""
+    if retriever_name in _LITERAL_METRIC_NAMES:
         return retriever_name
-    out: list[str] = []
+    out: list[str] = ["arm_"]
     for ch in retriever_name:
         if ch == "_":
             out.append("__")
