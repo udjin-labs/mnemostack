@@ -150,6 +150,23 @@ def test_config_load_normalizes_yaml_fields(tmp_path):
     assert cfg.recall.text_search_fields == {"title": 2.0, "text": 1.0}
 
 
+def test_config_load_rejects_exact_duplicate_yaml_keys(tmp_path):
+    # PyYAML silently keeps the LAST duplicate key, collapsing the mapping
+    # before any parse-level duplicate check can see it — the strict loader
+    # rejects it at load, for text_search_fields and every other config key.
+    p = tmp_path / "dup.yaml"
+    p.write_text(
+        "recall:\n  text_search: lexical\n  text_search_fields:\n"
+        "    title: 2.0\n    title: 3.0\n"
+    )
+    with pytest.raises(ValueError, match="duplicate key 'title'"):
+        Config.load(p)
+    p2 = tmp_path / "dup2.yaml"
+    p2.write_text("vector:\n  collection: a\n  collection: b\n")
+    with pytest.raises(ValueError, match="duplicate key 'collection'"):
+        Config.load(p2)
+
+
 # ---------- retriever name override ----------
 
 

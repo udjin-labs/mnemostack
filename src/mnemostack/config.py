@@ -51,6 +51,42 @@ def model_kwargs(model: str | None) -> dict[str, str]:
     return {"model": model} if model else {}
 
 
+class _StrictYamlLoader(yaml.SafeLoader):
+    """SafeLoader that REJECTS duplicate mapping keys.
+
+    PyYAML's default silently keeps the last duplicate — so a config file
+    repeating a key (two ``title:`` entries under ``text_search_fields``, or
+    two ``collection:`` lines) would drop one value with no signal, before
+    any downstream validation could see it. Duplicates are always an operator
+    error; failing the load matches how every other malformed config value
+    already behaves."""
+
+
+def _reject_duplicate_keys(
+    loader: _StrictYamlLoader, node: yaml.MappingNode, deep: bool = False
+) -> dict[Any, Any]:
+    loader.flatten_mapping(node)
+    seen: set[Any] = set()
+    for key_node, _value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in seen:
+            raise ValueError(
+                f"duplicate key {key!r} in config file (PyYAML would silently "
+                "keep only the last value)"
+            )
+        seen.add(key)
+    return yaml.SafeLoader.construct_mapping(loader, node, deep)
+
+
+_StrictYamlLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _reject_duplicate_keys
+)
+
+
+def _load_yaml_strict(stream: Any) -> Any:
+    return yaml.load(stream, Loader=_StrictYamlLoader)  # noqa: S506 - SafeLoader subclass
+
+
 @dataclass
 class EmbeddingConfig:
     provider: str = "gemini"
@@ -262,7 +298,7 @@ class Config:
         file_path = _resolve_config_path(path)
         if file_path and file_path.exists():
             with open(file_path) as f:
-                data = yaml.safe_load(f) or {}
+                data = _load_yaml_strict(f) or {}
             cfg = _merge_dict_into_config(cfg, data)
 
         # 2. Env vars (MNEMOSTACK_*)
