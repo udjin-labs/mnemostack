@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from abc import ABC, abstractmethod
 from calendar import monthrange
 from collections import defaultdict
@@ -518,24 +519,48 @@ class _SharedQueryEmbedding(EmbeddingProvider):
     _MAX_ENTRIES = 32
 
     def __init__(self, embedding: EmbeddingProvider):
-        import threading
-
         self._embedding = embedding
         self._lock = threading.Lock()
         self._memo: dict[str, list[float]] = {}
+        self._inflight: dict[str, tuple[threading.Event, list[list[float]]]] = {}
 
     def embed(self, text: str) -> list[float]:
+        # Single-flight: the arms run CONCURRENTLY from the recaller's thread
+        # pool, so a plain check-then-compute memo lets every arm miss before
+        # any result lands — N identical billable requests on every new query,
+        # exactly what this wrapper exists to prevent. The first caller for a
+        # text becomes the leader; concurrent callers wait on its event.
         with self._lock:
             if text in self._memo:
                 return self._memo[text]
-        vec = self._embedding.embed(text)
-        with self._lock:
-            if text not in self._memo:
-                if len(self._memo) >= self._MAX_ENTRIES:
-                    # FIFO eviction — recall queries arrive one at a time, so
-                    # a tiny bound is plenty; this only exists to stop growth.
-                    self._memo.pop(next(iter(self._memo)))
-                self._memo[text] = vec
+            entry = self._inflight.get(text)
+            if entry is None:
+                entry = (threading.Event(), [])
+                self._inflight[text] = entry
+                leader = True
+            else:
+                leader = False
+        event, box = entry
+        if not leader:
+            event.wait()
+            return box[0] if box else []
+        vec: list[float] = []  # empty = the providers' own failure contract
+        try:
+            vec = self._embedding.embed(text)
+        finally:
+            with self._lock:
+                box.append(vec)
+                # Failures (empty vectors) are NOT memoized: a transient
+                # provider outage must not pin the lexical arms dead for
+                # this query until 32 other queries evict the entry.
+                if vec:
+                    if len(self._memo) >= self._MAX_ENTRIES:
+                        # FIFO eviction — a tiny bound is plenty; this only
+                        # exists to stop growth.
+                        self._memo.pop(next(iter(self._memo)))
+                    self._memo[text] = vec
+                self._inflight.pop(text, None)
+            event.set()
         return vec
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:

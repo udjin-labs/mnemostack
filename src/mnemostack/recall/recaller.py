@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import zlib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -33,9 +34,16 @@ def _metric_name(retriever_name: str) -> str:
     accepts any non-empty string), so every character outside the Prometheus
     identifier grammar is normalized to underscore — a colon
     ("qdrant_text:title") is reserved for recording rules, a slash would be
-    rejected by the scrape outright. Only the metric identifier changes;
+    rejected by the scrape outright. Plain substitution is not injective
+    ("metadata/title" and "metadata-title" would merge), so any name that
+    needed sanitizing gets a short stable hash of the EXACT name appended —
+    per-arm series stay per-arm. Only the metric identifier changes;
     weights/traces/degraded keep the exact name."""
-    return re.sub(r"[^A-Za-z0-9_]", "_", retriever_name)
+    sanitized = re.sub(r"[^A-Za-z0-9_]", "_", retriever_name)
+    if sanitized == retriever_name:
+        return retriever_name
+    digest = zlib.crc32(retriever_name.encode("utf-8")) & 0xFFFF
+    return f"{sanitized}_{digest:04x}"
 
 
 def _validity_active(include_invalidated: bool, as_of: str | None) -> bool:

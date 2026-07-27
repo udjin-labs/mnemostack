@@ -116,6 +116,7 @@ def test_parse_fields_mapping_forms():
         {"title": None},
         {"title": True},  # bool is a float subclass; YAML `yes` is a typo
         {"title": 2.0, " title ": 3.0},  # collides after trimming
+        {True: 1.0},  # YAML `on:`/`yes:` key parses as a boolean
         {"": 1.0},
         ["title"],
         42,
@@ -250,11 +251,67 @@ def test_explain_empty_reports_the_instance_name():
 def test_metric_names_sanitize_every_invalid_character():
     from mnemostack.recall.recaller import _metric_name
 
-    assert _metric_name("qdrant_text:title") == "qdrant_text_title"
-    # Field names are operator-configured — a slash (or anything else outside
-    # the Prometheus grammar) must not reach the metric identifier either.
-    assert _metric_name("qdrant_text:metadata/title") == "qdrant_text_metadata_title"
+    # Clean names pass through untouched; sanitized ones get a stable hash
+    # suffix so the mapping stays injective.
     assert _metric_name("vector") == "vector"
+    assert _metric_name("qdrant_text:title").startswith("qdrant_text_title_")
+    import re as _re
+
+    assert _re.fullmatch(r"[A-Za-z0-9_]+", _metric_name("qdrant_text:metadata/title"))
+    # Names differing only by punctuation must NOT merge into one series.
+    assert _metric_name("qdrant_text:metadata/title") != _metric_name(
+        "qdrant_text:metadata-title"
+    )
+    # Deterministic across calls (dashboards depend on stable identifiers).
+    assert _metric_name("qdrant_text:title") == _metric_name("qdrant_text:title")
+
+
+def test_shared_embedding_is_single_flight_and_skips_failures():
+    import threading
+
+    calls = []
+    release = threading.Event()
+
+    class _SlowEmbedder(_FakeEmbedder):
+        def embed(self, text):
+            calls.append(text)
+            release.wait(5)
+            return _V1
+
+    from mnemostack.recall.retrievers import _SharedQueryEmbedding
+
+    shared = _SharedQueryEmbedding(_SlowEmbedder())
+    results = []
+    threads = [
+        threading.Thread(target=lambda: results.append(shared.embed("q")))
+        for _ in range(4)
+    ]
+    for t in threads:
+        t.start()
+    # All four are in flight before the provider returns — the race the
+    # sequential test masked.
+    release.set()
+    for t in threads:
+        t.join()
+    assert calls == ["q"]  # one leader, three waiters
+    assert results == [_V1] * 4
+
+    # Failures (empty vector) are returned but NOT memoized — the next call
+    # retries the recovered provider instead of pinning the arms dead.
+    flaky_calls = []
+
+    class _FlakyEmbedder(_FakeEmbedder):
+        def embed(self, text):
+            flaky_calls.append(text)
+            return [] if len(flaky_calls) == 1 else _V1
+
+    shared2 = _SharedQueryEmbedding(_FlakyEmbedder())
+    assert shared2.embed("q") == []
+    assert shared2.embed("q") == _V1
+    assert len(flaky_calls) == 2
+    # ...while successes ARE memoized.
+    assert shared2.embed("q") == _V1
+    assert len(flaky_calls) == 2
 
 
 def test_sparse_and_bm25_sources_carry_the_instance_name():

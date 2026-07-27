@@ -135,6 +135,14 @@ def parse_text_search_fields(value: Any) -> dict[str, float]:
             fields[key] = _text_field_weight(key, w.strip() or "1.0")
     elif isinstance(value, dict):
         for key, w in value.items():
+            if isinstance(key, bool):
+                # YAML 1.1: unquoted `on`/`off`/`yes`/`no` keys parse as
+                # booleans — str() would silently target a payload field
+                # literally named "True"/"False" that returns zero matches.
+                raise ValueError(
+                    "text_search_fields has a boolean field name (unquoted "
+                    "on/off/yes/no in YAML?) — quote the field name"
+                )
             norm = str(key).strip()
             if norm in fields:
                 # Keys distinct only by whitespace collapse after trimming —
