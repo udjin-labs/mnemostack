@@ -27,6 +27,46 @@ if TYPE_CHECKING:
     from .retrievers import Retriever
 
 
+#: The built-in retriever names whose metric series predate configurable arm
+#: names — these pass through verbatim so existing dashboards keep their
+#: identifiers. A CLOSED set on purpose: it is what makes the encoded
+#: namespace below provably disjoint from the passthrough one.
+_LITERAL_METRIC_NAMES = frozenset(
+    {"vector", "bm25", "sparse", "qdrant_text", "memgraph", "temporal", "hyde", "mca"}
+)
+
+
+def _metric_name(retriever_name: str) -> str:
+    """Retriever name as a metric-identifier component. Arm names derive from
+    operator-configured payload fields (and the public ``name=`` override
+    accepts any non-empty string), so characters outside the Prometheus
+    identifier grammar must not reach the metric name — a colon
+    ("qdrant_text:title") is reserved for recording rules, a slash would be
+    rejected by the scrape outright.
+
+    The mapping is injective by construction, in two DISJOINT namespaces:
+    the closed set of built-in names passes through verbatim (historical
+    series keep their identifiers), and every other name — valid characters
+    or not — is escape-encoded under an ``arm_`` prefix (``_`` doubles,
+    other invalid characters become ``_xx`` per UTF-8 byte). No built-in
+    name starts with ``arm_``, and the escape encoding is itself injective,
+    so two distinct retriever names can never share a series — which plain
+    substitution, truncated hashes, and verbatim-passthrough-of-anything-
+    valid all failed to guarantee. Only the metric identifier changes;
+    weights/traces/degraded keep the exact name."""
+    if retriever_name in _LITERAL_METRIC_NAMES:
+        return retriever_name
+    out: list[str] = ["arm_"]
+    for ch in retriever_name:
+        if ch == "_":
+            out.append("__")
+        elif ch.isascii() and ch.isalnum():
+            out.append(ch)
+        else:
+            out.extend(f"_{b:02x}" for b in ch.encode("utf-8"))
+    return "".join(out)
+
+
 def _validity_active(include_invalidated: bool, as_of: str | None) -> bool:
     """Whether recall will drop hits for validity (default-hide or point-in-time)."""
     return (not include_invalidated) or (as_of is not None)
@@ -876,10 +916,15 @@ class Recaller:
                 err = f"{type(exc).__name__}: {exc}"
             elapsed_ms = (time.monotonic() - start) * 1000.0
             # Per-retriever latency — exposed in /metrics as
-            # mnemostack_recall_<name>_latency_ms{...}.
+            # mnemostack_recall_<name>_latency_ms{...}. Suffixed multi-field
+            # arm names ("qdrant_text:title") are sanitized: a colon inside a
+            # Prometheus metric NAME collides with the recording-rule
+            # convention (traces/weights keep the exact name — only the
+            # metric identifier is normalized).
             try:
                 get_recorder().record_histogram(
-                    f"mnemostack.recall.{retr.name}_latency_ms", elapsed_ms
+                    f"mnemostack.recall.{_metric_name(retr.name)}_latency_ms",
+                    elapsed_ms,
                 )
             except Exception:
                 pass
@@ -916,7 +961,7 @@ class Recaller:
             ) as ex:
                 retriever_hits = list(ex.map(_run, self.retrievers))
             for retr, hits, err, elapsed_ms in retriever_hits:
-                counter(f"mnemostack.recall.{retr.name}_hits", len(hits))
+                counter(f"mnemostack.recall.{_metric_name(retr.name)}_hits", len(hits))
                 if trace is not None:
                     trace.retrievers.append(
                         RetrieverTrace(
