@@ -115,6 +115,7 @@ def test_parse_fields_mapping_forms():
         "title:2.0,title:3.0",  # duplicate key must not silently last-win
         {"title": None},
         {"title": True},  # bool is a float subclass; YAML `yes` is a typo
+        {"title": 2.0, " title ": 3.0},  # collides after trimming
         {"": 1.0},
         ["title"],
         42,
@@ -246,11 +247,85 @@ def test_explain_empty_reports_the_instance_name():
     assert arm.explain_empty("a b") == "qdrant_text:title:no_tokens"
 
 
-def test_metric_names_sanitize_the_colon():
+def test_metric_names_sanitize_every_invalid_character():
     from mnemostack.recall.recaller import _metric_name
 
     assert _metric_name("qdrant_text:title") == "qdrant_text_title"
+    # Field names are operator-configured — a slash (or anything else outside
+    # the Prometheus grammar) must not reach the metric identifier either.
+    assert _metric_name("qdrant_text:metadata/title") == "qdrant_text_metadata_title"
     assert _metric_name("vector") == "vector"
+
+
+def test_sparse_and_bm25_sources_carry_the_instance_name():
+    sp = _store(sparse=True)
+    sp.upsert(1, _V1, {"text": "postgres backup"})
+    arm = QdrantSparseRetriever(vector_store=sp, name="sparse:aux")
+    hits = arm.search("postgres", limit=5)
+    assert hits and all(h.sources == ["sparse:aux"] for h in hits)
+
+    from mnemostack.recall.bm25 import BM25Doc
+
+    bm = BM25Retriever(
+        docs=[BM25Doc(id=1, text="postgres backup", payload={})], name="bm25:aux"
+    )
+    bhits = bm.search("postgres", limit=5)
+    assert bhits and all(h.sources == ["bm25:aux"] for h in bhits)
+
+
+def test_direct_retriever_synthesis_matches_the_lexical_family():
+    from mnemostack.synthesis import _query_retrievers
+
+    s = _store()
+    _seed_titled(s)
+    arm = QdrantTextRetriever(
+        embedding=_FakeEmbedder(), vector_store=s, gate_key="title", name="qdrant_text:title"
+    )
+    # The "bm25" umbrella must select the suffixed arm on the DIRECT
+    # retrievers path too, not only through a supplied Recaller.
+    hits = _query_retrievers([arm], "postgres", 10, {"bm25"}, None)
+    assert {h.id for h in hits} == {1, 3}
+    assert _query_retrievers([arm], "postgres", 10, {"memgraph"}, None) == []
+
+
+def test_multi_field_arms_share_one_query_embedding():
+    calls = []
+
+    class _CountingEmbedder(_FakeEmbedder):
+        def embed(self, text):
+            calls.append(text)
+            return _V1
+
+    s = _store()
+    _seed_titled(s)
+    arms, _ = build_qdrant_text_arms(
+        embedding=_CountingEmbedder(),
+        vector_store=s,
+        fields={"title": 2.0, "text": 1.0},
+    )
+    for arm in arms:
+        arm.search("postgres", limit=5)
+    # Two arms, one query — one billable embedding call, not two.
+    assert calls == ["postgres"]
+
+
+def test_mcp_build_server_validates_fields_mode_eagerly():
+    pytest.importorskip("fastmcp")
+    from mnemostack.mcp.server import build_server
+
+    with pytest.raises(ValueError, match="text_search=lexical"):
+        build_server(
+            text_search="sparse", text_search_fields={"title": 2.0}
+        )
+
+
+def test_cli_fields_reader_propagates_malformed_config(monkeypatch):
+    cli = _cli_env(monkeypatch, MNEMOSTACK_TEXT_SEARCH_FIELDS="title:notanumber")
+    # A malformed fields value must NOT silently degrade to the body-only
+    # arm — the reader propagates, matching the servers' refusal to boot.
+    with pytest.raises(ValueError, match="must be a number"):
+        cli._text_search_fields()
+    cli._text_search_fields.cache_clear()
 
 
 # ---------- fusion weights + telemetry keying ----------

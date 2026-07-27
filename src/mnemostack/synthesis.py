@@ -428,7 +428,10 @@ def _query_retrievers(
     results: list[RecallResult] = []
     for retr in retrievers or []:
         name = str(getattr(retr, "name", "")).lower()
-        if source_filter is not None and name not in source_filter:
+        # Same family-aware matching as the recaller path: a suffixed
+        # multi-field arm ("qdrant_text:title") is part of the lexical
+        # family the "bm25" umbrella selects.
+        if not _source_enabled(name, source_filter):
             continue
         try:
             results.extend(retr.search(entity, limit=max_results, filters=filters))

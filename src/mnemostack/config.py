@@ -135,7 +135,14 @@ def parse_text_search_fields(value: Any) -> dict[str, float]:
             fields[key] = _text_field_weight(key, w.strip() or "1.0")
     elif isinstance(value, dict):
         for key, w in value.items():
-            fields[str(key).strip()] = _text_field_weight(str(key), w)
+            norm = str(key).strip()
+            if norm in fields:
+                # Keys distinct only by whitespace collapse after trimming —
+                # last-wins would silently drop a weight, same as the env form.
+                raise ValueError(
+                    f"text_search_fields lists field {norm!r} more than once"
+                )
+            fields[norm] = _text_field_weight(norm, w)
     else:
         raise ValueError(
             "text_search_fields must be a mapping of payload field -> weight "

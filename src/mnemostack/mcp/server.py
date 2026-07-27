@@ -109,6 +109,15 @@ def build_server(
     if rerank_mode not in RERANK_MODES:
         allowed = ", ".join(sorted(RERANK_MODES))
         raise ValueError(f"rerank_mode must be one of: {allowed}")
+    # Validate the fields/mode pairing at BUILD time, not lazily inside the
+    # recaller factory: a misconfigured deployment must fail before the MCP
+    # server starts advertising tools whose every recall would then error
+    # (possibly behind an unrelated embedding/vector failure).
+    from mnemostack.config import ensure_text_fields_mode, resolve_text_search_mode
+
+    ensure_text_fields_mode(
+        resolve_text_search_mode(text_search, bm25_paths), text_search_fields or {}
+    )
 
     mcp = FastMCP("mnemostack")
 

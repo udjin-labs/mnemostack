@@ -28,11 +28,14 @@ if TYPE_CHECKING:
 
 
 def _metric_name(retriever_name: str) -> str:
-    """Retriever name as a metric-identifier component: multi-field arm names
-    carry a colon ("qdrant_text:title"), which is reserved for recording
-    rules in Prometheus metric NAMES — normalize to underscore. Only the
-    metric identifier changes; weights/traces/degraded keep the exact name."""
-    return retriever_name.replace(":", "_")
+    """Retriever name as a metric-identifier component. Arm names derive from
+    operator-configured payload fields (and the public ``name=`` override
+    accepts any non-empty string), so every character outside the Prometheus
+    identifier grammar is normalized to underscore — a colon
+    ("qdrant_text:title") is reserved for recording rules, a slash would be
+    rejected by the scrape outright. Only the metric identifier changes;
+    weights/traces/degraded keep the exact name."""
+    return re.sub(r"[^A-Za-z0-9_]", "_", retriever_name)
 
 
 def _validity_active(include_invalidated: bool, as_of: str | None) -> bool:

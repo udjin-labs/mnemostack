@@ -504,6 +504,55 @@ class QdrantTextRetriever(Retriever):
         ]
 
 
+class _SharedQueryEmbedding(EmbeddingProvider):
+    """Memoizing wrapper shared by the arms of one multi-field lexical set.
+
+    The arms differ only in their MatchText gate field — the query vector is
+    identical, yet each ``search()`` would call ``embedding.embed(query)``
+    independently (concurrently, from the recaller's thread pool): N fields =
+    N identical billable provider requests per recall. One bounded memo keyed
+    by query text collapses them to one. Scoped to the factory's arm set on
+    purpose — nothing outside the multi-field feature changes behavior.
+    """
+
+    _MAX_ENTRIES = 32
+
+    def __init__(self, embedding: EmbeddingProvider):
+        import threading
+
+        self._embedding = embedding
+        self._lock = threading.Lock()
+        self._memo: dict[str, list[float]] = {}
+
+    def embed(self, text: str) -> list[float]:
+        with self._lock:
+            if text in self._memo:
+                return self._memo[text]
+        vec = self._embedding.embed(text)
+        with self._lock:
+            if text not in self._memo:
+                if len(self._memo) >= self._MAX_ENTRIES:
+                    # FIFO eviction — recall queries arrive one at a time, so
+                    # a tiny bound is plenty; this only exists to stop growth.
+                    self._memo.pop(next(iter(self._memo)))
+                self._memo[text] = vec
+        return vec
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return self._embedding.embed_batch(texts)
+
+    @property
+    def dimension(self) -> int:
+        return self._embedding.dimension
+
+    @property
+    def name(self) -> str:
+        return self._embedding.name
+
+    def health_check(self) -> tuple[bool, str]:
+        return self._embedding.health_check()
+
+
 def build_qdrant_text_arms(
     embedding: EmbeddingProvider,
     vector_store: VectorStore,
@@ -530,6 +579,10 @@ def build_qdrant_text_arms(
     """
     if not fields:
         fields = {text_key: 1.0}
+    if len(fields) > 1:
+        # The arms run concurrently and embed the SAME query — share one
+        # memoized provider so N fields cost one embedding call per recall.
+        embedding = _SharedQueryEmbedding(embedding)
     arms: list[QdrantTextRetriever] = []
     weights: dict[str, float] = {}
     for gate_field, weight in fields.items():
@@ -614,7 +667,7 @@ class QdrantSparseRetriever(Retriever):
                 text=(h.payload or {}).get(self.text_key, ""),
                 score=h.score,
                 payload=dict(h.payload or {}),
-                sources=["sparse"],
+                sources=[self.name],
             )
             for h in hits
         ]
@@ -762,7 +815,7 @@ class BM25Retriever(Retriever):
                 text=d.text,
                 score=s,
                 payload=d.payload or {},
-                sources=["bm25"],
+                sources=[self.name],
             )
             for d, s in hits
         ]

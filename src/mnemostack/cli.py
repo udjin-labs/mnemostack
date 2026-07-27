@@ -1982,12 +1982,13 @@ def _text_search_mode() -> str:
 @functools.lru_cache(maxsize=1)
 def _text_search_fields() -> tuple[tuple[str, float], ...]:
     """recall.text_search_fields from config/env, as a tuple so the cached
-    value cannot be mutated by a caller; falls back to empty on a broken
-    config, which _payload_schema already warned about loudly."""
-    try:
-        return tuple(Config.load().recall.text_search_fields.items())
-    except Exception:  # noqa: BLE001 — _payload_schema warned already
-        return ()
+    value cannot be mutated by a caller.
+
+    Unlike _payload_schema this does NOT fall back on a broken config: a
+    malformed fields value degrading `serve`/`text-index` to the body-only
+    arm would be exactly the silent no-op the fields contract forbids —
+    the error propagates (matching the servers, which refuse to boot)."""
+    return tuple(Config.load().recall.text_search_fields.items())
 
 
 def _indexing_store(args: argparse.Namespace, provider) -> VectorStore:
