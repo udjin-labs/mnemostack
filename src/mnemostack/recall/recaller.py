@@ -27,6 +27,14 @@ if TYPE_CHECKING:
     from .retrievers import Retriever
 
 
+def _metric_name(retriever_name: str) -> str:
+    """Retriever name as a metric-identifier component: multi-field arm names
+    carry a colon ("qdrant_text:title"), which is reserved for recording
+    rules in Prometheus metric NAMES — normalize to underscore. Only the
+    metric identifier changes; weights/traces/degraded keep the exact name."""
+    return retriever_name.replace(":", "_")
+
+
 def _validity_active(include_invalidated: bool, as_of: str | None) -> bool:
     """Whether recall will drop hits for validity (default-hide or point-in-time)."""
     return (not include_invalidated) or (as_of is not None)
@@ -876,10 +884,15 @@ class Recaller:
                 err = f"{type(exc).__name__}: {exc}"
             elapsed_ms = (time.monotonic() - start) * 1000.0
             # Per-retriever latency — exposed in /metrics as
-            # mnemostack_recall_<name>_latency_ms{...}.
+            # mnemostack_recall_<name>_latency_ms{...}. Suffixed multi-field
+            # arm names ("qdrant_text:title") are sanitized: a colon inside a
+            # Prometheus metric NAME collides with the recording-rule
+            # convention (traces/weights keep the exact name — only the
+            # metric identifier is normalized).
             try:
                 get_recorder().record_histogram(
-                    f"mnemostack.recall.{retr.name}_latency_ms", elapsed_ms
+                    f"mnemostack.recall.{_metric_name(retr.name)}_latency_ms",
+                    elapsed_ms,
                 )
             except Exception:
                 pass
@@ -916,7 +929,7 @@ class Recaller:
             ) as ex:
                 retriever_hits = list(ex.map(_run, self.retrievers))
             for retr, hits, err, elapsed_ms in retriever_hits:
-                counter(f"mnemostack.recall.{retr.name}_hits", len(hits))
+                counter(f"mnemostack.recall.{_metric_name(retr.name)}_hits", len(hits))
                 if trace is not None:
                     trace.retrievers.append(
                         RetrieverTrace(

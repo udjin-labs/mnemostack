@@ -56,6 +56,7 @@ from .retrievers import (
     TemporalRetriever,
     VectorRetriever,
     bm25_docs_from_qdrant,
+    build_qdrant_text_arms,
     extract_temporal,
 )
 from .scoring_reranker import RelevanceScorer, ScoringReranker
@@ -101,6 +102,7 @@ __all__ = [
     "QdrantSparseRetriever",
     "QdrantTextRetriever",
     "bm25_docs_from_qdrant",
+    "build_qdrant_text_arms",
     "HyDERetriever",
     "MemgraphRetriever",
     "TemporalRetriever",

@@ -38,7 +38,12 @@ except ImportError as e:  # pragma: no cover - import guard
     ) from e
 
 from mnemostack import __version__
-from mnemostack.config import Config, model_kwargs, resolve_text_search_mode
+from mnemostack.config import (
+    Config,
+    ensure_text_fields_mode,
+    model_kwargs,
+    resolve_text_search_mode,
+)
 from mnemostack.embeddings import get_provider
 from mnemostack.feedback import apply_feedback, record_recall_events
 from mnemostack.llm import get_llm
@@ -55,7 +60,6 @@ from mnemostack.recall import (
     BM25Retriever,
     MemgraphRetriever,
     QdrantSparseRetriever,
-    QdrantTextRetriever,
     Recaller,
     RecallTrace,
     Reranker,
@@ -63,6 +67,7 @@ from mnemostack.recall import (
     TemporalRetriever,
     VectorRetriever,
     build_full_pipeline,
+    build_qdrant_text_arms,
     recall_flow,
     sum_tokens,
 )
@@ -379,6 +384,8 @@ class ServerConfig:
     timestamp_key: str = "timestamp"
     timestamp_format: str = "iso"
     text_search: str = "auto"
+    # Multi-field lexical arms: payload field -> fusion weight (lexical only).
+    text_search_fields: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.rerank_mode not in RERANK_MODES:
@@ -418,6 +425,7 @@ class ServerConfig:
             timestamp_key=cfg.recall.timestamp_key,
             timestamp_format=cfg.recall.timestamp_format,
             text_search=cfg.recall.text_search,
+            text_search_fields=dict(cfg.recall.text_search_fields),
         )
 
 
@@ -558,6 +566,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
 
     provider = get_provider(cfg.provider_name, **model_kwargs(cfg.embedding_model))
     text_mode = resolve_text_search_mode(cfg.text_search, cfg.bm25_paths)
+    ensure_text_fields_mode(text_mode, cfg.text_search_fields)
     store = VectorStore(
         collection=cfg.collection,
         dimension=provider.dimension,
@@ -642,39 +651,48 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             ).start()
         return ok
 
-    lexical_arm: Retriever | None = None
+    lexical_arms: list[Retriever] = []
+    lexical_weights: dict[str, float] = {}
     if text_mode == "bm25":
         bm25_docs = _build_bm25_docs(cfg.bm25_paths)
         if bm25_docs:
-            lexical_arm = BM25Retriever(
-                docs=bm25_docs,
-                timestamp_key=cfg.timestamp_key,
-                timestamp_format=cfg.timestamp_format,
+            lexical_arms.append(
+                BM25Retriever(
+                    docs=bm25_docs,
+                    timestamp_key=cfg.timestamp_key,
+                    timestamp_format=cfg.timestamp_format,
+                )
             )
     elif text_mode == "qdrant_bm25":
         # In-process BM25 whose corpus scrolls straight out of the collection's
         # payloads — fine to ~100K chunks (the in-process ceiling), no files.
-        lexical_arm = BM25Retriever.from_qdrant(
-            store.client,
-            cfg.collection,
-            text_key=cfg.text_key,
-            timestamp_key=cfg.timestamp_key,
-            timestamp_format=cfg.timestamp_format,
+        lexical_arms.append(
+            BM25Retriever.from_qdrant(
+                store.client,
+                cfg.collection,
+                text_key=cfg.text_key,
+                timestamp_key=cfg.timestamp_key,
+                timestamp_format=cfg.timestamp_format,
+            )
         )
     elif text_mode == "lexical":
-        lexical_arm = QdrantTextRetriever(
+        arms, lexical_weights = build_qdrant_text_arms(
             embedding=provider,
             vector_store=store,
             text_key=cfg.text_key,
             timestamp_key=cfg.timestamp_key,
             timestamp_format=cfg.timestamp_format,
+            fields=cfg.text_search_fields,
         )
+        lexical_arms.extend(arms)
     elif text_mode == "sparse":
-        lexical_arm = QdrantSparseRetriever(
-            vector_store=store,
-            text_key=cfg.text_key,
-            timestamp_key=cfg.timestamp_key,
-            timestamp_format=cfg.timestamp_format,
+        lexical_arms.append(
+            QdrantSparseRetriever(
+                vector_store=store,
+                text_key=cfg.text_key,
+                timestamp_key=cfg.timestamp_key,
+                timestamp_format=cfg.timestamp_format,
+            )
         )
     maybe_retrievers = [
         VectorRetriever(
@@ -684,7 +702,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             timestamp_key=cfg.timestamp_key,
             timestamp_format=cfg.timestamp_format,
         ),
-        lexical_arm,
+        *lexical_arms,
         MemgraphRetriever(
             uri=cfg.graph_uri,
             user=cfg.graph_user,
@@ -706,6 +724,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     recaller = Recaller(
         retrievers=retrievers,
         vector_floor=cfg.vector_floor,
+        retriever_weights=lexical_weights or None,
         text_key=cfg.text_key,
         timestamp_key=cfg.timestamp_key,
         timestamp_format=cfg.timestamp_format,

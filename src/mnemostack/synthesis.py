@@ -342,7 +342,11 @@ def _expand_source_filter(source_filter: set[str] | None) -> set[str] | None:
 
 def _source_enabled(name: str, source_filter: set[str] | None) -> bool:
     source_filter = _expand_source_filter(source_filter)
-    return source_filter is None or name in source_filter
+    if source_filter is None:
+        return True
+    # Multi-field arms carry suffixed names ("qdrant_text:title") — the
+    # base name is the selectable family, the suffix is the field.
+    return name in source_filter or name.partition(":")[0] in source_filter
 
 
 def _filter_recaller(recaller: Any, source_filter: set[str] | None) -> Any:
@@ -374,6 +378,9 @@ def _result_source_enabled(result: RecallResult, source_filter: set[str] | None)
         return True
     source_filter = _expand_source_filter(source_filter) or source_filter
     sources = {str(s).lower() for s in (getattr(result, "sources", []) or [])}
+    # Suffixed multi-field arm sources ("qdrant_text:title") select by their
+    # base family name too.
+    sources |= {s.partition(":")[0] for s in sources}
     if "graph" in source_filter:
         source_filter = {*source_filter, "memgraph"}
     return bool(sources & source_filter)

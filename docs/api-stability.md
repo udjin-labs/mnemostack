@@ -134,7 +134,10 @@ names / numeric epoch timestamps; `timestamp_format` ∈ `iso|epoch|epoch_ms`),
 semantics are the stable contract; `QdrantTextRetriever` /
 `QdrantSparseRetriever` / `SparseTextEncoder` class shapes are 🟡
 experimental; `sparse` writes are maintained by the SYNC `VectorStore`
-only — `AsyncVectorStore` does not write sparse encodings).
+only — `AsyncVectorStore` does not write sparse encodings),
+`recall.text_search_fields` (multi-field lexical arms: payload field →
+fusion weight, `lexical` mode only; when set it replaces the arm set, and
+arm names follow `qdrant_text[:<field>]`).
 
 🟡 **Accepted but not yet wired** — present in the config schema, but the runtime
 does not consume them today, so don't depend on them until they are:

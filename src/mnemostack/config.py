@@ -31,6 +31,7 @@ Example config file:
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -104,6 +105,80 @@ def resolve_text_search_mode(mode: str, bm25_paths: list[str] | None) -> str:
     return mode
 
 
+def parse_text_search_fields(value: Any) -> dict[str, float]:
+    """Normalize ``recall.text_search_fields`` into ``{payload_field: weight}``.
+
+    Accepts the YAML mapping form (``{title: 2.0, text: 1.0}``) and the env
+    string form (``"title:2.0,text"`` — omitted weight means 1.0). Weights are
+    fusion-level (they weigh the arm's ranked LIST in RRF; the MatchText gate
+    itself cannot score). Invalid shapes fail loud: a typo here silently
+    dropping a lexical arm is exactly the misconfiguration this feature makes
+    expressible.
+    """
+    if value is None:
+        return {}
+    fields: dict[str, float] = {}
+    if isinstance(value, str):
+        for part in value.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            key, _, w = part.partition(":")
+            key = key.strip()
+            if key in fields:
+                # Last-wins would silently drop a weight — the very class of
+                # absorbed typo (e.g. an env var appended twice by templating)
+                # this parser exists to reject.
+                raise ValueError(
+                    f"text_search_fields lists field {key!r} more than once"
+                )
+            fields[key] = _text_field_weight(key, w.strip() or "1.0")
+    elif isinstance(value, dict):
+        for key, w in value.items():
+            fields[str(key).strip()] = _text_field_weight(str(key), w)
+    else:
+        raise ValueError(
+            "text_search_fields must be a mapping of payload field -> weight "
+            f"(or a 'field:weight,...' string), got {type(value).__name__}"
+        )
+    if any(not k for k in fields):
+        raise ValueError("text_search_fields contains an empty field name")
+    return fields
+
+
+def _text_field_weight(key: str, raw: Any) -> float:
+    if isinstance(raw, bool):
+        # bool is a float subclass, so YAML `title: yes` would silently become
+        # weight 1.0 — almost certainly a typo for a number, not an intent.
+        raise ValueError(
+            f"text_search_fields weight for {key!r} must be a number, got {raw!r}"
+        )
+    try:
+        w = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"text_search_fields weight for {key!r} must be a number, got {raw!r}"
+        ) from None
+    if not math.isfinite(w) or w <= 0:
+        raise ValueError(
+            f"text_search_fields weight for {key!r} must be a positive finite "
+            f"number, got {raw!r}"
+        )
+    return w
+
+
+def ensure_text_fields_mode(resolved_mode: str, fields: dict[str, float]) -> None:
+    """Fail loud when ``text_search_fields`` is configured but the resolved
+    lexical mode is not ``lexical`` — the fields would be silently ignored,
+    and a deployment that configured a title boost deserves an error, not a
+    quietly missing arm."""
+    if fields and resolved_mode != "lexical":
+        raise ValueError(
+            "recall.text_search_fields requires text_search=lexical "
+            f"(resolved mode is {resolved_mode!r})"
+        )
+
+
 @dataclass
 class RecallConfig:
     rrf_k: int = 60
@@ -131,6 +206,17 @@ class RecallConfig:
     #: size, no reindex); "sparse" = server-side sparse tf·idf scoring (any
     #: size, needs the sparse space at ingest); "off" = none.
     text_search: str = "auto"
+    #: Optional multi-field layout for the ``lexical`` arm: a mapping of
+    #: payload field -> fusion weight (e.g. ``{title: 2.0, text: 1.0}``).
+    #: Each field becomes its OWN lexically-gated arm (gating on that field,
+    #: returning chunk text from ``text_key``), fused with the given weight —
+    #: title/heading fields are typically far more precise lexical signals
+    #: than chunk bodies. Empty (default) = the single arm over ``text_key``.
+    #: When set, this REPLACES the arm set — list ``text_key`` explicitly if
+    #: the body arm should stay. Weight 1.0 is left to the adaptive profile;
+    #: any other weight is a static fusion override. Requires
+    #: ``text_search: lexical`` (anything else fails loud at build time).
+    text_search_fields: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -174,6 +260,12 @@ class Config:
         budget = cfg.recall.token_budget
         if budget is not None and int(budget) <= 0:
             cfg.recall.token_budget = None
+
+        # Normalize whichever shape arrived (YAML mapping or env string) into
+        # {field: weight}; malformed values fail here, at load, not at recall.
+        cfg.recall.text_search_fields = parse_text_search_fields(
+            cfg.recall.text_search_fields
+        )
 
         return cfg
 
@@ -312,6 +404,9 @@ def _apply_env_overrides(cfg: Config) -> Config:
         cfg.recall.timestamp_format = v
     if v := env.get("MNEMOSTACK_TEXT_SEARCH"):
         cfg.recall.text_search = v
+    if v := env.get("MNEMOSTACK_TEXT_SEARCH_FIELDS"):
+        # Raw string here; Config.load normalizes (parse_text_search_fields).
+        cfg.recall.text_search_fields = v  # type: ignore[assignment]
 
     return cfg
 
@@ -361,4 +456,11 @@ recall:
   timestamp_key: timestamp
   timestamp_format: iso       # iso | epoch | epoch_ms
   text_search: auto           # auto | off | bm25 | qdrant_bm25 | lexical | sparse
+  # Multi-field lexical arms (text_search: lexical only): one gated arm per
+  # payload field, fused with the given weight — title/heading fields are
+  # usually far more precise lexical signals than chunk bodies. When set,
+  # this REPLACES the arm set (list text_key explicitly to keep the body arm).
+  # text_search_fields:
+  #   title: 2.0
+  #   text: 1.0
 """

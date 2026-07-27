@@ -663,7 +663,30 @@ arm; pick by collection size and whether you can re-index:
 
 - `lexical` needs the full-text payload index on a real server: run
   `mnemostack text-index` once (idempotent, non-destructive — safe on a
-  mounted pre-existing collection).
+  mounted pre-existing collection; it indexes every configured gate field).
+- **Multi-field lexical arms** (`recall.text_search_fields`, env
+  `MNEMOSTACK_TEXT_SEARCH_FIELDS="title:2.0,text:1.0"`): title/heading
+  fields are usually far more precise lexical signals than chunk bodies —
+  each configured payload field becomes its own gated arm (gating on that
+  field, still returning chunk text from `text_key`), fused with the given
+  weight:
+
+  ```yaml
+  recall:
+    text_search: lexical
+    text_search_fields:
+      title: 2.0   # gate on the title field, boost its arm in fusion
+      text: 1.0    # keep the body arm (weight 1.0 stays adaptive)
+  ```
+
+  When set, this REPLACES the arm set — list `text_key` explicitly if the
+  body arm should stay. Arms are named `qdrant_text` (the `text_key` field)
+  and `qdrant_text:<field>`, so weights, the adaptive profile, and
+  trace/degraded telemetry stay per-arm; `--source bm25` still selects the
+  whole lexical family. Requires `text_search: lexical` (anything else
+  fails loud at startup), and every gate field needs its own full-text
+  index (`mnemostack text-index` creates them all; `doctor` live-checks
+  each). Points without the gate field simply never match that arm.
 - `sparse` is the strongest lexical arm at scale: new collections indexed
   under this mode get the sparse space automatically. Switching an existing
   dense collection requires a **re-index into a collection created under
