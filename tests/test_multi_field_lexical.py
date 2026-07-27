@@ -248,22 +248,38 @@ def test_explain_empty_reports_the_instance_name():
     assert arm.explain_empty("a b") == "qdrant_text:title:no_tokens"
 
 
-def test_metric_names_sanitize_every_invalid_character():
-    from mnemostack.recall.recaller import _metric_name
-
-    # Clean names pass through untouched; sanitized ones get a stable hash
-    # suffix so the mapping stays injective.
-    assert _metric_name("vector") == "vector"
-    assert _metric_name("qdrant_text:title").startswith("qdrant_text_title_")
+def test_metric_names_are_injectively_encoded():
     import re as _re
 
+    from mnemostack.recall.recaller import _metric_name
+
+    # Historical names pass through VERBATIM — existing dashboards keep
+    # their series identifiers.
+    assert _metric_name("vector") == "vector"
+    assert _metric_name("qdrant_text") == "qdrant_text"
+    # Encoded names stay inside the Prometheus identifier grammar.
     assert _re.fullmatch(r"[A-Za-z0-9_]+", _metric_name("qdrant_text:metadata/title"))
-    # Names differing only by punctuation must NOT merge into one series.
-    assert _metric_name("qdrant_text:metadata/title") != _metric_name(
-        "qdrant_text:metadata-title"
-    )
-    # Deterministic across calls (dashboards depend on stable identifiers).
+    # Escape ENCODING, not substitution or truncated hashing: distinct names
+    # can never merge into one series...
+    pairs = [
+        ("qdrant_text:metadata/title", "qdrant_text:metadata-title"),
+        ("qdrant_text:@a*a^", "qdrant_text:#a.a:"),  # 16-bit-CRC collision pair
+    ]
+    for a, b in pairs:
+        assert _metric_name(a) != _metric_name(b)
+    # ...and the mapping is deterministic (dashboards need stable ids).
     assert _metric_name("qdrant_text:title") == _metric_name("qdrant_text:title")
+
+
+def test_factory_validates_weights_at_the_programmatic_boundary():
+    # ServerConfig/build_server/library callers bypass Config.load — an
+    # invalid weight must fail HERE, not silently zero the arm in RRF.
+    s = _store()
+    for bad in ({"title": 0.0}, {"title": -1.0}, {"title": float("nan")}):
+        with pytest.raises(ValueError):
+            build_qdrant_text_arms(
+                embedding=_FakeEmbedder(), vector_store=s, fields=bad
+            )
 
 
 def test_shared_embedding_is_single_flight_and_skips_failures():

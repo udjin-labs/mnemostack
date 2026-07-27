@@ -602,6 +602,13 @@ def build_qdrant_text_arms(
     OMITTED on purpose: a static override always beats the adaptive
     (Q-learning) profile, so default-weight arms stay adaptive.
     """
+    from ..config import parse_text_search_fields
+
+    # Validate at THIS public boundary too, not only in Config.load: a
+    # programmatic caller (ServerConfig/build_server/library use) passing
+    # weight 0/-1/NaN would satisfy the type annotation while RRF clamps the
+    # arm to zero — a silently omitted arm instead of a loud config error.
+    fields = parse_text_search_fields(fields)
     if not fields:
         fields = {text_key: 1.0}
     if len(fields) > 1:

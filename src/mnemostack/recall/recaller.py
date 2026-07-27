@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import re
-import zlib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -31,19 +30,29 @@ if TYPE_CHECKING:
 def _metric_name(retriever_name: str) -> str:
     """Retriever name as a metric-identifier component. Arm names derive from
     operator-configured payload fields (and the public ``name=`` override
-    accepts any non-empty string), so every character outside the Prometheus
-    identifier grammar is normalized to underscore — a colon
+    accepts any non-empty string), so characters outside the Prometheus
+    identifier grammar must not reach the metric name — a colon
     ("qdrant_text:title") is reserved for recording rules, a slash would be
-    rejected by the scrape outright. Plain substitution is not injective
-    ("metadata/title" and "metadata-title" would merge), so any name that
-    needed sanitizing gets a short stable hash of the EXACT name appended —
-    per-arm series stay per-arm. Only the metric identifier changes;
-    weights/traces/degraded keep the exact name."""
-    sanitized = re.sub(r"[^A-Za-z0-9_]", "_", retriever_name)
-    if sanitized == retriever_name:
+    rejected by the scrape outright.
+
+    Names already inside the grammar pass through VERBATIM (the historical
+    ``qdrant_text``/``vector`` series keep their identifiers). Anything else
+    is escape-ENCODED, not hashed: ``_`` doubles to ``__`` and every invalid
+    character becomes ``_xx`` per UTF-8 byte, so two distinct sanitized
+    names can never merge into one series (a substitution or truncated hash
+    could). Only the metric identifier changes; weights/traces/degraded keep
+    the exact name."""
+    if re.fullmatch(r"[A-Za-z0-9_]+", retriever_name):
         return retriever_name
-    digest = zlib.crc32(retriever_name.encode("utf-8")) & 0xFFFF
-    return f"{sanitized}_{digest:04x}"
+    out: list[str] = []
+    for ch in retriever_name:
+        if ch == "_":
+            out.append("__")
+        elif ch.isascii() and ch.isalnum():
+            out.append(ch)
+        else:
+            out.extend(f"_{b:02x}" for b in ch.encode("utf-8"))
+    return "".join(out)
 
 
 def _validity_active(include_invalidated: bool, as_of: str | None) -> bool:
