@@ -755,6 +755,7 @@ class BM25Retriever(Retriever):
         tokenizer: Tokenizer | None = None,
         timestamp_key: str = "timestamp",
         timestamp_format: str = "iso",
+        name: str | None = None,
     ) -> BM25Retriever:
         """Build a BM25 retriever from Qdrant payload text.
 
@@ -813,6 +814,7 @@ class BM25Retriever(Retriever):
             retokenize=False,
             timestamp_key=timestamp_key,
             timestamp_format=timestamp_format,
+            name=name,
             # Qdrant payloads carry tenant_id — this corpus CAN be scoped.
             tenant_aware=True,
         )

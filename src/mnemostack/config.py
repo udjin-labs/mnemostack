@@ -65,9 +65,15 @@ class _StrictYamlLoader(yaml.SafeLoader):
 def _reject_duplicate_keys(
     loader: _StrictYamlLoader, node: yaml.MappingNode, deep: bool = False
 ) -> dict[Any, Any]:
-    loader.flatten_mapping(node)
+    # Scan BEFORE merge-key flattening and skip `<<` entries: an anchor-based
+    # config (`<<: *defaults` plus an explicit override of one inherited key)
+    # is valid YAML whose override must win — only keys repeated EXPLICITLY
+    # in the same mapping are operator errors. construct_mapping below then
+    # applies the normal merge semantics itself.
     seen: set[Any] = set()
     for key_node, _value_node in node.value:
+        if key_node.tag == "tag:yaml.org,2002:merge":
+            continue
         key = loader.construct_object(key_node, deep=deep)
         if key in seen:
             raise ValueError(

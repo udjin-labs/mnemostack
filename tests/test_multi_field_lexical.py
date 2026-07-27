@@ -167,6 +167,46 @@ def test_config_load_rejects_exact_duplicate_yaml_keys(tmp_path):
         Config.load(p2)
 
 
+def test_strict_loader_accepts_yaml_merge_key_overrides(tmp_path):
+    # An anchor-based config overriding one inherited key is VALID YAML —
+    # the explicit override wins over the merged default and must not be
+    # rejected as a duplicate.
+    p = tmp_path / "merge.yaml"
+    p.write_text(
+        "defaults: &defaults\n  host: http://default:6333\n  collection: base\n"
+        "vector:\n  <<: *defaults\n  host: http://override:6333\n"
+    )
+    cfg = Config.load(p)
+    assert cfg.vector.host == "http://override:6333"
+    assert cfg.vector.collection == "base"
+
+
+def test_prometheus_labels_escape_configured_names():
+    pytest.importorskip("fastapi")
+    from mnemostack.server import _prometheus_dump
+
+    class _FakeRecorder:
+        def snapshot_counters(self):
+            return {("mnemostack.degraded", ("reason", 'arm"with\nnewline\\x')): 3}
+
+        def snapshot_histograms(self):
+            return {}
+
+    out = _prometheus_dump(_FakeRecorder())
+    # One sample line, metacharacters escaped per the Prometheus text format —
+    # an unescaped newline would inject an extra exposition line.
+    sample = [line for line in out.splitlines() if not line.startswith("#")]
+    assert sample == ['mnemostack_degraded_total{reason="arm\\"with\\nnewline\\\\x"} 3']
+
+
+def test_bm25_from_qdrant_threads_the_name_override():
+    s = _store()
+    _seed_titled(s)
+    bm = BM25Retriever.from_qdrant(s.client, "mf", name="bm25:aux")
+    assert bm.name == "bm25:aux"
+    assert BM25Retriever.from_qdrant(s.client, "mf").name == "bm25"
+
+
 # ---------- retriever name override ----------
 
 

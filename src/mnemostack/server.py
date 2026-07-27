@@ -499,7 +499,19 @@ def _prometheus_dump(rec: InMemoryRecorder) -> str:
     def _fmt_labels(labels: dict[str, str] | None) -> str:
         if not labels:
             return ""
-        parts = [f'{k}="{v}"' for k, v in labels.items()]
+        # Label VALUES can carry operator-configured text (e.g. a multi-field
+        # arm name inside a degraded reason). The Prometheus text format
+        # requires backslash, double-quote and newline escaped — unescaped, a
+        # newline would inject extra exposition lines and malform the scrape.
+        def esc(v: Any) -> str:
+            return (
+                str(v)
+                .replace("\\", "\\\\")
+                .replace('"', '\\"')
+                .replace("\n", "\\n")
+            )
+
+        parts = [f'{k}="{esc(v)}"' for k, v in labels.items()]
         return "{" + ",".join(parts) + "}"
 
     def _from_key(key: tuple):
