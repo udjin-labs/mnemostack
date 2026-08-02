@@ -635,6 +635,27 @@ def test_posix_backslash_filenames_survive(tmp_path):
     assert res.verdict == "intact" and res.supported
 
 
+def test_indented_heading_sections_keep_their_position(tmp_path):
+    # A CommonMark heading indented 1-3 spaces: the chunker strips the
+    # section, so the stored text starts AFTER the indent while the offset
+    # points at it. Under a drifted snapshot the position check must still
+    # hold (whitespace-only gap), yielding source_changed - not moved.
+    root = _corpus(tmp_path)
+    (root / "indent.md").write_text(
+        "# Top\n\nIntro before.\n\n   ## Indented section\n\nIndented body line.\n"
+    )
+    store, chunks = _index(root)
+    mine = [c for c in chunks if c.payload["source"] == "indent.md"]
+    assert mine
+    p = root / "indent.md"
+    p.write_text(p.read_text() + "\nTrailing edit.\n")
+    for c in mine:
+        if c.payload.get("synthetic_prefix_len", 0) > 0:
+            continue  # prefixed chunks are ambiguous under mismatch by contract
+        res = resolve_citation(store, c.id)
+        assert res.verdict == "source_changed", (c.payload["offset"], res.verdict, res.detail)
+
+
 def test_frontmatter_text_is_not_search_material(tmp_path):
     # A phrase deleted from the BODY but surviving in YAML frontmatter (a
     # title) must not resolve as `moved` — frontmatter was never indexed.

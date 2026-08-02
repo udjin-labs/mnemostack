@@ -446,16 +446,23 @@ def _fragment_variants(text: str, payload: dict[str, Any]) -> list[str]:
     return variants
 
 
-def _at_offset(candidate: str, offset: int, fragment: str) -> bool:
-    """Fragment present EXACTLY at ``offset`` in this candidate rendering.
+def _at_offset(candidate: str, offset: int, fragment: str, ws_gap: bool = False) -> bool:
+    """Fragment present at ``offset`` in this candidate rendering.
 
-    No whitespace slack: a lenient comparison would bless fragments whose
-    own (source-significant) indentation changed. Coordinate-base drift from
-    the chunker's segment stripping is handled by searching the stripped
-    RENDERINGS of the document (see ``_search_texts``), not by loosening the
-    match — and when the ingest snapshot hash matches, position is not
-    consulted at all (ingest determinism)."""
-    return candidate[offset : offset + len(fragment)] == fragment
+    The fragment itself must always match BYTE-EXACT (its own indentation is
+    source-significant — lstripping it would bless edited fragments). With
+    ``ws_gap`` — markdown-chunker payloads only — a pure-whitespace gap
+    between the recorded offset and the exact match is tolerated: the
+    chunker strips each SECTION individually, so a 1-3-space-indented
+    heading records its offset at the indent while the stored text starts
+    after it. Plain-index offsets are raw-file coordinates and stay exact
+    (added leading whitespace must read as moved, not in-position)."""
+    if candidate[offset : offset + len(fragment)] == fragment:
+        return True
+    if not ws_gap:
+        return False
+    idx = candidate.find(fragment, offset, offset + len(fragment) + 64)
+    return idx > offset and candidate[offset:idx].isspace()
 
 
 def resolve_payload(
@@ -687,11 +694,17 @@ def resolve_payload(
     # payload (set_payload, external writers), so `intact` is only issued
     # when the fragment is actually found — a hash match must never launder
     # arbitrary stored text into a supported citation.
+    is_md_point = "_md_keys" in payload or "heading_path" in payload
     located: str | None = None
     if stored_offset is not None:
         for candidate in texts:
             located = next(
-                (f for f in fragments if _at_offset(candidate, stored_offset, f)), None
+                (
+                    f
+                    for f in fragments
+                    if _at_offset(candidate, stored_offset, f, ws_gap=is_md_point)
+                ),
+                None,
             )
             if located is not None:
                 break
