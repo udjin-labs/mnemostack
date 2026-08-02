@@ -233,7 +233,7 @@ def test_configured_text_key_is_honored(tmp_path):
 
 
 def test_uri_sources_are_unresolvable(tmp_path):
-    for src in ("https://example.com/doc", "urn:example:note", "mailto:u@example.com"):
+    for src in ("https://example.com/doc", "urn:example:note", "mailto:u@example.com", "x:note"):
         res = resolve_payload(
             "x",
             {"text": "abc", "source": src, "offset": 0},

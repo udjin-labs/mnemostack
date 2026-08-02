@@ -160,20 +160,25 @@ def _candidate_paths(
 # "x://...") are unambiguous — non-local in every context; the sole
 # exemption is a doubled-slash Windows DRIVE path ("C://corpus"), which only
 # exists on Windows and is checked platform-aware. Scheme-only forms
-# ("urn:...", "mailto:...", "file:/...") are classified only when NO corpus
-# root is known: with a root, a colon is a legal POSIX filename character
-# ("notes:2026.md"); their schemes are 2+ characters so a plain drive path
-# ("C:\corpus") is exempt everywhere.
+# ("urn:...", "mailto:...", "file:/...", one-letter "x:note") are classified
+# only when NO corpus root is known: with a root, a colon is a legal POSIX
+# filename character ("notes:2026.md"). Windows drive paths (single letter +
+# colon, any slash shape) are exempt platform-aware — drives only exist
+# there.
 _URI_AUTHORITY = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://")
-_URI_SOURCE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]+:")
+_URI_SOURCE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*:")
+
+
+def _is_windows_drive(source: str) -> bool:
+    return os.name == "nt" and re.match(r"^[A-Za-z]:", source) is not None
 
 
 def _is_authority_uri(source: str) -> bool:
-    if not _URI_AUTHORITY.match(source):
-        return False
-    if os.name == "nt" and re.match(r"^[A-Za-z]://", source):
-        return False  # doubled-slash Windows drive path, not a scheme
-    return True
+    return bool(_URI_AUTHORITY.match(source)) and not _is_windows_drive(source)
+
+
+def _is_schemed_uri(source: str) -> bool:
+    return bool(_URI_SOURCE.match(source)) and not _is_windows_drive(source)
 
 
 _SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
@@ -469,7 +474,7 @@ def resolve_payload(
         )
     payload_root = payload.get("index_root")
     has_root = bool(root) or bool(isinstance(payload_root, str) and payload_root)
-    if _is_authority_uri(source) or (not has_root and _URI_SOURCE.match(source)):
+    if _is_authority_uri(source) or (not has_root and _is_schemed_uri(source)):
         # Authority-form URIs are non-local in EVERY context (a rooted
         # lookup would happily read a decoy at <root>/https:/...). The
         # scheme-only classification applies just to rootless sources: with
