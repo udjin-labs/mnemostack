@@ -129,8 +129,28 @@ def _item_tags(item: IngestItem) -> list[str]:
 
 # Keys an enricher may never override: text/source/offset feed
 # stable_chunk_id, index_root scopes pruning, tenant_id is the isolation
-# boundary (only the Ingestor's `tenant` may set it — see _flush).
-_PROTECTED_PAYLOAD_KEYS = frozenset({"text", "source", "offset", "index_root", "tenant_id"})
+# boundary (only the Ingestor's `tenant` may set it — see _flush), and the
+# provenance snapshot pair backs `mnemostack resolve` verdicts (a fabricated
+# hash/capture-time would corrupt citation verification).
+_PROTECTED_PAYLOAD_KEYS = frozenset(
+    {
+        "text",
+        "source",
+        "offset",
+        "index_root",
+        "tenant_id",
+        "source_content_hash",
+        "source_captured_at",
+        # Structural resolver keys: the windowed-point marker and the
+        # id-scheme marker decide `mnemostack resolve` verdict paths.
+        "_id_scheme",
+        "chunk_kind",
+        "chunk_window",
+        "chunk_start_offset",
+        "chunk_end_offset",
+        "synthetic_prefix_len",
+    }
+)
 
 
 def apply_enrichment(

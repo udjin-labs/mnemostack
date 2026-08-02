@@ -1,4 +1,4 @@
-# Recipes: rerankers, BM25 analyzers, key-file encryption
+# Recipes: rerankers, BM25 analyzers, key-file encryption, citation audits
 
 Concrete, runnable recipes for extension points mnemostack ships but
 deliberately keeps dependency-free: the score-based reranker
@@ -325,3 +325,55 @@ sops --encrypt --age <age-public-key> \
 Zero code changes; backups now carry only the sops-encrypted blob. If you
 outgrow the file (multi-node, rotation/audit requirements), switch the backend
 instead: `MNEMOSTACK_KEYSTORE=openbao` — see the deployment guide.
+
+---
+
+## Auditing answer citations against their sources
+
+Every recall result carries a stable, citable id (`[id:...]`), and — since
+the verifiable-citations feature — that id can be *checked*, not just
+trusted. `mnemostack resolve` re-reads the current source document and
+returns an honest verdict:
+
+| Verdict | Meaning | Citation supported? |
+|---|---|---|
+| `intact` | fragment at its recorded position (snapshot hash matches, or position holds for pre-feature points) | yes |
+| `source_changed` | fragment in place; the document changed elsewhere | yes |
+| `moved` | exact fragment found at a different position (edits above shifted it) | yes |
+| `changed` | document exists but no longer contains the fragment | **no** |
+| `missing` | source document deleted or renamed | **no** |
+| `unresolvable` | no source in the payload / not readable from this process | cannot verify |
+
+Audit every fragment a query would cite, end to end (`search --json` emits
+one `id` per recalled chunk; `answer`'s `sources` list carries document
+paths, so the per-fragment audit goes through the recall ids):
+
+```bash
+# 1. Recall, keeping the chunk ids
+mnemostack search "when did we switch the backup tooling?" --json \
+  | jq -r '.[].id' > /tmp/cited-ids
+
+# 2. Verify each citation against the live corpus
+while read -r id; do
+  mnemostack resolve "$id" || echo "UNSUPPORTED: $id"
+done < /tmp/cited-ids
+```
+
+Exit codes make this scriptable: `0` = still supported by the source,
+`1` = not supported (`changed` / `missing`), `2` = cannot be verified.
+`--json` emits the full resolution (verdict, snapshot comparison, offsets,
+and — for supported verdicts — the located fragment; `changed` deliberately
+returns no file content). If a corpus was relocated after indexing, point
+the resolver at the new root: `mnemostack resolve <id> --root /new/path`.
+Resolution is confined to the corpus root: `../` escapes, symlinks leading
+outside, and (on the HTTP/MCP surfaces) bare filesystem paths are refused
+as `unresolvable`. The HTTP and MCP surfaces are additionally fail-closed:
+they resolve nothing until the operator sets `MNEMOSTACK_RESOLVE_ROOTS` to
+the corpus directories the process may read (the stored `index_root` is
+payload data, not a security boundary), and their `changed` verdicts never
+return file content. The CLI, as the operator surface, trusts the local
+filesystem it is pointed at.
+
+The check never runs inside recall (latency untouched), and under `--auth`
+it is tenant-scoped: a foreign tenant's id is indistinguishable from an
+absent one.

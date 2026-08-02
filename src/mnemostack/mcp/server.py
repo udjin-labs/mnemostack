@@ -81,6 +81,7 @@ def build_server(
     timestamp_format: str = "iso",
     text_search: str = "auto",
     text_search_fields: dict[str, float] | None = None,
+    resolve_roots: list[str] | None = None,
 ) -> Any:
     """Build and return a configured FastMCP server.
 
@@ -645,6 +646,43 @@ def build_server(
             return {"ok": False, "error": str(e), "query": query}
 
     @mcp.tool()
+    def mnemostack_resolve(
+        chunk_id: Annotated[
+            str,
+            Field(description="The [id:...] value from a recall result or answer citation"),
+        ],
+    ) -> dict:
+        """Verify a citation: resolve a chunk id back to its source document.
+
+        Re-reads the CURRENT source and returns an honest verdict: intact /
+        source_changed / moved (citation still supported), changed / missing
+        (not supported by the current source), or unresolvable (cannot be
+        verified from this process). Includes the snapshot-hash comparison and
+        the fragment when locatable. Read-only; never mutates stored memory;
+        runs outside the recall path. Resolution is confined to the corpus
+        root recorded at ingest — there is deliberately no way for a caller
+        to point it at another directory.
+        """
+        try:
+            from ..provenance import resolve_citation
+
+            principal = _authorize("read")
+            # Payload-only store: resolving never embeds, so a missing or
+            # unconfigured embedding provider must not break verification.
+            # allowed_roots: the stored index_root is payload data, not a
+            # security boundary — empty (unset) keeps this tool fail-closed.
+            res = resolve_citation(
+                _get_vector_payload_only(),
+                chunk_id,
+                tenant=_tenant_of(principal),
+                text_key=text_key,
+                allowed_roots=list(resolve_roots or []),
+            )
+            return {"ok": True, **res.to_dict()}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e), "chunk_id": chunk_id}
+
+    @mcp.tool()
     def mnemostack_invalidate(
         ids: Annotated[
             list[str | int],
@@ -903,6 +941,9 @@ def main() -> None:
         timestamp_format=cfg.recall.timestamp_format,
         text_search=cfg.recall.text_search,
         text_search_fields=dict(cfg.recall.text_search_fields) or None,
+        resolve_roots=[
+            p for p in os.environ.get("MNEMOSTACK_RESOLVE_ROOTS", "").split(os.pathsep) if p
+        ],
         token_budget=cfg.recall.token_budget,
         auth_enabled=auth_enabled,
         api_key=os.environ.get("MNEMOSTACK_API_KEY") or None,

@@ -15,7 +15,37 @@ from typing import Any
 
 from ..chunking import MarkdownChunker
 from ..ingest import stable_chunk_id
+from ..provenance import (
+    ID_SCHEME_KEY,
+    SOURCE_CAPTURED_KEY,
+    SOURCE_HASH_KEY,
+    STABLE_ID_SCHEME,
+    source_snapshot,
+)
 from .parse import extract_links, parse_frontmatter
+
+#: Structural payload keys the resolver keys verdicts on — a frontmatter key
+#: of the same name must never masquerade as them (a note with
+#: ``chunk_kind: sliding_window`` in its frontmatter would otherwise render
+#: every chunk of that document unverifiable).
+_RESERVED_STRUCTURAL_KEYS = frozenset(
+    {
+        "chunk_kind",
+        "chunk_window",
+        "chunk_start_offset",
+        "chunk_end_offset",
+        ID_SCHEME_KEY,
+        SOURCE_HASH_KEY,
+        SOURCE_CAPTURED_KEY,
+        # The corpus root drives resolver path selection and is only ever
+        # written by the indexer itself (when the caller supplies one) — a
+        # frontmatter "index_root" could redirect resolution to a decoy
+        # directory. tenant_id is the isolation boundary, same rule.
+        "index_root",
+        "tenant_id",
+        "synthetic_prefix_len",
+    }
+)
 
 
 @dataclass
@@ -177,7 +207,12 @@ def collect_markdown(
         meta, body = parse_frontmatter(text)
         # Qdrant payload field names must be strings; a YAML key like ``2026:``
         # parses to an int and would abort the upsert, so coerce keys to str.
-        meta = {str(k): v for k, v in meta.items()}
+        # Structural resolver keys are RESERVED — frontmatter cannot set them.
+        meta = {
+            str(k): v
+            for k, v in meta.items()
+            if str(k) not in _RESERVED_STRUCTURAL_KEYS
+        }
         out.sources.append(rel)
 
         for link in extract_links(body):
@@ -200,16 +235,39 @@ def collect_markdown(
         # Ownership record: which payload keys this markdown run wrote from the
         # file, so a re-index refresh deletes only removed frontmatter keys and
         # leaves foreign keys (external enrichment, validity markers) untouched.
-        md_keys = sorted({*meta, "text", "source", "offset", "heading_path", "_md_keys"})
+        md_keys = sorted(
+            {
+                *meta,
+                "text",
+                "source",
+                "offset",
+                "heading_path",
+                "_md_keys",
+                SOURCE_HASH_KEY,
+                SOURCE_CAPTURED_KEY,
+                ID_SCHEME_KEY,
+                "synthetic_prefix_len",
+            }
+        )
         if index_root is not None:
             md_keys = sorted({*md_keys, "index_root"})
 
+        # Document snapshot for verifiable citations: the resolver compares
+        # this hash against the current file to verify (or honestly refute)
+        # a citation without re-reading anything at recall time.
+        snapshot = source_snapshot(text)
         for chunk in chunker.chunk(body):
             payload: dict[str, Any] = {
                 **meta,
+                **snapshot,
+                ID_SCHEME_KEY: STABLE_ID_SCHEME,
                 "text": chunk.text,
                 "source": rel,
                 "offset": chunk.offset,
+                # Ingest-recorded synthetic-prefix length (0 = none): the
+                # resolver strips exactly this many characters, never a
+                # reconstruction from other metadata.
+                "synthetic_prefix_len": int(chunk.metadata.get("synthetic_prefix_len", 0)),
                 # ``heading_path`` is parser-derived and reserved — always set it
                 # (even to []) so a frontmatter key of the same name can't inject
                 # bogus section hierarchy on a headingless chunk.
