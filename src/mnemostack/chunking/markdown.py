@@ -116,15 +116,20 @@ class MarkdownChunker(Chunker):
             # If section is small enough, emit as single chunk
             if len(body) <= self.chunk_size:
                 chunk_text = body
+                metadata: dict = {"heading_path": list(heading_path)}
                 if self.include_heading_in_text and len(heading_path) > 1:
                     # Prepend the outer path as context (inner heading is already at top of body)
                     parent_path = " > ".join(heading_path[:-1])
                     chunk_text = f"[{parent_path}]\n{body}"
+                    # Record exactly how much of the text is synthetic — the
+                    # citation resolver strips ONLY this ingest-recorded
+                    # prefix, never a reconstruction from mutable metadata.
+                    metadata["synthetic_prefix_len"] = len(chunk_text) - len(body)
                 chunks.append(
                     Chunk(
                         text=chunk_text,
                         offset=start,
-                        metadata={"heading_path": list(heading_path)},
+                        metadata=metadata,
                     )
                 )
             else:
@@ -133,14 +138,16 @@ class MarkdownChunker(Chunker):
                 while sub_offset < len(body):
                     piece = body[sub_offset : sub_offset + self.chunk_size]
                     piece_text = piece
+                    piece_meta: dict = {"heading_path": list(heading_path)}
                     if self.include_heading_in_text:
                         path_str = " > ".join(heading_path)
                         piece_text = f"[{path_str}]\n{piece}"
+                        piece_meta["synthetic_prefix_len"] = len(piece_text) - len(piece)
                     chunks.append(
                         Chunk(
                             text=piece_text,
                             offset=start + sub_offset,
-                            metadata={"heading_path": list(heading_path)},
+                            metadata=piece_meta,
                         )
                     )
                     sub_offset += self.chunk_size

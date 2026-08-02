@@ -233,6 +233,22 @@ class AnswerResponse(BaseModel):
     )
 
 
+class ResolveResponse(BaseModel):
+    """One citation verified against its current source (see mnemostack.provenance)."""
+
+    chunk_id: str
+    verdict: str
+    supported: bool
+    source: str
+    resolved_path: str | None
+    snapshot: str
+    stored_offset: int | None
+    found_offset: int | None
+    fragment: str | None
+    detail: str
+    captured_at: str | None
+
+
 class FeedbackResponse(BaseModel):
     ok: bool
     hit_id: str
@@ -386,6 +402,12 @@ class ServerConfig:
     text_search: str = "auto"
     # Multi-field lexical arms: payload field -> fusion weight (lexical only).
     text_search_fields: dict[str, float] = field(default_factory=dict)
+    # Citation resolution allowlist (GET /resolve): the corpus directories
+    # this process may read. The stored index_root is payload data and cannot
+    # be its own security boundary — EMPTY (default) disables resolution on
+    # the HTTP surface entirely (fail closed). Env: MNEMOSTACK_RESOLVE_ROOTS
+    # (os.pathsep-separated).
+    resolve_roots: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.rerank_mode not in RERANK_MODES:
@@ -426,7 +448,13 @@ class ServerConfig:
             timestamp_format=cfg.recall.timestamp_format,
             text_search=cfg.recall.text_search,
             text_search_fields=dict(cfg.recall.text_search_fields),
+            resolve_roots=_resolve_roots_env(),
         )
+
+
+def _resolve_roots_env() -> list[str]:
+    """MNEMOSTACK_RESOLVE_ROOTS as a list (os.pathsep-separated)."""
+    return [p for p in os.environ.get("MNEMOSTACK_RESOLVE_ROOTS", "").split(os.pathsep) if p]
 
 
 def _build_bm25_docs(paths: list[str] | None):
@@ -1032,6 +1060,34 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             trace=trace.to_dict() if req.include_trace else None,
             tokens_estimate=sum_tokens(results),
         )
+
+    @app.get("/resolve/{chunk_id}", response_model=ResolveResponse)
+    async def resolve_endpoint(chunk_id: str, principal=Depends(_require("read"))):  # noqa: B008 — FastAPI DI pattern
+        """Verify a citation: resolve a chunk id back to its source document.
+
+        Runs OUTSIDE the recall path (recall latency is untouched). Verdicts
+        are honest about what this process can see: a server without the
+        source tree mounted reports missing/unresolvable rather than
+        pretending. Under auth the lookup is tenant-scoped — another tenant's
+        point is indistinguishable from an absent one.
+        """
+        from mnemostack.provenance import resolve_citation
+
+        try:
+            res = await asyncio.to_thread(
+                partial(
+                    resolve_citation,
+                    store,
+                    chunk_id,
+                    tenant=_tenant_of(principal),
+                    text_key=cfg.text_key,
+                    allowed_roots=list(cfg.resolve_roots),
+                )
+            )
+        except Exception as exc:
+            log.exception("resolve endpoint failed")
+            raise HTTPException(status_code=500, detail="resolve failed") from exc
+        return res.to_dict()
 
     @app.post("/answer", response_model=AnswerResponse)
     async def answer_endpoint(req: AnswerRequest, principal=Depends(_require("read"))):  # noqa: B008 — FastAPI DI pattern
