@@ -645,6 +645,37 @@ def build_server(
             return {"ok": False, "error": str(e), "query": query}
 
     @mcp.tool()
+    def mnemostack_resolve(
+        chunk_id: Annotated[
+            str,
+            Field(description="The [id:...] value from a recall result or answer citation"),
+        ],
+    ) -> dict:
+        """Verify a citation: resolve a chunk id back to its source document.
+
+        Re-reads the CURRENT source and returns an honest verdict: intact /
+        source_changed / moved (citation still supported), changed / missing
+        (not supported by the current source), or unresolvable (cannot be
+        verified from this process). Includes the snapshot-hash comparison and
+        the fragment when locatable. Read-only; never mutates stored memory;
+        runs outside the recall path. Resolution is confined to the corpus
+        root recorded at ingest — there is deliberately no way for a caller
+        to point it at another directory.
+        """
+        try:
+            from ..provenance import resolve_citation
+
+            principal = _authorize("read")
+            # Payload-only store: resolving never embeds, so a missing or
+            # unconfigured embedding provider must not break verification.
+            res = resolve_citation(
+                _get_vector_payload_only(), chunk_id, tenant=_tenant_of(principal)
+            )
+            return {"ok": True, **res.to_dict()}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e), "chunk_id": chunk_id}
+
+    @mcp.tool()
     def mnemostack_invalidate(
         ids: Annotated[
             list[str | int],

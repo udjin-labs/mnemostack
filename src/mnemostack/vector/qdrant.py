@@ -363,6 +363,27 @@ class VectorStore:
         info = self.client.get_collection(self.collection)
         return info.points_count or 0
 
+    def retrieve_payload(
+        self, point_id: str | int, *, tenant: str | None = None
+    ) -> dict[str, Any] | None:
+        """Full payload of one point by id, or ``None`` if absent.
+
+        ``tenant`` scopes the lookup like every other read: a point belonging
+        to a different tenant resolves to ``None`` (indistinguishable from
+        absent — existence must not leak across the boundary)."""
+        found = self.client.retrieve(
+            collection_name=self.collection,
+            ids=[point_id],
+            with_payload=True,
+            with_vectors=False,
+        )
+        if not found:
+            return None
+        payload = dict(found[0].payload or {})
+        if tenant is not None and payload.get(TENANT_ID_KEY) != tenant:
+            return None
+        return payload
+
     def retrieve_existing_ids(
         self, ids: list[str | int], *, tenant: str | None = None
     ) -> set[str]:

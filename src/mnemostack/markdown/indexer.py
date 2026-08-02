@@ -15,6 +15,7 @@ from typing import Any
 
 from ..chunking import MarkdownChunker
 from ..ingest import stable_chunk_id
+from ..provenance import SOURCE_CAPTURED_KEY, SOURCE_HASH_KEY, source_snapshot
 from .parse import extract_links, parse_frontmatter
 
 
@@ -200,13 +201,29 @@ def collect_markdown(
         # Ownership record: which payload keys this markdown run wrote from the
         # file, so a re-index refresh deletes only removed frontmatter keys and
         # leaves foreign keys (external enrichment, validity markers) untouched.
-        md_keys = sorted({*meta, "text", "source", "offset", "heading_path", "_md_keys"})
+        md_keys = sorted(
+            {
+                *meta,
+                "text",
+                "source",
+                "offset",
+                "heading_path",
+                "_md_keys",
+                SOURCE_HASH_KEY,
+                SOURCE_CAPTURED_KEY,
+            }
+        )
         if index_root is not None:
             md_keys = sorted({*md_keys, "index_root"})
 
+        # Document snapshot for verifiable citations: the resolver compares
+        # this hash against the current file to verify (or honestly refute)
+        # a citation without re-reading anything at recall time.
+        snapshot = source_snapshot(text)
         for chunk in chunker.chunk(body):
             payload: dict[str, Any] = {
                 **meta,
+                **snapshot,
                 "text": chunk.text,
                 "source": rel,
                 "offset": chunk.offset,

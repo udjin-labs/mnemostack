@@ -1359,6 +1359,42 @@ def cmd_text_index(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_resolve(args: argparse.Namespace) -> int:
+    """Verify a citation against its CURRENT source document.
+
+    Exit codes: 0 = the citation is still supported by the source (intact /
+    source_changed / moved), 1 = it is not (changed / missing), 2 = it cannot
+    be verified (unresolvable / no such point).
+    """
+    from mnemostack.provenance import resolve_citation
+
+    store = VectorStore(collection=args.collection, dimension=1, host=args.qdrant)
+    try:
+        if not store.collection_exists():
+            print(f"error: collection '{args.collection}' does not exist", file=sys.stderr)
+            return 2
+        # The CLI is the operator surface: bare source paths (no corpus root
+        # in the payload) may resolve against the local filesystem here —
+        # service surfaces (HTTP/MCP) never do.
+        res = resolve_citation(
+            store, args.chunk_id, root=args.root, tenant=args.tenant, allow_unrooted=True
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"error: cannot resolve: {e}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(res.to_dict(), ensure_ascii=False, indent=2))
+    else:
+        print(f"{res.verdict}: {res.detail}")
+        print(f"  source:   {res.source}" + (f" -> {res.resolved_path}" if res.resolved_path else ""))
+        print(f"  snapshot: {res.snapshot}" + (f" (captured {res.captured_at})" if res.captured_at else ""))
+        if res.found_offset is not None and res.found_offset != res.stored_offset:
+            print(f"  offset:   {res.stored_offset} -> {res.found_offset}")
+    if res.supported:
+        return 0
+    return 2 if res.verdict == "unresolvable" else 1
+
+
 def _lexical_gate_fields() -> list[str]:
     """The payload fields the lexical arm(s) gate on: the configured
     text_search_fields keys, or just text_key when unset. These are the
@@ -2802,6 +2838,25 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         "requires on a real Qdrant server (idempotent, non-destructive)",
     )
     p_text_index.set_defaults(func=cmd_text_index)
+
+    p_resolve = sub.add_parser(
+        "resolve",
+        parents=[common],
+        help="Verify a citation: resolve a chunk id back to its source "
+        "document and report an honest verdict (intact / source_changed / "
+        "moved / changed / missing / unresolvable)",
+    )
+    p_resolve.add_argument("chunk_id", help="the [id:...] value from recall/answer output")
+    p_resolve.add_argument(
+        "--root",
+        default=None,
+        help="Where relative sources are looked up (default: the payload's own index_root)",
+    )
+    p_resolve.add_argument("--tenant", default=None, help="Tenant scope for the lookup")
+    p_resolve.add_argument(
+        "--json", action="store_true", help="Emit the full resolution as JSON"
+    )
+    p_resolve.set_defaults(func=cmd_resolve)
 
     p_sparse_backfill = sub.add_parser(
         "sparse-backfill",

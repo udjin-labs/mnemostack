@@ -233,6 +233,22 @@ class AnswerResponse(BaseModel):
     )
 
 
+class ResolveResponse(BaseModel):
+    """One citation verified against its current source (see mnemostack.provenance)."""
+
+    chunk_id: str
+    verdict: str
+    supported: bool
+    source: str
+    resolved_path: str | None
+    snapshot: str
+    stored_offset: int | None
+    found_offset: int | None
+    fragment: str | None
+    detail: str
+    captured_at: str | None
+
+
 class FeedbackResponse(BaseModel):
     ok: bool
     hit_id: str
@@ -1032,6 +1048,27 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             trace=trace.to_dict() if req.include_trace else None,
             tokens_estimate=sum_tokens(results),
         )
+
+    @app.get("/resolve/{chunk_id}", response_model=ResolveResponse)
+    async def resolve_endpoint(chunk_id: str, principal=Depends(_require("read"))):  # noqa: B008 — FastAPI DI pattern
+        """Verify a citation: resolve a chunk id back to its source document.
+
+        Runs OUTSIDE the recall path (recall latency is untouched). Verdicts
+        are honest about what this process can see: a server without the
+        source tree mounted reports missing/unresolvable rather than
+        pretending. Under auth the lookup is tenant-scoped — another tenant's
+        point is indistinguishable from an absent one.
+        """
+        from mnemostack.provenance import resolve_citation
+
+        try:
+            res = await asyncio.to_thread(
+                resolve_citation, store, chunk_id, tenant=_tenant_of(principal)
+            )
+        except Exception as exc:
+            log.exception("resolve endpoint failed")
+            raise HTTPException(status_code=500, detail="resolve failed") from exc
+        return res.to_dict()
 
     @app.post("/answer", response_model=AnswerResponse)
     async def answer_endpoint(req: AnswerRequest, principal=Depends(_require("read"))):  # noqa: B008 — FastAPI DI pattern

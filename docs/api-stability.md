@@ -139,6 +139,14 @@ only — `AsyncVectorStore` does not write sparse encodings),
 fusion weight, `lexical` mode only; when set it replaces the arm set, and
 arm names follow `qdrant_text[:<field>]`).
 
+🟡 **Experimental — verifiable citations** (`mnemostack.provenance`,
+`mnemostack resolve`, `GET /resolve/{id}`, MCP `mnemostack_resolve`): the
+verdict NAMES (`intact` / `source_changed` / `moved` / `changed` / `missing`
+/ `unresolvable`) and their meaning are the intended contract; the
+`Resolution` field shape may still evolve. The two ingest-time payload
+fields (`source_content_hash`, `source_captured_at`) are additive — points
+without them resolve by position with `snapshot: absent`.
+
 🟡 **Accepted but not yet wired** — present in the config schema, but the runtime
 does not consume them today, so don't depend on them until they are:
 `embedding.api_key_env` (only drives a CLI "set `$KEY`" hint, not provider key
