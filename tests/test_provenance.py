@@ -564,6 +564,55 @@ def test_posix_backslash_filenames_survive(tmp_path):
     assert res.verdict == "intact" and res.supported
 
 
+def test_suffix_match_without_snapshot_is_ambiguous(tmp_path):
+    # The prefix-length marker is mutable payload (not covered by the id
+    # commitment): a suffix-only match against a CHANGED document cannot
+    # distinguish a synthetic prefix from a deleted cited first line — the
+    # safe verdict is unresolvable, never supported.
+    root = _corpus(tmp_path)
+    (root / "nested.md").write_text(
+        "# Top\n\nIntro paragraph.\n\n## Inner section\n\nDeep content line.\n"
+    )
+    store, chunks = _index(root)
+    prefixed = [
+        c
+        for c in chunks
+        if c.payload["source"] == "nested.md" and c.payload.get("synthetic_prefix_len", 0) > 0
+    ]
+    assert prefixed
+    # Under a matching snapshot the stripped reading is provably synthetic.
+    for c in prefixed:
+        assert resolve_citation(store, c.id).verdict == "intact"
+    # Document drifts: suffix-only evidence downgrades to unresolvable.
+    p = root / "nested.md"
+    p.write_text(p.read_text() + "\nTrailing edit.\n")
+    for c in prefixed:
+        res = resolve_citation(store, c.id)
+        assert res.verdict == "unresolvable" and not res.supported
+        assert "synthetic-prefix" in res.detail
+    # The tampering scenario itself: a first-party-shaped point (carries a
+    # snapshot hash) whose marker was planted after its real first line was
+    # deleted from the source — snapshot mismatches, and the suffix-only
+    # match must NOT come back supported.
+    doc = root / "plainline.md"
+    doc.write_text("bar\n")
+    planted = {
+        "text": "[Foo]\nbar\n",
+        "source": "plainline.md",
+        "index_root": str(root),
+        "offset": 0,
+        "synthetic_prefix_len": 6,
+        SOURCE_HASH_KEY: source_content_hash("[Foo]\nbar\n"),  # ingest-era doc
+    }
+    res = resolve_payload("x", planted)
+    assert res.verdict == "unresolvable" and not res.supported
+    # A pre-feature (snapshot-absent) prefixed point keeps its positional
+    # legacy semantics — the whole legacy path is position-trust already.
+    legacy_prefixed = {k: v for k, v in planted.items() if k != SOURCE_HASH_KEY}
+    doc.write_text("bar\n")
+    assert resolve_payload("x", legacy_prefixed).verdict == "intact"
+
+
 def test_only_ingest_recorded_prefixes_are_stripped():
     from mnemostack.provenance import _fragment_variants
 

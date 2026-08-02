@@ -661,26 +661,50 @@ def resolve_payload(
                 fragment=fragment,
                 detail="fragment present in the snapshot-verified document",
             )
-    elif located is not None:
-        verdict = "source_changed" if snapshot == "mismatch" else "intact"
-        detail = (
-            "fragment intact at its recorded position; document changed elsewhere"
-            if snapshot == "mismatch"
-            else "fragment at its recorded position (no ingest snapshot to compare)"
-        )
-        return _resolution(
-            chunk_id,
-            payload,
-            verdict=verdict,
-            resolved_path=str(path),
-            snapshot=snapshot,
-            stored_offset=stored_offset,
-            found_offset=stored_offset,
-            fragment=located,
-            detail=detail,
-        )
-    elif found is not None:
-        idx, fragment = found
+    elif located is not None or found is not None:
+        # Against a document that PROVABLY changed since ingest (snapshot
+        # mismatch), only the FULL stored text is evidence. A stripped-variant
+        # (suffix) match is ambiguous there: the prefix-length marker is
+        # mutable payload (not covered by the id commitment), so a suffix
+        # match cannot distinguish "the chunker's synthetic prefix" from "a
+        # deleted cited first line" — the safe verdict is unresolvable, never
+        # supported. Snapshot-absent (pre-feature) points keep positional
+        # semantics: their whole resolution is position-trust already, and
+        # penalizing only the prefix field would add no coherent guarantee.
+        matched = located if located is not None else found[1]  # type: ignore[index]
+        if matched != text and snapshot == "mismatch":
+            return _resolution(
+                chunk_id,
+                payload,
+                verdict="unresolvable",
+                resolved_path=str(path),
+                snapshot=snapshot,
+                stored_offset=stored_offset,
+                detail=(
+                    "only the synthetic-prefix-stripped reading matches a "
+                    "changed document — cannot verify the full cited text "
+                    "without a matching ingest snapshot"
+                ),
+            )
+        if located is not None:
+            verdict = "source_changed" if snapshot == "mismatch" else "intact"
+            detail = (
+                "fragment intact at its recorded position; document changed elsewhere"
+                if snapshot == "mismatch"
+                else "fragment at its recorded position (no ingest snapshot to compare)"
+            )
+            return _resolution(
+                chunk_id,
+                payload,
+                verdict=verdict,
+                resolved_path=str(path),
+                snapshot=snapshot,
+                stored_offset=stored_offset,
+                found_offset=stored_offset,
+                fragment=located,
+                detail=detail,
+            )
+        idx, fragment = found  # type: ignore[misc]
         if stored_offset is None:
             # Without a recorded position, presence alone cannot distinguish
             # "moved by edits" from "planted text that happens to occur" in a
