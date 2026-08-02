@@ -173,7 +173,11 @@ def _open_beneath(base: Path, source: str) -> int:
     trade-off, identical to the audit trail's: a legitimately symlinked
     entry inside the corpus is ALSO refused, loudly — index real paths.
     Raises OSError on refusal."""
-    parts = [p for p in re.split(r"[/\\]+", source) if p and p != "."]
+    # Platform-correct component split: on POSIX a backslash is a LEGAL
+    # filename character, not a separator — splitting it would break a file
+    # literally named "a\\b.md". Windows accepts both separators.
+    separators = r"[/\\]+" if os.name == "nt" else r"/+"
+    parts = [p for p in re.split(separators, source) if p and p != "."]
     if not parts or ".." in parts:
         raise OSError("source path escapes the corpus root")
     final_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
@@ -208,13 +212,23 @@ def _read_source(path: Path, base: Path | None, source: str) -> tuple[str | None
     SAME descriptor via ``fstat``/``read``. Returns ``(text, "")`` or
     ``(None, reason)``."""
     try:
-        if base is not None and not Path(source).is_absolute():
-            fd = _open_beneath(base.resolve(), source)
+        if base is not None:
+            resolved_base = base.resolve()
+            if Path(source).is_absolute():
+                # A confined ABSOLUTE source walks too: convert it to a
+                # root-relative path first, so intermediate components get
+                # the same no-symlink treatment as relative sources.
+                target = path.resolve()
+                if not target.is_relative_to(resolved_base):
+                    return None, "source path escapes the corpus root — refusing to read it"
+                walk_source = target.relative_to(resolved_base).as_posix()
+            else:
+                walk_source = source
+            fd = _open_beneath(resolved_base, walk_source)
         else:
-            target = path.resolve()
-            if base is not None and not target.is_relative_to(base.resolve()):
-                return None, "source path escapes the corpus root — refusing to read it"
-            fd = os.open(str(target), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            fd = os.open(
+                str(path.resolve()), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            )
     except OSError as e:
         return None, f"source exists but cannot be opened: {e}"
     try:

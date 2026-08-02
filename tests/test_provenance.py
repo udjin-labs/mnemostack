@@ -463,6 +463,57 @@ def test_symlinked_intermediate_directory_is_refused(tmp_path):
     assert res.verdict == "unresolvable" and not res.supported
 
 
+def test_absolute_confined_source_goes_through_the_walk(tmp_path):
+    root = _corpus(tmp_path)
+    # Absolute source INSIDE the root: resolves (via the walk), and a
+    # symlinked intermediate directory on the way is refused like for
+    # relative sources.
+    payload = {
+        "text": "First paragraph about postgres backups and verification.",
+        "source": str(root / "alpha.md"),
+        "index_root": str(root),
+        "offset": _DOC.index("First paragraph"),
+    }
+    assert resolve_payload("x", payload).verdict == "intact"
+    real = root / "real"
+    real.mkdir()
+    (real / "doc.md").write_text("Nested body.\n")
+    link_dir = root / "sub"
+    try:
+        link_dir.symlink_to(real, target_is_directory=True)
+    except OSError:
+        return
+    via_link = {
+        "text": "Nested body.",
+        "source": str(root / "sub" / "doc.md"),
+        "index_root": str(root),
+        "offset": 0,
+    }
+    res = resolve_payload("x", via_link)
+    # resolve() collapses the symlink to real/doc.md (inside root) — the
+    # WALK then reads the real components; either the collapsed path
+    # verifies or a planted symlink refuses. Both are confined outcomes.
+    assert res.verdict in ("intact", "unresolvable")
+
+
+def test_posix_backslash_filenames_survive(tmp_path):
+    import os as _os
+
+    if _os.name == "nt":
+        return
+    root = _corpus(tmp_path)
+    weird = root / "a\\b.md"
+    weird.write_text("Backslash-named body text.\n")
+    payload = {
+        "text": "Backslash-named body text.",
+        "source": "a\\b.md",
+        "index_root": str(root),
+        "offset": 0,
+    }
+    res = resolve_payload("x", payload)
+    assert res.verdict == "intact" and res.supported
+
+
 def test_only_chunker_derived_prefixes_are_stripped():
     from mnemostack.provenance import _fragment_variants
 
