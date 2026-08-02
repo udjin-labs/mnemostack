@@ -331,6 +331,15 @@ def _id_commitment_holds(chunk_id: str, payload: dict[str, Any], text: str) -> b
     offset = payload.get("offset")
     if not isinstance(source, str) or not isinstance(offset, int):
         return False
+    if "|" in source or "\x00" in source:
+        # stable_chunk_id joins the tuple with "|" (a 1.0-stable id contract
+        # that cannot change without re-embedding every corpus). With a
+        # pipe-free source the encoding "source|offset|" parses UNIQUELY
+        # (offset is digits), so hash equality implies text equality — a
+        # real tuple commitment. A pipe-bearing source makes the encoding
+        # ambiguous (("a", 0, "0|X") == ("a|0", 0, "X")), so the commitment
+        # cannot be guaranteed: refuse conservatively.
+        return False
     index_root = payload.get("index_root")
     # Match by the indexer's ACTUAL shape rather than accepting either
     # variant: the markdown indexer roots the id when an index_root exists

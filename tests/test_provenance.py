@@ -453,6 +453,19 @@ def test_frontmatter_cannot_plant_structural_keys(tmp_path):
         assert res.verdict == "intact", res.detail
 
 
+def test_pipe_bearing_sources_refuse_the_commitment(tmp_path):
+    # stable_chunk_id's tuple encoding is only unambiguous for pipe-free
+    # sources — a pipe-bearing one could collide with a different tuple, so
+    # the commitment gate refuses conservatively.
+    root = _corpus(tmp_path)
+    store, chunks = _index(root)
+    c = chunks[0]
+    piped = dict(c.payload)
+    piped["source"] = "weird|name.md"
+    res = resolve_payload(c.id, piped)
+    assert res.verdict == "unresolvable" and "commitment" in res.detail
+
+
 def test_snapshot_helper_without_id_scheme_is_not_first_party(tmp_path):
     # A mounted collection may use the documented source_snapshot() helper
     # with its OWN point ids — the hash field alone must not drag it under
