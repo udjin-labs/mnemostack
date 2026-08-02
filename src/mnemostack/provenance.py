@@ -156,9 +156,12 @@ def _candidate_paths(
     return pairs, escaped
 
 
-# Scheme-prefixed URIs, with or without the // authority ("https://...",
-# "urn:...", "mailto:...", "file:/..."). The scheme must be 2+ characters so
-# a Windows drive path ("C:\corpus") is NOT classified as a URI.
+# Authority-form URIs ("https://...") are unambiguous — non-local in every
+# context. Scheme-only forms ("urn:...", "mailto:...", "file:/...") are only
+# classified when NO corpus root is known: with a root, a colon is a legal
+# POSIX filename character ("notes:2026.md"). Schemes are 2+ characters so a
+# Windows drive path ("C:\corpus") is exempt from both.
+_URI_AUTHORITY = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]+://")
 _URI_SOURCE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]+:")
 
 
@@ -292,9 +295,19 @@ def _id_commitment_holds(chunk_id: str, payload: dict[str, Any], text: str) -> b
     if not isinstance(source, str) or not isinstance(offset, int):
         return False
     index_root = payload.get("index_root")
-    id_sources = [source]
-    if isinstance(index_root, str):
-        id_sources.insert(0, f"{index_root}\x00{source}")
+    # Match by the indexer's ACTUAL shape rather than accepting either
+    # variant: the markdown indexer roots the id when an index_root exists
+    # (so a swapped root breaks the commitment), while plain `index` ids are
+    # root-free by construction — for those the root is NOT id-bound.
+    # Documented residual: a bare-id point whose index_root is repointed at
+    # another operator-ALLOWLISTED corpus holding byte-identical content
+    # verifies against that identical copy — a true statement about an
+    # approved corpus, no content disclosure; store-writers remain outside
+    # the threat model regardless.
+    if "_md_keys" in payload and isinstance(index_root, str):
+        id_sources = [f"{index_root}\x00{source}"]
+    else:
+        id_sources = [source]
     tenant = payload.get("tenant_id")
     tenants = [tenant, None] if isinstance(tenant, str) else [None]
     return any(
@@ -444,15 +457,12 @@ def resolve_payload(
             detail=f"payload carries no resolvable source/{text_key} pair",
         )
     payload_root = payload.get("index_root")
-    if (
-        not root
-        and not (isinstance(payload_root, str) and payload_root)
-        and _URI_SOURCE.match(source)
-    ):
-        # URI classification applies only when NO corpus root is known: with
-        # a root, `source` is a corpus-relative FILENAME — and on POSIX a
-        # colon is a legal filename character ("notes:2026.md"), so a rooted
-        # source must resolve beneath its root, not be misread as a scheme.
+    has_root = bool(root) or bool(isinstance(payload_root, str) and payload_root)
+    if _URI_AUTHORITY.match(source) or (not has_root and _URI_SOURCE.match(source)):
+        # Authority-form URIs are non-local in EVERY context (a rooted
+        # lookup would happily read a decoy at <root>/https:/...). The
+        # scheme-only classification applies just to rootless sources: with
+        # a root, a colon is a legal POSIX filename char ("notes:2026.md").
         return _resolution(
             chunk_id,
             payload,

@@ -242,6 +242,35 @@ def test_uri_sources_are_unresolvable(tmp_path):
         assert res.verdict == "unresolvable" and "URI" in res.detail, src
 
 
+def test_authority_uris_stay_nonlocal_even_with_a_root(tmp_path):
+    # "https://..." is unambiguous: a rooted lookup must NOT read a decoy at
+    # <root>/https:/example.com/doc.
+    root = _corpus(tmp_path)
+    decoy = root / "https:" / "example.com"
+    decoy.mkdir(parents=True)
+    (decoy / "doc").write_text("decoy body")
+    res = resolve_payload(
+        "x",
+        {"text": "decoy body", "source": "https://example.com/doc", "index_root": str(root), "offset": 0},
+    )
+    assert res.verdict == "unresolvable" and "URI" in res.detail
+
+
+def test_md_commitment_binds_the_root(tmp_path):
+    # Markdown ids fold index_root into the commitment — repointing the
+    # payload root at another corpus breaks it.
+    root = _corpus(tmp_path)
+    store, chunks = _index(root)
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "alpha.md").write_text(_DOC)
+    c = next(c for c in chunks if c.payload["source"] == "alpha.md")
+    repointed = dict(c.payload)
+    repointed["index_root"] = str(other)
+    res = resolve_payload(c.id, repointed)
+    assert res.verdict == "unresolvable" and "commitment" in res.detail
+
+
 def test_rooted_colon_filenames_are_not_uris(tmp_path):
     import os as _os
 
