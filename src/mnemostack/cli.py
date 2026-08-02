@@ -1375,9 +1375,15 @@ def cmd_resolve(args: argparse.Namespace) -> int:
             return 2
         # The CLI is the operator surface: bare source paths (no corpus root
         # in the payload) may resolve against the local filesystem here —
-        # service surfaces (HTTP/MCP) never do.
+        # service surfaces (HTTP/MCP) never do, and they additionally confine
+        # roots to the MNEMOSTACK_RESOLVE_ROOTS allowlist.
         res = resolve_citation(
-            store, args.chunk_id, root=args.root, tenant=args.tenant, allow_unrooted=True
+            store,
+            args.chunk_id,
+            root=args.root,
+            tenant=args.tenant,
+            allow_unrooted=True,
+            text_key=_payload_schema()[0],
         )
     except Exception as e:  # noqa: BLE001
         print(f"error: cannot resolve: {e}", file=sys.stderr)
@@ -3791,6 +3797,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
         timestamp_format=_schema_fmt,
         text_search=_text_search_mode(),
         text_search_fields=dict(_text_search_fields()),
+        resolve_roots=[
+            p for p in os.environ.get("MNEMOSTACK_RESOLVE_ROOTS", "").split(os.pathsep) if p
+        ],
     )
     app = build_app(cfg)
 
@@ -3956,6 +3965,9 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
         timestamp_format=_schema_fmt,
         text_search=_text_search_mode(),
         text_search_fields=dict(_text_search_fields()) or None,
+        resolve_roots=[
+            p for p in os.environ.get("MNEMOSTACK_RESOLVE_ROOTS", "").split(os.pathsep) if p
+        ],
     )
     mcp.run()
     return 0

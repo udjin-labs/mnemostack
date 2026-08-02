@@ -367,7 +367,12 @@ returns no file content). If a corpus was relocated after indexing, point
 the resolver at the new root: `mnemostack resolve <id> --root /new/path`.
 Resolution is confined to the corpus root: `../` escapes, symlinks leading
 outside, and (on the HTTP/MCP surfaces) bare filesystem paths are refused
-as `unresolvable`.
+as `unresolvable`. The HTTP and MCP surfaces are additionally fail-closed:
+they resolve nothing until the operator sets `MNEMOSTACK_RESOLVE_ROOTS` to
+the corpus directories the process may read (the stored `index_root` is
+payload data, not a security boundary), and their `changed` verdicts never
+return file content. The CLI, as the operator surface, trusts the local
+filesystem it is pointed at.
 
 The check never runs inside recall (latency untouched), and under `--auth`
 it is tenant-scoped: a foreign tenant's id is indistinguishable from an

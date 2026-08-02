@@ -189,6 +189,112 @@ def test_unresolvable_cases(tmp_path):
     assert res2.verdict == "unresolvable"
 
 
+def test_allowed_roots_gate_service_surfaces(tmp_path):
+    # The stored index_root is payload data — writable by whoever ingests —
+    # so it cannot be its own security boundary. Service surfaces pass an
+    # operator allowlist: empty = fail closed, and a planted index_root
+    # outside the allowlist ("/") is refused even for real files.
+    root = _corpus(tmp_path)
+    store, chunks = _index(root)
+    c = chunks[0]
+    # Empty allowlist (the service default): resolution disabled.
+    res = resolve_citation(store, c.id, allowed_roots=[])
+    assert res.verdict == "unresolvable" and "not enabled" in res.detail
+    # Allowlist covering the corpus: resolves normally.
+    assert resolve_citation(store, c.id, allowed_roots=[str(tmp_path)]).verdict == "intact"
+    # Planted root outside the allowlist: refused.
+    planted = dict(c.payload)
+    planted["index_root"] = "/"
+    planted["source"] = "etc/hostname"
+    res = resolve_payload(c.id, planted, allowed_roots=[str(tmp_path)])
+    assert res.verdict == "unresolvable" and "allowlist" in res.detail
+
+
+def test_configured_text_key_is_honored(tmp_path):
+    root = _corpus(tmp_path)
+    doc = root / "alpha.md"
+    payload = {
+        "content": "First paragraph about postgres backups and verification.",
+        "source": "alpha.md",
+        "index_root": str(root),
+        "offset": _DOC.index("First paragraph"),
+    }
+    assert resolve_payload("x", payload, text_key="content").verdict == "intact"
+    # The default key reports the pair as unresolvable, naming the key.
+    res = resolve_payload("x", payload)
+    assert res.verdict == "unresolvable" and "text" in res.detail
+    assert doc.is_file()
+
+
+def test_uri_sources_are_unresolvable(tmp_path):
+    res = resolve_payload(
+        "x",
+        {"text": "abc", "source": "https://example.com/doc", "offset": 0},
+        allow_unrooted=True,
+    )
+    assert res.verdict == "unresolvable" and "URI" in res.detail
+
+
+def test_hash_match_does_not_launder_planted_text(tmp_path):
+    # A matching snapshot hash authenticates the FILE, not the point: a
+    # payload whose text was swapped (set_payload / external writer) must
+    # not come back `intact` echoing the planted text.
+    root = _corpus(tmp_path)
+    store, chunks = _index(root)
+    planted = dict(chunks[0].payload)
+    planted["text"] = "totally fabricated claim"
+    res = resolve_payload(chunks[0].id, planted)
+    assert res.verdict == "changed" and not res.supported
+    assert res.fragment is None
+    assert "does not belong" in res.detail
+
+
+def test_no_offset_points_need_a_snapshot_to_be_supported(tmp_path):
+    root = _corpus(tmp_path)
+    store, chunks = _index(root)
+    c = next(c for c in chunks if c.payload["source"] == "alpha.md")
+    no_offset = {k: v for k, v in c.payload.items() if k != "offset"}
+    # Snapshot still matches: presence in the verified document is enough.
+    assert resolve_payload(c.id, no_offset).verdict == "intact"
+    # Snapshot drifted: presence alone cannot distinguish moved from planted.
+    (root / "alpha.md").write_text(_DOC + "\ntail\n")
+    res = resolve_payload(c.id, no_offset)
+    assert res.verdict == "unresolvable" and "no recorded offset" in res.detail
+
+
+def test_integer_and_invalid_ids_resolve_gracefully(tmp_path):
+    root = _corpus(tmp_path)
+    store, chunks = _index(root)
+    c = chunks[0]
+    store.upsert(41, [1.0, 0.0, 0.0, 0.0], dict(c.payload))
+    # A decimal-string citation reaches the integer point.
+    assert resolve_citation(store, "41").verdict == "intact"
+    # A handle the store rejects (e.g. a graph id) is a verdict, not a crash.
+    res = resolve_citation(store, "graph:acme:node-7")
+    assert res.verdict == "unresolvable"
+
+
+def test_moved_offset_is_body_relative_for_markdown(tmp_path):
+    root = _corpus(tmp_path)
+    store, chunks = _index(root)
+    # Insert into the BODY of the frontmatter doc: stored offsets are
+    # body-relative, so found_offset must be too (body searched first).
+    (root / "beta.md").write_text(
+        _FM_DOC.replace("Body line one", "Inserted paragraph.\n\nBody line one")
+    )
+    c = next(
+        c
+        for c in chunks
+        if c.payload["source"] == "beta.md" and "Body line one" in c.text
+    )
+    res = resolve_citation(store, c.id)
+    assert res.verdict == "moved"
+    from mnemostack.markdown.parse import parse_frontmatter
+
+    _meta, body = parse_frontmatter((root / "beta.md").read_text())
+    assert res.found_offset == body.index(res.fragment)
+
+
 def test_traversal_source_is_refused(tmp_path):
     # `source` is an untrusted label — a ../ escape under the corpus root
     # must be refused outright, even when the target file exists.

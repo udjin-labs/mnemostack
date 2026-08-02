@@ -32,6 +32,7 @@ current source still evidence this citation?
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -139,12 +140,26 @@ def _candidate_paths(
     return pairs, escaped
 
 
+_URI_SOURCE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://")
+
+
+def _root_allowed(base: str, allowed_roots: list[str]) -> bool:
+    """Whether ``base`` (the corpus root about to be read) lies inside one of
+    the operator-configured allowlist directories."""
+    try:
+        resolved = Path(base).resolve()
+        return any(resolved.is_relative_to(Path(ar).resolve()) for ar in allowed_roots)
+    except OSError:
+        return False
+
+
 def _search_texts(raw: str, payload: dict[str, Any]) -> list[str]:
     """The texts a stored offset may index into.
 
     Markdown chunk offsets are relative to the BODY (frontmatter stripped by
-    the indexer), while plain ingest offsets index the raw document — check
-    both rather than encode per-format knowledge into the verdicts."""
+    the indexer), so for markdown points the body is searched FIRST — a
+    ``found_offset`` should live in the same coordinate system as the stored
+    offset whenever possible. Plain ingest offsets index the raw document."""
     texts = [raw]
     if "_md_keys" in payload or "heading_path" in payload:
         try:
@@ -152,7 +167,7 @@ def _search_texts(raw: str, payload: dict[str, Any]) -> list[str]:
 
             _meta, body = parse_frontmatter(raw)
             if body != raw:
-                texts.append(body)
+                texts.insert(0, body)
         except Exception:  # noqa: BLE001 - fall back to raw-only search
             pass
     return texts
@@ -196,23 +211,66 @@ def resolve_payload(
     *,
     root: str | None = None,
     allow_unrooted: bool = False,
+    text_key: str = "text",
+    allowed_roots: list[str] | None = None,
 ) -> Resolution:
     """Resolve a citation given its point payload (see module docstring).
 
     ``root`` overrides where sources are looked up (default: the payload's
     own ``index_root``); resolution is CONFINED to that root. Bare source
     paths (no root known) are only tried when ``allow_unrooted=True`` — the
-    operator-CLI trust level; service surfaces keep the default."""
-    text = payload.get("text")
+    operator-CLI trust level; service surfaces keep the default.
+
+    ``text_key`` is the payload key holding the chunk text (the deployment's
+    configured payload schema — a mounted foreign collection keeps its own
+    field names).
+
+    ``allowed_roots`` is the operator-configured resolution allowlist for
+    SERVICE surfaces: the corpus root actually used must live inside one of
+    these directories. The stored ``index_root`` is payload data — writable
+    by whoever ingests — so it cannot be its own security boundary; ``None``
+    (operator/CLI trust) skips the check, an empty list disables resolution
+    entirely (the fail-closed service default)."""
+    text = payload.get(text_key)
     source = payload.get("source")
     if not source or not isinstance(source, str) or not isinstance(text, str) or not text:
         return _resolution(
             chunk_id,
             payload,
             verdict="unresolvable",
-            detail="payload carries no resolvable source/text pair",
+            detail=f"payload carries no resolvable source/{text_key} pair",
+        )
+    if _URI_SOURCE.match(source):
+        return _resolution(
+            chunk_id,
+            payload,
+            verdict="unresolvable",
+            detail="source is not a local document (URI-style source)",
         )
     index_root = payload.get("index_root")
+    base_str = root or (index_root if isinstance(index_root, str) else None)
+    if allowed_roots is not None:
+        if not allowed_roots:
+            return _resolution(
+                chunk_id,
+                payload,
+                verdict="unresolvable",
+                detail=(
+                    "resolution is not enabled on this surface — set "
+                    "MNEMOSTACK_RESOLVE_ROOTS to the corpus directories this "
+                    "process may read"
+                ),
+            )
+        if not base_str or not _root_allowed(base_str, allowed_roots):
+            return _resolution(
+                chunk_id,
+                payload,
+                verdict="unresolvable",
+                detail=(
+                    "the point's corpus root is not in the operator-configured "
+                    "resolution allowlist"
+                ),
+            )
     candidates, escaped = _candidate_paths(
         source, index_root if isinstance(index_root, str) else None, root, allow_unrooted
     )
@@ -272,39 +330,24 @@ def resolve_payload(
     texts = _search_texts(raw, payload)
     fragments = _fragment_variants(text, payload)
 
-    if snapshot == "match":
-        # The document is byte-identical to what was indexed — the fragment's
-        # presence at its recorded position is implied by ingest determinism.
-        # The returned fragment must be SOURCE text, not the stored embedding
-        # text (which may carry the chunker's synthetic heading prefix): pick
-        # the variant actually present at the recorded position.
-        fragment = text
-        if stored_offset is not None:
-            for candidate in texts:
-                located = next(
-                    (f for f in fragments if _at_offset(candidate, stored_offset, f)), None
-                )
-                if located is not None:
-                    fragment = located
-                    break
-        return _resolution(
-            chunk_id,
-            payload,
-            verdict="intact",
-            resolved_path=str(path),
-            snapshot=snapshot,
-            stored_offset=stored_offset,
-            found_offset=stored_offset,
-            fragment=fragment,
-            detail="source snapshot hash matches the ingested document",
-        )
-
     if payload.get("chunk_kind") == "sliding_window":
         # Windowed points store a SYNTHETIC concatenation (constituent chunks
         # joined with a separator) — that exact blob never exists in the
-        # source, so text search would report a false `changed` on an
-        # untouched document. With the hash equality path exhausted, be
-        # honest: the synthetic text cannot be verified against the source.
+        # source, so text search cannot verify it. The snapshot hash CAN:
+        # a byte-identical document implies the derived text by ingest
+        # determinism. No fragment is returned either way (it would be
+        # embedding text, not source text).
+        if snapshot == "match":
+            return _resolution(
+                chunk_id,
+                payload,
+                verdict="intact",
+                resolved_path=str(path),
+                snapshot=snapshot,
+                stored_offset=stored_offset,
+                found_offset=stored_offset,
+                detail="sliding-window point: source snapshot hash matches the ingested document",
+            )
         return _resolution(
             chunk_id,
             payload,
@@ -318,46 +361,103 @@ def resolve_payload(
                 "changed source (snapshot hash no longer matches)"
             ),
         )
+
+    # Locate the fragment in the CURRENT document. A matching snapshot hash
+    # authenticates the FILE, not the point: text/offset live in a mutable
+    # payload (set_payload, external writers), so `intact` is only issued
+    # when the fragment is actually found — a hash match must never launder
+    # arbitrary stored text into a supported citation.
+    located: str | None = None
     if stored_offset is not None:
         for candidate in texts:
-            for fragment in fragments:
-                if _at_offset(candidate, stored_offset, fragment):
-                    verdict = "source_changed" if snapshot == "mismatch" else "intact"
-                    detail = (
-                        "fragment intact at its recorded position; document changed elsewhere"
-                        if snapshot == "mismatch"
-                        else "fragment at its recorded position (no ingest snapshot to compare)"
-                    )
-                    return _resolution(
-                        chunk_id,
-                        payload,
-                        verdict=verdict,
-                        resolved_path=str(path),
-                        snapshot=snapshot,
-                        stored_offset=stored_offset,
-                        found_offset=stored_offset,
-                        fragment=fragment,
-                        detail=detail,
-                    )
+            located = next(
+                (f for f in fragments if _at_offset(candidate, stored_offset, f)), None
+            )
+            if located is not None:
+                break
+    if located is not None:
+        if snapshot == "match":
+            detail = "fragment at its recorded position; source snapshot hash matches"
+            verdict = "intact"
+        elif snapshot == "absent":
+            detail = "fragment at its recorded position (no ingest snapshot to compare)"
+            verdict = "intact"
+        else:
+            detail = "fragment intact at its recorded position; document changed elsewhere"
+            verdict = "source_changed"
+        return _resolution(
+            chunk_id,
+            payload,
+            verdict=verdict,
+            resolved_path=str(path),
+            snapshot=snapshot,
+            stored_offset=stored_offset,
+            found_offset=stored_offset,
+            fragment=located,
+            detail=detail,
+        )
+    found: tuple[int, str] | None = None
     for candidate in texts:
         for fragment in fragments:
             idx = candidate.find(fragment)
             if idx != -1:
+                found = (idx, fragment)
+                break
+        if found:
+            break
+    if found is not None:
+        idx, fragment = found
+        if stored_offset is None:
+            # Without a recorded position, presence alone cannot distinguish
+            # "moved by edits" from "planted text that happens to occur".
+            # A snapshot-verified document is the exception: the fragment
+            # provably belongs to the file that was ingested.
+            if snapshot == "match":
                 return _resolution(
                     chunk_id,
                     payload,
-                    verdict="moved",
+                    verdict="intact",
                     resolved_path=str(path),
                     snapshot=snapshot,
-                    stored_offset=stored_offset,
+                    stored_offset=None,
                     found_offset=idx,
                     fragment=fragment,
-                    detail="exact fragment found at a different position",
+                    detail="fragment present in the snapshot-verified document (no recorded position)",
                 )
+            return _resolution(
+                chunk_id,
+                payload,
+                verdict="unresolvable",
+                resolved_path=str(path),
+                snapshot=snapshot,
+                stored_offset=None,
+                found_offset=idx,
+                detail=(
+                    "point has no recorded offset — presence without position "
+                    "cannot be verified against a changed document"
+                ),
+            )
+        return _resolution(
+            chunk_id,
+            payload,
+            verdict="moved",
+            resolved_path=str(path),
+            snapshot=snapshot,
+            stored_offset=stored_offset,
+            found_offset=idx,
+            fragment=fragment,
+            detail="exact fragment found at a different position",
+        )
     # No fragment on `changed` ON PURPOSE: every other verdict returns text
     # the caller already possesses (the cited fragment); echoing what the
     # CURRENT file holds at an offset the payload controls would turn the
     # resolver into a read oracle over the corpus root.
+    detail = (
+        "document matches the ingest snapshot but never contained this "
+        "fragment — the point's text/offset does not belong to it"
+        if snapshot == "match"
+        else "source exists but no longer contains the exact fragment"
+    )
     return _resolution(
         chunk_id,
         payload,
@@ -367,7 +467,7 @@ def resolve_payload(
         stored_offset=stored_offset,
         found_offset=None,
         fragment=None,
-        detail="source exists but no longer contains the exact fragment",
+        detail=detail,
     )
 
 
@@ -378,14 +478,31 @@ def resolve_citation(
     root: str | None = None,
     tenant: str | None = None,
     allow_unrooted: bool = False,
+    text_key: str = "text",
+    allowed_roots: list[str] | None = None,
 ) -> Resolution:
     """Resolve a citation by chunk id against ``store`` (a ``VectorStore``).
 
     ``tenant`` scopes the lookup: another tenant's point resolves exactly like
     an absent one (existence must not leak across the boundary).
     ``allow_unrooted`` extends resolution to bare source paths — operator-CLI
-    trust level only; service surfaces keep the default."""
-    payload = store.retrieve_payload(chunk_id, tenant=tenant)
+    trust level only; service surfaces keep the default. ``text_key`` and
+    ``allowed_roots``: see :func:`resolve_payload`."""
+    # Integer-id collections render citations as decimal strings — hand
+    # Qdrant the integer back, or the lookup misses its own point.
+    lookup_id: str | int = chunk_id
+    if isinstance(chunk_id, str) and chunk_id.isdigit():
+        lookup_id = int(chunk_id)
+    try:
+        payload = store.retrieve_payload(lookup_id, tenant=tenant)
+    except Exception as e:  # noqa: BLE001 — an invalid handle (e.g. a graph
+        # id) or a store error is "cannot verify", never a crashing surface.
+        return _resolution(
+            chunk_id,
+            {},
+            verdict="unresolvable",
+            detail=f"point lookup failed: {e}",
+        )
     if payload is None:
         return _resolution(
             chunk_id,
@@ -393,4 +510,11 @@ def resolve_citation(
             verdict="unresolvable",
             detail="no such point in the collection",
         )
-    return resolve_payload(chunk_id, payload, root=root, allow_unrooted=allow_unrooted)
+    return resolve_payload(
+        chunk_id,
+        payload,
+        root=root,
+        allow_unrooted=allow_unrooted,
+        text_key=text_key,
+        allowed_roots=allowed_roots,
+    )

@@ -81,6 +81,7 @@ def build_server(
     timestamp_format: str = "iso",
     text_search: str = "auto",
     text_search_fields: dict[str, float] | None = None,
+    resolve_roots: list[str] | None = None,
 ) -> Any:
     """Build and return a configured FastMCP server.
 
@@ -668,8 +669,14 @@ def build_server(
             principal = _authorize("read")
             # Payload-only store: resolving never embeds, so a missing or
             # unconfigured embedding provider must not break verification.
+            # allowed_roots: the stored index_root is payload data, not a
+            # security boundary — empty (unset) keeps this tool fail-closed.
             res = resolve_citation(
-                _get_vector_payload_only(), chunk_id, tenant=_tenant_of(principal)
+                _get_vector_payload_only(),
+                chunk_id,
+                tenant=_tenant_of(principal),
+                text_key=text_key,
+                allowed_roots=list(resolve_roots or []),
             )
             return {"ok": True, **res.to_dict()}
         except Exception as e:  # noqa: BLE001
@@ -934,6 +941,9 @@ def main() -> None:
         timestamp_format=cfg.recall.timestamp_format,
         text_search=cfg.recall.text_search,
         text_search_fields=dict(cfg.recall.text_search_fields) or None,
+        resolve_roots=[
+            p for p in os.environ.get("MNEMOSTACK_RESOLVE_ROOTS", "").split(os.pathsep) if p
+        ],
         token_budget=cfg.recall.token_budget,
         auth_enabled=auth_enabled,
         api_key=os.environ.get("MNEMOSTACK_API_KEY") or None,

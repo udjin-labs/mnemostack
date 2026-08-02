@@ -402,6 +402,12 @@ class ServerConfig:
     text_search: str = "auto"
     # Multi-field lexical arms: payload field -> fusion weight (lexical only).
     text_search_fields: dict[str, float] = field(default_factory=dict)
+    # Citation resolution allowlist (GET /resolve): the corpus directories
+    # this process may read. The stored index_root is payload data and cannot
+    # be its own security boundary — EMPTY (default) disables resolution on
+    # the HTTP surface entirely (fail closed). Env: MNEMOSTACK_RESOLVE_ROOTS
+    # (os.pathsep-separated).
+    resolve_roots: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.rerank_mode not in RERANK_MODES:
@@ -442,7 +448,13 @@ class ServerConfig:
             timestamp_format=cfg.recall.timestamp_format,
             text_search=cfg.recall.text_search,
             text_search_fields=dict(cfg.recall.text_search_fields),
+            resolve_roots=_resolve_roots_env(),
         )
+
+
+def _resolve_roots_env() -> list[str]:
+    """MNEMOSTACK_RESOLVE_ROOTS as a list (os.pathsep-separated)."""
+    return [p for p in os.environ.get("MNEMOSTACK_RESOLVE_ROOTS", "").split(os.pathsep) if p]
 
 
 def _build_bm25_docs(paths: list[str] | None):
@@ -1063,7 +1075,14 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
 
         try:
             res = await asyncio.to_thread(
-                resolve_citation, store, chunk_id, tenant=_tenant_of(principal)
+                partial(
+                    resolve_citation,
+                    store,
+                    chunk_id,
+                    tenant=_tenant_of(principal),
+                    text_key=cfg.text_key,
+                    allowed_roots=list(cfg.resolve_roots),
+                )
             )
         except Exception as exc:
             log.exception("resolve endpoint failed")
