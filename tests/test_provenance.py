@@ -346,6 +346,17 @@ def test_no_offset_points_cannot_claim_position(tmp_path):
     assert res.verdict == "unresolvable" and "no recorded offset" in res.detail
 
 
+def test_exotic_digit_ids_resolve_gracefully(tmp_path):
+    # Unicode digits pass str.isdigit() but fail int(); huge digit strings
+    # exceed integer-conversion limits — both must produce a verdict, not a
+    # 500. And a 21+ digit string is not a Qdrant u64, so it stays a string.
+    root = _corpus(tmp_path)
+    store, chunks = _index(root)
+    for weird in ("\u00b2\u00b3", "9" * 5000, "1" * 21):
+        res = resolve_citation(store, weird)
+        assert res.verdict == "unresolvable", weird
+
+
 def test_integer_and_invalid_ids_resolve_gracefully(tmp_path):
     root = _corpus(tmp_path)
     store, chunks = _index(root)

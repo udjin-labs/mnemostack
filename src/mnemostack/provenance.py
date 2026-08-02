@@ -184,7 +184,7 @@ def _is_schemed_uri(source: str) -> bool:
 _SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 
 
-def _open_beneath(base: Path, source: str) -> int:
+def _open_beneath(base: Path, source: str, strict: bool = False) -> int:
     """Open ``source`` beneath ``base`` with EVERY component refusing symlinks.
 
     ``O_NOFOLLOW`` on a single open only protects the final component — a
@@ -204,9 +204,18 @@ def _open_beneath(base: Path, source: str) -> int:
         raise OSError("source path escapes the corpus root")
     final_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     if not _SUPPORTS_DIR_FD:
+        if strict:
+            # Service surfaces need the ATOMIC beneath-root walk — the
+            # lstat-then-open fallback is a check-then-open race a corpus
+            # writer could win. Fail closed where the primitive is missing.
+            raise OSError(
+                "atomic beneath-root walk unavailable on this platform — "
+                "service-surface resolution is disabled"
+            )
         # No openat walk (Windows, where O_NOFOLLOW is also absent): refuse
-        # symlinks by lstat-walking first — check-then-open, best effort on a
-        # secondary platform where symlink creation needs elevation anyway.
+        # symlinks by lstat-walking first — check-then-open, best effort for
+        # the OPERATOR CLI on a platform where symlink creation needs
+        # elevation anyway.
         probe = base
         for comp in parts:
             probe = probe / comp
@@ -224,7 +233,9 @@ def _open_beneath(base: Path, source: str) -> int:
         os.close(dfd)
 
 
-def _read_source(path: Path, base: Path | None, source: str) -> tuple[str | None, str, str]:
+def _read_source(
+    path: Path, base: Path | None, source: str, strict_walk: bool = False
+) -> tuple[str | None, str, str]:
     """Read the source through ONE file descriptor, TOCTOU-hardened.
 
     Confined reads (a base is known) go through the symlink-refusing
@@ -251,7 +262,7 @@ def _read_source(path: Path, base: Path | None, source: str) -> tuple[str | None
                 walk_source = target.relative_to(resolved_base).as_posix()
             else:
                 walk_source = source
-            fd = _open_beneath(resolved_base, walk_source)
+            fd = _open_beneath(resolved_base, walk_source, strict=strict_walk)
         else:
             fd = os.open(
                 str(path.resolve()), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
@@ -638,7 +649,9 @@ def resolve_payload(
             read_base = anchor_path
             if not Path(source).is_absolute() and prefix not in (".", ""):
                 read_source_path = f"{prefix}/{source}"
-        text_read, reason, kind = _read_source(p, read_base, read_source_path)
+        text_read, reason, kind = _read_source(
+            p, read_base, read_source_path, strict_walk=allowed_roots is not None
+        )
         if kind == "ok":
             raw = text_read
             path = p
@@ -876,11 +889,19 @@ def resolve_citation(
     # 32-digit simple-form UUID is also all digits and must STAY a string
     # (Qdrant distinguishes unsigned-int ids from UUID strings).
     lookup_id: str | int = chunk_id
-    if isinstance(chunk_id, str) and chunk_id.isdigit():
+    if (
+        isinstance(chunk_id, str)
+        and chunk_id.isascii()
+        and chunk_id.isdigit()
+        and len(chunk_id) <= 20  # Qdrant integer ids are unsigned 64-bit
+    ):
         try:
             uuid.UUID(chunk_id)
         except ValueError:
-            lookup_id = int(chunk_id)
+            try:
+                lookup_id = int(chunk_id)
+            except ValueError:
+                lookup_id = chunk_id
     try:
         payload = store.retrieve_payload(lookup_id, tenant=tenant)
     except Exception as e:  # noqa: BLE001 — an invalid handle (e.g. a graph
