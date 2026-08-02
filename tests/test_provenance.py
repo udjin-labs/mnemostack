@@ -659,6 +659,20 @@ def test_posix_backslash_filenames_survive(tmp_path):
     assert res.verdict == "intact" and res.supported
 
 
+def test_inserted_blank_line_reads_as_moved_not_in_position(tmp_path):
+    # The whitespace gap covers ONLY the chunker's heading-indent strip
+    # (<= 3 spaces): an inserted blank line before a fragment is a real
+    # shift and must read as moved with the true offset.
+    root = _corpus(tmp_path)
+    store, chunks = _index(root)
+    (root / "alpha.md").write_text("\n" + _DOC)
+    for c in chunks:
+        if c.payload["source"] != "alpha.md":
+            continue
+        res = resolve_citation(store, c.id)
+        assert res.verdict == "moved", (c.payload["offset"], res.verdict)
+
+
 def test_indented_heading_sections_keep_their_position(tmp_path):
     # A CommonMark heading indented 1-3 spaces: the chunker strips the
     # section, so the stored text starts AFTER the indent while the offset

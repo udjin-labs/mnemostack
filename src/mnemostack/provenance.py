@@ -184,7 +184,9 @@ def _is_schemed_uri(source: str) -> bool:
 _SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 
 
-def _open_beneath(base: Path, source: str, strict: bool = False) -> int:
+def _open_beneath(
+    base: Path, source: str, strict: bool = False, base_fd: int | None = None
+) -> int:
     """Open ``source`` beneath ``base`` with EVERY component refusing symlinks.
 
     ``O_NOFOLLOW`` on a single open only protects the final component — a
@@ -222,7 +224,10 @@ def _open_beneath(base: Path, source: str, strict: bool = False) -> int:
             if probe.is_symlink():
                 raise OSError(f"source path component {comp!r} is a symlink — refused")
         return os.open(str(base.joinpath(*parts)), final_flags)
-    dfd = os.open(str(base), os.O_RDONLY | os.O_DIRECTORY)
+    # A held descriptor for the operator-configured root survives a rename
+    # of the root pathname mid-resolve — the walk stays anchored to the
+    # ORIGINALLY approved directory, not to whatever the name points at now.
+    dfd = os.dup(base_fd) if base_fd is not None else os.open(str(base), os.O_RDONLY | os.O_DIRECTORY)
     try:
         for comp in parts[:-1]:
             ndfd = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dfd)
@@ -234,7 +239,11 @@ def _open_beneath(base: Path, source: str, strict: bool = False) -> int:
 
 
 def _read_source(
-    path: Path, base: Path | None, source: str, strict_walk: bool = False
+    path: Path,
+    base: Path | None,
+    source: str,
+    strict_walk: bool = False,
+    base_fd: int | None = None,
 ) -> tuple[str | None, str, str]:
     """Read the source through ONE file descriptor, TOCTOU-hardened.
 
@@ -262,7 +271,7 @@ def _read_source(
                 walk_source = target.relative_to(resolved_base).as_posix()
             else:
                 walk_source = source
-            fd = _open_beneath(resolved_base, walk_source, strict=strict_walk)
+            fd = _open_beneath(resolved_base, walk_source, strict=strict_walk, base_fd=base_fd)
         else:
             fd = os.open(
                 str(path.resolve()), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
@@ -395,17 +404,17 @@ def _search_texts(raw: str, payload: dict[str, Any]) -> list[str]:
                 texts = [body]
         except Exception:  # noqa: BLE001 - fall back to raw-only search
             pass
-        # The MARKDOWN chunker records offsets into STRIPPED segments (a
-        # headingless note or pre-heading lead-in is `.strip()`-ed before
-        # windowing) — search the stripped renderings too, right after their
-        # unstripped originals. Only for markdown points: plain `index`
-        # offsets are raw-file coordinates, and a stripped candidate would
-        # recreate a stale coordinate system (leading whitespace added to a
-        # plain file must read as `moved`, not `source_changed`).
-        for candidate in list(texts):
-            stripped = candidate.strip()
-            if stripped != candidate:
-                texts.insert(texts.index(candidate) + 1, stripped)
+        # The MARKDOWN chunker records offsets into STRIPPED segments for
+        # HEADINGLESS chunks only (a headingless note or pre-heading lead-in
+        # is `.strip()`-ed before windowing) — for those, search the
+        # stripped renderings too. Heading-anchored sections use raw-based
+        # offsets, and a stripped rendering would fabricate "in position"
+        # for a document that gained leading whitespace (must read moved).
+        if not payload.get("heading_path"):
+            for candidate in list(texts):
+                stripped = candidate.strip()
+                if stripped != candidate:
+                    texts.insert(texts.index(candidate) + 1, stripped)
     return texts
 
 
@@ -481,8 +490,11 @@ def _at_offset(candidate: str, offset: int, fragment: str, ws_gap: bool = False)
         return True
     if not ws_gap:
         return False
-    idx = candidate.find(fragment, offset, offset + len(fragment) + 64)
-    return idx > offset and candidate[offset:idx].isspace()
+    # The chunker's only per-section normalization is stripping a CommonMark
+    # heading indent — at most 3 SPACES. Anything wider (or an inserted
+    # blank line) is a real shift and must read as `moved`.
+    idx = candidate.find(fragment, offset, offset + len(fragment) + 3)
+    return idx > offset and set(candidate[offset:idx]) == {" "}
 
 
 def resolve_payload(
@@ -625,6 +637,7 @@ def resolve_payload(
     for cand_base, p in candidates:
         read_base = cand_base
         read_source_path = source
+        anchor_fd: int | None = None
         if allowed_roots is not None and cand_base is not None:
             anchor = _anchor_for(str(cand_base), allowed_roots)
             if anchor is None:
@@ -639,6 +652,12 @@ def resolve_payload(
                 prefix = (
                     cand_base.resolve().relative_to(anchor_path.resolve()).as_posix()
                 )
+                # Hold a descriptor for the APPROVED root for the duration of
+                # the read: a rename of the root pathname after this open
+                # cannot redirect the walk (it starts from this fd, not from
+                # a re-resolved name).
+                if _SUPPORTS_DIR_FD:
+                    anchor_fd = os.open(str(anchor_path), os.O_RDONLY | os.O_DIRECTORY)
             except (OSError, ValueError, RuntimeError):
                 saw_error = True
                 failure_detail = (
@@ -649,9 +668,17 @@ def resolve_payload(
             read_base = anchor_path
             if not Path(source).is_absolute() and prefix not in (".", ""):
                 read_source_path = f"{prefix}/{source}"
-        text_read, reason, kind = _read_source(
-            p, read_base, read_source_path, strict_walk=allowed_roots is not None
-        )
+        try:
+            text_read, reason, kind = _read_source(
+                p,
+                read_base,
+                read_source_path,
+                strict_walk=allowed_roots is not None,
+                base_fd=anchor_fd,
+            )
+        finally:
+            if anchor_fd is not None:
+                os.close(anchor_fd)
         if kind == "ok":
             raw = text_read
             path = p
