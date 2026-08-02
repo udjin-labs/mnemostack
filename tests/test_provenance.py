@@ -319,6 +319,57 @@ def test_moved_offset_is_body_relative_for_markdown(tmp_path):
     assert res.found_offset == body.index(res.fragment)
 
 
+def test_crlf_sources_verify_like_ingest_read_them(tmp_path):
+    # Ingest reads with Path.read_text() (universal newlines: CRLF -> \n);
+    # the fd-based resolver read must normalize identically or every
+    # untouched CRLF document becomes a snapshot mismatch whose multiline
+    # fragments then fail exact matching.
+    root = _corpus(tmp_path)
+    (root / "windows.md").write_bytes(
+        b"# CRLF note\r\n\r\nLine one about backups.\r\n\r\nLine two about restores.\r\n"
+    )
+    store, chunks = _index(root)
+    crlf = [c for c in chunks if c.payload["source"] == "windows.md"]
+    assert crlf
+    for c in crlf:
+        res = resolve_citation(store, c.id)
+        assert res.verdict == "intact" and res.snapshot == "match", res.detail
+
+
+def test_chunk_kind_alone_is_not_a_window_marker(tmp_path):
+    # A library-ingested item may carry metadata chunk_kind="sliding_window"
+    # for its own reasons — without the full structural convention
+    # (chunk_window + both offsets) its source-native text must resolve
+    # normally, not be refused as synthetic.
+    root = _corpus(tmp_path)
+    store, chunks = _index(root)
+    c = next(c for c in chunks if c.payload["source"] == "alpha.md")
+    quirky = {
+        k: v
+        for k, v in c.payload.items()
+        if k not in (SOURCE_HASH_KEY, SOURCE_CAPTURED_KEY, ID_SCHEME_KEY)
+    }
+    quirky["chunk_kind"] = "sliding_window"  # no chunk_window/offsets
+    res = resolve_payload(c.id, quirky)
+    assert res.verdict == "intact" and res.supported
+
+
+def test_frontmatter_cannot_plant_index_root(tmp_path):
+    # collect_markdown(index_root=None): a frontmatter index_root must not
+    # survive into the payload and redirect resolution to a decoy directory.
+    root = _corpus(tmp_path)
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    (root / "redir.md").write_text(
+        f"---\nindex_root: {decoy}\n---\nRedirect body text.\n"
+    )
+    col = collect_markdown(root)  # no index_root supplied
+    redir = [c for c in col.chunks if c.payload["source"] == "redir.md"]
+    assert redir
+    for c in redir:
+        assert "index_root" not in c.payload
+
+
 def test_frontmatter_cannot_plant_structural_keys(tmp_path):
     # A note whose frontmatter claims `chunk_kind: sliding_window` (or an
     # id-scheme / snapshot key) must not have its chunks misclassified as
@@ -489,6 +540,9 @@ def test_sliding_window_points_are_honest(tmp_path):
     # refuses it before the windowed special case is even consulted.
     windowed = dict(c.payload)
     windowed["chunk_kind"] = "sliding_window"
+    windowed["chunk_window"] = 3
+    windowed["chunk_start_offset"] = 0
+    windowed["chunk_end_offset"] = 2
     windowed["text"] = "synthetic\n" + c.payload["text"] + "\njoined"
     res_match = resolve_payload(c.id, windowed)
     assert res_match.verdict == "unresolvable" and not res_match.supported

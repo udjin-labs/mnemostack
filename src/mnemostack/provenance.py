@@ -197,7 +197,13 @@ def _read_source(path: Path, base: Path | None) -> tuple[str | None, str]:
         return None, f"source exists but cannot be read: {e}"
     finally:
         os.close(fd)
-    return data.decode("utf-8", errors="ignore"), ""
+    # Universal-newline translation, exactly as the ingest-side
+    # ``Path.read_text()`` applied it: the stored snapshot hash, offsets and
+    # chunk text all use normalized \n — decoding raw bytes without this
+    # would make every untouched CRLF document a snapshot mismatch whose
+    # multiline fragments then fail exact matching.
+    text = data.decode("utf-8", errors="ignore").replace("\r\n", "\n").replace("\r", "\n")
+    return text, ""
 
 
 def _root_allowed(base: str, allowed_roots: list[str]) -> bool:
@@ -268,6 +274,22 @@ def _search_texts(raw: str, payload: dict[str, Any]) -> list[str]:
         if stripped != candidate:
             texts.insert(texts.index(candidate) + 1, stripped)
     return texts
+
+
+def _is_windowed(payload: dict[str, Any]) -> bool:
+    """Whether the payload carries the FULL sliding-window convention.
+
+    ``chunk_kind`` alone is not trusted — a library-ingested item or mounted
+    collection may use that key for unrelated metadata, and classifying its
+    source-native text as synthetic would falsely refuse a verifiable
+    citation. The built-in window writers always stamp all four structural
+    fields together."""
+    return (
+        payload.get("chunk_kind") == "sliding_window"
+        and isinstance(payload.get("chunk_window"), int)
+        and isinstance(payload.get("chunk_start_offset"), int)
+        and isinstance(payload.get("chunk_end_offset"), int)
+    )
 
 
 def _fragment_variants(text: str, payload: dict[str, Any]) -> list[str]:
@@ -457,7 +479,7 @@ def resolve_payload(
     texts = _search_texts(raw, payload)
     fragments = _fragment_variants(text, payload)
 
-    if payload.get("chunk_kind") == "sliding_window":
+    if _is_windowed(payload):
         # Windowed points store a SYNTHETIC concatenation (constituent chunks
         # joined with a separator) — that exact blob never exists in the
         # source, so text search cannot verify it. Nor may a matching

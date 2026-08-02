@@ -37,6 +37,12 @@ _RESERVED_STRUCTURAL_KEYS = frozenset(
         ID_SCHEME_KEY,
         SOURCE_HASH_KEY,
         SOURCE_CAPTURED_KEY,
+        # The corpus root drives resolver path selection and is only ever
+        # written by the indexer itself (when the caller supplies one) — a
+        # frontmatter "index_root" could redirect resolution to a decoy
+        # directory. tenant_id is the isolation boundary, same rule.
+        "index_root",
+        "tenant_id",
     }
 )
 
