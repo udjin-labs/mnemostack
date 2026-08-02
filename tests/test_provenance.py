@@ -637,13 +637,22 @@ def test_only_ingest_recorded_prefixes_are_stripped():
         "[A]\nbody",
         "body",
     ]
-    # No marker (or zero): a source-native bracketed first line — e.g. a
-    # Setext heading "[Foo]" — is never stripped, and mutable heading_path
+    # Marker PRESENT (even zero): it is the only authority — heading_path
     # has no say.
-    assert _fragment_variants("[Foo]\n=====\nrest", {"heading_path": ["Foo"]}) == [
+    assert _fragment_variants(
+        "[Foo]\nrest", {"synthetic_prefix_len": 0, "heading_path": ["Foo"]}
+    ) == ["[Foo]\nrest"]
+    # Marker ABSENT (legacy pre-feature payload): the chunker-derived
+    # heading-path prefix is stripped for compatibility...
+    assert _fragment_variants("[Foo]\nrest", {"heading_path": ["Foo"]}) == [
+        "[Foo]\nrest",
+        "rest",
+    ]
+    # ...but a source-native bracketed Setext heading ("[Foo]" is the TITLE,
+    # so heading_path holds "[Foo]") still never matches the derivation.
+    assert _fragment_variants("[Foo]\n=====\nrest", {"heading_path": ["[Foo]"]}) == [
         "[Foo]\n=====\nrest"
     ]
-    assert _fragment_variants("[Foo]\nrest", {"synthetic_prefix_len": 0}) == ["[Foo]\nrest"]
     # Shape sanity: a bogus length that does not end on the "]\n" boundary
     # or covers the whole text is ignored.
     assert _fragment_variants("[A]\nbody", {"synthetic_prefix_len": 3}) == ["[A]\nbody"]

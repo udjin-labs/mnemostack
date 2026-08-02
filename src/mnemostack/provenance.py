@@ -141,7 +141,7 @@ def _candidate_paths(
             base = Path(base_str)
             candidate = Path(source) if Path(source).is_absolute() else base / source
             inside = candidate.resolve().is_relative_to(base.resolve())
-        except (OSError, ValueError):
+        except (OSError, ValueError, RuntimeError):  # RuntimeError: symlink loop
             escaped = True
             continue
         if inside:
@@ -156,7 +156,10 @@ def _candidate_paths(
     return pairs, escaped
 
 
-_URI_SOURCE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://")
+# Scheme-prefixed URIs, with or without the // authority ("https://...",
+# "urn:...", "mailto:...", "file:/..."). The scheme must be 2+ characters so
+# a Windows drive path ("C:\corpus") is NOT classified as a URI.
+_URI_SOURCE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]+:")
 
 
 _SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
@@ -229,7 +232,7 @@ def _read_source(path: Path, base: Path | None, source: str) -> tuple[str | None
             fd = os.open(
                 str(path.resolve()), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
             )
-    except OSError as e:
+    except (OSError, RuntimeError) as e:  # RuntimeError: symlink loop in resolve()
         return None, f"source exists but cannot be opened: {e}"
     try:
         st = os.fstat(fd)
@@ -267,7 +270,7 @@ def _root_allowed(base: str, allowed_roots: list[str]) -> bool:
     try:
         resolved = Path(base).resolve()
         return any(resolved.is_relative_to(Path(ar).resolve()) for ar in allowed_roots)
-    except (OSError, ValueError):  # ValueError: e.g. an embedded NUL byte
+    except (OSError, ValueError, RuntimeError):  # NUL byte / symlink loop
         return False
 
 
@@ -363,14 +366,33 @@ def _fragment_variants(text: str, payload: dict[str, Any]) -> list[str]:
     like ``heading_path``, which could be edited to make the resolver strip
     a REAL cited line and misreport a deleted fragment as supported."""
     variants = [text]
-    n = payload.get("synthetic_prefix_len")
-    if (
-        isinstance(n, int)
-        and 0 < n < len(text)
-        and text.startswith("[")
-        and text[n - 1] == "\n"
-    ):
-        variants.append(text[n:])
+    if "synthetic_prefix_len" in payload:
+        n = payload.get("synthetic_prefix_len")
+        if (
+            isinstance(n, int)
+            and 0 < n < len(text)
+            and text.startswith("[")
+            and text[n - 1] == "\n"
+        ):
+            variants.append(text[n:])
+    else:
+        # LEGACY shape (pre-feature markdown payloads): no marker exists, yet
+        # nested-heading chunks DO store synthetic "[path]\n" text — without
+        # a fallback an untouched legacy citation would misreport `changed`.
+        # Derive the prefix from heading_path exactly as the chunker would
+        # (parent path for sections, full path for windows). These points are
+        # snapshot-absent, so the round-11 ambiguity rule never grants a
+        # mismatch-backed verdict off this derivation.
+        hp = payload.get("heading_path")
+        if isinstance(hp, list) and hp and text.startswith("["):
+            titles = [str(t) for t in hp]
+            expected = {f"[{' > '.join(titles)}]\n"}
+            if len(titles) > 1:
+                expected.add(f"[{' > '.join(titles[:-1])}]\n")
+            for prefix in expected:
+                if text.startswith(prefix) and len(text) > len(prefix):
+                    variants.append(text[len(prefix) :])
+                    break
     return variants
 
 
@@ -452,7 +474,7 @@ def resolve_payload(
         try:
             if Path(source).is_absolute():
                 source = Path(source).relative_to(Path(index_root)).as_posix()
-        except ValueError:
+        except (ValueError, RuntimeError):
             pass  # absolute source outside the old root — handled below as-is
     base_str = root or (index_root if isinstance(index_root, str) else None)
     if allowed_roots is not None:
@@ -551,7 +573,7 @@ def resolve_payload(
                 prefix = (
                     base_of_path.resolve().relative_to(anchor_path.resolve()).as_posix()
                 )
-            except (OSError, ValueError):
+            except (OSError, ValueError, RuntimeError):
                 return _resolution(
                     chunk_id,
                     payload,
