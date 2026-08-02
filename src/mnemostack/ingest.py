@@ -141,6 +141,13 @@ _PROTECTED_PAYLOAD_KEYS = frozenset(
         "tenant_id",
         "source_content_hash",
         "source_captured_at",
+        # Structural resolver keys: the windowed-point marker and the
+        # id-scheme marker decide `mnemostack resolve` verdict paths.
+        "_id_scheme",
+        "chunk_kind",
+        "chunk_window",
+        "chunk_start_offset",
+        "chunk_end_offset",
     }
 )
 

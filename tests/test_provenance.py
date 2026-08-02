@@ -17,6 +17,7 @@ from qdrant_client.models import Distance
 
 from mnemostack.markdown import collect_markdown
 from mnemostack.provenance import (
+    ID_SCHEME_KEY,
     SOURCE_CAPTURED_KEY,
     SOURCE_HASH_KEY,
     Resolution,
@@ -172,7 +173,7 @@ def test_legacy_point_without_snapshot_resolves_via_position(tmp_path):
     root = _corpus(tmp_path)
     store, chunks = _index(root)
     c = next(c for c in chunks if c.payload["source"] == "alpha.md")
-    legacy = {k: v for k, v in c.payload.items() if k not in (SOURCE_HASH_KEY, SOURCE_CAPTURED_KEY)}
+    legacy = {k: v for k, v in c.payload.items() if k not in (SOURCE_HASH_KEY, SOURCE_CAPTURED_KEY, ID_SCHEME_KEY)}
     res = resolve_payload(c.id, legacy)
     assert res.verdict == "intact" and res.supported
     assert res.snapshot == "absent"
@@ -207,7 +208,7 @@ def test_allowed_roots_gate_service_surfaces(tmp_path):
     planted = {
         k: v
         for k, v in c.payload.items()
-        if k not in (SOURCE_HASH_KEY, SOURCE_CAPTURED_KEY)
+        if k not in (SOURCE_HASH_KEY, SOURCE_CAPTURED_KEY, ID_SCHEME_KEY)
     }
     planted["index_root"] = "/"
     planted["source"] = "etc/hostname"
@@ -254,7 +255,7 @@ def test_hash_match_does_not_launder_planted_text(tmp_path):
     # Foreign-shaped payload (no snapshot marker): the planted text is
     # searched for honestly and is simply not there.
     foreign = {
-        k: v for k, v in planted.items() if k not in (SOURCE_HASH_KEY, SOURCE_CAPTURED_KEY)
+        k: v for k, v in planted.items() if k not in (SOURCE_HASH_KEY, SOURCE_CAPTURED_KEY, ID_SCHEME_KEY)
     }
     res2 = resolve_payload(chunks[0].id, foreign)
     assert res2.verdict == "changed" and not res2.supported
@@ -274,7 +275,7 @@ def test_no_offset_points_cannot_claim_position(tmp_path):
     foreign = {
         k: v
         for k, v in no_offset.items()
-        if k not in (SOURCE_HASH_KEY, SOURCE_CAPTURED_KEY)
+        if k not in (SOURCE_HASH_KEY, SOURCE_CAPTURED_KEY, ID_SCHEME_KEY)
     }
     res = resolve_payload(c.id, foreign)
     assert res.verdict == "unresolvable" and "no recorded offset" in res.detail
@@ -287,7 +288,7 @@ def test_integer_and_invalid_ids_resolve_gracefully(tmp_path):
     copy = {
         k: v
         for k, v in c.payload.items()
-        if k not in (SOURCE_HASH_KEY, SOURCE_CAPTURED_KEY)
+        if k not in (SOURCE_HASH_KEY, SOURCE_CAPTURED_KEY, ID_SCHEME_KEY)
     }
     store.upsert(41, [1.0, 0.0, 0.0, 0.0], copy)
     # A decimal-string citation reaches the integer point.
@@ -316,6 +317,43 @@ def test_moved_offset_is_body_relative_for_markdown(tmp_path):
 
     _meta, body = parse_frontmatter((root / "beta.md").read_text())
     assert res.found_offset == body.index(res.fragment)
+
+
+def test_frontmatter_cannot_plant_structural_keys(tmp_path):
+    # A note whose frontmatter claims `chunk_kind: sliding_window` (or an
+    # id-scheme / snapshot key) must not have its chunks misclassified as
+    # windowed or tampered — structural resolver keys are reserved.
+    root = _corpus(tmp_path)
+    (root / "tricky.md").write_text(
+        "---\nchunk_kind: sliding_window\n_id_scheme: bogus\n"
+        "source_content_hash: deadbeef\n---\nPerfectly ordinary body text.\n"
+    )
+    store, chunks = _index(root)
+    tricky = [c for c in chunks if c.payload["source"] == "tricky.md"]
+    assert tricky
+    for c in tricky:
+        assert c.payload.get("chunk_kind") != "sliding_window"
+        res = resolve_citation(store, c.id)
+        assert res.verdict == "intact", res.detail
+
+
+def test_snapshot_helper_without_id_scheme_is_not_first_party(tmp_path):
+    # A mounted collection may use the documented source_snapshot() helper
+    # with its OWN point ids — the hash field alone must not drag it under
+    # the stable_chunk_id commitment.
+    from mnemostack.provenance import source_snapshot
+
+    root = _corpus(tmp_path)
+    raw = (root / "alpha.md").read_text()
+    payload = {
+        "text": "First paragraph about postgres backups and verification.",
+        "source": "alpha.md",
+        "index_root": str(root),
+        "offset": raw.index("First paragraph"),
+        **source_snapshot(raw),
+    }
+    res = resolve_payload("my-own-id-scheme-0001", payload)
+    assert res.verdict == "intact" and res.supported
 
 
 def test_traversal_source_is_refused(tmp_path):
@@ -423,7 +461,7 @@ def test_sliding_window_points_are_honest(tmp_path):
     # A genuine windowed point (no snapshot fields — cmd_index does not
     # stamp them on windows) is honestly unverifiable, hash or no hash.
     genuine = {
-        k: v for k, v in windowed.items() if k not in (SOURCE_HASH_KEY, SOURCE_CAPTURED_KEY)
+        k: v for k, v in windowed.items() if k not in (SOURCE_HASH_KEY, SOURCE_CAPTURED_KEY, ID_SCHEME_KEY)
     }
     res = resolve_payload(c.id, genuine)
     assert res.verdict == "unresolvable" and "constituent" in res.detail
@@ -440,7 +478,7 @@ def test_all_digit_uuid_ids_stay_strings(tmp_path):
     copy = {
         k: v
         for k, v in chunks[0].payload.items()
-        if k not in (SOURCE_HASH_KEY, SOURCE_CAPTURED_KEY)
+        if k not in (SOURCE_HASH_KEY, SOURCE_CAPTURED_KEY, ID_SCHEME_KEY)
     }
     store.upsert(digit_uuid, [1.0, 0.0, 0.0, 0.0], copy)
     assert resolve_citation(store, digit_uuid).verdict == "intact"

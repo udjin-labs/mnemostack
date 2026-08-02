@@ -2248,10 +2248,12 @@ def cmd_index(args: argparse.Namespace) -> int:
             }
             if enricher is not None:
                 apply_enrichment(enricher, IngestItem(text=chunk, source=source, offset=i), payload)
-            # The snapshot is AUTHORITATIVE — applied after enrichment so an
-            # enricher key collision cannot fabricate a capture time or force
-            # a false snapshot mismatch.
+            # The snapshot and id-scheme marker are AUTHORITATIVE — applied
+            # after enrichment so an enricher key collision cannot fabricate
+            # a capture time, force a false snapshot mismatch, or unmark the
+            # id commitment.
             payload.update(snapshot)
+            payload["_id_scheme"] = "stable_chunk_id"
             chunks.append((cid, chunk, payload))
         if args.window_size > 1:
             for start in range(0, len(file_chunks) - args.window_size + 1):

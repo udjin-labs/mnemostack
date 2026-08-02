@@ -15,8 +15,30 @@ from typing import Any
 
 from ..chunking import MarkdownChunker
 from ..ingest import stable_chunk_id
-from ..provenance import SOURCE_CAPTURED_KEY, SOURCE_HASH_KEY, source_snapshot
+from ..provenance import (
+    ID_SCHEME_KEY,
+    SOURCE_CAPTURED_KEY,
+    SOURCE_HASH_KEY,
+    STABLE_ID_SCHEME,
+    source_snapshot,
+)
 from .parse import extract_links, parse_frontmatter
+
+#: Structural payload keys the resolver keys verdicts on — a frontmatter key
+#: of the same name must never masquerade as them (a note with
+#: ``chunk_kind: sliding_window`` in its frontmatter would otherwise render
+#: every chunk of that document unverifiable).
+_RESERVED_STRUCTURAL_KEYS = frozenset(
+    {
+        "chunk_kind",
+        "chunk_window",
+        "chunk_start_offset",
+        "chunk_end_offset",
+        ID_SCHEME_KEY,
+        SOURCE_HASH_KEY,
+        SOURCE_CAPTURED_KEY,
+    }
+)
 
 
 @dataclass
@@ -178,7 +200,12 @@ def collect_markdown(
         meta, body = parse_frontmatter(text)
         # Qdrant payload field names must be strings; a YAML key like ``2026:``
         # parses to an int and would abort the upsert, so coerce keys to str.
-        meta = {str(k): v for k, v in meta.items()}
+        # Structural resolver keys are RESERVED — frontmatter cannot set them.
+        meta = {
+            str(k): v
+            for k, v in meta.items()
+            if str(k) not in _RESERVED_STRUCTURAL_KEYS
+        }
         out.sources.append(rel)
 
         for link in extract_links(body):
@@ -211,6 +238,7 @@ def collect_markdown(
                 "_md_keys",
                 SOURCE_HASH_KEY,
                 SOURCE_CAPTURED_KEY,
+                ID_SCHEME_KEY,
             }
         )
         if index_root is not None:
@@ -224,6 +252,7 @@ def collect_markdown(
             payload: dict[str, Any] = {
                 **meta,
                 **snapshot,
+                ID_SCHEME_KEY: STABLE_ID_SCHEME,
                 "text": chunk.text,
                 "source": rel,
                 "offset": chunk.offset,

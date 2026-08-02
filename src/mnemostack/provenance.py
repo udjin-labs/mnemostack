@@ -45,6 +45,15 @@ from typing import Any
 SOURCE_HASH_KEY = "source_content_hash"
 SOURCE_CAPTURED_KEY = "source_captured_at"
 
+#: Explicit id-scheme marker: ONLY payloads carrying this value have their
+#: deterministic ``stable_chunk_id`` commitment enforced. The snapshot hash
+#: alone must not imply the scheme — a mounted collection or custom indexer
+#: may legitimately use the documented ``source_snapshot()`` helper with its
+#: own point ids. Stamped by the built-in indexers; reserved at ingest so
+#: frontmatter/enrichers cannot plant or clobber it.
+ID_SCHEME_KEY = "_id_scheme"
+STABLE_ID_SCHEME = "stable_chunk_id"
+
 
 def source_content_hash(text: str) -> str:
     """Snapshot hash of a source document's decoded text.
@@ -165,10 +174,10 @@ def _id_commitment_holds(chunk_id: str, payload: dict[str, Any], text: str) -> b
     (source[, index_root], offset, text[, tenant]) — so an in-place payload
     edit (or a payload copied from another genuine point) breaks the
     commitment even when the replacement triple verifies against the file.
-    Only enforced for payloads carrying the ingest snapshot (the first-party
-    marker): foreign/mounted collections use their own id schemes and are
-    exempt. This is defense-in-depth against corruption, not against a
-    hostile store — a writer who controls payloads controls the memory."""
+    Only enforced for payloads explicitly marked ``_id_scheme:
+    stable_chunk_id``: foreign/mounted collections use their own id schemes
+    and are exempt. This is defense-in-depth against corruption, not against
+    a hostile store — a writer who controls payloads controls the memory."""
     from .ingest import stable_chunk_id
 
     source = payload.get("source")
@@ -288,9 +297,11 @@ def resolve_payload(
             verdict="unresolvable",
             detail="source is not a local document (URI-style source)",
         )
-    if SOURCE_HASH_KEY in payload and not _id_commitment_holds(chunk_id, payload, text):
-        # First-party payloads (they carry the ingest snapshot) commit to
-        # (source, offset, text) through their deterministic id — an edited
+    if payload.get(ID_SCHEME_KEY) == STABLE_ID_SCHEME and not _id_commitment_holds(
+        chunk_id, payload, text
+    ):
+        # First-party payloads (explicitly marked with the id scheme) commit
+        # to (source, offset, text) through their deterministic id — an edited
         # or copied payload must not be validated under the original citation.
         return _resolution(
             chunk_id,
