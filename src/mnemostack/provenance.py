@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -95,7 +96,10 @@ def _resolution(chunk_id: str, payload: dict[str, Any], **kw: Any) -> Resolution
     kw.setdefault("stored_offset", None)
     kw.setdefault("found_offset", None)
     kw.setdefault("fragment", None)
-    kw.setdefault("captured_at", payload.get(SOURCE_CAPTURED_KEY))
+    # Foreign/external payloads may carry anything here — the field's contract
+    # (and the HTTP response model) is `str | None`, never a raw object.
+    captured = payload.get(SOURCE_CAPTURED_KEY)
+    kw.setdefault("captured_at", captured if isinstance(captured, str) else None)
     kw["supported"] = kw["verdict"] in _SUPPORTED_VERDICTS
     return Resolution(chunk_id=chunk_id, **kw)
 
@@ -170,6 +174,16 @@ def _search_texts(raw: str, payload: dict[str, Any]) -> list[str]:
                 texts.insert(0, body)
         except Exception:  # noqa: BLE001 - fall back to raw-only search
             pass
+    # The chunker records offsets into STRIPPED segments (a headingless note
+    # or the pre-heading lead-in is `.strip()`-ed before windowing) — for a
+    # document with leading whitespace those coordinates differ from the
+    # unstripped text by the strip amount. Search the stripped renderings
+    # too, right after their unstripped originals, so an unchanged chunk
+    # matches at its stored offset instead of misreporting `moved`.
+    for candidate in list(texts):
+        stripped = candidate.strip()
+        if stripped != candidate:
+            texts.insert(texts.index(candidate) + 1, stripped)
     return texts
 
 
@@ -333,21 +347,13 @@ def resolve_payload(
     if payload.get("chunk_kind") == "sliding_window":
         # Windowed points store a SYNTHETIC concatenation (constituent chunks
         # joined with a separator) — that exact blob never exists in the
-        # source, so text search cannot verify it. The snapshot hash CAN:
-        # a byte-identical document implies the derived text by ingest
-        # determinism. No fragment is returned either way (it would be
-        # embedding text, not source text).
-        if snapshot == "match":
-            return _resolution(
-                chunk_id,
-                payload,
-                verdict="intact",
-                resolved_path=str(path),
-                snapshot=snapshot,
-                stored_offset=stored_offset,
-                found_offset=stored_offset,
-                detail="sliding-window point: source snapshot hash matches the ingested document",
-            )
+        # source, so text search cannot verify it. Nor may a matching
+        # snapshot hash stand in: the hash authenticates the FILE, not the
+        # mutable payload, and `chunk_kind` itself is payload data — trusting
+        # it would let any writer mark planted text as windowed and have it
+        # laundered into `intact`. Honest answer: not verifiable; resolve the
+        # constituent chunks instead (the snapshot comparison is still
+        # reported for whatever it is worth).
         return _resolution(
             chunk_id,
             payload,
@@ -358,7 +364,7 @@ def resolve_payload(
             detail=(
                 "sliding-window point: the stored text is a synthetic "
                 "concatenation that cannot be text-verified against the "
-                "changed source (snapshot hash no longer matches)"
+                "source — resolve the constituent chunks instead"
             ),
         )
 
@@ -489,10 +495,15 @@ def resolve_citation(
     trust level only; service surfaces keep the default. ``text_key`` and
     ``allowed_roots``: see :func:`resolve_payload`."""
     # Integer-id collections render citations as decimal strings — hand
-    # Qdrant the integer back, or the lookup misses its own point.
+    # Qdrant the integer back, or the lookup misses its own point. But a
+    # 32-digit simple-form UUID is also all digits and must STAY a string
+    # (Qdrant distinguishes unsigned-int ids from UUID strings).
     lookup_id: str | int = chunk_id
     if isinstance(chunk_id, str) and chunk_id.isdigit():
-        lookup_id = int(chunk_id)
+        try:
+            uuid.UUID(chunk_id)
+        except ValueError:
+            lookup_id = int(chunk_id)
     try:
         payload = store.retrieve_payload(lookup_id, tenant=tenant)
     except Exception as e:  # noqa: BLE001 — an invalid handle (e.g. a graph

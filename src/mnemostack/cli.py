@@ -2212,6 +2212,7 @@ def cmd_index(args: argparse.Namespace) -> int:
         return 2
 
     from .ingest import IngestItem, apply_enrichment
+    from .provenance import source_snapshot
 
     enricher = _load_enricher(args.enrich) if args.enrich else None
 
@@ -2228,6 +2229,10 @@ def cmd_index(args: argparse.Namespace) -> int:
         text = f.read_text(encoding="utf-8", errors="ignore")
         source = str(f.relative_to(target if target.is_dir() else target.parent))
         visited_sources.add(source)
+        # Document snapshot for verifiable citations (`mnemostack resolve`):
+        # chunk offsets here are exact character offsets into this text, so
+        # non-windowed chunks verify by hash AND position.
+        snapshot = source_snapshot(text)
         file_chunks: list[tuple[int, str]] = []
         for i in range(0, len(text), args.chunk_size):
             chunk = text[i : i + args.chunk_size]
@@ -2240,6 +2245,7 @@ def cmd_index(args: argparse.Namespace) -> int:
                 "source": source,
                 "offset": i,
                 "index_root": index_root,
+                **snapshot,
             }
             if enricher is not None:
                 apply_enrichment(enricher, IngestItem(text=chunk, source=source, offset=i), payload)
@@ -2259,6 +2265,7 @@ def cmd_index(args: argparse.Namespace) -> int:
                     "chunk_kind": "sliding_window",
                     "chunk_start_offset": window[0][0],
                     "chunk_end_offset": window[-1][0],
+                    **snapshot,
                 }
                 if enricher is not None:
                     # Window metadata travels on the item so enrichers shared

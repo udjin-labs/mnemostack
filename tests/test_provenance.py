@@ -383,20 +383,62 @@ def test_explicit_root_fully_overrides_stored_root(tmp_path):
 
 
 def test_sliding_window_points_are_honest(tmp_path):
+    # Windowed text is synthetic BY DESIGN, and chunk_kind is payload data —
+    # a matching document hash must not launder it into `intact` (a writer
+    # could mark planted text as windowed to skip fragment verification).
+    # The only honest verdict is unresolvable, hash match or not.
     root = _corpus(tmp_path)
     store, chunks = _index(root)
     c = next(c for c in chunks if c.payload["source"] == "alpha.md")
     windowed = dict(c.payload)
     windowed["chunk_kind"] = "sliding_window"
     windowed["text"] = "synthetic\n" + c.payload["text"] + "\njoined"
-    # Hash still matches → intact by ingest determinism.
-    assert resolve_payload(c.id, windowed).verdict == "intact"
-    # Hash mismatch → the synthetic blob cannot be text-verified: honest
-    # unresolvable, never a false `changed`.
+    res_match = resolve_payload(c.id, windowed)
+    assert res_match.verdict == "unresolvable" and not res_match.supported
+    assert "constituent" in res_match.detail
     (root / "alpha.md").write_text(_DOC + "\ntail edit\n")
     res = resolve_payload(c.id, windowed)
     assert res.verdict == "unresolvable" and not res.supported
-    assert "sliding-window" in res.detail
+
+
+def test_all_digit_uuid_ids_stay_strings(tmp_path):
+    root = _corpus(tmp_path)
+    store, chunks = _index(root)
+    digit_uuid = "11111111111111111111111111111111"  # valid simple-form UUID
+    store.upsert(digit_uuid, [1.0, 0.0, 0.0, 0.0], dict(chunks[0].payload))
+    assert resolve_citation(store, digit_uuid).verdict == "intact"
+
+
+def test_non_string_captured_at_normalizes_to_none(tmp_path):
+    from mnemostack.provenance import SOURCE_CAPTURED_KEY as CK
+
+    root = _corpus(tmp_path)
+    store, chunks = _index(root)
+    weird = dict(chunks[0].payload)
+    weird[CK] = 1722600000  # epoch number from an external writer
+    res = resolve_payload(chunks[0].id, weird)
+    assert res.verdict == "intact"
+    assert res.captured_at is None  # response contract is str | None
+
+
+def test_leading_whitespace_document_offsets_still_verify(tmp_path):
+    # A headingless note starting with whitespace: the chunker strips the
+    # text before windowing, so stored offsets are stripped-coordinates —
+    # an unchanged later chunk must verify at its offset, not misreport
+    # `moved`.
+    root = _corpus(tmp_path)
+    para = "word " * 80  # ~400 chars, forces multiple 1200-char windows
+    (root / "lead.md").write_text("\n\n\n" + "\n\n".join(para for _ in range(6)))
+    store, chunks = _index(root)
+    lead = [c for c in chunks if c.payload["source"] == "lead.md"]
+    assert len(lead) > 1  # windowed, with a stripped coordinate base
+    # Snapshot mismatch forces the position path (the hash shortcut would
+    # mask a coordinate bug): touch the file's END only.
+    p = root / "lead.md"
+    p.write_text(p.read_text() + "\n\ntail")
+    for c in lead:
+        res = resolve_citation(store, c.id)
+        assert res.verdict == "source_changed", (c.payload["offset"], res.verdict)
 
 
 def test_hash_match_returns_source_native_fragment(tmp_path):
