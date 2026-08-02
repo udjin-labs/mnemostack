@@ -148,6 +148,7 @@ _PROTECTED_PAYLOAD_KEYS = frozenset(
         "chunk_window",
         "chunk_start_offset",
         "chunk_end_offset",
+        "synthetic_prefix_len",
     }
 )
 

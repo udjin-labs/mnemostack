@@ -351,25 +351,21 @@ def _fragment_variants(text: str, payload: dict[str, Any]) -> list[str]:
     """The stored text as it may appear IN the source document.
 
     The markdown chunker prepends synthetic heading context
-    (``[Parent > Path]\\n<body>``) to some chunks for embedding quality — that
-    prefix does not exist in the source. Only the prefixes the chunker would
-    actually DERIVE from this chunk's heading path are stripped: a chunk
-    whose source-native text merely begins with a bracketed line (e.g. a
-    Setext heading ``[Foo]``) keeps its full-text reading, so removing that
-    real line from the source cannot masquerade as still-supported."""
+    (``[Parent > Path]\\n<body>``) to some chunks for embedding quality — and
+    records EXACTLY how many characters it added (``synthetic_prefix_len``)
+    at ingest. Stripping uses only that ingest-recorded length, with shape
+    sanity checks — never a reconstruction from other (mutable) metadata
+    like ``heading_path``, which could be edited to make the resolver strip
+    a REAL cited line and misreport a deleted fragment as supported."""
     variants = [text]
-    hp = payload.get("heading_path")
-    if isinstance(hp, list) and hp and text.startswith("["):
-        titles = [str(t) for t in hp]
-        # Sections get the PARENT path; oversized-section windows get the
-        # full path (see MarkdownChunker) — accept exactly those two.
-        expected = {f"[{' > '.join(titles)}]\n"}
-        if len(titles) > 1:
-            expected.add(f"[{' > '.join(titles[:-1])}]\n")
-        for prefix in expected:
-            if text.startswith(prefix) and len(text) > len(prefix):
-                variants.append(text[len(prefix) :])
-                break
+    n = payload.get("synthetic_prefix_len")
+    if (
+        isinstance(n, int)
+        and 0 < n < len(text)
+        and text.startswith("[")
+        and text[n - 1] == "\n"
+    ):
+        variants.append(text[n:])
     return variants
 
 
@@ -443,6 +439,16 @@ def resolve_payload(
             ),
         )
     index_root = payload.get("index_root")
+    if root and isinstance(index_root, str) and index_root:
+        # Relocation contract: an explicit root REPLACES the recorded one.
+        # A point that stored its source as an ABSOLUTE path under the old
+        # root must be rebased onto the override, or the confinement check
+        # would reject the relocated corpus as an escape.
+        try:
+            if Path(source).is_absolute():
+                source = Path(source).relative_to(Path(index_root)).as_posix()
+        except ValueError:
+            pass  # absolute source outside the old root — handled below as-is
     base_str = root or (index_root if isinstance(index_root, str) else None)
     if allowed_roots is not None:
         if not allowed_roots:

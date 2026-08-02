@@ -514,24 +514,43 @@ def test_posix_backslash_filenames_survive(tmp_path):
     assert res.verdict == "intact" and res.supported
 
 
-def test_only_chunker_derived_prefixes_are_stripped():
+def test_only_ingest_recorded_prefixes_are_stripped():
     from mnemostack.provenance import _fragment_variants
 
-    # Genuine synthetic prefixes: parent path (sections) or full path
-    # (oversized-section windows).
-    assert _fragment_variants("[A > B]\nbody", {"heading_path": ["A", "B"]}) == [
-        "[A > B]\nbody",
-        "body",
-    ]
-    assert _fragment_variants("[A]\nbody", {"heading_path": ["A", "B"]}) == [
+    # The ingest-recorded length is the ONLY strip authority.
+    assert _fragment_variants("[A]\nbody", {"synthetic_prefix_len": 4}) == [
         "[A]\nbody",
         "body",
     ]
-    # A source-native bracketed first line (e.g. a Setext heading "[Foo]")
-    # is NOT stripped — removing that real line must not stay "supported".
-    assert _fragment_variants("[Foo]\n=====\nrest", {"heading_path": ["[Foo]"]}) == [
+    # No marker (or zero): a source-native bracketed first line — e.g. a
+    # Setext heading "[Foo]" — is never stripped, and mutable heading_path
+    # has no say.
+    assert _fragment_variants("[Foo]\n=====\nrest", {"heading_path": ["Foo"]}) == [
         "[Foo]\n=====\nrest"
     ]
+    assert _fragment_variants("[Foo]\nrest", {"synthetic_prefix_len": 0}) == ["[Foo]\nrest"]
+    # Shape sanity: a bogus length that does not end on the "]\n" boundary
+    # or covers the whole text is ignored.
+    assert _fragment_variants("[A]\nbody", {"synthetic_prefix_len": 3}) == ["[A]\nbody"]
+    assert _fragment_variants("[A]\n", {"synthetic_prefix_len": 4}) == ["[A]\n"]
+
+
+def test_root_override_rebases_absolute_sources(tmp_path):
+    # A point that recorded an ABSOLUTE source under its old root must
+    # follow --root to the relocated corpus (the override replaces the
+    # recorded root, docs promise relocation works).
+    root = _corpus(tmp_path)
+    payload = {
+        "text": "First paragraph about postgres backups and verification.",
+        "source": str(root / "alpha.md"),
+        "index_root": str(root),
+        "offset": _DOC.index("First paragraph"),
+    }
+    moved_root = tmp_path / "relocated"
+    root.rename(moved_root)
+    assert resolve_payload("x", payload).verdict == "missing"
+    res = resolve_payload("x", payload, root=str(moved_root))
+    assert res.verdict == "intact" and res.supported
 
 
 def test_traversal_source_is_refused(tmp_path):

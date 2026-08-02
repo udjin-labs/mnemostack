@@ -43,6 +43,7 @@ _RESERVED_STRUCTURAL_KEYS = frozenset(
         # directory. tenant_id is the isolation boundary, same rule.
         "index_root",
         "tenant_id",
+        "synthetic_prefix_len",
     }
 )
 
@@ -245,6 +246,7 @@ def collect_markdown(
                 SOURCE_HASH_KEY,
                 SOURCE_CAPTURED_KEY,
                 ID_SCHEME_KEY,
+                "synthetic_prefix_len",
             }
         )
         if index_root is not None:
@@ -262,6 +264,10 @@ def collect_markdown(
                 "text": chunk.text,
                 "source": rel,
                 "offset": chunk.offset,
+                # Ingest-recorded synthetic-prefix length (0 = none): the
+                # resolver strips exactly this many characters, never a
+                # reconstruction from other metadata.
+                "synthetic_prefix_len": int(chunk.metadata.get("synthetic_prefix_len", 0)),
                 # ``heading_path`` is parser-derived and reserved — always set it
                 # (even to []) so a frontmatter key of the same name can't inject
                 # bogus section hierarchy on a headingless chunk.
