@@ -159,21 +159,62 @@ def _candidate_paths(
 _URI_SOURCE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://")
 
 
-def _read_source(path: Path, base: Path | None) -> tuple[str | None, str]:
+_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
+
+
+def _open_beneath(base: Path, source: str) -> int:
+    """Open ``source`` beneath ``base`` with EVERY component refusing symlinks.
+
+    ``O_NOFOLLOW`` on a single open only protects the final component — a
+    corpus writer racing the resolver could swap an intermediate directory
+    for a symlink after the containment check and divert the read outside
+    the root. So walk with ``openat`` semantics (``dir_fd``), each component
+    ``O_NOFOLLOW`` (the same primitive the audit trail uses). Deliberate
+    trade-off, identical to the audit trail's: a legitimately symlinked
+    entry inside the corpus is ALSO refused, loudly — index real paths.
+    Raises OSError on refusal."""
+    parts = [p for p in re.split(r"[/\\]+", source) if p and p != "."]
+    if not parts or ".." in parts:
+        raise OSError("source path escapes the corpus root")
+    final_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    if not _SUPPORTS_DIR_FD:
+        # No openat walk (Windows, where O_NOFOLLOW is also absent): refuse
+        # symlinks by lstat-walking first — check-then-open, best effort on a
+        # secondary platform where symlink creation needs elevation anyway.
+        probe = base
+        for comp in parts:
+            probe = probe / comp
+            if probe.is_symlink():
+                raise OSError(f"source path component {comp!r} is a symlink — refused")
+        return os.open(str(base.joinpath(*parts)), final_flags)
+    dfd = os.open(str(base), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for comp in parts[:-1]:
+            ndfd = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dfd)
+            os.close(dfd)
+            dfd = ndfd
+        return os.open(parts[-1], final_flags, dir_fd=dfd)
+    finally:
+        os.close(dfd)
+
+
+def _read_source(path: Path, base: Path | None, source: str) -> tuple[str | None, str]:
     """Read the source through ONE file descriptor, TOCTOU-hardened.
 
-    The containment check validated a path; a writer racing the resolver
-    could swap that entry for a symlink (or a bigger file) between the check
-    and the read. So: re-resolve, re-verify containment, open the resolved
-    path with ``O_NOFOLLOW`` (a final-component symlink planted after the
-    resolve fails with ELOOP instead of being followed), and take BOTH the
-    size cap and the bytes from the same descriptor via ``fstat``/``read``.
-    Returns ``(text, "")`` or ``(None, reason)``."""
+    Confined reads (a base is known) go through the symlink-refusing
+    ``openat`` walk. Unconfined reads (operator CLI, no root known — or an
+    absolute source validated against its base) fall back to resolve +
+    final-component ``O_NOFOLLOW``. Size cap and bytes both come from the
+    SAME descriptor via ``fstat``/``read``. Returns ``(text, "")`` or
+    ``(None, reason)``."""
     try:
-        target = path.resolve()
-        if base is not None and not target.is_relative_to(base.resolve()):
-            return None, "source path escapes the corpus root — refusing to read it"
-        fd = os.open(str(target), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        if base is not None and not Path(source).is_absolute():
+            fd = _open_beneath(base.resolve(), source)
+        else:
+            target = path.resolve()
+            if base is not None and not target.is_relative_to(base.resolve()):
+                return None, "source path escapes the corpus root — refusing to read it"
+            fd = os.open(str(target), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     except OSError as e:
         return None, f"source exists but cannot be opened: {e}"
     try:
@@ -297,14 +338,24 @@ def _fragment_variants(text: str, payload: dict[str, Any]) -> list[str]:
 
     The markdown chunker prepends synthetic heading context
     (``[Parent > Path]\\n<body>``) to some chunks for embedding quality — that
-    prefix does not exist in the source. Try both readings rather than guess:
-    a chunk whose real text begins with ``[`` keeps its full-text variant, a
-    prefixed chunk matches via the stripped one."""
+    prefix does not exist in the source. Only the prefixes the chunker would
+    actually DERIVE from this chunk's heading path are stripped: a chunk
+    whose source-native text merely begins with a bracketed line (e.g. a
+    Setext heading ``[Foo]``) keeps its full-text reading, so removing that
+    real line from the source cannot masquerade as still-supported."""
     variants = [text]
-    if payload.get("heading_path") and text.startswith("["):
-        _prefix, sep, rest = text.partition("]\n")
-        if sep and rest:
-            variants.append(rest)
+    hp = payload.get("heading_path")
+    if isinstance(hp, list) and hp and text.startswith("["):
+        titles = [str(t) for t in hp]
+        # Sections get the PARENT path; oversized-section windows get the
+        # full path (see MarkdownChunker) — accept exactly those two.
+        expected = {f"[{' > '.join(titles)}]\n"}
+        if len(titles) > 1:
+            expected.add(f"[{' > '.join(titles[:-1])}]\n")
+        for prefix in expected:
+            if text.startswith(prefix) and len(text) > len(prefix):
+                variants.append(text[len(prefix) :])
+                break
     return variants
 
 
@@ -457,7 +508,7 @@ def resolve_payload(
             verdict="missing",
             detail="source document not found under the known corpus root",
         )
-    raw, read_error = _read_source(path, base_of_path)
+    raw, read_error = _read_source(path, base_of_path, source)
     if raw is None:
         return _resolution(
             chunk_id,

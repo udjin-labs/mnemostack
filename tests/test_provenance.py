@@ -419,10 +419,12 @@ def test_access_denied_candidate_is_unresolvable(tmp_path, monkeypatch):
     assert res.verdict == "unresolvable" and "cannot be accessed" in res.detail
 
 
-def test_symlink_within_root_resolves(tmp_path):
-    # A symlink whose target stays INSIDE the corpus root is legitimate —
-    # the O_NOFOLLOW hardening must only refuse post-check swaps, not
-    # ordinary in-corpus links.
+def test_symlinked_source_is_refused_in_confined_reads(tmp_path):
+    # The openat walk refuses symlinks on EVERY component (the audit trail's
+    # documented trade-off): a corpus writer racing the resolver could
+    # otherwise swap a component and divert the read outside the root.
+    # Legitimately symlinked corpus entries are refused loudly — index real
+    # paths.
     root = _corpus(tmp_path)
     store, chunks = _index(root)
     link = root / "gamma.md"
@@ -438,7 +440,47 @@ def test_symlink_within_root_resolves(tmp_path):
     }
     aliased["source"] = "gamma.md"
     res = resolve_payload(c.id, aliased)
-    assert res.verdict == "intact" and res.supported
+    assert res.verdict == "unresolvable" and not res.supported
+
+
+def test_symlinked_intermediate_directory_is_refused(tmp_path):
+    root = _corpus(tmp_path)
+    real = root / "real"
+    real.mkdir()
+    (real / "doc.md").write_text("Nested body text about backups.\n")
+    link_dir = root / "sub"
+    try:
+        link_dir.symlink_to(real, target_is_directory=True)
+    except OSError:
+        return
+    payload = {
+        "text": "Nested body text about backups.",
+        "source": "sub/doc.md",
+        "index_root": str(root),
+        "offset": 0,
+    }
+    res = resolve_payload("x", payload)
+    assert res.verdict == "unresolvable" and not res.supported
+
+
+def test_only_chunker_derived_prefixes_are_stripped():
+    from mnemostack.provenance import _fragment_variants
+
+    # Genuine synthetic prefixes: parent path (sections) or full path
+    # (oversized-section windows).
+    assert _fragment_variants("[A > B]\nbody", {"heading_path": ["A", "B"]}) == [
+        "[A > B]\nbody",
+        "body",
+    ]
+    assert _fragment_variants("[A]\nbody", {"heading_path": ["A", "B"]}) == [
+        "[A]\nbody",
+        "body",
+    ]
+    # A source-native bracketed first line (e.g. a Setext heading "[Foo]")
+    # is NOT stripped — removing that real line must not stay "supported".
+    assert _fragment_variants("[Foo]\n=====\nrest", {"heading_path": ["[Foo]"]}) == [
+        "[Foo]\n=====\nrest"
+    ]
 
 
 def test_traversal_source_is_refused(tmp_path):
