@@ -807,6 +807,99 @@ def test_root_override_rebases_absolute_sources(tmp_path):
     assert res.verdict == "intact" and res.supported
 
 
+def test_symlinked_allowed_root_is_refused(tmp_path):
+    # RELEASE BLOCKER regression: opening the allowed root BY NAME would
+    # follow a symlink planted at the root's own name (a writer with access
+    # to the root's parent swaps the directory between configuration and
+    # open), anchoring the whole confinement outside the allowlist. The root
+    # open must walk its own components with O_NOFOLLOW — a symlinked
+    # configured root is refused, never silently followed.
+    import os as _os
+
+    if _os.open not in _os.supports_dir_fd:
+        return
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "doc.md").write_text("Outside body text.\n")
+    swapped = tmp_path / "approved"
+    try:
+        swapped.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        return
+    payload = {
+        "text": "Outside body text.",
+        "source": "doc.md",
+        "index_root": str(swapped),
+        "offset": 0,
+    }
+    res = resolve_payload("x", payload, allowed_roots=[str(swapped)])
+    assert res.verdict == "unresolvable" and not res.supported
+    assert "symlink" in res.detail
+
+
+def test_symlinked_component_in_allowed_root_path_is_refused(tmp_path):
+    import os as _os
+
+    if _os.open not in _os.supports_dir_fd:
+        return
+    real_parent = tmp_path / "real-parent"
+    (real_parent / "corpus").mkdir(parents=True)
+    (real_parent / "corpus" / "doc.md").write_text("Body text here.\n")
+    linked_parent = tmp_path / "linked-parent"
+    try:
+        linked_parent.symlink_to(real_parent, target_is_directory=True)
+    except OSError:
+        return
+    configured = str(linked_parent / "corpus")  # symlinked INTERMEDIATE
+    payload = {
+        "text": "Body text here.",
+        "source": "doc.md",
+        "index_root": configured,
+        "offset": 0,
+    }
+    res = resolve_payload("x", payload, allowed_roots=[configured])
+    assert res.verdict == "unresolvable" and "symlink" in res.detail
+
+
+def test_relative_configured_root_resolves_and_refuses_symlinks(tmp_path, monkeypatch):
+    import os as _os
+
+    if _os.open not in _os.supports_dir_fd:
+        return
+    # Operators can configure a RELATIVE root (no normalization on the env
+    # var) — the "." anchor branch of the root walk must work and must
+    # still refuse symlinked components.
+    monkeypatch.chdir(tmp_path)
+    root = _corpus(tmp_path)
+    store, chunks = _index(root)
+    res = resolve_citation(store, chunks[0].id, allowed_roots=["corpus"])
+    assert res.verdict == "intact", res.detail
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "alpha.md").write_text(_DOC)
+    link = tmp_path / "linked"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        return
+    repointed = dict(chunks[0].payload)
+    repointed = {
+        k: v
+        for k, v in repointed.items()
+        if k not in (SOURCE_HASH_KEY, SOURCE_CAPTURED_KEY, ID_SCHEME_KEY)
+    }
+    repointed["index_root"] = "linked"
+    res2 = resolve_payload(chunks[0].id, repointed, allowed_roots=["linked"])
+    assert res2.verdict == "unresolvable" and "symlink" in res2.detail
+
+
+def test_real_allowed_root_still_resolves(tmp_path):
+    root = _corpus(tmp_path)
+    store, chunks = _index(root)
+    res = resolve_citation(store, chunks[0].id, allowed_roots=[str(tmp_path)])
+    assert res.verdict == "intact" and res.supported
+
+
 def test_traversal_source_is_refused(tmp_path):
     # `source` is an untrusted label — a ../ escape under the corpus root
     # must be refused outright, even when the target file exists.

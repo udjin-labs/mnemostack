@@ -238,6 +238,42 @@ def _open_beneath(
         os.close(dfd)
 
 
+def _open_root(root_path: str) -> int:
+    """Open an operator-configured root directory WITHOUT following symlinks.
+
+    Opening the root by pathname would follow a symlink planted at the
+    root's own name (a writer with access to the root's PARENT can swap the
+    directory between configuration and open) — anchoring the entire
+    confinement at an attacker-chosen target. So the root path itself is
+    walked component-by-component from the filesystem anchor with
+    ``O_NOFOLLOW``, the same discipline the source walk uses. Deliberate
+    trade-off (identical to the audit trail's): a configured root containing
+    ANY symlinked component is refused loudly — point
+    ``MNEMOSTACK_RESOLVE_ROOTS`` at real paths. Raises OSError on refusal."""
+    if not _SUPPORTS_DIR_FD:
+        # Self-guarding: dir_fd-less platforms would raise
+        # NotImplementedError from os.open, escaping the OSError handling
+        # at the call sites. Services fail closed there anyway.
+        raise OSError("openat walk unavailable on this platform")
+    p = Path(root_path)
+    parts = p.parts
+    if p.is_absolute():
+        anchor, walk = parts[0], parts[1:]
+    else:
+        anchor, walk = ".", parts
+    dfd = os.open(anchor, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for comp in walk:
+            ndfd = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dfd)
+            os.close(dfd)
+            dfd = ndfd
+        result, dfd = dfd, -1
+        return result
+    finally:
+        if dfd != -1:
+            os.close(dfd)
+
+
 def _read_source(
     path: Path,
     base: Path | None,
@@ -654,20 +690,32 @@ def resolve_payload(
                 continue
             try:
                 anchor_path = Path(anchor)
+                # The prefix is a by-name resolve and can go stale in a race
+                # — that is a wrong-but-CONFINED read at worst: the actual
+                # walk below is bounded by the freshly opened, symlink-
+                # verified anchor_fd and rejects ".." components, so escape
+                # stays impossible by construction.
                 prefix = (
                     cand_base.resolve().relative_to(anchor_path.resolve()).as_posix()
                 )
                 # Hold a descriptor for the APPROVED root for the duration of
-                # the read: a rename of the root pathname after this open
-                # cannot redirect the walk (it starts from this fd, not from
-                # a re-resolved name).
+                # the read — acquired WITHOUT following symlinks on any
+                # component of the root path itself (a by-name open would
+                # follow a symlink planted at the root's own name and anchor
+                # the confinement outside the allowlist). A rename after this
+                # open cannot redirect the walk either: it starts from this
+                # fd, not from a re-resolved name.
                 if _SUPPORTS_DIR_FD:
-                    anchor_fd = os.open(str(anchor_path), os.O_RDONLY | os.O_DIRECTORY)
-            except (OSError, ValueError, RuntimeError):
+                    anchor_fd = _open_root(str(anchor_path))
+            except (OSError, ValueError, RuntimeError) as e:
                 saw_error = True
+                # Exception TYPE only: the OSError carries the offending
+                # path component in .filename, and details are public
+                # resolve output — no server directory names in it.
                 failure_detail = (
-                    "the point's corpus root is not in the operator-configured "
-                    "resolution allowlist"
+                    "the operator-configured resolution root cannot be opened "
+                    "without following a symlink (configure real paths): "
+                    f"{type(e).__name__}"
                 )
                 continue
             read_base = anchor_path
