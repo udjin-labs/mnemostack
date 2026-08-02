@@ -463,6 +463,56 @@ def test_symlinked_intermediate_directory_is_refused(tmp_path):
     assert res.verdict == "unresolvable" and not res.supported
 
 
+def test_nested_index_root_walks_from_the_allowed_root(tmp_path):
+    # index_root nested beneath an allowlisted corpus: the walk anchors at
+    # the OPERATOR root, so the nested prefix is O_NOFOLLOW-protected too.
+    allowed = tmp_path / "allowed"
+    nested = allowed / "team" / "docs"
+    nested.mkdir(parents=True)
+    (nested / "note.md").write_text("Nested note body.\n")
+    payload = {
+        "text": "Nested note body.",
+        "source": "note.md",
+        "index_root": str(nested),
+        "offset": 0,
+    }
+    res = resolve_payload("x", payload, allowed_roots=[str(allowed)])
+    assert res.verdict == "intact" and res.supported
+    # Swap the nested prefix for an out-of-root symlink: refused by the walk.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "docs").mkdir()
+    (outside / "docs" / "note.md").write_text("Nested note body.\n")
+    import shutil
+
+    shutil.rmtree(allowed / "team")
+    try:
+        (allowed / "team").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        return
+    res2 = resolve_payload("x", payload, allowed_roots=[str(allowed)])
+    assert res2.verdict == "unresolvable" and not res2.supported
+
+
+def test_plain_index_offsets_are_raw_coordinates(tmp_path):
+    # Non-markdown-chunker points (plain `index`): offsets are raw-file
+    # coordinates — leading whitespace added to the file must read as
+    # `moved`, never `source_changed` at a stale stripped coordinate.
+    root = _corpus(tmp_path)
+    doc = root / "plain.md"
+    doc.write_text("hello world of plain indexing.\n")
+    payload = {
+        "text": "hello world",
+        "source": "plain.md",
+        "index_root": str(root),
+        "offset": 0,
+    }
+    assert resolve_payload("x", payload).verdict == "intact"
+    doc.write_text("\n\n" + "hello world of plain indexing.\n")
+    res = resolve_payload("x", payload)
+    assert res.verdict == "moved" and res.found_offset == 2
+
+
 def test_absolute_confined_source_goes_through_the_walk(tmp_path):
     root = _corpus(tmp_path)
     # Absolute source INSIDE the root: resolves (via the walk), and a

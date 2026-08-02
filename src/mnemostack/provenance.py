@@ -318,16 +318,17 @@ def _search_texts(raw: str, payload: dict[str, Any]) -> list[str]:
                 texts.insert(0, body)
         except Exception:  # noqa: BLE001 - fall back to raw-only search
             pass
-    # The chunker records offsets into STRIPPED segments (a headingless note
-    # or the pre-heading lead-in is `.strip()`-ed before windowing) — for a
-    # document with leading whitespace those coordinates differ from the
-    # unstripped text by the strip amount. Search the stripped renderings
-    # too, right after their unstripped originals, so an unchanged chunk
-    # matches at its stored offset instead of misreporting `moved`.
-    for candidate in list(texts):
-        stripped = candidate.strip()
-        if stripped != candidate:
-            texts.insert(texts.index(candidate) + 1, stripped)
+        # The MARKDOWN chunker records offsets into STRIPPED segments (a
+        # headingless note or pre-heading lead-in is `.strip()`-ed before
+        # windowing) — search the stripped renderings too, right after their
+        # unstripped originals. Only for markdown points: plain `index`
+        # offsets are raw-file coordinates, and a stripped candidate would
+        # recreate a stale coordinate system (leading whitespace added to a
+        # plain file must read as `moved`, not `source_changed`).
+        for candidate in list(texts):
+            stripped = candidate.strip()
+            if stripped != candidate:
+                texts.insert(texts.index(candidate) + 1, stripped)
     return texts
 
 
@@ -528,7 +529,38 @@ def resolve_payload(
             verdict="missing",
             detail="source document not found under the known corpus root",
         )
-    raw, read_error = _read_source(path, base_of_path, source)
+    read_base = base_of_path
+    read_source_path = source
+    if allowed_roots is not None and base_of_path is not None:
+        # Anchor the descriptor walk at the OPERATOR-configured root, not at
+        # the payload-supplied (possibly nested) index_root: a writer able to
+        # rename that nested directory could swap it for an out-of-root
+        # symlink after the allowlist check. Walking the nested prefix AND
+        # the source beneath the allowed root's descriptor keeps every
+        # component O_NOFOLLOW-protected relative to operator-trusted ground.
+        anchor = next(
+            (a for a in allowed_roots if _root_allowed(str(base_of_path), [a])), None
+        )
+        if anchor is not None:
+            try:
+                anchor_path = Path(anchor)
+                prefix = (
+                    base_of_path.resolve().relative_to(anchor_path.resolve()).as_posix()
+                )
+            except (OSError, ValueError):
+                return _resolution(
+                    chunk_id,
+                    payload,
+                    verdict="unresolvable",
+                    detail=(
+                        "the point's corpus root is not in the operator-configured "
+                        "resolution allowlist"
+                    ),
+                )
+            read_base = anchor_path
+            if not Path(source).is_absolute() and prefix not in (".", ""):
+                read_source_path = f"{prefix}/{source}"
+    raw, read_error = _read_source(path, read_base, read_source_path)
     if raw is None:
         return _resolution(
             chunk_id,
