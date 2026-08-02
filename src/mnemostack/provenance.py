@@ -443,7 +443,16 @@ def resolve_payload(
             verdict="unresolvable",
             detail=f"payload carries no resolvable source/{text_key} pair",
         )
-    if _URI_SOURCE.match(source):
+    payload_root = payload.get("index_root")
+    if (
+        not root
+        and not (isinstance(payload_root, str) and payload_root)
+        and _URI_SOURCE.match(source)
+    ):
+        # URI classification applies only when NO corpus root is known: with
+        # a root, `source` is a corpus-relative FILENAME — and on POSIX a
+        # colon is a legal filename character ("notes:2026.md"), so a rooted
+        # source must resolve beneath its root, not be misread as a scheme.
         return _resolution(
             chunk_id,
             payload,

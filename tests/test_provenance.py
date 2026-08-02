@@ -233,12 +233,32 @@ def test_configured_text_key_is_honored(tmp_path):
 
 
 def test_uri_sources_are_unresolvable(tmp_path):
-    res = resolve_payload(
-        "x",
-        {"text": "abc", "source": "https://example.com/doc", "offset": 0},
-        allow_unrooted=True,
-    )
-    assert res.verdict == "unresolvable" and "URI" in res.detail
+    for src in ("https://example.com/doc", "urn:example:note", "mailto:u@example.com"):
+        res = resolve_payload(
+            "x",
+            {"text": "abc", "source": src, "offset": 0},
+            allow_unrooted=True,
+        )
+        assert res.verdict == "unresolvable" and "URI" in res.detail, src
+
+
+def test_rooted_colon_filenames_are_not_uris(tmp_path):
+    import os as _os
+
+    if _os.name == "nt":
+        return
+    # On POSIX a colon is a legal filename character: a source under a known
+    # corpus root is a FILENAME, never a URI scheme.
+    root = _corpus(tmp_path)
+    (root / "notes:2026.md").write_text("Colon-named body text.\n")
+    payload = {
+        "text": "Colon-named body text.",
+        "source": "notes:2026.md",
+        "index_root": str(root),
+        "offset": 0,
+    }
+    res = resolve_payload("x", payload)
+    assert res.verdict == "intact" and res.supported
 
 
 def test_hash_match_does_not_launder_planted_text(tmp_path):
