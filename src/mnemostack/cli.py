@@ -2245,10 +2245,13 @@ def cmd_index(args: argparse.Namespace) -> int:
                 "source": source,
                 "offset": i,
                 "index_root": index_root,
-                **snapshot,
             }
             if enricher is not None:
                 apply_enrichment(enricher, IngestItem(text=chunk, source=source, offset=i), payload)
+            # The snapshot is AUTHORITATIVE — applied after enrichment so an
+            # enricher key collision cannot fabricate a capture time or force
+            # a false snapshot mismatch.
+            payload.update(snapshot)
             chunks.append((cid, chunk, payload))
         if args.window_size > 1:
             for start in range(0, len(file_chunks) - args.window_size + 1):
@@ -2265,7 +2268,6 @@ def cmd_index(args: argparse.Namespace) -> int:
                     "chunk_kind": "sliding_window",
                     "chunk_start_offset": window[0][0],
                     "chunk_end_offset": window[-1][0],
-                    **snapshot,
                 }
                 if enricher is not None:
                     # Window metadata travels on the item so enrichers shared

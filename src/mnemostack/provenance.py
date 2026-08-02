@@ -111,36 +111,37 @@ MAX_RESOLVE_BYTES = 32 * 1024 * 1024
 
 
 def _candidate_paths(
-    source: str, index_root: str | None, root: str | None, allow_unrooted: bool
+    source: str, bases: list[str], allow_unrooted: bool
 ) -> tuple[list[tuple[Path | None, Path]], bool]:
     """(base, candidate) pairs the source may live at, plus an escape flag.
 
     ``source`` is an UNTRUSTED label (any ingest caller writes it) that this
     module is the first to open as a filesystem path — so candidates are
-    CONFINED: a root-joined candidate must resolve inside its root
-    (``.resolve()`` + ``is_relative_to``), which kills ``..`` traversal and
-    symlink escapes. An explicit ``root`` SELECTS the corpus — no fallback to
-    the stored index_root (a source deleted from the selected root must
-    report missing, not resolve intact against the stale copy). A bare
-    ``source`` path (absolute, or relative to the process cwd) is inherently
-    unconfined and is only ever tried for ``allow_unrooted`` callers (the
-    operator CLI) when no root is known at all."""
+    CONFINED: every candidate must resolve inside its base (``.resolve()`` +
+    ``is_relative_to``), which kills ``..`` traversal and symlink escapes; an
+    absolute ``source`` is only accepted when it already lies inside a base.
+    A bare ``source`` path (no base known) is inherently unconfined and is
+    only ever tried for ``allow_unrooted`` callers (the operator CLI).
+    Malformed labels (e.g. an embedded NUL) simply produce no candidate."""
     pairs: list[tuple[Path | None, Path]] = []
     escaped = False
-    base_str = root or index_root
-    if base_str:
-        base = Path(base_str)
-        candidate = base / source
+    for base_str in bases:
         try:
+            base = Path(base_str)
+            candidate = Path(source) if Path(source).is_absolute() else base / source
             inside = candidate.resolve().is_relative_to(base.resolve())
-        except OSError:
-            inside = False
+        except (OSError, ValueError):
+            escaped = True
+            continue
         if inside:
             pairs.append((base, candidate))
         else:
             escaped = True
-    elif allow_unrooted:
-        pairs.append((None, Path(source)))
+    if not bases and allow_unrooted:
+        try:
+            pairs.append((None, Path(source)))
+        except ValueError:
+            escaped = True
     return pairs, escaped
 
 
@@ -153,8 +154,38 @@ def _root_allowed(base: str, allowed_roots: list[str]) -> bool:
     try:
         resolved = Path(base).resolve()
         return any(resolved.is_relative_to(Path(ar).resolve()) for ar in allowed_roots)
-    except OSError:
+    except (OSError, ValueError):  # ValueError: e.g. an embedded NUL byte
         return False
+
+
+def _id_commitment_holds(chunk_id: str, payload: dict[str, Any], text: str) -> bool:
+    """Whether a FIRST-PARTY payload still matches its deterministic id.
+
+    Built-in indexers derive the point id from ``stable_chunk_id`` over
+    (source[, index_root], offset, text[, tenant]) — so an in-place payload
+    edit (or a payload copied from another genuine point) breaks the
+    commitment even when the replacement triple verifies against the file.
+    Only enforced for payloads carrying the ingest snapshot (the first-party
+    marker): foreign/mounted collections use their own id schemes and are
+    exempt. This is defense-in-depth against corruption, not against a
+    hostile store — a writer who controls payloads controls the memory."""
+    from .ingest import stable_chunk_id
+
+    source = payload.get("source")
+    offset = payload.get("offset")
+    if not isinstance(source, str) or not isinstance(offset, int):
+        return False
+    index_root = payload.get("index_root")
+    id_sources = [source]
+    if isinstance(index_root, str):
+        id_sources.insert(0, f"{index_root}\x00{source}")
+    tenant = payload.get("tenant_id")
+    tenants = [tenant, None] if isinstance(tenant, str) else [None]
+    return any(
+        stable_chunk_id(s, offset, text, tenant=t) == str(chunk_id)
+        for s in id_sources
+        for t in tenants
+    )
 
 
 def _search_texts(raw: str, payload: dict[str, Any]) -> list[str]:
@@ -204,19 +235,15 @@ def _fragment_variants(text: str, payload: dict[str, Any]) -> list[str]:
 
 
 def _at_offset(candidate: str, offset: int, fragment: str) -> bool:
-    """Fragment present at ``offset``, modulo stripped leading whitespace.
+    """Fragment present EXACTLY at ``offset`` in this candidate rendering.
 
-    Exact match at the offset first. Otherwise: the chunker strips segment
-    slices before recording them, so the recorded offset can point at
-    whitespace directly preceding the fragment — a whitespace-only gap is
-    still "the recorded position"; any real inserted text is not. Both sides
-    are lstripped for that comparison, because a mid-section window fragment
-    can itself begin with whitespace."""
-    if candidate[offset : offset + len(fragment)] == fragment:
-        return True
-    window = candidate[offset : offset + len(fragment) + 4096]
-    lean = fragment.lstrip()
-    return bool(lean) and window.lstrip()[: len(lean)] == lean
+    No whitespace slack: a lenient comparison would bless fragments whose
+    own (source-significant) indentation changed. Coordinate-base drift from
+    the chunker's segment stripping is handled by searching the stripped
+    RENDERINGS of the document (see ``_search_texts``), not by loosening the
+    match — and when the ingest snapshot hash matches, position is not
+    consulted at all (ingest determinism)."""
+    return candidate[offset : offset + len(fragment)] == fragment
 
 
 def resolve_payload(
@@ -261,6 +288,19 @@ def resolve_payload(
             verdict="unresolvable",
             detail="source is not a local document (URI-style source)",
         )
+    if SOURCE_HASH_KEY in payload and not _id_commitment_holds(chunk_id, payload, text):
+        # First-party payloads (they carry the ingest snapshot) commit to
+        # (source, offset, text) through their deterministic id — an edited
+        # or copied payload must not be validated under the original citation.
+        return _resolution(
+            chunk_id,
+            payload,
+            verdict="unresolvable",
+            detail=(
+                "payload does not match the point's id commitment "
+                "(edited in place or copied from another point?)"
+            ),
+        )
     index_root = payload.get("index_root")
     base_str = root or (index_root if isinstance(index_root, str) else None)
     if allowed_roots is not None:
@@ -275,27 +315,36 @@ def resolve_payload(
                     "process may read"
                 ),
             )
-        if not base_str or not _root_allowed(base_str, allowed_roots):
+        if base_str:
+            if not _root_allowed(base_str, allowed_roots):
+                return _resolution(
+                    chunk_id,
+                    payload,
+                    verdict="unresolvable",
+                    detail=(
+                        "the point's corpus root is not in the operator-configured "
+                        "resolution allowlist"
+                    ),
+                )
+            bases = [base_str]
+        else:
+            # Rootless point (legacy / library-ingested / mounted): the
+            # operator-configured roots themselves are the trusted bases —
+            # the surface offers no per-call override, so without this such
+            # points could never resolve at all. First root wins on a
+            # relative-path collision (the operator controls the order).
+            bases = list(allowed_roots)
+    else:
+        bases = [base_str] if base_str else []
+    candidates, escaped = _candidate_paths(source, bases, allow_unrooted)
+    if not candidates:
+        if escaped:
             return _resolution(
                 chunk_id,
                 payload,
                 verdict="unresolvable",
-                detail=(
-                    "the point's corpus root is not in the operator-configured "
-                    "resolution allowlist"
-                ),
+                detail="source path escapes the corpus root — refusing to read it",
             )
-    candidates, escaped = _candidate_paths(
-        source, index_root if isinstance(index_root, str) else None, root, allow_unrooted
-    )
-    if escaped:
-        return _resolution(
-            chunk_id,
-            payload,
-            verdict="unresolvable",
-            detail="source path escapes the corpus root — refusing to read it",
-        )
-    if not candidates:
         return _resolution(
             chunk_id,
             payload,
@@ -381,16 +430,55 @@ def resolve_payload(
             )
             if located is not None:
                 break
-    if located is not None:
-        if snapshot == "match":
-            detail = "fragment at its recorded position; source snapshot hash matches"
-            verdict = "intact"
-        elif snapshot == "absent":
-            detail = "fragment at its recorded position (no ingest snapshot to compare)"
-            verdict = "intact"
-        else:
-            detail = "fragment intact at its recorded position; document changed elsewhere"
-            verdict = "source_changed"
+    found: tuple[int, str] | None = None
+    if located is None:
+        for candidate in texts:
+            for fragment in fragments:
+                idx = candidate.find(fragment)
+                if idx != -1:
+                    found = (idx, fragment)
+                    break
+            if found:
+                break
+
+    if snapshot == "match":
+        # The document is byte-identical to the one that was ingested, so a
+        # fragment present ANYWHERE provably belongs to it — position is a
+        # coordinate-system detail (the chunker records offsets into stripped
+        # segment renderings), not evidence. Absent entirely → the point's
+        # text never came from this document.
+        if located is not None:
+            return _resolution(
+                chunk_id,
+                payload,
+                verdict="intact",
+                resolved_path=str(path),
+                snapshot=snapshot,
+                stored_offset=stored_offset,
+                found_offset=stored_offset,
+                fragment=located,
+                detail="fragment at its recorded position; source snapshot hash matches",
+            )
+        if found is not None:
+            idx, fragment = found
+            return _resolution(
+                chunk_id,
+                payload,
+                verdict="intact",
+                resolved_path=str(path),
+                snapshot=snapshot,
+                stored_offset=stored_offset,
+                found_offset=idx,
+                fragment=fragment,
+                detail="fragment present in the snapshot-verified document",
+            )
+    elif located is not None:
+        verdict = "source_changed" if snapshot == "mismatch" else "intact"
+        detail = (
+            "fragment intact at its recorded position; document changed elsewhere"
+            if snapshot == "mismatch"
+            else "fragment at its recorded position (no ingest snapshot to compare)"
+        )
         return _resolution(
             chunk_id,
             payload,
@@ -402,34 +490,12 @@ def resolve_payload(
             fragment=located,
             detail=detail,
         )
-    found: tuple[int, str] | None = None
-    for candidate in texts:
-        for fragment in fragments:
-            idx = candidate.find(fragment)
-            if idx != -1:
-                found = (idx, fragment)
-                break
-        if found:
-            break
-    if found is not None:
+    elif found is not None:
         idx, fragment = found
         if stored_offset is None:
             # Without a recorded position, presence alone cannot distinguish
-            # "moved by edits" from "planted text that happens to occur".
-            # A snapshot-verified document is the exception: the fragment
-            # provably belongs to the file that was ingested.
-            if snapshot == "match":
-                return _resolution(
-                    chunk_id,
-                    payload,
-                    verdict="intact",
-                    resolved_path=str(path),
-                    snapshot=snapshot,
-                    stored_offset=None,
-                    found_offset=idx,
-                    fragment=fragment,
-                    detail="fragment present in the snapshot-verified document (no recorded position)",
-                )
+            # "moved by edits" from "planted text that happens to occur" in a
+            # document that no longer matches its ingest snapshot.
             return _resolution(
                 chunk_id,
                 payload,

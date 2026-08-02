@@ -202,8 +202,13 @@ def test_allowed_roots_gate_service_surfaces(tmp_path):
     assert res.verdict == "unresolvable" and "not enabled" in res.detail
     # Allowlist covering the corpus: resolves normally.
     assert resolve_citation(store, c.id, allowed_roots=[str(tmp_path)]).verdict == "intact"
-    # Planted root outside the allowlist: refused.
-    planted = dict(c.payload)
+    # Planted root outside the allowlist: refused (foreign-shaped payload so
+    # the allowlist check itself is what fires, not the id commitment).
+    planted = {
+        k: v
+        for k, v in c.payload.items()
+        if k not in (SOURCE_HASH_KEY, SOURCE_CAPTURED_KEY)
+    }
     planted["index_root"] = "/"
     planted["source"] = "etc/hostname"
     res = resolve_payload(c.id, planted, allowed_roots=[str(tmp_path)])
@@ -236,29 +241,42 @@ def test_uri_sources_are_unresolvable(tmp_path):
 
 
 def test_hash_match_does_not_launder_planted_text(tmp_path):
-    # A matching snapshot hash authenticates the FILE, not the point: a
-    # payload whose text was swapped (set_payload / external writer) must
-    # not come back `intact` echoing the planted text.
+    # A matching snapshot hash authenticates the FILE, not the point.
     root = _corpus(tmp_path)
     store, chunks = _index(root)
+    # First-party-shaped payload (carries the snapshot): a swapped text
+    # breaks the deterministic id commitment before anything is read.
     planted = dict(chunks[0].payload)
     planted["text"] = "totally fabricated claim"
     res = resolve_payload(chunks[0].id, planted)
-    assert res.verdict == "changed" and not res.supported
-    assert res.fragment is None
-    assert "does not belong" in res.detail
+    assert res.verdict == "unresolvable" and not res.supported
+    assert "commitment" in res.detail
+    # Foreign-shaped payload (no snapshot marker): the planted text is
+    # searched for honestly and is simply not there.
+    foreign = {
+        k: v for k, v in planted.items() if k not in (SOURCE_HASH_KEY, SOURCE_CAPTURED_KEY)
+    }
+    res2 = resolve_payload(chunks[0].id, foreign)
+    assert res2.verdict == "changed" and not res2.supported
+    assert res2.fragment is None
 
 
-def test_no_offset_points_need_a_snapshot_to_be_supported(tmp_path):
+def test_no_offset_points_cannot_claim_position(tmp_path):
     root = _corpus(tmp_path)
     store, chunks = _index(root)
     c = next(c for c in chunks if c.payload["source"] == "alpha.md")
+    # A first-party-shaped payload (snapshot present) without an offset
+    # cannot satisfy its id commitment — refused up front.
     no_offset = {k: v for k, v in c.payload.items() if k != "offset"}
-    # Snapshot still matches: presence in the verified document is enough.
-    assert resolve_payload(c.id, no_offset).verdict == "intact"
-    # Snapshot drifted: presence alone cannot distinguish moved from planted.
-    (root / "alpha.md").write_text(_DOC + "\ntail\n")
-    res = resolve_payload(c.id, no_offset)
+    assert resolve_payload(c.id, no_offset).verdict == "unresolvable"
+    # A foreign-shaped payload without an offset: presence alone cannot
+    # distinguish moved from planted once the document has no snapshot.
+    foreign = {
+        k: v
+        for k, v in no_offset.items()
+        if k not in (SOURCE_HASH_KEY, SOURCE_CAPTURED_KEY)
+    }
+    res = resolve_payload(c.id, foreign)
     assert res.verdict == "unresolvable" and "no recorded offset" in res.detail
 
 
@@ -266,7 +284,12 @@ def test_integer_and_invalid_ids_resolve_gracefully(tmp_path):
     root = _corpus(tmp_path)
     store, chunks = _index(root)
     c = chunks[0]
-    store.upsert(41, [1.0, 0.0, 0.0, 0.0], dict(c.payload))
+    copy = {
+        k: v
+        for k, v in c.payload.items()
+        if k not in (SOURCE_HASH_KEY, SOURCE_CAPTURED_KEY)
+    }
+    store.upsert(41, [1.0, 0.0, 0.0, 0.0], copy)
     # A decimal-string citation reaches the integer point.
     assert resolve_citation(store, "41").verdict == "intact"
     # A handle the store rejects (e.g. a graph id) is a verdict, not a crash.
@@ -390,22 +413,36 @@ def test_sliding_window_points_are_honest(tmp_path):
     root = _corpus(tmp_path)
     store, chunks = _index(root)
     c = next(c for c in chunks if c.payload["source"] == "alpha.md")
+    # Tampered first-party payload marked windowed: the id commitment
+    # refuses it before the windowed special case is even consulted.
     windowed = dict(c.payload)
     windowed["chunk_kind"] = "sliding_window"
     windowed["text"] = "synthetic\n" + c.payload["text"] + "\njoined"
     res_match = resolve_payload(c.id, windowed)
     assert res_match.verdict == "unresolvable" and not res_match.supported
-    assert "constituent" in res_match.detail
+    # A genuine windowed point (no snapshot fields — cmd_index does not
+    # stamp them on windows) is honestly unverifiable, hash or no hash.
+    genuine = {
+        k: v for k, v in windowed.items() if k not in (SOURCE_HASH_KEY, SOURCE_CAPTURED_KEY)
+    }
+    res = resolve_payload(c.id, genuine)
+    assert res.verdict == "unresolvable" and "constituent" in res.detail
     (root / "alpha.md").write_text(_DOC + "\ntail edit\n")
-    res = resolve_payload(c.id, windowed)
-    assert res.verdict == "unresolvable" and not res.supported
+    assert resolve_payload(c.id, genuine).verdict == "unresolvable"
 
 
 def test_all_digit_uuid_ids_stay_strings(tmp_path):
     root = _corpus(tmp_path)
     store, chunks = _index(root)
     digit_uuid = "11111111111111111111111111111111"  # valid simple-form UUID
-    store.upsert(digit_uuid, [1.0, 0.0, 0.0, 0.0], dict(chunks[0].payload))
+    # Foreign-shaped copy (no snapshot): this test exercises ID handling,
+    # not the first-party id commitment.
+    copy = {
+        k: v
+        for k, v in chunks[0].payload.items()
+        if k not in (SOURCE_HASH_KEY, SOURCE_CAPTURED_KEY)
+    }
+    store.upsert(digit_uuid, [1.0, 0.0, 0.0, 0.0], copy)
     assert resolve_citation(store, digit_uuid).verdict == "intact"
 
 
