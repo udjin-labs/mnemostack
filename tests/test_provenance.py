@@ -256,6 +256,22 @@ def test_authority_uris_stay_nonlocal_even_with_a_root(tmp_path):
     assert res.verdict == "unresolvable" and "URI" in res.detail
 
 
+def test_one_letter_authority_uris_stay_nonlocal(tmp_path):
+    import os as _os
+
+    if _os.name == "nt":
+        return
+    root = _corpus(tmp_path)
+    decoy = root / "x:" / "remote"
+    decoy.mkdir(parents=True)
+    (decoy / "doc").write_text("decoy body")
+    res = resolve_payload(
+        "x",
+        {"text": "decoy body", "source": "x://remote/doc", "index_root": str(root), "offset": 0},
+    )
+    assert res.verdict == "unresolvable" and "URI" in res.detail
+
+
 def test_md_commitment_binds_the_root(tmp_path):
     # Markdown ids fold index_root into the commitment — repointing the
     # payload root at another corpus breaks it.

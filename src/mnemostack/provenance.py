@@ -156,13 +156,24 @@ def _candidate_paths(
     return pairs, escaped
 
 
-# Authority-form URIs ("https://...") are unambiguous — non-local in every
-# context. Scheme-only forms ("urn:...", "mailto:...", "file:/...") are only
-# classified when NO corpus root is known: with a root, a colon is a legal
-# POSIX filename character ("notes:2026.md"). Schemes are 2+ characters so a
-# Windows drive path ("C:\corpus") is exempt from both.
-_URI_AUTHORITY = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]+://")
+# Authority-form URIs ("https://...", including one-letter schemes like
+# "x://...") are unambiguous — non-local in every context; the sole
+# exemption is a doubled-slash Windows DRIVE path ("C://corpus"), which only
+# exists on Windows and is checked platform-aware. Scheme-only forms
+# ("urn:...", "mailto:...", "file:/...") are classified only when NO corpus
+# root is known: with a root, a colon is a legal POSIX filename character
+# ("notes:2026.md"); their schemes are 2+ characters so a plain drive path
+# ("C:\corpus") is exempt everywhere.
+_URI_AUTHORITY = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://")
 _URI_SOURCE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]+:")
+
+
+def _is_authority_uri(source: str) -> bool:
+    if not _URI_AUTHORITY.match(source):
+        return False
+    if os.name == "nt" and re.match(r"^[A-Za-z]://", source):
+        return False  # doubled-slash Windows drive path, not a scheme
+    return True
 
 
 _SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
@@ -458,7 +469,7 @@ def resolve_payload(
         )
     payload_root = payload.get("index_root")
     has_root = bool(root) or bool(isinstance(payload_root, str) and payload_root)
-    if _URI_AUTHORITY.match(source) or (not has_root and _URI_SOURCE.match(source)):
+    if _is_authority_uri(source) or (not has_root and _URI_SOURCE.match(source)):
         # Authority-form URIs are non-local in EVERY context (a rooted
         # lookup would happily read a decoy at <root>/https:/...). The
         # scheme-only classification applies just to rootless sources: with
