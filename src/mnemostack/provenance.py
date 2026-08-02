@@ -32,7 +32,9 @@ current source still evidence this citation?
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import stat as stat_module
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -155,6 +157,47 @@ def _candidate_paths(
 
 
 _URI_SOURCE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://")
+
+
+def _read_source(path: Path, base: Path | None) -> tuple[str | None, str]:
+    """Read the source through ONE file descriptor, TOCTOU-hardened.
+
+    The containment check validated a path; a writer racing the resolver
+    could swap that entry for a symlink (or a bigger file) between the check
+    and the read. So: re-resolve, re-verify containment, open the resolved
+    path with ``O_NOFOLLOW`` (a final-component symlink planted after the
+    resolve fails with ELOOP instead of being followed), and take BOTH the
+    size cap and the bytes from the same descriptor via ``fstat``/``read``.
+    Returns ``(text, "")`` or ``(None, reason)``."""
+    try:
+        target = path.resolve()
+        if base is not None and not target.is_relative_to(base.resolve()):
+            return None, "source path escapes the corpus root — refusing to read it"
+        fd = os.open(str(target), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as e:
+        return None, f"source exists but cannot be opened: {e}"
+    try:
+        st = os.fstat(fd)
+        if not stat_module.S_ISREG(st.st_mode):
+            return None, "source is not a regular file"
+        if st.st_size > MAX_RESOLVE_BYTES:
+            return None, f"source larger than the {MAX_RESOLVE_BYTES}-byte verification cap"
+        chunks: list[bytes] = []
+        remaining = MAX_RESOLVE_BYTES + 1
+        while remaining > 0:
+            block = os.read(fd, min(remaining, 1 << 20))
+            if not block:
+                break
+            chunks.append(block)
+            remaining -= len(block)
+        data = b"".join(chunks)
+        if len(data) > MAX_RESOLVE_BYTES:
+            return None, f"source larger than the {MAX_RESOLVE_BYTES}-byte verification cap"
+    except OSError as e:
+        return None, f"source exists but cannot be read: {e}"
+    finally:
+        os.close(fd)
+    return data.decode("utf-8", errors="ignore"), ""
 
 
 def _root_allowed(base: str, allowed_roots: list[str]) -> bool:
@@ -365,31 +408,41 @@ def resolve_payload(
                 "resolution is not allowed on this surface"
             ),
         )
-    path = next((p for _base, p in candidates if p.is_file()), None)
+    path: Path | None = None
+    base_of_path: Path | None = None
+    access_denied = False
+    for cand_base, p in candidates:
+        try:
+            if p.is_file():
+                path = p
+                base_of_path = cand_base
+                break
+        except OSError:
+            # pathlib re-raises EACCES and friends — an untraversable
+            # candidate is "cannot verify", never a 500.
+            access_denied = True
     if path is None:
+        if access_denied:
+            return _resolution(
+                chunk_id,
+                payload,
+                verdict="unresolvable",
+                detail="source path cannot be accessed by this process",
+            )
         return _resolution(
             chunk_id,
             payload,
             verdict="missing",
             detail="source document not found under the known corpus root",
         )
-    try:
-        if path.stat().st_size > MAX_RESOLVE_BYTES:
-            return _resolution(
-                chunk_id,
-                payload,
-                verdict="unresolvable",
-                resolved_path=str(path),
-                detail=f"source larger than the {MAX_RESOLVE_BYTES}-byte verification cap",
-            )
-        raw = path.read_text(encoding="utf-8", errors="ignore")
-    except OSError as e:
+    raw, read_error = _read_source(path, base_of_path)
+    if raw is None:
         return _resolution(
             chunk_id,
             payload,
             verdict="unresolvable",
             resolved_path=str(path),
-            detail=f"source exists but cannot be read: {e}",
+            detail=read_error,
         )
 
     stored_hash = payload.get(SOURCE_HASH_KEY)

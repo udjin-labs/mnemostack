@@ -356,6 +356,40 @@ def test_snapshot_helper_without_id_scheme_is_not_first_party(tmp_path):
     assert res.verdict == "intact" and res.supported
 
 
+def test_access_denied_candidate_is_unresolvable(tmp_path, monkeypatch):
+    # pathlib re-raises EACCES from is_file() — an untraversable path must
+    # produce a verdict, never escape as a 500.
+    root = _corpus(tmp_path)
+    store, chunks = _index(root)
+    monkeypatch.setattr(
+        Path, "is_file", lambda self: (_ for _ in ()).throw(PermissionError("denied"))
+    )
+    res = resolve_citation(store, chunks[0].id)
+    assert res.verdict == "unresolvable" and "cannot be accessed" in res.detail
+
+
+def test_symlink_within_root_resolves(tmp_path):
+    # A symlink whose target stays INSIDE the corpus root is legitimate —
+    # the O_NOFOLLOW hardening must only refuse post-check swaps, not
+    # ordinary in-corpus links.
+    root = _corpus(tmp_path)
+    store, chunks = _index(root)
+    link = root / "gamma.md"
+    try:
+        link.symlink_to(root / "alpha.md")
+    except OSError:  # filesystem without symlink support
+        return
+    c = next(c for c in chunks if c.payload["source"] == "alpha.md")
+    aliased = {
+        k: v
+        for k, v in c.payload.items()
+        if k not in (SOURCE_HASH_KEY, SOURCE_CAPTURED_KEY, ID_SCHEME_KEY)
+    }
+    aliased["source"] = "gamma.md"
+    res = resolve_payload(c.id, aliased)
+    assert res.verdict == "intact" and res.supported
+
+
 def test_traversal_source_is_refused(tmp_path):
     # `source` is an untrusted label — a ../ escape under the corpus root
     # must be refused outright, even when the target file exists.
