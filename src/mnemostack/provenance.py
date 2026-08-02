@@ -224,15 +224,20 @@ def _open_beneath(base: Path, source: str) -> int:
         os.close(dfd)
 
 
-def _read_source(path: Path, base: Path | None, source: str) -> tuple[str | None, str]:
+def _read_source(path: Path, base: Path | None, source: str) -> tuple[str | None, str, str]:
     """Read the source through ONE file descriptor, TOCTOU-hardened.
 
     Confined reads (a base is known) go through the symlink-refusing
     ``openat`` walk. Unconfined reads (operator CLI, no root known — or an
     absolute source validated against its base) fall back to resolve +
     final-component ``O_NOFOLLOW``. Size cap and bytes both come from the
-    SAME descriptor via ``fstat``/``read``. Returns ``(text, "")`` or
-    ``(None, reason)``."""
+    SAME descriptor via ``fstat``/``read``.
+
+    Returns ``(text, "", "ok")``, ``(None, reason, "absent")`` when the
+    document simply does not exist, or ``(None, reason, "error")`` for every
+    other refusal. Verdict classification derives from THIS protected
+    attempt — a pre-check ``stat`` on the raw pathname would both race the
+    walk and leak out-of-root existence."""
     try:
         if base is not None:
             resolved_base = base.resolve()
@@ -242,7 +247,7 @@ def _read_source(path: Path, base: Path | None, source: str) -> tuple[str | None
                 # the same no-symlink treatment as relative sources.
                 target = path.resolve()
                 if not target.is_relative_to(resolved_base):
-                    return None, "source path escapes the corpus root — refusing to read it"
+                    return None, "source path escapes the corpus root — refusing to read it", "error"
                 walk_source = target.relative_to(resolved_base).as_posix()
             else:
                 walk_source = source
@@ -251,14 +256,21 @@ def _read_source(path: Path, base: Path | None, source: str) -> tuple[str | None
             fd = os.open(
                 str(path.resolve()), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
             )
+    except FileNotFoundError as e:
+        # ONLY a clean ENOENT counts as absence. NotADirectoryError is the
+        # walk's refusal signal (an O_NOFOLLOW directory open of a swapped
+        # symlink raises ENOTDIR) and must classify as an error — the same
+        # verdict whether or not the symlink's target exists, so the
+        # missing/unresolvable split can't act as an existence oracle.
+        return None, f"source document not found: {e}", "absent"
     except (OSError, RuntimeError) as e:  # RuntimeError: symlink loop in resolve()
-        return None, f"source exists but cannot be opened: {e}"
+        return None, f"source exists but cannot be opened: {e}", "error"
     try:
         st = os.fstat(fd)
         if not stat_module.S_ISREG(st.st_mode):
-            return None, "source is not a regular file"
+            return None, "source is not a regular file", "error"
         if st.st_size > MAX_RESOLVE_BYTES:
-            return None, f"source larger than the {MAX_RESOLVE_BYTES}-byte verification cap"
+            return None, f"source larger than the {MAX_RESOLVE_BYTES}-byte verification cap", "error"
         chunks: list[bytes] = []
         remaining = MAX_RESOLVE_BYTES + 1
         while remaining > 0:
@@ -269,9 +281,9 @@ def _read_source(path: Path, base: Path | None, source: str) -> tuple[str | None
             remaining -= len(block)
         data = b"".join(chunks)
         if len(data) > MAX_RESOLVE_BYTES:
-            return None, f"source larger than the {MAX_RESOLVE_BYTES}-byte verification cap"
+            return None, f"source larger than the {MAX_RESOLVE_BYTES}-byte verification cap", "error"
     except OSError as e:
-        return None, f"source exists but cannot be read: {e}"
+        return None, f"source exists but cannot be read: {e}", "error"
     finally:
         os.close(fd)
     # Universal-newline translation, exactly as the ingest-side
@@ -280,17 +292,26 @@ def _read_source(path: Path, base: Path | None, source: str) -> tuple[str | None
     # would make every untouched CRLF document a snapshot mismatch whose
     # multiline fragments then fail exact matching.
     text = data.decode("utf-8", errors="ignore").replace("\r\n", "\n").replace("\r", "\n")
-    return text, ""
+    return text, "", "ok"
+
+
+def _anchor_for(base: str, allowed_roots: list[str]) -> str | None:
+    """The first operator-configured root containing ``base``, or None.
+
+    Each configured entry is checked INDEPENDENTLY — one broken entry (e.g.
+    a symlink loop) must not disable the roots listed after it."""
+    for ar in allowed_roots:
+        try:
+            if Path(base).resolve().is_relative_to(Path(ar).resolve()):
+                return ar
+        except (OSError, ValueError, RuntimeError):  # NUL byte / symlink loop
+            continue
+    return None
 
 
 def _root_allowed(base: str, allowed_roots: list[str]) -> bool:
-    """Whether ``base`` (the corpus root about to be read) lies inside one of
-    the operator-configured allowlist directories."""
-    try:
-        resolved = Path(base).resolve()
-        return any(resolved.is_relative_to(Path(ar).resolve()) for ar in allowed_roots)
-    except (OSError, ValueError, RuntimeError):  # NUL byte / symlink loop
-        return False
+    """Whether ``base`` lies inside one of the allowlist directories."""
+    return _anchor_for(base, allowed_roots) is not None
 
 
 def _id_commitment_holds(chunk_id: str, payload: dict[str, Any], text: str) -> bool:
@@ -563,72 +584,66 @@ def resolve_payload(
                 "resolution is not allowed on this surface"
             ),
         )
+    # Verdict classification derives from the PROTECTED open attempt itself:
+    # a pre-check stat on the raw pathname would both race the walk and act
+    # as an out-of-root existence oracle (missing vs unresolvable would
+    # distinguish an external target). Each candidate is anchored at the
+    # OPERATOR-configured root when an allowlist is active — a payload-
+    # supplied nested index_root that can no longer be re-anchored (renamed
+    # or replaced mid-flight) FAILS CLOSED instead of being read through.
+    raw: str | None = None
     path: Path | None = None
-    base_of_path: Path | None = None
-    access_denied = False
+    failure_detail = ""
+    saw_error = False
     for cand_base, p in candidates:
-        try:
-            if p.is_file():
-                path = p
-                base_of_path = cand_base
-                break
-        except OSError:
-            # pathlib re-raises EACCES and friends — an untraversable
-            # candidate is "cannot verify", never a 500.
-            access_denied = True
-    if path is None:
-        if access_denied:
+        read_base = cand_base
+        read_source_path = source
+        if allowed_roots is not None and cand_base is not None:
+            anchor = _anchor_for(str(cand_base), allowed_roots)
+            if anchor is None:
+                saw_error = True
+                failure_detail = (
+                    "the point's corpus root is not in the operator-configured "
+                    "resolution allowlist"
+                )
+                continue
+            try:
+                anchor_path = Path(anchor)
+                prefix = (
+                    cand_base.resolve().relative_to(anchor_path.resolve()).as_posix()
+                )
+            except (OSError, ValueError, RuntimeError):
+                saw_error = True
+                failure_detail = (
+                    "the point's corpus root is not in the operator-configured "
+                    "resolution allowlist"
+                )
+                continue
+            read_base = anchor_path
+            if not Path(source).is_absolute() and prefix not in (".", ""):
+                read_source_path = f"{prefix}/{source}"
+        text_read, reason, kind = _read_source(p, read_base, read_source_path)
+        if kind == "ok":
+            raw = text_read
+            path = p
+            break
+        if kind == "error":
+            saw_error = True
+            failure_detail = reason
+        # kind == "absent": try the next candidate
+    if raw is None or path is None:
+        if saw_error:
             return _resolution(
                 chunk_id,
                 payload,
                 verdict="unresolvable",
-                detail="source path cannot be accessed by this process",
+                detail=failure_detail or "source path cannot be accessed by this process",
             )
         return _resolution(
             chunk_id,
             payload,
             verdict="missing",
             detail="source document not found under the known corpus root",
-        )
-    read_base = base_of_path
-    read_source_path = source
-    if allowed_roots is not None and base_of_path is not None:
-        # Anchor the descriptor walk at the OPERATOR-configured root, not at
-        # the payload-supplied (possibly nested) index_root: a writer able to
-        # rename that nested directory could swap it for an out-of-root
-        # symlink after the allowlist check. Walking the nested prefix AND
-        # the source beneath the allowed root's descriptor keeps every
-        # component O_NOFOLLOW-protected relative to operator-trusted ground.
-        anchor = next(
-            (a for a in allowed_roots if _root_allowed(str(base_of_path), [a])), None
-        )
-        if anchor is not None:
-            try:
-                anchor_path = Path(anchor)
-                prefix = (
-                    base_of_path.resolve().relative_to(anchor_path.resolve()).as_posix()
-                )
-            except (OSError, ValueError, RuntimeError):
-                return _resolution(
-                    chunk_id,
-                    payload,
-                    verdict="unresolvable",
-                    detail=(
-                        "the point's corpus root is not in the operator-configured "
-                        "resolution allowlist"
-                    ),
-                )
-            read_base = anchor_path
-            if not Path(source).is_absolute() and prefix not in (".", ""):
-                read_source_path = f"{prefix}/{source}"
-    raw, read_error = _read_source(path, read_base, read_source_path)
-    if raw is None:
-        return _resolution(
-            chunk_id,
-            payload,
-            verdict="unresolvable",
-            resolved_path=str(path),
-            detail=read_error,
         )
 
     stored_hash = payload.get(SOURCE_HASH_KEY)

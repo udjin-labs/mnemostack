@@ -473,15 +473,21 @@ def test_snapshot_helper_without_id_scheme_is_not_first_party(tmp_path):
 
 
 def test_access_denied_candidate_is_unresolvable(tmp_path, monkeypatch):
-    # pathlib re-raises EACCES from is_file() — an untraversable path must
-    # produce a verdict, never escape as a 500.
+    # EACCES during the protected open must produce a verdict, never a 500 —
+    # and it must NOT read as `missing` (that split would leak existence).
+    import os as _os
+
     root = _corpus(tmp_path)
     store, chunks = _index(root)
-    monkeypatch.setattr(
-        Path, "is_file", lambda self: (_ for _ in ()).throw(PermissionError("denied"))
-    )
+    real_open = _os.open
+
+    def _denied(*a, **kw):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(_os, "open", _denied)
     res = resolve_citation(store, chunks[0].id)
-    assert res.verdict == "unresolvable" and "cannot be accessed" in res.detail
+    monkeypatch.setattr(_os, "open", real_open)
+    assert res.verdict == "unresolvable" and not res.supported
 
 
 def test_symlinked_source_is_refused_in_confined_reads(tmp_path):
