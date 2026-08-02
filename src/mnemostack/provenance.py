@@ -274,7 +274,12 @@ def _read_source(
             fd = _open_beneath(resolved_base, walk_source, strict=strict_walk, base_fd=base_fd)
         else:
             fd = os.open(
-                str(path.resolve()), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                str(path.resolve()),
+                os.O_RDONLY
+                | getattr(os, "O_NOFOLLOW", 0)
+                # O_NONBLOCK: a FIFO with no writer must not hang the
+                # resolver — fstat rejects non-regular files right after.
+                | getattr(os, "O_NONBLOCK", 0),
             )
     except FileNotFoundError as e:
         # ONLY a clean ENOENT counts as absence. NotADirectoryError is the

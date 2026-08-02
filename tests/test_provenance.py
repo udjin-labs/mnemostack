@@ -834,6 +834,21 @@ def test_symlink_escape_is_refused(tmp_path):
     assert res.verdict == "unresolvable" and "escapes" in res.detail
 
 
+def test_fifo_source_does_not_hang_the_unrooted_path(tmp_path):
+    import os as _os
+
+    if not hasattr(_os, "mkfifo"):
+        return
+    fifo = tmp_path / "pipe.md"
+    _os.mkfifo(fifo)
+    res = resolve_payload(
+        "x",
+        {"text": "anything", "source": str(fifo), "offset": 0},
+        allow_unrooted=True,
+    )
+    assert res.verdict == "unresolvable" and "regular" in res.detail
+
+
 def test_bare_paths_only_resolve_for_the_operator_surface(tmp_path):
     doc = tmp_path / "standalone.md"
     doc.write_text("standalone body text")
