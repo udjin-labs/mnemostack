@@ -315,7 +315,11 @@ def _search_texts(raw: str, payload: dict[str, Any]) -> list[str]:
 
             _meta, body = parse_frontmatter(raw)
             if body != raw:
-                texts.insert(0, body)
+                # Frontmatter was never part of any indexed fragment — for a
+                # markdown point it must not serve as search material either,
+                # or a phrase surviving only in YAML metadata (e.g. a title)
+                # would falsely resolve a deleted body fragment as `moved`.
+                texts = [body]
         except Exception:  # noqa: BLE001 - fall back to raw-only search
             pass
         # The MARKDOWN chunker records offsets into STRIPPED segments (a

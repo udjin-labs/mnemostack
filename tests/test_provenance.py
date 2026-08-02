@@ -564,6 +564,22 @@ def test_posix_backslash_filenames_survive(tmp_path):
     assert res.verdict == "intact" and res.supported
 
 
+def test_frontmatter_text_is_not_search_material(tmp_path):
+    # A phrase deleted from the BODY but surviving in YAML frontmatter (a
+    # title) must not resolve as `moved` — frontmatter was never indexed.
+    root = _corpus(tmp_path)
+    (root / "dup.md").write_text(
+        "---\ntitle: duplicated exact phrase\n---\nduplicated exact phrase in body.\n"
+    )
+    store, chunks = _index(root)
+    c = next(c for c in chunks if c.payload["source"] == "dup.md")
+    (root / "dup.md").write_text(
+        "---\ntitle: duplicated exact phrase\n---\nentirely different body now.\n"
+    )
+    res = resolve_citation(store, c.id)
+    assert res.verdict == "changed" and not res.supported
+
+
 def test_suffix_match_without_snapshot_is_ambiguous(tmp_path):
     # The prefix-length marker is mutable payload (not covered by the id
     # commitment): a suffix-only match against a CHANGED document cannot
