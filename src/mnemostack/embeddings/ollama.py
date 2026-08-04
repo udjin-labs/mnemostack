@@ -40,9 +40,14 @@ def _api_level_error(exc: urllib.error.HTTPError) -> bool:
     except Exception:  # noqa: BLE001 — unreadable body: treat as router-level
         return False
     try:
-        return isinstance(json.loads(body.decode("utf-8", "replace")), dict)
+        data = json.loads(body.decode("utf-8", "replace"))
     except Exception:  # noqa: BLE001 — non-JSON body: router-level
         return False
+    # Ollama's API errors are specifically {"error": "..."} — an arbitrary
+    # JSON body (e.g. a reverse proxy's own JSON 404 page in front of an old
+    # server) must not be mistaken for the API answering, or the legacy
+    # fallback would never engage behind such proxies.
+    return isinstance(data, dict) and isinstance(data.get("error"), str)
 
 
 class OllamaProvider(EmbeddingProvider):
@@ -285,14 +290,21 @@ class OllamaProvider(EmbeddingProvider):
             logger.debug("ollama embed failed: %s", exc)
             return []
 
-    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+    def embed_batch(
+        self, texts: list[str], max_workers: int | None = None
+    ) -> list[list[float]]:
         """Native batch via /api/embed (single request per batch).
 
         On failure every item reports failed (``[]``) — cardinality
         mismatches are provider failures, never partial success. The
         legacy-server path degrades to per-item requests, observable via
         ``endpoint`` and the fallback warning.
+
+        ``max_workers`` is accepted for source compatibility with the old
+        thread-pool implementation and IGNORED — the native batch endpoint
+        made client-side parallelism obsolete.
         """
+        del max_workers
         if not texts:
             return []
         try:

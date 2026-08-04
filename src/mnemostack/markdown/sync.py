@@ -13,7 +13,9 @@ source(s) it was given, never siblings (mirroring the one-shot command's
 
 from __future__ import annotations
 
+import json
 import os
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -177,7 +179,7 @@ def upsert_markdown_chunks(
     # The stamp reuses EXACTLY the fingerprint the guard validated (one
     # resolution — no check-vs-stamp window); the fallback only runs for an
     # unguardable store, where no verdict exists to race against.
-    doc_fp = SpaceGuard(store, provider, recheck_seconds=0.0).ensure()
+    doc_fp = SpaceGuard(store, provider, recheck_seconds=0.0, fail_closed=True).ensure()
     if doc_fp is None:
         doc_fp = document_space_fingerprint_via(provider)
     tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
@@ -242,23 +244,37 @@ def upsert_markdown_chunks(
                     payload[EMBEDDING_SPACE_KEY] = doc_fp
             _upsert_group(embedded)
     else:
-        # Quota hook: it enforces on the total insert count and is all-or-nothing,
-        # so embed the whole batch first (in bounded provider groups), run the
-        # check, then write only if it passes.
-        to_upsert: list[tuple[str, list, dict]] = []
-        for start in range(0, len(new_chunks), embedding_batch_size):
-            to_upsert.extend(_embed_group(new_chunks[start : start + embedding_batch_size]))
-        if doc_fp is not None:
-            for _cid, _vec, payload in to_upsert:
-                payload[EMBEDDING_SPACE_KEY] = doc_fp
-        before_upsert(len(to_upsert), res.failed_sources)
-        # Post-embed check before ANY write: the quota path embeds the whole
-        # batch first, so this closes the same mid-batch repoint window the
-        # streaming path sandwiches per group.
-        if to_upsert and not _fp_unchanged():
-            _raise_fp_changed()
-        for start in range(0, len(to_upsert), embedding_batch_size):
-            _upsert_group(to_upsert[start : start + embedding_batch_size])
+        # Quota hook: it enforces on the total insert count and is
+        # all-or-nothing, so EVERYTHING must be embedded before the first
+        # write — but holding every vector in memory would break the
+        # bounded-ingestion guarantee on a large corpus. Vectors are spooled
+        # to an anonymous temp file per group (memory stays O(group); the
+        # payload/text objects already live in `chunks` by this function's
+        # contract), then streamed back group-wise after the hook passes.
+        spooled: list[tuple[str, dict]] = []
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as spool:
+            for start in range(0, len(new_chunks), embedding_batch_size):
+                for cid, vec, payload in _embed_group(
+                    new_chunks[start : start + embedding_batch_size]
+                ):
+                    spool.write(json.dumps(vec))
+                    spool.write("\n")
+                    spooled.append((cid, payload))
+            before_upsert(len(spooled), res.failed_sources)
+            # Post-embed check before ANY write: closes the same mid-batch
+            # repoint window the streaming path sandwiches per group.
+            if spooled and not _fp_unchanged():
+                _raise_fp_changed()
+            spool.seek(0)
+            group_buf: list[tuple[str, list, dict]] = []
+            for (cid, payload), line in zip(spooled, spool, strict=True):
+                if doc_fp is not None:
+                    payload[EMBEDDING_SPACE_KEY] = doc_fp
+                group_buf.append((cid, json.loads(line), payload))
+                if len(group_buf) >= embedding_batch_size:
+                    _upsert_group(group_buf)
+                    group_buf = []
+            _upsert_group(group_buf)
 
     if res.inserted:
         # POST-COMMIT revalidation: no atomic empty-collection claim exists,
@@ -266,7 +282,7 @@ def upsert_markdown_chunks(
         # under another space is detected by re-sampling after our writes —
         # exposure bounded to one interleaved invocation, all later writes
         # refused by the normal mismatch verdict.
-        SpaceGuard(store, provider, recheck_seconds=0.0).ensure()
+        SpaceGuard(store, provider, recheck_seconds=0.0, fail_closed=True).ensure()
 
     for cid, _text, payload in chunks:
         if cid not in existing_ids:

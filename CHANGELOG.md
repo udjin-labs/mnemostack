@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> The next release is **2.0.0**: role-aware embedding changes the DEFAULT
+> semantics for known asymmetric model families (E5 transforms, decoder
+> last-token pooling, Ollama timeout/host resolution), and pre-2.0
+> collections of such families require an identity profile or a reindex.
+> See the [1.x → 2.0 migration guide](docs/migration-1.x-to-2.0.md).
+
 ### Added
 
 - **Bounded batch ingestion (`--embedding-batch-size` / `MNEMOSTACK_EMBEDDING_BATCH_SIZE` / `embedding.batch_size`, default 64)**: `index` and `index-markdown` now embed each fingerprint-sandwich group with ONE provider batch call (letting Ollama's `/api/embed` and hosted batch endpoints do their job) and commit it with ONE `upsert_batch` store round-trip where the store supports it — HTTP overhead no longer moves from the embedding endpoint to one Qdrant request per point. Memory stays bounded by the group size (vectors are never held for the whole corpus), deterministic-id skipping and per-source failure accounting are unchanged, committed earlier groups stay valid on a later failure, and the markdown quota hook still sees one all-or-nothing total before any write. The degradation ladder is now shared (`embed_documents_resilient`): native batch → per-item for providers without a batch API → guarded per-item on batch exceptions, isolating a poisoned chunk to its own failure instead of losing the group — identical semantics for `Ingestor`, the CLI indexer and the markdown sync.

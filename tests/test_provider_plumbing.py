@@ -522,3 +522,106 @@ def test_wholesale_retry_respects_storm_guarded_providers():
     p = _StormGuarded()
     assert embed_documents_resilient(p, ["a", "b"]) == [[], []]
     assert p.single_calls == 0  # no replay into the failing service
+
+
+# --------------------------------------------------- write-path fail-closed
+
+
+class _BrokenScrollStore(_BatchStore):
+    def scroll(self):
+        raise ConnectionError("read denied")
+
+
+def test_write_guard_fails_closed_when_the_check_itself_fails():
+    """A write-capable key without read rights (or a scroll outage) must NOT
+    let ingestion write unverified vectors — the PR-137 guarantee has to
+    hold under failure, not only under success."""
+    from mnemostack.embeddings.roles import EmbeddingSpaceError
+    from mnemostack.ingest import IngestItem, Ingestor
+    from mnemostack.markdown.sync import upsert_markdown_chunks
+
+    provider = _BatchCountingProvider()
+    store = _BrokenScrollStore()
+    with pytest.raises(EmbeddingSpaceError, match="WRITE path"):
+        Ingestor(embedding=provider, vector_store=store).ingest(
+            [IngestItem(text="hello", source="a.md")]
+        )
+    assert store.upsert_batches == [] and store.single_upserts == 0
+
+    store2 = _BrokenScrollStore()
+    with pytest.raises(EmbeddingSpaceError, match="WRITE path"):
+        upsert_markdown_chunks(store2, provider, _chunks(1), existing_payloads={})
+    assert store2.upsert_batches == [] and store2.single_upserts == 0
+
+
+def test_cli_index_guard_fails_closed_on_check_errors():
+    from mnemostack.cli import _guard_document_space
+
+    rc, fp = _guard_document_space(_BrokenScrollStore(), _BatchCountingProvider())
+    assert rc == 1 and fp is None
+
+
+def test_read_guard_stays_fail_open_on_check_errors():
+    # Recall keeps the historical hiccup tolerance — only WRITES fail closed.
+    from mnemostack.embeddings.roles import SpaceGuard
+
+    guard = SpaceGuard(_BrokenScrollStore(), _BatchCountingProvider())
+    assert guard.ensure() is None  # logged, not raised
+
+
+# -------------------------------------------------- quota-path memory bound
+
+
+def test_quota_path_spools_vectors_and_preserves_results():
+    from mnemostack.markdown.sync import upsert_markdown_chunks
+
+    provider = _BatchCountingProvider()
+    store = _BatchStore()
+    hook_calls: list[int] = []
+    res = upsert_markdown_chunks(
+        store,
+        provider,
+        _chunks(5),
+        existing_payloads={},
+        before_upsert=lambda n, failed: hook_calls.append(n),
+        embedding_batch_size=2,
+    )
+    assert res.inserted == 5
+    assert hook_calls == [5]  # all-or-nothing total, before any write
+    assert provider.batch_calls == [2, 2, 1]
+    assert store.upsert_batches == [2, 2, 1]  # streamed back group-wise
+
+
+# --------------------------------------------------- ollama compat details
+
+
+def test_proxy_json_404_still_engages_legacy_fallback(monkeypatch):
+    """An arbitrary JSON 404 (reverse proxy in front of an old server) is
+    NOT the Ollama API answering — only {"error": "..."} is."""
+    import urllib.error
+
+    provider = get_provider("ollama")
+
+    def fake_urlopen(req, timeout=None):
+        if req.full_url.endswith("/api/embed"):
+            body = BytesIO(jsonlib.dumps({"message": "no such route"}).encode())
+            raise urllib.error.HTTPError(req.full_url, 404, "nf", {}, body)
+        payload = jsonlib.loads(req.data.decode())
+        del payload
+        return _Resp(jsonlib.dumps({"embedding": [0.3, 0.4]}).encode())
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    assert provider.embed_batch(["x"]) == [[0.3, 0.4]]
+    assert provider.endpoint == "api/embeddings"
+
+
+def test_ollama_embed_batch_accepts_and_ignores_max_workers(monkeypatch):
+    def fake_urlopen(req, timeout=None):
+        payload = jsonlib.loads(req.data.decode())
+        return _Resp(
+            jsonlib.dumps({"embeddings": [[0.1] for _ in payload["input"]]}).encode()
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    provider = get_provider("ollama")
+    assert provider.embed_batch(["a", "b"], max_workers=4) == [[0.1], [0.1]]
