@@ -113,6 +113,25 @@ class EmbeddingProvider(ABC):
         """
         return {}
 
+    def _role_override_marker(self, names: tuple[str, ...]) -> str | None:
+        """Identity marker when any of *names* is overridden by a subclass.
+
+        Native role semantics live server-side and cannot be hashed like a
+        declarative transform — but the override identity at least separates
+        the space from the inherited declarative default, so neutral and
+        native-role workers cannot stamp identical fingerprints during a
+        rolling upgrade.
+        """
+        cls = type(self)
+        overridden = [
+            n
+            for n in names
+            if getattr(cls, n, None) is not getattr(EmbeddingProvider, n)
+        ]
+        if not overridden:
+            return None
+        return f"{cls.__module__}.{cls.__qualname__}:{'+'.join(overridden)}"
+
     def document_space_fingerprint(self) -> str:
         """Stable identity of the document embedding space.
 
@@ -120,15 +139,26 @@ class EmbeddingProvider(ABC):
         mixed in one collection.
         """
         provider, model = self._provider_model()
+        extras = dict(self._fingerprint_extras())
+        marker = self._role_override_marker(("embed_document", "embed_documents"))
+        if marker:
+            extras["native_document_role"] = marker
         return _profiles.document_space_fingerprint(
-            provider, model, self.profile, self.dimension, self._fingerprint_extras()
+            provider, model, self.profile, self.dimension, extras
         )
 
     def query_profile_fingerprint(self) -> str:
         """Stable identity of the query embedding pipeline (gates query caches)."""
         provider, model = self._provider_model()
+        extras = dict(self._fingerprint_extras())
+        doc_marker = self._role_override_marker(("embed_document", "embed_documents"))
+        if doc_marker:
+            extras["native_document_role"] = doc_marker
+        query_marker = self._role_override_marker(("embed_query", "embed_queries"))
+        if query_marker:
+            extras["native_query_role"] = query_marker
         return _profiles.query_profile_fingerprint(
-            provider, model, self.profile, self.dimension, self._fingerprint_extras()
+            provider, model, self.profile, self.dimension, extras
         )
 
     @property

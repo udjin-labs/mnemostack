@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..embeddings.roles import (
     EMBEDDING_SPACE_KEY,
+    EmbeddingSpaceError,
     SpaceGuard,
     document_space_fingerprint_via,
     embed_document_via,
@@ -183,6 +184,20 @@ def upsert_markdown_chunks(
     res = ChunkSyncResult()
     new_chunks = [c for c in chunks if c[0] not in existing_ids]
 
+    def _fp_unchanged() -> bool:
+        if doc_fp is None:
+            return True
+        try:
+            return document_space_fingerprint_via(provider) == doc_fp
+        except EmbeddingSpaceError:
+            return False
+
+    def _raise_fp_changed() -> None:
+        raise EmbeddingSpaceError(
+            "embedding space changed mid-sync (the model tag was repointed "
+            "or became unresolvable) — aborting before any mixed-space write"
+        )
+
     def _embed(text: str, source: str) -> list | None:
         vec = embed_document_via(provider, text)
         if not vec:
@@ -191,17 +206,30 @@ def upsert_markdown_chunks(
             return None
         return vec
 
+    _FP_BATCH = 64
     if before_upsert is None:
-        # No quota hook: stream embed+upsert per chunk so indexing a large corpus
-        # doesn't hold every vector in memory at once.
-        for cid, text, payload in new_chunks:
-            vec = _embed(text, payload["source"])
-            if vec is None:
-                continue
-            if doc_fp is not None:
-                payload[EMBEDDING_SPACE_KEY] = doc_fp
-            store.upsert(cid, vec, payload, **tkw)
-            res.inserted += 1
+        # No quota hook: bounded groups with a SANDWICH check — the
+        # fingerprint is verified unchanged before a group is embedded and
+        # again before the group is committed, so a tag repointed mid-corpus
+        # can't stream mixed-space points. Memory stays bounded by the
+        # group size, preserving the constant-footprint property.
+        for start in range(0, len(new_chunks), _FP_BATCH):
+            group = new_chunks[start : start + _FP_BATCH]
+            if start and not _fp_unchanged():
+                _raise_fp_changed()
+            embedded: list[tuple[str, list, dict]] = []
+            for cid, text, payload in group:
+                vec = _embed(text, payload["source"])
+                if vec is None:
+                    continue
+                embedded.append((cid, vec, payload))
+            if embedded and not _fp_unchanged():
+                _raise_fp_changed()
+            for cid, vec, payload in embedded:
+                if doc_fp is not None:
+                    payload[EMBEDDING_SPACE_KEY] = doc_fp
+                store.upsert(cid, vec, payload, **tkw)
+                res.inserted += 1
     else:
         # Quota hook: it enforces on the total insert count and is all-or-nothing,
         # so embed the whole batch first, run the check, then write only if it passes.
@@ -214,6 +242,11 @@ def upsert_markdown_chunks(
                 payload[EMBEDDING_SPACE_KEY] = doc_fp
             to_upsert.append((cid, vec, payload))
         before_upsert(len(to_upsert), res.failed_sources)
+        # Post-embed check before ANY write: the quota path embeds the whole
+        # batch first, so this closes the same mid-batch repoint window the
+        # streaming path sandwiches per group.
+        if to_upsert and not _fp_unchanged():
+            _raise_fp_changed()
         for cid, vec, payload in to_upsert:
             store.upsert(cid, vec, payload, **tkw)
             res.inserted += 1

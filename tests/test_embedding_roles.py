@@ -355,6 +355,54 @@ def test_markdown_sync_stamps_new_and_refreshed_chunks():
     assert emb.seen == ["passage: fresh text"]
 
 
+def test_markdown_sync_sandwiches_fingerprint_around_writes():
+    # A tag repointed after the invocation guard must be caught before ANY
+    # write — the post-embed check sees a different resolution and aborts.
+    from mnemostack.embeddings.roles import EmbeddingSpaceError
+    from mnemostack.markdown.sync import upsert_markdown_chunks
+
+    class _Flipping(_AsymmetricProvider):
+        def __init__(self):
+            super().__init__()
+            self.resolutions = 0
+
+        def _fingerprint_extras(self):
+            self.resolutions += 1
+            return {"rev": str(self.resolutions)}
+
+    store = _RecordingStore()
+    with pytest.raises(EmbeddingSpaceError, match="changed mid-sync"):
+        upsert_markdown_chunks(
+            store,
+            _Flipping(),
+            [("c1", "text", {"text": "text", "source": "a.md"})],
+            existing_payloads={},
+        )
+    assert store.upserts == []
+
+
+def test_native_role_overrides_participate_in_fingerprints():
+    # A provider switching from the inherited declarative document role to a
+    # backend-native one changes the vectors — the fingerprint must change
+    # with it, or rolling old/new workers would stamp alike.
+    class _NativeDoc(_AsymmetricProvider):
+        def embed_document(self, text):
+            return [9.9, 9.9]
+
+    class _NativeQuery(_AsymmetricProvider):
+        def embed_query(self, text):
+            return [7.0, 7.0]
+
+    plain = _AsymmetricProvider()
+    native_doc = _NativeDoc()
+    native_q = _NativeQuery()
+    assert native_doc.document_space_fingerprint() != plain.document_space_fingerprint()
+    assert native_doc.query_profile_fingerprint() != plain.query_profile_fingerprint()
+    # A query-only native role changes ONLY the query pipeline identity.
+    assert native_q.document_space_fingerprint() == plain.document_space_fingerprint()
+    assert native_q.query_profile_fingerprint() != plain.query_profile_fingerprint()
+
+
 def test_markdown_sync_guards_each_invocation():
     # The watch loop calls this per file batch long after the CLI startup
     # guard ran — each invocation must recheck before embedding.
