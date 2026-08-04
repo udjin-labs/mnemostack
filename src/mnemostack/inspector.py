@@ -52,7 +52,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 from mnemostack import __version__
 from mnemostack.config import model_kwargs
 from mnemostack.embeddings import get_provider
-from mnemostack.embeddings.roles import embed_query_via
+from mnemostack.embeddings.roles import embed_query_via, recall_space_error
 from mnemostack.server import ServerConfig, _make_probe_client
 from mnemostack.vector import VectorStore
 from mnemostack.vector.qdrant import (
@@ -426,11 +426,31 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
     probe_client = _make_probe_client(cfg.qdrant_url, cfg.qdrant_health_timeout)
     _provider: dict[str, Any] = {}
 
-    def _embed(text: str) -> list[float]:
+    def _get_provider() -> Any:
         if "p" not in _provider:
             _provider["p"] = get_provider(cfg.provider_name, **model_kwargs(cfg.embedding_model))
+        return _provider["p"]
+
+    def _embed(text: str) -> list[float]:
         # Operator-typed search text is a retrieval query.
-        return embed_query_via(_provider["p"], text)
+        return embed_query_via(_get_provider(), text)
+
+    _space_verdict: dict[str, str | None] = {}
+
+    def _space_error_cached() -> str | None:
+        # The inspector searches the store directly (no Recaller), so it
+        # needs its own embedding-space guard — silently misleading results
+        # in an operator debugging tool are worse than an error. Conclusive
+        # verdicts are cached per process; an inconclusive check (store
+        # hiccup) lets the search proceed and is retried next time.
+        if "verdict" in _space_verdict:
+            return _space_verdict["verdict"]
+        try:
+            verdict = recall_space_error(store, _get_provider())
+        except Exception:  # noqa: BLE001 — inconclusive must not block the tool
+            return None
+        _space_verdict["verdict"] = verdict
+        return verdict
 
     app = FastAPI(title="mnemostack inspector", version=__version__)
 
@@ -720,6 +740,9 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
         rows: list[dict[str, Any]] = []
         try:
             if q:
+                space_err = _space_error_cached()
+                if space_err:
+                    return {"records": [], "error": space_err, "tenant": tenant}
                 vec = _embed(q)
                 if scoped:
                     for hit in store.search(vec, limit=limit, filters=parsed, tenant=scoped):

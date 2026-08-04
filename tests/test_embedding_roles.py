@@ -349,6 +349,59 @@ def test_ollama_provider_uses_profile_known_dimension():
     assert OllamaProvider(model="completely-unknown").dimension == 768
 
 
+def test_ollama_provider_resolves_quantized_tag_dimensions():
+    # Size-first quantized tags must not fall through to the 768 default —
+    # the collection would never accept the model's real vectors.
+    from mnemostack.embeddings.ollama import OllamaProvider
+
+    assert OllamaProvider(model="qwen3-embedding:0.6b-q8_0").dimension == 1024
+    assert OllamaProvider(model="qwen3-embedding:8b-q4_K_M").dimension == 4096
+    assert OllamaProvider(model="mxbai-embed-large:335m-v1-fp16").dimension == 1024
+
+
+def test_ollama_fingerprint_pins_the_pulled_model_digest(monkeypatch):
+    import json as jsonlib
+    from io import BytesIO
+
+    from mnemostack.embeddings.ollama import OllamaProvider
+
+    class _Resp(BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    digests = {"qwen3-embedding:8b": "sha256:aaa"}
+
+    def fake_urlopen(url, timeout=None):
+        assert str(url).endswith("/api/tags")
+        models = [{"name": n, "digest": d} for n, d in digests.items()]
+        return _Resp(jsonlib.dumps({"models": models}).encode())
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    p = OllamaProvider(model="qwen3-embedding:8b")
+    fp_a = p.document_space_fingerprint()
+    assert p._fingerprint_extras() == {"digest": "sha256:aaa"}
+    # A repointed tag (new digest) is a DIFFERENT space.
+    digests["qwen3-embedding:8b"] = "sha256:bbb"
+    fp_b = OllamaProvider(model="qwen3-embedding:8b").document_space_fingerprint()
+    assert fp_a != fp_b
+
+
+def test_ollama_fingerprint_degrades_to_none_when_host_unreachable(monkeypatch):
+    from mnemostack.embeddings.ollama import OllamaProvider
+
+    def fake_urlopen(url, timeout=None):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    p = OllamaProvider(model="qwen3-embedding:8b")
+    # The helper degrades to "no stamp, no guard" instead of crashing the
+    # consumer — embedding calls against the same host fail the same way.
+    assert document_space_fingerprint_via(p) is None
+
+
 def test_shared_query_embedding_forwards_profile_and_fingerprints():
     from mnemostack.recall.retrievers import _SharedQueryEmbedding
 
@@ -460,6 +513,59 @@ def test_recaller_guard_covers_retrievers_mode():
     )
     recaller = Recaller(retrievers=[arm])
     with pytest.raises(EmbeddingSpaceError, match="transforms documents"):
+        recaller.recall("вопрос")
+
+
+def test_recaller_guard_checks_every_vector_arm():
+    # A compatible first arm must not speak for an incompatible later one.
+    from mnemostack.embeddings.roles import EmbeddingSpaceError
+    from mnemostack.recall.recaller import Recaller
+    from mnemostack.recall.retrievers import VectorRetriever
+
+    class _Vec(_ScrollStore):
+        def search(self, *a, **kw):
+            return []
+
+    class _Identity(_AsymmetricProvider):
+        @property
+        def name(self):
+            return "ollama:nomic-embed-text"
+
+    ok_arm = VectorRetriever(embedding=_Identity(), vector_store=_Vec([]))
+    bad_arm = VectorRetriever(
+        embedding=_AsymmetricProvider(),
+        vector_store=_Vec([{EMBEDDING_SPACE_KEY: "es1:other"}]),
+    )
+    recaller = Recaller(retrievers=[ok_arm, bad_arm])
+    with pytest.raises(EmbeddingSpaceError, match="different spaces"):
+        recaller.recall("вопрос")
+
+
+def test_recaller_guard_retries_after_inconclusive_check():
+    from mnemostack.embeddings.roles import EmbeddingSpaceError
+    from mnemostack.recall.recaller import Recaller
+
+    class _FlakyVec:
+        def __init__(self, payloads):
+            self._payloads = payloads
+            self.scroll_calls = 0
+
+        def scroll(self):
+            self.scroll_calls += 1
+            if self.scroll_calls == 1:
+                raise ConnectionError("store hiccup")
+            for p in self._payloads:
+                yield SimpleNamespace(id="x", payload=p)
+
+        def search(self, *a, **kw):
+            return []
+
+    store = _FlakyVec([{EMBEDDING_SPACE_KEY: "es1:other"}])
+    recaller = Recaller(embedding_provider=_AsymmetricProvider(), vector_store=store)
+    # First recall: check inconclusive → fail open, do NOT cache.
+    assert recaller.recall("вопрос") == []
+    # Store recovered: the retried check finds the mismatch and refuses.
+    with pytest.raises(EmbeddingSpaceError, match="different spaces"):
         recaller.recall("вопрос")
 
 

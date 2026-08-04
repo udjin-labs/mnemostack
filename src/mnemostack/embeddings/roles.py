@@ -10,10 +10,13 @@ role methods, so the fallback only fires for objects that never had them.
 
 from __future__ import annotations
 
+import logging
 from itertools import islice
 from typing import Any
 
 from .profiles import EMBEDDING_SPACE_KEY
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "EMBEDDING_SPACE_KEY",
@@ -65,9 +68,27 @@ def embed_documents_via(provider: Any, texts: list[str]) -> list[list[float]]:
 
 
 def document_space_fingerprint_via(provider: Any) -> str | None:
-    """The provider's document-space fingerprint, or None for legacy providers."""
+    """The provider's document-space fingerprint, or None when unavailable.
+
+    None covers both legacy providers without fingerprint support and a
+    fingerprint that cannot be computed right now (e.g. the Ollama digest
+    lookup against an unreachable host). Degrading to "no stamp, no guard"
+    is safe: embedding calls against the same host fail the same way, so no
+    mis-stamped point can be written — at worst points land unstamped and
+    are adopted later via the documented legacy path.
+    """
     method = getattr(provider, "document_space_fingerprint", None)
-    return method() if method is not None else None
+    if method is None:
+        return None
+    try:
+        return method()
+    except Exception as exc:  # noqa: BLE001 — degraded, not broken
+        logger.warning(
+            "document-space fingerprint unavailable (%s) — proceeding without "
+            "space stamping/guarding",
+            exc,
+        )
+        return None
 
 
 def recall_space_error(store: Any, provider: Any) -> str | None:

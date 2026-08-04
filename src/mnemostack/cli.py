@@ -1614,14 +1614,17 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             except Exception as e:  # noqa: BLE001
                 add("embedding", "down", f"{provider.name}: {e}")
             profile = getattr(provider, "profile", None)
-            fp_method = getattr(provider, "document_space_fingerprint", None)
-            if profile is not None and fp_method is not None:
+            if profile is not None:
                 # Transforms are reported by profile identity only — never
-                # user text, transformed or otherwise.
+                # user text, transformed or otherwise. The fingerprint may be
+                # unavailable (e.g. Ollama digest lookup against a down host)
+                # — doctor reports, it never crashes.
+                fp = document_space_fingerprint_via(provider)
                 add(
                     "embedding_profile",
-                    "ok",
-                    f"{profile.name} v{profile.version} — doc_space {fp_method()}",
+                    "ok" if fp else "down",
+                    f"{profile.name} v{profile.version} — doc_space {fp or 'unavailable'}",
+                    None if fp else "provider unreachable — space stamping/guarding degraded",
                 )
 
     # Qdrant (a hard recall dependency), read-only.

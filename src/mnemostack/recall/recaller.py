@@ -324,22 +324,30 @@ class Recaller:
         self._space_error: str | None = None
         self._space_lock = threading.Lock()
 
-    def _space_check_pair(self) -> tuple[Any, Any] | None:
-        """The (store, provider) pair to space-check, or None.
+    def _space_check_pairs(self) -> list[tuple[Any, Any]]:
+        """Every distinct (store, provider) pair this recaller can query.
 
-        The legacy path holds them directly; in retrievers mode the Recaller
-        itself often has neither, so the first vector-backed retriever
-        (embedding + vector_store attributes) speaks for the collection —
-        all built-in vector arms share one store and one provider.
+        The legacy path holds one pair directly; retrievers mode publicly
+        permits arbitrary arms over different collections/providers, so each
+        distinct pair is checked — a compatible first arm must not speak for
+        an incompatible later one. The multi-field arms share one wrapper
+        and one store, so they dedup to a single pair.
         """
-        if self.embedding is not None and self.vector is not None:
-            return self.vector, self.embedding
+        pairs: list[tuple[Any, Any]] = []
+        seen: set[tuple[int, int]] = set()
+
+        def _add(store: Any, emb: Any) -> None:
+            if store is None or emb is None:
+                return
+            key = (id(store), id(emb))
+            if key not in seen:
+                seen.add(key)
+                pairs.append((store, emb))
+
+        _add(self.vector, self.embedding)
         for retriever in self.retrievers:
-            store = getattr(retriever, "vector_store", None)
-            emb = getattr(retriever, "embedding", None)
-            if store is not None and emb is not None:
-                return store, emb
-        return None
+            _add(getattr(retriever, "vector_store", None), getattr(retriever, "embedding", None))
+        return pairs
 
     def _ensure_space_compat(self) -> None:
         """Fail loud (once determined, on every recall) when the query and
@@ -349,23 +357,34 @@ class Recaller:
         stamped with a different fingerprint — degrades retrieval with no
         error at all; that silent failure mode is exactly what the space
         fingerprints exist to prevent, so recall refuses instead. The check
-        samples the collection once per Recaller instance (serialized — the
-        loser of a concurrent first recall waits instead of skipping the
-        verdict); a check that ERRORS (store hiccup, custom store without
-        scroll semantics) logs and never blocks recall.
+        samples each queried collection once per Recaller instance
+        (serialized — the loser of a concurrent first recall waits instead
+        of skipping the verdict). A check that ERRORS (store hiccup) logs,
+        lets the current recall proceed, and is RETRIED on a later recall —
+        a transient outage at first-recall time must not disable the guard
+        for the instance's lifetime.
         """
         if not self._space_checked:
             with self._space_lock:
                 if not self._space_checked:
-                    pair = self._space_check_pair()
-                    if pair is not None:
+                    error: str | None = None
+                    conclusive = True
+                    for store, emb in self._space_check_pairs():
                         try:
-                            self._space_error = recall_space_error(pair[0], pair[1])
-                        except Exception as exc:  # noqa: BLE001 — a broken check must not break recall
+                            error = recall_space_error(store, emb)
+                        except Exception as exc:  # noqa: BLE001 — must not break recall
+                            conclusive = False
                             logger.warning(
-                                "embedding-space compatibility check skipped (%s)", exc
+                                "embedding-space compatibility check inconclusive "
+                                "(%s) — will retry on a later recall",
+                                exc,
                             )
-                    self._space_checked = True
+                            continue
+                        if error:
+                            break
+                    self._space_error = error
+                    if conclusive or error:
+                        self._space_checked = True
         if self._space_error:
             raise EmbeddingSpaceError(self._space_error)
 
