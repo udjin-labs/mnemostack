@@ -144,6 +144,18 @@ def document_space_fingerprint_via(provider: Any) -> str | None:
     method = getattr(provider, "document_space_fingerprint", None)
     if method is None:
         return None
+    split = getattr(provider, "_provider_model", None)
+    if split is not None:
+        try:
+            _, model = split()
+        except Exception:  # noqa: BLE001 — identity probe must not fail closed
+            model = None
+        if model == "":
+            # Unqualified provider name (pre-existing custom-provider
+            # contract): no model identity → no space identity. Two
+            # different models behind one name must not share a
+            # fingerprint, so none is issued at all.
+            return None
     try:
         return method()
     except Exception as exc:

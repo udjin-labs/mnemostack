@@ -168,8 +168,20 @@ def resolve_profile(provider: str, model: str) -> EmbeddingProfile:
 
 
 def known_dimension(provider: str, model: str) -> int | None:
-    """Profile-declared native dimension for a model tag, if any."""
-    return resolve_profile(provider, model).known_dimensions.get(model.lower())
+    """Profile-declared native dimension for a model tag, if any.
+
+    Deliberately independent of transform-profile precedence: dimensions are
+    keyed by EXACT tag, so every registered profile is consulted (latest
+    registration first) — an application overriding a built-in profile's
+    transforms without repeating its dimension table must not regress the
+    tag to a wrong fallback dimension.
+    """
+    norm = model.lower()
+    for profile in reversed(_PROFILES.get(provider.lower(), [])):
+        dim = profile.known_dimensions.get(norm)
+        if dim:
+            return dim
+    return None
 
 
 # Reserved payload key carrying the document-space fingerprint on stored

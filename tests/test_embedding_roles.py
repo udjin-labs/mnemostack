@@ -651,6 +651,75 @@ def test_singular_role_defaults_dispatch_through_batch_overrides():
     assert _NativeBatchQueries().embed_query("q") == [6.6]
 
 
+def test_profile_override_without_dimensions_keeps_builtin_table():
+    # Registering a transform override (e.g. the identity profile the guard
+    # error suggests) must not regress known tags to a wrong dimension.
+    from mnemostack.embeddings.profiles import (
+        EmbeddingProfile,
+        known_dimension,
+        register_embedding_profile,
+        resolve_profile,
+    )
+
+    register_embedding_profile(
+        "ollama",
+        EmbeddingProfile(
+            name="qwen3-identity-override",
+            version=1,
+            model_patterns=("qwen3-embedding:0.6b",),
+        ),
+    )
+    assert resolve_profile("ollama", "qwen3-embedding:0.6b").name == "qwen3-identity-override"
+    assert known_dimension("ollama", "qwen3-embedding:0.6b") == 1024
+
+
+def test_own_pair_guard_skipped_in_retrievers_mode_but_kept_for_search_many():
+    # A CLI construction passes the same provider/store to the Recaller AND
+    # its arms; in retrievers mode the legacy pair is unused, so it must not
+    # veto a recall the arm may satisfy without vector work — while
+    # search_many always queries the own pair and always guards.
+    from mnemostack.embeddings.roles import EmbeddingSpaceError
+    from mnemostack.recall.recaller import Recaller
+    from mnemostack.recall.retrievers import VectorRetriever
+
+    class _Vec(_ScrollStore):
+        def search(self, *a, **kw):
+            return []
+
+    class _Identity(_AsymmetricProvider):
+        @property
+        def name(self):
+            return "ollama:nomic-embed-text"
+
+    mismatched = _Vec([{EMBEDDING_SPACE_KEY: "es1:other"}])
+    ok_arm = VectorRetriever(embedding=_Identity(), vector_store=_Vec([]))
+    recaller = Recaller(
+        embedding_provider=_AsymmetricProvider(),
+        vector_store=mismatched,
+        retrievers=[ok_arm],
+    )
+    assert recaller.recall("вопрос") == []  # legacy pair unused → no veto
+    with pytest.raises(EmbeddingSpaceError, match="different spaces"):
+        recaller.search_many([[0.1, 0.2]], limit=5)  # own pair used → guarded
+
+
+def test_unqualified_provider_name_gets_no_space_identity():
+    # The documented custom-provider contract never required "provider:model"
+    # names — such a provider has no model identity, so no fingerprint is
+    # issued (two different models behind one name must not share one).
+    class _Unqualified(_AsymmetricProvider):
+        @property
+        def name(self):
+            return "my-provider"
+
+    assert document_space_fingerprint_via(_Unqualified()) is None
+    store = _RecordingStore()
+    Ingestor(embedding=_Unqualified(), vector_store=store).ingest(
+        [IngestItem(text="hello", source="a.md")]
+    )
+    assert EMBEDDING_SPACE_KEY not in store.upserts[0][2]
+
+
 def test_cooperative_super_overrides_of_both_forms_do_not_recurse():
     # Overriding BOTH forms and delegating to super() (logging wrappers,
     # backend setup) must land on the declarative path, not bounce between

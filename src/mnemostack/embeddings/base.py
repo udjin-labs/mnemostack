@@ -37,7 +37,14 @@ class EmbeddingProvider(ABC):
         """Return embedding vectors for multiple texts. Empty list for failed items."""
 
     def _provider_model(self) -> tuple[str, str]:
-        """Split `name` ('ollama:qwen3-embedding:8b') into (provider, model)."""
+        """Split `name` ('ollama:qwen3-embedding:8b') into (provider, model).
+
+        An unqualified name (the pre-existing custom-provider contract never
+        required a colon) yields an EMPTY model: such a provider has no
+        model identity, so it gets no space identity either — fingerprint
+        consumers treat it like a legacy provider (no stamping, no guard)
+        instead of letting two different models share one fingerprint.
+        """
         provider, _, model = self.name.partition(":")
         return provider, model
 

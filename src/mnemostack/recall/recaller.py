@@ -345,12 +345,15 @@ class Recaller:
         restart.
 
         Deliberately guards only the recaller's OWN (vector, embedding)
-        pair. Retriever arms enforce compatibility themselves, inside
-        ``search()``, exactly when they perform vector work — after their
-        own early returns (empty gate tokens, no temporal window) and after
-        request-eligibility skips (tenant-incapable arms never run). Their
+        pair, and only on paths that actually USE it: retrievers-mode
+        recall never touches the legacy pair (a CLI construction passes the
+        same provider/store to both the Recaller and its arms, and the arm
+        may legitimately return before any vector work), so there the arms
+        enforce compatibility themselves inside ``search()`` — after their
+        own early returns and request-eligibility skips — and their
         :class:`EmbeddingSpaceError` propagates out of the retrieval loop
-        instead of being degraded away, so the refusal stays loud.
+        instead of being degraded away. ``search_many`` always queries the
+        own pair directly, so it always guards.
         """
         del tenant  # eligibility is enforced where arms run, not here
         if self._space_guards is None:
@@ -543,8 +546,10 @@ class Recaller:
         as_of: str | None = None,
         tenant: str | None = None,
     ) -> list[RecallResult]:
-        # Before ANY path embeds the query — retrievers mode included.
-        self._ensure_space_compat(tenant=tenant)
+        # Legacy-pair guard only when the legacy path will actually run —
+        # in retrievers mode the arms guard themselves at their boundaries.
+        if not self.retrievers:
+            self._ensure_space_compat(tenant=tenant)
         # Retrievers mode: fuse N arbitrary ranked lists
         if self.retrievers:
             return self._recall_via_retrievers(
