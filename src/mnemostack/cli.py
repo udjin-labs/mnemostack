@@ -2477,6 +2477,14 @@ def cmd_index(args: argparse.Namespace) -> int:
             store.upsert(cid, vec, payload)
             inserted += 1
 
+    if inserted:
+        # POST-COMMIT revalidation (no atomic empty-collection claim
+        # exists): a concurrent writer bootstrapping this collection under
+        # another space is caught by re-sampling after our writes.
+        post_rc, _post_fp = _guard_document_space(store, provider)
+        if post_rc is not None:
+            return post_rc
+
     refreshed = 0
     foreign_skipped = 0
     foreign_space_skipped = 0

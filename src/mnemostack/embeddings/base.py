@@ -53,7 +53,16 @@ class EmbeddingProvider(ABC):
         self._profile = value
 
     def embed_query(self, text: str) -> list[float]:
-        """Embed a retrieval query (applies the profile query transform once)."""
+        """Embed a retrieval query (applies the profile query transform once).
+
+        Dispatches through an overridden ``embed_queries`` so a provider
+        implementing only the BATCH native role keeps it on singular paths
+        too (mirror of the batch→singular dispatch below). No recursion is
+        possible: each default delegates only to an OVERRIDDEN counterpart.
+        """
+        if type(self).embed_queries is not EmbeddingProvider.embed_queries:
+            vecs = self.embed_queries([text])
+            return vecs[0] if vecs else []
         return self.embed(self.profile.apply_query(text))
 
     def embed_queries(self, texts: list[str]) -> list[list[float]]:
@@ -69,7 +78,16 @@ class EmbeddingProvider(ABC):
         return self.embed_batch([self.profile.apply_query(t) for t in texts])
 
     def embed_document(self, text: str) -> list[float]:
-        """Embed a document/chunk for indexing (applies the document transform once)."""
+        """Embed a document/chunk for indexing (applies the document transform once).
+
+        Dispatches through an overridden ``embed_documents`` so a provider
+        implementing only the BATCH native role keeps it on singular paths
+        (CLI/markdown indexing) too — otherwise those routes would produce
+        neutral vectors under the same native-role fingerprint.
+        """
+        if type(self).embed_documents is not EmbeddingProvider.embed_documents:
+            vecs = self.embed_documents([text])
+            return vecs[0] if vecs else []
         return self.embed(self.profile.apply_document(text))
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:

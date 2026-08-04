@@ -560,9 +560,37 @@ def test_native_document_override_is_not_legacy_compatible():
 
 
 def test_ingestor_stamps_the_guard_validated_fingerprint():
-    # ONE resolution per flush: the stamp must be the exact fingerprint the
-    # guard validated — a second independent lookup would open a window
-    # where the guard passed space A and the stamp recorded space B.
+    # The stamp must be the fingerprint the guard validated; the only other
+    # resolution per flush is the post-embedding SANDWICH comparison — no
+    # independent stamp lookup exists to race against the verdict.
+    class _Counting(_AsymmetricProvider):
+        def __init__(self):
+            super().__init__()
+            self.resolutions = 0
+
+        def _fingerprint_extras(self):
+            self.resolutions += 1
+            return {"rev": "stable"}
+
+    class _Store(_ScrollStore, _RecordingStore):
+        def __init__(self, payloads):
+            _ScrollStore.__init__(self, payloads)
+            _RecordingStore.__init__(self)
+
+    emb = _Counting()
+    store = _Store([])
+    Ingestor(embedding=emb, vector_store=store).ingest(
+        [IngestItem(text="hello", source="a.md")]
+    )
+    # guard + sandwich comparison + post-commit revalidation = 3, никакого
+    # отдельного резолва под штамп.
+    assert emb.resolutions == 3
+    assert EMBEDDING_SPACE_KEY in store.upserts[0][2]
+
+
+def test_ingestor_flush_sandwich_aborts_on_mid_embed_repoint():
+    from mnemostack.embeddings.roles import EmbeddingSpaceError
+
     class _Flipping(_AsymmetricProvider):
         def __init__(self):
             super().__init__()
@@ -572,18 +600,55 @@ def test_ingestor_stamps_the_guard_validated_fingerprint():
             self.resolutions += 1
             return {"rev": str(self.resolutions)}
 
-    class _Store(_ScrollStore, _RecordingStore):
-        def __init__(self, payloads):
-            _ScrollStore.__init__(self, payloads)
-            _RecordingStore.__init__(self)
+    store = _RecordingStore()
+    with pytest.raises(EmbeddingSpaceError, match="changed mid-flush"):
+        Ingestor(embedding=_Flipping(), vector_store=store).ingest(
+            [IngestItem(text="hello", source="a.md")]
+        )
+    assert store.upserts == []
 
-    emb = _Flipping()
-    store = _Store([])
-    Ingestor(embedding=emb, vector_store=store).ingest(
-        [IngestItem(text="hello", source="a.md")]
-    )
-    assert emb.resolutions == 1  # guard's resolution IS the stamp's
-    assert EMBEDDING_SPACE_KEY in store.upserts[0][2]
+
+def test_concurrent_empty_bootstrap_is_detected_post_commit():
+    # No atomic empty-collection claim exists: a foreign writer's stamp that
+    # appears while we write must fail the SAME flush, not a later one.
+    from mnemostack.embeddings.roles import EmbeddingSpaceError
+
+    class _RacyStore(_RecordingStore):
+        def __init__(self):
+            super().__init__()
+            self.foreign: dict | None = None
+
+        def scroll(self):
+            if self.foreign is not None:
+                yield SimpleNamespace(id="foreign", payload=self.foreign)
+            for cid, _vec, payload in self.upserts:
+                yield SimpleNamespace(id=cid, payload=payload)
+
+        def upsert(self, id, vector, payload, **kw):
+            super().upsert(id, vector, payload, **kw)
+            # Simulate the concurrent bootstrapping writer landing first.
+            self.foreign = {EMBEDDING_SPACE_KEY: "es1:other"}
+
+    store = _RacyStore()
+    with pytest.raises(EmbeddingSpaceError, match="different spaces"):
+        Ingestor(embedding=_AsymmetricProvider(), vector_store=store).ingest(
+            [IngestItem(text="hello", source="a.md")]
+        )
+
+
+def test_singular_role_defaults_dispatch_through_batch_overrides():
+    # Mirror case: a provider implementing only the BATCH native role must
+    # keep it on singular paths (CLI/markdown indexing) too.
+    class _NativeBatchDocs(_AsymmetricProvider):
+        def embed_documents(self, texts):
+            return [[5.5] for _ in texts]
+
+    class _NativeBatchQueries(_AsymmetricProvider):
+        def embed_queries(self, texts):
+            return [[6.6] for _ in texts]
+
+    assert _NativeBatchDocs().embed_document("x") == [5.5]
+    assert _NativeBatchQueries().embed_query("q") == [6.6]
 
 
 def test_batch_role_defaults_dispatch_through_singular_overrides():

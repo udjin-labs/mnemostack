@@ -46,6 +46,7 @@ from typing import Any
 from mnemostack.embeddings.base import EmbeddingProvider
 from mnemostack.embeddings.roles import (
     EMBEDDING_SPACE_KEY,
+    EmbeddingSpaceError,
     SpaceGuard,
     document_space_fingerprint_via,
     embed_document_via,
@@ -717,6 +718,17 @@ class Ingestor:
             except Exception as exc:
                 log.warning("embed_batch failed (%s) — falling back to per-item", exc)
                 vectors = [self._safe_embed_single(t) for t in texts]
+        # SANDWICH (same policy as the CLI/markdown paths): the fingerprint
+        # must still be the guarded one AFTER embedding — a tag repointed
+        # during the embed call must not have its vectors stamped as the
+        # pre-repoint space.
+        if doc_space_fp is not None:
+            current_fp = document_space_fingerprint_via(self.embedding)
+            if current_fp != doc_space_fp:
+                raise EmbeddingSpaceError(
+                    "embedding space changed mid-flush (the model tag was "
+                    "repointed) — aborting before any mixed-space write"
+                )
 
         points = []
         for (pid, item), vec in zip(buffer, vectors, strict=False):
@@ -769,6 +781,14 @@ class Ingestor:
                     self.store.upsert(pid, vec, payload, **tkw)
         stats.upserted += len(points)
         stats.ids.extend(p[0] for p in points)
+        # POST-COMMIT revalidation: Qdrant has no atomic "claim an empty
+        # collection" primitive, so two processes bootstrapping the same
+        # empty collection under different spaces could both pass the empty
+        # pre-check. Re-sampling AFTER the write sees the other writer's
+        # stamps and fails loud within the same flush — the exposure is
+        # bounded to one interleaved batch per process, and every later
+        # write is refused by the normal mismatch verdict.
+        self._space_guard.ensure()
         self._write_wrappers(points, stats)
         if self._seen is not None:
             for p in points:

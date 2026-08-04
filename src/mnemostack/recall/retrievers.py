@@ -579,29 +579,48 @@ class _SharedQueryEmbedding(EmbeddingProvider):
         method = getattr(type(self._embedding), name, None)
         return method is not None and method is not getattr(EmbeddingProvider, name)
 
+    # The role methods below spell out the declarative fallback instead of
+    # calling super(): the base defaults dispatch through OVERRIDDEN
+    # counterparts, and this wrapper overrides all four for memoization —
+    # super() would bounce between the base singular/batch defaults forever.
+
     def embed_query(self, text: str) -> list[float]:
         if self._inner_overrides("embed_query"):
             return self._single_flight(
                 ("native", "query", text), lambda: self._embedding.embed_query(text)
             )
-        return super().embed_query(text)
+        if self._inner_overrides("embed_queries"):
+            return self._single_flight(
+                ("native", "query", text),
+                lambda: next(iter(self._embedding.embed_queries([text])), []),
+            )
+        return self.embed(self.profile.apply_query(text))
 
     def embed_queries(self, texts: list[str]) -> list[list[float]]:
         if self._inner_overrides("embed_queries"):
             return self._embedding.embed_queries(texts)
-        return super().embed_queries(texts)
+        if self._inner_overrides("embed_query"):
+            return [self.embed_query(t) for t in texts]
+        return self.embed_batch([self.profile.apply_query(t) for t in texts])
 
     def embed_document(self, text: str) -> list[float]:
         if self._inner_overrides("embed_document"):
             return self._single_flight(
                 ("native", "document", text), lambda: self._embedding.embed_document(text)
             )
-        return super().embed_document(text)
+        if self._inner_overrides("embed_documents"):
+            return self._single_flight(
+                ("native", "document", text),
+                lambda: next(iter(self._embedding.embed_documents([text])), []),
+            )
+        return self.embed(self.profile.apply_document(text))
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         if self._inner_overrides("embed_documents"):
             return self._embedding.embed_documents(texts)
-        return super().embed_documents(texts)
+        if self._inner_overrides("embed_document"):
+            return [self.embed_document(t) for t in texts]
+        return self.embed_batch([self.profile.apply_document(t) for t in texts])
 
     def _single_flight(self, key: Any, compute: Callable[[], list[float]]) -> list[float]:
         # Single-flight: the arms run CONCURRENTLY from the recaller's thread

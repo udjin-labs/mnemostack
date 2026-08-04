@@ -251,6 +251,14 @@ def upsert_markdown_chunks(
             store.upsert(cid, vec, payload, **tkw)
             res.inserted += 1
 
+    if res.inserted:
+        # POST-COMMIT revalidation: no atomic empty-collection claim exists,
+        # so a concurrent writer bootstrapping the same empty collection
+        # under another space is detected by re-sampling after our writes —
+        # exposure bounded to one interleaved invocation, all later writes
+        # refused by the normal mismatch verdict.
+        SpaceGuard(store, provider, recheck_seconds=0.0).ensure()
+
     for cid, _text, payload in chunks:
         if cid not in existing_ids:
             continue
