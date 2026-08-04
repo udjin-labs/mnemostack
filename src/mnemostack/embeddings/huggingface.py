@@ -10,21 +10,37 @@ from pathlib import Path
 
 from .base import EmbeddingProvider
 
+# Small text assets that change tokenization — and therefore the vectors —
+# without touching config.json or the weight files. Hashed by CONTENT.
+_TOKENIZER_ASSETS = (
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "vocab.json",
+    "vocab.txt",
+    "merges.txt",
+    "spiece.model",
+    "sentencepiece.bpe.model",
+)
+
 
 def _local_weights_signature(path: Path) -> str:
-    """Cheap identity of a local weights directory for space fingerprints.
+    """Cheap identity of a local model directory for space fingerprints.
 
-    A local path has no hub commit hash, yet its weights can be swapped in
+    A local path has no hub commit hash, yet its contents can be swapped in
     place while provider/model/pooling/dimension all stay equal. Hashing
     gigabytes of weights on every startup is not viable, so this pins the
-    config bytes plus each weight file's (name, size) — catching config/
-    architecture changes and practically every weight swap. Residual: an
-    in-place same-size weight edit is not detected.
+    config and tokenizer asset BYTES (small files whose changes alter the
+    vectors) plus each weight file's (name, size) — catching config,
+    tokenizer and practically every weight swap. Residual: an in-place
+    same-size weight edit is not detected.
     """
     h = hashlib.sha256()
-    config = path / "config.json"
-    if config.is_file():
-        h.update(config.read_bytes())
+    for asset in ("config.json", *_TOKENIZER_ASSETS):
+        f = path / asset
+        if f.is_file():
+            h.update(asset.encode())
+            h.update(f.read_bytes())
     for f in sorted(path.iterdir()):
         if f.suffix in (".safetensors", ".bin", ".pt") and f.is_file():
             h.update(f"{f.name}:{f.stat().st_size}".encode())
@@ -81,12 +97,17 @@ class HuggingFaceProvider(EmbeddingProvider):
         # The RESOLVED weights identity: a mutable branch label ("main") can
         # be repointed to different weights, so the space fingerprint pins
         # the commit hash when the hub provides one — and a content signature
-        # when the model is a LOCAL directory (no hub hash exists there, yet
-        # the weights at the same path can be replaced).
-        self.revision = getattr(self.model.config, "_commit_hash", None) or revision
+        # when the model is a LOCAL directory. For local directories the
+        # signature wins over a caller-supplied `revision`: Transformers
+        # ignores revisions for local files, so an arbitrary label would
+        # mask an in-place file swap.
+        commit = getattr(self.model.config, "_commit_hash", None)
         model_dir = Path(model)
-        if self.revision is None and model_dir.is_dir():
+        self.revision: str | None
+        if commit is None and model_dir.is_dir():
             self.revision = f"local:{_local_weights_signature(model_dir)}"
+        else:
+            self.revision = commit or revision
         # Infer dimension from a probe embedding
         self._dim = len(self.embed("dim probe"))
 
