@@ -44,6 +44,9 @@ _RESERVED_STRUCTURAL_KEYS = frozenset(
         "index_root",
         "tenant_id",
         "synthetic_prefix_len",
+        # Document-space fingerprint is stamped at upsert time from the live
+        # provider — a frontmatter value would forge space membership.
+        "_embedding_space",
     }
 )
 

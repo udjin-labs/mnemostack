@@ -139,6 +139,27 @@ only — `AsyncVectorStore` does not write sparse encodings),
 fusion weight, `lexical` mode only; when set it replaces the arm set, and
 arm names follow `qdrant_text[:<field>]`).
 
+🟡 **Experimental — embedding profiles** (`mnemostack.embeddings.profiles`):
+`EmbeddingProfile`, `register_embedding_profile`, `resolve_profile`, the
+declarative transform specs (`identity` / `prefix` / `instruct`, the latter
+with an optional `separator` field for family variants) and the space
+fingerprints (`document_space_fingerprint` / `query_profile_fingerprint`,
+the `_embedding_space` payload key). The intended contract: transforms apply
+exactly once inside the role methods and never change stored text; a
+document-fingerprint change requires a new collection or explicit recreate,
+a query-fingerprint change only invalidates query caches. The mixed-space
+guard (`check_document_space` / `SpaceGuard`) is sample-based and enforced
+everywhere built-in code reads or writes vectors: the CLI index commands,
+`Ingestor` (per flush) and `upsert_markdown_chunks` (per invocation — watch
+batches included) on the write side; the `Recaller` (incl. `search_many`),
+the built-in vector retrievers and the inspector on the read side. Freshness is a
+BOUNDED contract, not an instantaneous one: verdicts are cached and
+revalidated on an interval, fingerprints pin the resolved weights (HF
+revision / local-directory signature, Ollama digest re-resolved per batch)
+— weights mutated underneath a live process are detected at the next
+revalidation, batch or process start, never mid-request. Field shapes and
+the fingerprint schema prefix (`es1:`) may still evolve.
+
 🟡 **Experimental — verifiable citations** (`mnemostack.provenance`,
 `mnemostack resolve`, `GET /resolve/{id}`, MCP `mnemostack_resolve`): the
 verdict NAMES (`intact` / `source_changed` / `moved` / `changed` / `missing`
@@ -245,8 +266,14 @@ behave exactly as listed above.
   **silently skip** foreign-owned ids (they leave them untouched and return without
   error, so don't write `except TenantConflictError` around them). `stamp_tenant(
   tenant, only_missing=True)` backfills the key on a pre-tenant collection.
-- **Embeddings**: `EmbeddingProvider` (incl. `health_check`), `get_provider`,
-  `list_providers`, `register_provider`.
+- **Embeddings**: `EmbeddingProvider` (incl. `health_check` and the role
+  methods `embed_query` / `embed_queries` / `embed_document` /
+  `embed_documents`, which default to the legacy `embed` / `embed_batch` —
+  existing providers stay source-compatible and symmetric models produce
+  identical vectors), `get_provider`, `list_providers`, `register_provider`.
+  The embedding-profile registry (`EmbeddingProfile`,
+  `register_embedding_profile`, `resolve_profile`, the transform-spec
+  vocabulary and the space fingerprints) is 🟡 experimental — see below.
 - **LLM**: `LLMProvider` (incl. `health_check`), `LLMResponse`, `get_llm`,
   `list_llms`, `register_llm`.
 - **Recall (core)**: `Recaller` (`recall` / `recall_async`), `recall_flow`,

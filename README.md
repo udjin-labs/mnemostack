@@ -833,6 +833,35 @@ class MyProvider(EmbeddingProvider):
 register_provider("my-provider", MyProvider)
 ```
 
+`embed`/`embed_batch` are the neutral primitives and stay the required
+surface. Ingestion and retrieval call the inherited *role methods* —
+`embed_document(s)` for chunks, `embed_query`/`embed_queries` for queries —
+which apply the model family's **embedding profile** exactly once before
+delegating to your primitives. Built-in profiles cover asymmetric families
+(Qwen3-Embedding's query instruction; E5's `query: `/`passage: ` prefixes;
+the multilingual-E5-instruct variant's instruction format);
+symmetric models resolve to the identity profile and behave exactly as
+before. Transforms touch only inference input — stored text, chunk ids,
+lexical search and citations keep the original document text. To teach
+mnemostack a new family without patching it:
+
+```python
+from mnemostack.embeddings import EmbeddingProfile, register_embedding_profile
+
+register_embedding_profile("ollama", EmbeddingProfile(
+    name="my-family",
+    version=1,
+    model_patterns=("my-family-embed:*",),
+    query_transform={"kind": "prefix", "prefix": "query: "},
+))
+```
+
+Indexed points are stamped with a document-space fingerprint (provider +
+model + document transform + dimension + provider inference knobs —
+profile name/version are metadata and never hashed); `mnemostack index` /
+`index-markdown` refuse a collection embedded under a different space, and
+`doctor` reports the active profile and fingerprint.
+
 ## Install for an OpenClaw-style agent
 
 If you run an OpenClaw-style assistant with its own `scripts/recall.sh` or similar recall entry point, you don't have to wire mnemostack in by hand. Ask the assistant to do it and it can follow the steps below verbatim.
@@ -882,7 +911,7 @@ If you run an OpenClaw-style assistant with its own `scripts/recall.sh` or simil
 
    **Case B — user already has Qdrant / Memgraph populated by another plugin or a prior assistant run.** Don't re-index. mnemostack reads existing collections and graphs as-is; payload like `chat_id`, `memory_class`, `valid_from` is preserved. Just point `VectorStore(collection=...)` at the existing collection name and `MemgraphRetriever(uri=...)` at the existing graph.
 
-   **Critical for both cases:** use the *same embedding model* for the query that was used for the stored points. Mixing providers/models across ingest and query silently returns garbage — no error, just bad results.
+   **Critical for both cases:** use the *same embedding model* for the query that was used for the stored points. Mixing providers/models across ingest and query silently returns garbage — no error, just bad results. Indexing commands now enforce this for documents: points carry a document-space fingerprint and `index`/`index-markdown` refuse a collection embedded under a different provider/model/profile.
 
 4. **Point your recall entry at mnemostack.** Swap your search helper to use the 4-retriever `Recaller` from the "Full stack" example above. If your recall script has a `--unified` flag, route to mnemostack first and fall back to the legacy code path on any exception.
 

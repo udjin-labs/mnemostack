@@ -33,11 +33,23 @@ provider = get_provider("gemini", api_key="...")        # Cloud (best quality)
 provider = get_provider("ollama", host="http://localhost:11434")  # Local
 provider = get_provider("huggingface", model="BAAI/bge-large-en-v1.5")  # Local GPU
 
-vec = provider.embed("some text")
+query_vec = provider.embed_query("some question")   # retrieval query role
+doc_vec = provider.embed_document("some text")      # document/chunk role
+vec = provider.embed("some text")                   # neutral primitive
 assert provider.dimension == len(vec)
 ```
 
-Critical constraint: **use the same provider/model for indexing and searching**. Mixing dimensions or models breaks similarity scores silently.
+`embed`/`embed_batch` are the neutral primitives. The role methods
+(`embed_query`, `embed_document` and their batch forms) apply the model
+family's *embedding profile* — declarative query/document input conventions
+such as E5's `query: `/`passage: ` prefixes or Qwen3-Embedding's query
+instruction — exactly once before delegating to the primitives. For
+symmetric models the profile is the identity and the role methods are
+bit-identical to the primitives. Transforms touch only inference input:
+stored text, chunk ids, BM25 input and citations always keep the original
+document text.
+
+Critical constraint: **use the same provider/model for indexing and searching**. Mixing dimensions or models breaks similarity scores silently. Indexed points are stamped with a *document-space fingerprint* (provider + model + document transform + dimension + provider inference knobs; profile name/version are metadata and never hashed), and the index commands refuse a collection whose stored fingerprint differs — dimension alone can't catch two different models sharing a size.
 
 ### Vector store
 

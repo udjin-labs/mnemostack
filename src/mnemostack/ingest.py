@@ -44,6 +44,14 @@ from pathlib import Path
 from typing import Any
 
 from mnemostack.embeddings.base import EmbeddingProvider
+from mnemostack.embeddings.roles import (
+    EMBEDDING_SPACE_KEY,
+    EmbeddingSpaceError,
+    SpaceGuard,
+    document_space_fingerprint_via,
+    embed_document_via,
+    embed_documents_via,
+)
 from mnemostack.observability.recorder import counter, histogram
 from mnemostack.quotas import enforce_points_quota
 from mnemostack.vector import VectorStore
@@ -144,6 +152,10 @@ _PROTECTED_PAYLOAD_KEYS = frozenset(
         # Structural resolver keys: the windowed-point marker and the
         # id-scheme marker decide `mnemostack resolve` verdict paths.
         "_id_scheme",
+        # Document-space fingerprint: identifies the embedding space the
+        # point's vector belongs to — a planted value would defeat the
+        # mixed-space guard.
+        "_embedding_space",
         "chunk_kind",
         "chunk_window",
         "chunk_start_offset",
@@ -529,6 +541,11 @@ class Ingestor:
     The ingestor does NOT create the Qdrant collection — call `store.ensure_collection()`
     yourself. This keeps the ingestor cheap to instantiate in servers where
     the collection is set up once at startup.
+
+    Writes are space-guarded: every flush revalidates (TTL-bounded) that the
+    collection's stamped embedding space matches this provider and stamps
+    each point with the provider's document-space fingerprint. A conflict
+    raises `EmbeddingSpaceError` instead of writing mixed-space vectors.
     """
 
     def __init__(
@@ -571,6 +588,14 @@ class Ingestor:
         self.window_separator = window_separator
         self.enrich = enrich
         self._seen = _SeenCache(seen_cache_size) if skip_seen else None
+        # Self-guarding writes: every flush revalidates UNCONDITIONALLY
+        # (recheck_seconds=0, same policy as the markdown sync) that the
+        # collection's stamped space matches this provider before any
+        # embedding/upsert. Write-side staleness is not acceptable even
+        # within a TTL: a repointed tag inside the window would stamp fresh
+        # fingerprints next to old-space points and corrupt the collection
+        # BEFORE any read-side revalidation could notice.
+        self._space_guard = SpaceGuard(vector_store, embedding, recheck_seconds=0.0)
 
     # ---- Public API ----
 
@@ -674,16 +699,36 @@ class Ingestor:
         )
 
     def _flush(self, buffer: list[tuple[str, IngestItem]], stats: IngestStats) -> None:
+        # Guard BEFORE embedding (raises EmbeddingSpaceError on conflict) and
+        # stamp EXACTLY the fingerprint the guard validated — one resolution,
+        # so a tag repointed between "check" and "stamp" cannot pass the
+        # guard under space A and label the points space B. The fallback
+        # resolution only runs for an unguardable pair (store without
+        # scroll), where no verdict exists to race against.
+        doc_space_fp = self._space_guard.ensure()
+        if doc_space_fp is None:
+            doc_space_fp = document_space_fingerprint_via(self.embedding)
         texts = [item.text for _, item in buffer]
         with histogram("mnemostack.ingest.embed_batch_ms"):
             try:
-                vectors = self.embedding.embed_batch(texts)
+                vectors = embed_documents_via(self.embedding, texts)
             except AttributeError:
                 # Provider without batch API — fall back to single-item
-                vectors = [self.embedding.embed(t) for t in texts]
+                vectors = [embed_document_via(self.embedding, t) for t in texts]
             except Exception as exc:
                 log.warning("embed_batch failed (%s) — falling back to per-item", exc)
                 vectors = [self._safe_embed_single(t) for t in texts]
+        # SANDWICH (same policy as the CLI/markdown paths): the fingerprint
+        # must still be the guarded one AFTER embedding — a tag repointed
+        # during the embed call must not have its vectors stamped as the
+        # pre-repoint space.
+        if doc_space_fp is not None:
+            current_fp = document_space_fingerprint_via(self.embedding)
+            if current_fp != doc_space_fp:
+                raise EmbeddingSpaceError(
+                    "embedding space changed mid-flush (the model tag was "
+                    "repointed) — aborting before any mixed-space write"
+                )
 
         points = []
         for (pid, item), vec in zip(buffer, vectors, strict=False):
@@ -703,6 +748,13 @@ class Ingestor:
             # (the write-side of the isolation boundary) — never by metadata or
             # an enrich hook. Drop any planted value so it can't be spoofed.
             payload.pop("tenant_id", None)
+            # Same rule as tenant_id: the space stamp is set ONLY by this
+            # pipeline. Dropped unconditionally so a caller-supplied value
+            # can't survive when the provider is a duck type (no fingerprint
+            # to overwrite it) and later forge space membership.
+            payload.pop(EMBEDDING_SPACE_KEY, None)
+            if doc_space_fp is not None:
+                payload[EMBEDDING_SPACE_KEY] = doc_space_fp
             payload.setdefault("indexed_at", datetime.now(timezone.utc).isoformat())
             tags = _item_tags(item)
             if tags:
@@ -729,6 +781,14 @@ class Ingestor:
                     self.store.upsert(pid, vec, payload, **tkw)
         stats.upserted += len(points)
         stats.ids.extend(p[0] for p in points)
+        # POST-COMMIT revalidation: Qdrant has no atomic "claim an empty
+        # collection" primitive, so two processes bootstrapping the same
+        # empty collection under different spaces could both pass the empty
+        # pre-check. Re-sampling AFTER the write sees the other writer's
+        # stamps and fails loud within the same flush — the exposure is
+        # bounded to one interleaved batch per process, and every later
+        # write is refused by the normal mismatch verdict.
+        self._space_guard.ensure()
         self._write_wrappers(points, stats)
         if self._seen is not None:
             for p in points:
@@ -736,7 +796,7 @@ class Ingestor:
 
     def _safe_embed_single(self, text: str) -> list[float]:
         try:
-            return self.embedding.embed(text)
+            return embed_document_via(self.embedding, text)
         except Exception:
             return []
 
