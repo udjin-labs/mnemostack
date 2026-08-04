@@ -52,10 +52,24 @@ class SpaceGuard:
     cached (fail closed, retried); store hiccups log, fail open and retry.
     """
 
-    def __init__(self, store: Any, provider: Any, *, recheck_seconds: float = 300.0):
+    def __init__(
+        self,
+        store: Any,
+        provider: Any,
+        *,
+        recheck_seconds: float = 300.0,
+        fail_closed: bool = False,
+    ):
         self._store = store
         self._provider = provider
         self._recheck = recheck_seconds
+        # Write-side guards set fail_closed=True: a check that ERRORS (scroll
+        # failure, a write-capable key without read rights) means the space
+        # CANNOT be verified — proceeding would stamp unverified vectors, so
+        # the write must refuse. Read-side guards keep the historical
+        # fail-open-and-retry (a store hiccup must not take recall down when
+        # the query itself would fail visibly anyway).
+        self._fail_closed = fail_closed
         self._lock = threading.Lock()
         self._error: str | None = None
         self._validated: str | None = None
@@ -84,7 +98,15 @@ class SpaceGuard:
                         # Fingerprint unresolvable: fail closed for this
                         # call, cache nothing, retry on the next one.
                         raise
-                    except Exception as exc:  # noqa: BLE001 — store hiccup: fail open, retry
+                    except Exception as exc:  # noqa: BLE001 — verdict-less check
+                        if self._fail_closed:
+                            # Nothing is cached — a recovered store lets the
+                            # next attempt proceed normally.
+                            raise EmbeddingSpaceError(
+                                "embedding-space check failed and this is a "
+                                f"WRITE path — refusing to write unverified "
+                                f"vectors: {exc}"
+                            ) from exc
                         logger.warning(
                             "embedding-space check inconclusive (%s) — will retry",
                             exc,
