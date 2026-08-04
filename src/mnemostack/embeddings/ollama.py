@@ -7,6 +7,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 from .base import EmbeddingProvider
+from .profiles import known_dimension
 
 
 class OllamaProvider(EmbeddingProvider):
@@ -33,7 +34,12 @@ class OllamaProvider(EmbeddingProvider):
         self.model = model
         self.host = host.rstrip("/")
         self.timeout = timeout
-        self._dim = dimension or self.MODEL_DIMS.get(model, 768)
+        # Profile tables know newer model families (e.g. qwen3-embedding);
+        # the blind 768 fallback for a fully unknown model is a known trap
+        # slated for replacement by capability discovery.
+        self._dim = (
+            dimension or self.MODEL_DIMS.get(model) or known_dimension("ollama", model) or 768
+        )
 
     @property
     def dimension(self) -> int:

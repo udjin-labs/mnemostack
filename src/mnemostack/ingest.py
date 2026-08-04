@@ -44,6 +44,12 @@ from pathlib import Path
 from typing import Any
 
 from mnemostack.embeddings.base import EmbeddingProvider
+from mnemostack.embeddings.roles import (
+    EMBEDDING_SPACE_KEY,
+    document_space_fingerprint_via,
+    embed_document_via,
+    embed_documents_via,
+)
 from mnemostack.observability.recorder import counter, histogram
 from mnemostack.quotas import enforce_points_quota
 from mnemostack.vector import VectorStore
@@ -144,6 +150,10 @@ _PROTECTED_PAYLOAD_KEYS = frozenset(
         # Structural resolver keys: the windowed-point marker and the
         # id-scheme marker decide `mnemostack resolve` verdict paths.
         "_id_scheme",
+        # Document-space fingerprint: identifies the embedding space the
+        # point's vector belongs to — a planted value would defeat the
+        # mixed-space guard.
+        "_embedding_space",
         "chunk_kind",
         "chunk_window",
         "chunk_start_offset",
@@ -529,6 +539,12 @@ class Ingestor:
     The ingestor does NOT create the Qdrant collection — call `store.ensure_collection()`
     yourself. This keeps the ingestor cheap to instantiate in servers where
     the collection is set up once at startup.
+
+    It also does NOT verify the collection's embedding space: every point is
+    stamped with the provider's document-space fingerprint, but checking that
+    the collection was built under the SAME space is the caller's setup step —
+    run `mnemostack.embeddings.roles.check_document_space(store, provider)`
+    once alongside `ensure_collection()` (the CLI index commands do).
     """
 
     def __init__(
@@ -571,6 +587,10 @@ class Ingestor:
         self.window_separator = window_separator
         self.enrich = enrich
         self._seen = _SeenCache(seen_cache_size) if skip_seen else None
+        # Stamped on every ingested point so mixed embedding spaces in one
+        # collection are detectable. None for duck-typed legacy providers
+        # without fingerprint support — their points simply stay unstamped.
+        self._doc_space_fp = document_space_fingerprint_via(embedding)
 
     # ---- Public API ----
 
@@ -677,10 +697,10 @@ class Ingestor:
         texts = [item.text for _, item in buffer]
         with histogram("mnemostack.ingest.embed_batch_ms"):
             try:
-                vectors = self.embedding.embed_batch(texts)
+                vectors = embed_documents_via(self.embedding, texts)
             except AttributeError:
                 # Provider without batch API — fall back to single-item
-                vectors = [self.embedding.embed(t) for t in texts]
+                vectors = [embed_document_via(self.embedding, t) for t in texts]
             except Exception as exc:
                 log.warning("embed_batch failed (%s) — falling back to per-item", exc)
                 vectors = [self._safe_embed_single(t) for t in texts]
@@ -703,6 +723,8 @@ class Ingestor:
             # (the write-side of the isolation boundary) — never by metadata or
             # an enrich hook. Drop any planted value so it can't be spoofed.
             payload.pop("tenant_id", None)
+            if self._doc_space_fp is not None:
+                payload[EMBEDDING_SPACE_KEY] = self._doc_space_fp
             payload.setdefault("indexed_at", datetime.now(timezone.utc).isoformat())
             tags = _item_tags(item)
             if tags:
@@ -736,7 +758,7 @@ class Ingestor:
 
     def _safe_embed_single(self, text: str) -> list[float]:
         try:
-            return self.embedding.embed(text)
+            return embed_document_via(self.embedding, text)
         except Exception:
             return []
 

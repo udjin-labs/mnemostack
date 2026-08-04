@@ -19,6 +19,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ..embeddings.roles import (
+    EMBEDDING_SPACE_KEY,
+    document_space_fingerprint_via,
+    embed_document_via,
+)
 from ..quotas import enforce_points_quota
 from .indexer import collect_markdown
 
@@ -40,6 +45,10 @@ class ChunkSyncResult:
     refreshed: int = 0
     failed: int = 0
     failed_sources: set[str] = field(default_factory=set)
+    # Existing points whose stored `_embedding_space` stamp conflicts with the
+    # active provider's — refresh leaves them untouched instead of laundering
+    # them into the current space.
+    space_conflicts: int = 0
 
 
 def markdown_prune_count(
@@ -150,14 +159,26 @@ def upsert_markdown_chunks(
     footprint. The hook needs the total insert count before any write and is
     all-or-nothing, so *that* path must embed the whole batch before writing —
     bounded in practice by the tenant's cap, since a run past it is rejected.
+
+    Embedding-space contract: new points and refreshed payloads are stamped
+    with the provider's document-space fingerprint, but this function does
+    not guard the collection — callers must run ``check_document_space``
+    first (the CLI does). A refresh never overwrites a point stamped with a
+    DIFFERENT space; such points are counted in ``space_conflicts`` and left
+    untouched.
     """
     tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
     existing_ids = set(existing_payloads)
     res = ChunkSyncResult()
     new_chunks = [c for c in chunks if c[0] not in existing_ids]
+    # Stamped on new points AND on payload refreshes: a refresh does not
+    # re-embed, so stamping there is the sanctioned adoption path for legacy
+    # (pre-fingerprint) points — the index-command guard has already rejected
+    # a genuinely mismatched collection before this runs.
+    doc_fp = document_space_fingerprint_via(provider)
 
     def _embed(text: str, source: str) -> list | None:
-        vec = provider.embed(text)
+        vec = embed_document_via(provider, text)
         if not vec:
             res.failed += 1
             res.failed_sources.add(source)
@@ -171,6 +192,8 @@ def upsert_markdown_chunks(
             vec = _embed(text, payload["source"])
             if vec is None:
                 continue
+            if doc_fp is not None:
+                payload[EMBEDDING_SPACE_KEY] = doc_fp
             store.upsert(cid, vec, payload, **tkw)
             res.inserted += 1
     else:
@@ -181,6 +204,8 @@ def upsert_markdown_chunks(
             vec = _embed(text, payload["source"])
             if vec is None:
                 continue
+            if doc_fp is not None:
+                payload[EMBEDDING_SPACE_KEY] = doc_fp
             to_upsert.append((cid, vec, payload))
         before_upsert(len(to_upsert), res.failed_sources)
         for cid, vec, payload in to_upsert:
@@ -191,10 +216,19 @@ def upsert_markdown_chunks(
         if cid not in existing_ids:
             continue
         old = existing_payloads.get(cid, {})
+        old_fp = old.get(EMBEDDING_SPACE_KEY)
+        if doc_fp is not None and old_fp is not None and old_fp != doc_fp:
+            # A conflicting stamp (possible outside the guard's sample
+            # window) must never be overwritten with the current fingerprint —
+            # that would make the mixed state permanently invisible.
+            res.space_conflicts += 1
+            continue
         owned = old.get("_md_keys") or []
         stale = [k for k in owned if k not in payload]
         if stale:
             store.delete_payload_keys(cid, stale, **tkw)
+        if doc_fp is not None:
+            payload[EMBEDDING_SPACE_KEY] = doc_fp
         store.set_payload(cid, payload, **tkw)
         res.refreshed += 1
     return res

@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from ..embeddings.base import EmbeddingProvider
+from ..embeddings.roles import embed_query_via
 from ..observability import counter, histogram
 from ..observability.recorder import get_recorder
 from ..vector.qdrant import Hit, VectorStore
@@ -525,7 +526,7 @@ class Recaller:
             # Vector search
             vector_hits: list[Hit] = []
             with histogram("mnemostack.recall.embed_latency_ms"):
-                query_vec = self.embedding.embed(query)
+                query_vec = embed_query_via(self.embedding, query)
             if query_vec:
                 with histogram("mnemostack.recall.vector_latency_ms"):
                     vector_hits = self.vector.search(
@@ -1213,7 +1214,7 @@ class Recaller:
         tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
         if self.embedding and self.vector:
             try:
-                query_vec = self.embedding.embed(query)
+                query_vec = embed_query_via(self.embedding, query)
             except Exception:
                 return []
             if not query_vec:

@@ -52,6 +52,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 from mnemostack import __version__
 from mnemostack.config import model_kwargs
 from mnemostack.embeddings import get_provider
+from mnemostack.embeddings.roles import embed_query_via
 from mnemostack.server import ServerConfig, _make_probe_client
 from mnemostack.vector import VectorStore
 from mnemostack.vector.qdrant import (
@@ -428,7 +429,8 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
     def _embed(text: str) -> list[float]:
         if "p" not in _provider:
             _provider["p"] = get_provider(cfg.provider_name, **model_kwargs(cfg.embedding_model))
-        return _provider["p"].embed(text)
+        # Operator-typed search text is a retrieval query.
+        return embed_query_via(_provider["p"], text)
 
     app = FastAPI(title="mnemostack inspector", version=__version__)
 

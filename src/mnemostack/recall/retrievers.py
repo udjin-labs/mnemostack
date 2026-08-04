@@ -28,6 +28,7 @@ from typing import Any, cast
 from urllib.parse import quote
 
 from ..embeddings.base import EmbeddingProvider
+from ..embeddings.roles import embed_document_via, embed_query_via
 from ..llm.base import LLMProvider
 from ..observability import counter
 from ..vector import VectorStore
@@ -139,7 +140,7 @@ class VectorRetriever(Retriever):
     def search(
         self, query, limit=20, filters=None, as_of=None, include_invalidated=False, tenant=None
     ):
-        vec = self.embedding.embed(query)
+        vec = embed_query_via(self.embedding, query)
         if not vec:
             return []
         hide_invalidated = as_of is None and not include_invalidated
@@ -492,7 +493,7 @@ class QdrantTextRetriever(Retriever):
         tokens = self._gate_tokens(query)
         if not tokens:
             return []
-        vec = self.embedding.embed(query)
+        vec = embed_query_via(self.embedding, query)
         if not vec:
             return []
         filters = convert_timestamp_filter(
@@ -526,11 +527,19 @@ class _SharedQueryEmbedding(EmbeddingProvider):
     """Memoizing wrapper shared by the arms of one multi-field lexical set.
 
     The arms differ only in their MatchText gate field — the query vector is
-    identical, yet each ``search()`` would call ``embedding.embed(query)``
-    independently (concurrently, from the recaller's thread pool): N fields =
-    N identical billable provider requests per recall. One bounded memo keyed
-    by query text collapses them to one. Scoped to the factory's arm set on
-    purpose — nothing outside the multi-field feature changes behavior.
+    identical, yet each ``search()`` would embed the query independently
+    (concurrently, from the recaller's thread pool): N fields = N identical
+    billable provider requests per recall. One bounded memo collapses them to
+    one. Scoped to the factory's arm set on purpose — nothing outside the
+    multi-field feature changes behavior.
+
+    Role note: the arms reach this wrapper through ``embed_query`` (inherited
+    from the base class), which applies the profile transform exactly once and
+    then lands in the memoized ``embed`` below — so the memo key is the
+    already-transformed inference input. That keeps the memo role-safe without
+    a role component in the key: one wrapper instance serves one provider and
+    one profile, and different roles produce different transformed inputs
+    whenever the profile distinguishes them.
     """
 
     _MAX_ENTRIES = 32
@@ -590,6 +599,37 @@ class _SharedQueryEmbedding(EmbeddingProvider):
     @property
     def name(self) -> str:
         return self._embedding.name
+
+    @property
+    def profile(self):
+        # Delegate instead of re-resolving from `name`: an instance-level
+        # profile override on the wrapped provider must win here too. A
+        # duck-typed inner without profiles keeps today's identity behavior.
+        prof = getattr(self._embedding, "profile", None)
+        if prof is not None:
+            return prof
+        from ..embeddings.profiles import IDENTITY_PROFILE
+
+        return IDENTITY_PROFILE
+
+    @profile.setter
+    def profile(self, value) -> None:
+        self._embedding.profile = value
+
+    def document_space_fingerprint(self) -> str:
+        # Forwarded so the wrapped provider's own fingerprint extras
+        # (e.g. HuggingFace pooling) are not lost; a duck-typed inner falls
+        # back to the base computation over the delegated name/profile.
+        method = getattr(self._embedding, "document_space_fingerprint", None)
+        if method is not None:
+            return method()
+        return super().document_space_fingerprint()
+
+    def query_profile_fingerprint(self) -> str:
+        method = getattr(self._embedding, "query_profile_fingerprint", None)
+        if method is not None:
+            return method()
+        return super().query_profile_fingerprint()
 
     def health_check(self) -> tuple[bool, str]:
         return self._embedding.health_check()
@@ -954,7 +994,9 @@ class HyDERetriever(Retriever):
         hypo = self._generate_hypothetical(query)
         if not hypo:
             return []
-        vec = self.embedding.embed(hypo)
+        # HyDE's whole premise is that the hypothetical lives in DOCUMENT
+        # space (it imitates a stored memory), so it takes the document role.
+        vec = embed_document_via(self.embedding, hypo)
         if not vec:
             return []
         hits = self.vector_store.search(
@@ -1833,7 +1875,7 @@ class TemporalRetriever(Retriever):
                     exc,
                 )
 
-        vec = self.embedding.embed(query)
+        vec = embed_query_via(self.embedding, query)
         if not vec:
             return []
         try:

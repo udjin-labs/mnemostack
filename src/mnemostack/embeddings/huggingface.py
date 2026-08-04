@@ -34,7 +34,12 @@ class HuggingFaceProvider(EmbeddingProvider):
         if not _AVAILABLE:
             raise ImportError("HuggingFaceProvider requires `pip install mnemostack[huggingface]`")
         self.model_name = model
-        self.pooling = pooling
+        # Normalized and validated: pooling participates in the space
+        # fingerprints, so "CLS" silently mean-pooling while fingerprinting
+        # as a distinct space would corrupt both sides.
+        self.pooling = pooling.lower()
+        if self.pooling not in ("mean", "cls"):
+            raise ValueError(f"pooling must be 'mean' or 'cls', got {pooling!r}")
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.tokenizer = AutoTokenizer.from_pretrained(model)
         self.model = AutoModel.from_pretrained(model).to(self.device).eval()
@@ -48,6 +53,11 @@ class HuggingFaceProvider(EmbeddingProvider):
     @property
     def name(self) -> str:
         return f"huggingface:{self.model_name}"
+
+    def _fingerprint_extras(self) -> dict[str, str]:
+        # Pooling changes the vector space for the same model, so it must
+        # participate in the embedding-space fingerprints.
+        return {"pooling": self.pooling}
 
     def embed(self, text: str) -> list[float]:
         return self.embed_batch([text])[0]
