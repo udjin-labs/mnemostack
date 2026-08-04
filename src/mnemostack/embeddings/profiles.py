@@ -245,6 +245,11 @@ def _register_builtins() -> None:
         version=1,
         model_patterns=("qwen3-embedding", "qwen3-embedding:*", "qwen/qwen3-embedding-*"),
         known_dimensions={
+            # The untagged/:latest alias points at the 8b artifact on the
+            # Ollama registry (identical digest 64b933495768, verified
+            # against ollama.com/library/qwen3-embedding/tags 2026-08-04) —
+            # hence 4096. If the registry ever repoints the alias, the
+            # digest-pinned fingerprint catches the change loudly.
             "qwen3-embedding": 4096,
             "qwen3-embedding:latest": 4096,
             "qwen3-embedding:8b": 4096,

@@ -736,6 +736,11 @@ class Ingestor:
             # (the write-side of the isolation boundary) — never by metadata or
             # an enrich hook. Drop any planted value so it can't be spoofed.
             payload.pop("tenant_id", None)
+            # Same rule as tenant_id: the space stamp is set ONLY by this
+            # pipeline. Dropped unconditionally so a caller-supplied value
+            # can't survive when the provider is a duck type (no fingerprint
+            # to overwrite it) and later forge space membership.
+            payload.pop(EMBEDDING_SPACE_KEY, None)
             if doc_space_fp is not None:
                 payload[EMBEDDING_SPACE_KEY] = doc_space_fp
             payload.setdefault("indexed_at", datetime.now(timezone.utc).isoformat())

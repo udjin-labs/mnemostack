@@ -66,14 +66,17 @@ def _embedding_model(args: argparse.Namespace) -> str | None:
     return getattr(args, "embedding_model", None)
 
 
-def _guard_document_space(store: Any, provider: Any) -> int | None:
+def _guard_document_space(store: Any, provider: Any) -> tuple[int | None, str | None]:
     """Refuse to index into a collection embedded under a different document space.
 
     Dimension alone can't catch this (two different models can share a
     dimension), so the guard compares the document-space fingerprint stamped
-    on existing points. Returns an exit code to abort with, or None to
-    proceed. Pre-fingerprint collections proceed with a note — new points are
-    stamped and --refresh-payloads adopts owned points.
+    on existing points. Returns ``(exit_code, validated_fp)`` — exit_code
+    None means proceed, and the fingerprint is the SAME resolution the
+    verdict came from: the index command must stamp exactly it, or a tag
+    repointed between guard and stamping would pass under space A and label
+    points space B. Pre-fingerprint collections proceed with a note — new
+    points are stamped and --refresh-payloads adopts owned points.
     """
     try:
         status, expected, found = check_document_space(store, provider)
@@ -85,7 +88,7 @@ def _guard_document_space(store: Any, provider: Any) -> int | None:
             "retry when the embedding provider is fully reachable",
             file=sys.stderr,
         )
-        return 1
+        return 1, None
     if status == "mismatch":
         profile = getattr(provider, "profile", None)
         profile_name = getattr(profile, "name", "unknown")
@@ -99,7 +102,7 @@ def _guard_document_space(store: Any, provider: Any) -> int | None:
             "rerun with --recreate to drop and rebuild this one.",
             file=sys.stderr,
         )
-        return 1
+        return 1, None
     if status == "legacy":
         # Pre-fingerprint points were embedded from RAW text under the
         # provider's THEN-default settings. If the active profile transforms
@@ -122,7 +125,7 @@ def _guard_document_space(store: Any, provider: Any) -> int | None:
                 "with --recreate to drop and rebuild this one.",
                 file=sys.stderr,
             )
-            return 1
+            return 1, None
         print(
             "note: existing points carry no embedding-space fingerprint "
             "(indexed by an older mnemostack). The active profile embeds "
@@ -131,7 +134,7 @@ def _guard_document_space(store: Any, provider: Any) -> int | None:
             "it for owned points.",
             file=sys.stderr,
         )
-    return None
+    return None, expected
 
 
 def _llm_model(args: argparse.Namespace) -> str | None:
@@ -2293,7 +2296,7 @@ def cmd_index(args: argparse.Namespace) -> int:
             print("aborted")
             return 1
     store.ensure_collection(recreate=args.recreate)
-    guard_rc = _guard_document_space(store, provider)
+    guard_rc, guard_fp = _guard_document_space(store, provider)
     if guard_rc is not None:
         return guard_rc
 
@@ -2419,7 +2422,10 @@ def cmd_index(args: argparse.Namespace) -> int:
     inserted = 0
     failed = 0
     failed_sources: set[str] = set()
-    doc_fp = document_space_fingerprint_via(provider)
+    # The guard's OWN resolution: stamping anything else would open a
+    # guard-approved-A / stamped-B window. Fallback resolution only for an
+    # unguardable pair (no verdict exists to race against).
+    doc_fp = guard_fp if guard_fp is not None else document_space_fingerprint_via(provider)
 
     def _fingerprint_still(current_of: str | None) -> bool:
         """Re-resolve the fingerprint and compare — a mutable tag repointed
@@ -2681,7 +2687,7 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
             print("aborted")
             return 1
     store.ensure_collection(recreate=args.recreate)
-    guard_rc = _guard_document_space(store, provider)
+    guard_rc, _guard_fp = _guard_document_space(store, provider)
     if guard_rc is not None:
         return guard_rc
 

@@ -151,7 +151,7 @@ def test_cli_guard_refuses_legacy_collection_under_document_transform():
 
     provider = _AsymmetricProvider()  # e5 profile: non-identity document transform
     legacy_store = _ScrollStore([{"text": "old point, no fingerprint"}])
-    assert _guard_document_space(legacy_store, provider) == 1
+    assert _guard_document_space(legacy_store, provider)[0] == 1
 
 
 def test_cli_guard_allows_legacy_collection_under_identity_document_transform():
@@ -163,7 +163,9 @@ def test_cli_guard_allows_legacy_collection_under_identity_document_transform():
             return "ollama:qwen3-embedding:8b"  # query instruct, identity documents
 
     legacy_store = _ScrollStore([{"text": "old point, no fingerprint"}])
-    assert _guard_document_space(legacy_store, _QwenProvider()) is None
+    rc, fp = _guard_document_space(legacy_store, _QwenProvider())
+    assert rc is None
+    assert fp is not None  # the validated fingerprint travels to the stamp
 
 
 def test_cli_guard_aborts_on_fingerprint_mismatch():
@@ -171,7 +173,7 @@ def test_cli_guard_aborts_on_fingerprint_mismatch():
 
     provider = _AsymmetricProvider()
     store = _ScrollStore([{EMBEDDING_SPACE_KEY: "es1:deadbeef"}])
-    assert _guard_document_space(store, provider) == 1
+    assert _guard_document_space(store, provider)[0] == 1
 
 
 # ----------------------------------------------------------------- stamping
@@ -206,6 +208,24 @@ def test_ingestor_skips_stamp_for_duck_provider():
     store = _RecordingStore()
     ingestor = Ingestor(embedding=_DuckProvider(), vector_store=store)
     ingestor.ingest([IngestItem(text="hello", source="a.md")])
+    assert EMBEDDING_SPACE_KEY not in store.upserts[0][2]
+
+
+def test_item_metadata_cannot_forge_the_space_fingerprint():
+    # With a duck-typed provider there is no fingerprint to overwrite a
+    # planted value — the reserved key must be dropped unconditionally,
+    # same rule as tenant_id.
+    store = _RecordingStore()
+    ingestor = Ingestor(embedding=_DuckProvider(), vector_store=store)
+    ingestor.ingest(
+        [
+            IngestItem(
+                text="hello",
+                source="a.md",
+                metadata={EMBEDDING_SPACE_KEY: "es1:forged"},
+            )
+        ]
+    )
     assert EMBEDDING_SPACE_KEY not in store.upserts[0][2]
 
 
@@ -390,7 +410,7 @@ def test_guard_refuses_legacy_when_provider_defaults_changed():
     legacy_store = _ScrollStore([{"text": "old unstamped point"}])
     err = recall_space_error(legacy_store, _RepooledProvider())
     assert err is not None and "does not reproduce" in err
-    assert _guard_document_space(legacy_store, _RepooledProvider()) == 1
+    assert _guard_document_space(legacy_store, _RepooledProvider())[0] == 1
     # Same model with legacy-compatible settings still adopts.
     class _MeanProvider(_RepooledProvider):
         def _legacy_space_compatible(self) -> bool:
@@ -669,7 +689,7 @@ def test_cli_guard_fails_closed_when_fingerprint_unresolvable():
         def document_space_fingerprint(self) -> str:
             raise RuntimeError("tags endpoint down")
 
-    assert _guard_document_space(_ScrollStore([]), _FlakyFp()) == 1
+    assert _guard_document_space(_ScrollStore([]), _FlakyFp())[0] == 1
 
 
 def test_recaller_fails_closed_on_unresolvable_fingerprint_and_retries():
