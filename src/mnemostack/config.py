@@ -51,6 +51,34 @@ def model_kwargs(model: str | None) -> dict[str, str]:
     return {"model": model} if model else {}
 
 
+def provider_kwargs(
+    provider: str,
+    *,
+    model: str | None = None,
+    ollama_host: str | None = None,
+    timeout: int | None = None,
+) -> dict[str, Any]:
+    """Constructor kwargs for ``get_provider()`` incl. provider-specific knobs.
+
+    The shared resolution point for every surface (CLI, HTTP server, MCP,
+    inspector) so a configured host/timeout can never be accepted by the
+    config schema yet silently dropped before reaching the provider. Only
+    known built-in providers receive host/timeout — a custom registered
+    provider keeps the historical model-only construction contract, so an
+    unexpected keyword can't break it.
+    """
+    kw: dict[str, Any] = dict(model_kwargs(model))
+    name = (provider or "").lower()
+    if name == "ollama":
+        if ollama_host:
+            kw["host"] = ollama_host
+        if timeout is not None:
+            kw["timeout"] = timeout
+    elif name == "gemini" and timeout is not None:
+        kw["timeout"] = timeout
+    return kw
+
+
 class _StrictYamlLoader(yaml.SafeLoader):
     """SafeLoader that REJECTS duplicate mapping keys.
 
@@ -98,7 +126,13 @@ class EmbeddingConfig:
     provider: str = "gemini"
     model: str | None = None  # uses provider default if None
     api_key_env: str = "GEMINI_API_KEY"
-    ollama_host: str = "http://localhost:11434"
+    # None = do not override the provider's own resolution (which honors the
+    # native OLLAMA_HOST env var before falling back to localhost).
+    ollama_host: str | None = None
+    # Embedding request timeout in seconds; None = provider default. Local
+    # model cold starts legitimately exceed short liveness timeouts, so this
+    # is configurable independently of vector.health_timeout.
+    timeout: int | None = None
 
 
 @dataclass
@@ -332,6 +366,17 @@ class Config:
             cfg.recall.text_search_fields
         )
 
+        # Same startup-rejection contract for every source (file AND env): a
+        # malformed embedding timeout must fail the load, not surface later
+        # as an unrelated urlopen error inside a serving process.
+        if cfg.embedding.timeout is not None:
+            timeout = cfg.embedding.timeout
+            if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 1:
+                raise ValueError(
+                    "embedding.timeout must be a positive integer number of "
+                    f"seconds, got {timeout!r}"
+                )
+
         return cfg
 
     def save(self, path: str | Path) -> None:
@@ -378,6 +423,8 @@ def _apply_env_overrides(cfg: Config) -> Config:
         MNEMOSTACK_PROVIDER          (alias for EMBEDDING_PROVIDER)
         MNEMOSTACK_EMBEDDING        (alias for EMBEDDING_PROVIDER)
         MNEMOSTACK_EMBEDDING_MODEL
+        MNEMOSTACK_OLLAMA_HOST      (Ollama endpoint for the embedding provider)
+        MNEMOSTACK_EMBEDDING_TIMEOUT (seconds; embedding requests only)
         MNEMOSTACK_VECTOR_HOST
         MNEMOSTACK_QDRANT_URL       (alias for VECTOR_HOST)
         MNEMOSTACK_VECTOR_COLLECTION
@@ -414,6 +461,14 @@ def _apply_env_overrides(cfg: Config) -> Config:
         cfg.embedding.provider = embedding_provider
     if v := env.get("MNEMOSTACK_EMBEDDING_MODEL"):
         cfg.embedding.model = v
+    if v := env.get("MNEMOSTACK_OLLAMA_HOST"):
+        cfg.embedding.ollama_host = v
+    if v := env.get("MNEMOSTACK_EMBEDDING_TIMEOUT"):
+        # Strict parse on purpose: a malformed value must fail at startup,
+        # not silently fall back to (or be clamped toward) a default —
+        # Config.load's positive-integer validation runs after this and
+        # rejects 0/negative uniformly with the file path.
+        cfg.embedding.timeout = int(v)
 
     # Vector (with aliases)
     host = (
@@ -490,7 +545,8 @@ embedding:
   provider: gemini        # gemini | ollama | huggingface
   model: null             # null = provider default
   api_key_env: GEMINI_API_KEY
-  ollama_host: http://localhost:11434
+  ollama_host: null          # null = native OLLAMA_HOST env, then localhost
+  timeout: null              # embedding request timeout (s); null = provider default
 
 vector:
   host: http://localhost:6333

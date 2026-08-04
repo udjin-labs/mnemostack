@@ -137,7 +137,13 @@ experimental; `sparse` writes are maintained by the SYNC `VectorStore`
 only — `AsyncVectorStore` does not write sparse encodings),
 `recall.text_search_fields` (multi-field lexical arms: payload field →
 fusion weight, `lexical` mode only; when set it replaces the arm set, and
-arm names follow `qdrant_text[:<field>]`).
+arm names follow `qdrant_text[:<field>]`),
+`embedding.ollama_host` / `MNEMOSTACK_OLLAMA_HOST` / `--ollama-host` (now
+wired through every provider factory — CLI, HTTP server, MCP, inspector;
+explicit flag > env > config > the native `OLLAMA_HOST` variable >
+localhost), and `embedding.timeout` / `MNEMOSTACK_EMBEDDING_TIMEOUT` /
+`--embedding-timeout` (embedding requests only, independent of
+`vector.health_timeout`; malformed values are rejected at startup).
 
 🟡 **Experimental — embedding profiles** (`mnemostack.embeddings.profiles`):
 `EmbeddingProfile`, `register_embedding_profile`, `resolve_profile`, the
@@ -171,7 +177,7 @@ without them resolve by position with `snapshot: absent`.
 🟡 **Accepted but not yet wired** — present in the config schema, but the runtime
 does not consume them today, so don't depend on them until they are:
 `embedding.api_key_env` (only drives a CLI "set `$KEY`" hint, not provider key
-resolution — the provider reads its own fixed env var), `embedding.ollama_host`,
+resolution — the provider reads its own fixed env var),
 `vector.overlap` (the chunker's overlap is currently fixed), `recall.rrf_k`
 (the RRF constant is currently fixed at 60), and `graph.health_timeout` (honored
 by the env / ASGI-factory server via `ServerConfig.from_env`, but the `mnemostack

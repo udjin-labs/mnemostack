@@ -51,7 +51,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from mnemostack.auth import FileKeyStore
 
 from mnemostack import __version__
-from mnemostack.config import model_kwargs
+from mnemostack.config import provider_kwargs
 from mnemostack.embeddings import get_provider
 from mnemostack.embeddings.roles import (
     EmbeddingSpaceError,
@@ -440,7 +440,13 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
         with _provider_lock:
             if "p" not in _provider:
                 _provider["p"] = get_provider(
-                    cfg.provider_name, **model_kwargs(cfg.embedding_model)
+                    cfg.provider_name,
+                    **provider_kwargs(
+                        cfg.provider_name,
+                        model=cfg.embedding_model,
+                        ollama_host=getattr(cfg, "ollama_host", None),
+                        timeout=getattr(cfg, "embedding_timeout", None),
+                    ),
                 )
             return _provider["p"]
 

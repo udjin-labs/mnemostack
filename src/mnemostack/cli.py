@@ -21,8 +21,14 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .config import DEFAULT_CONFIG_PATHS, Config, generate_example_config, model_kwargs
-from .embeddings import get_provider, list_providers
+from .config import (
+    DEFAULT_CONFIG_PATHS,
+    Config,
+    generate_example_config,
+    model_kwargs,
+    provider_kwargs,
+)
+from .embeddings import ProviderProbeError, get_provider, list_providers
 from .embeddings.roles import (
     EMBEDDING_SPACE_KEY,
     EmbeddingSpaceError,
@@ -64,6 +70,35 @@ TIER_PROFILES: dict[int, dict] = {
 
 def _embedding_model(args: argparse.Namespace) -> str | None:
     return getattr(args, "embedding_model", None)
+
+
+def _positive_int(value: str) -> int:
+    """argparse type: the same positive-integer contract as the config path."""
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer number of seconds")
+    return parsed
+
+
+def _redact_host(host: str) -> str:
+    """Host for diagnostics with userinfo credentials stripped."""
+    if "@" in host:
+        scheme, sep, rest = host.partition("://")
+        if sep and "@" in rest:
+            return f"{scheme}://***@{rest.rsplit('@', 1)[1]}"
+        return f"***@{host.rsplit('@', 1)[1]}"
+    return host
+
+
+def _provider_kwargs_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    """get_provider kwargs from resolved CLI args (config/env folded into
+    argparse defaults, explicit flags strongest)."""
+    return provider_kwargs(
+        getattr(args, "provider", "") or "",
+        model=_embedding_model(args),
+        ollama_host=getattr(args, "ollama_host", None),
+        timeout=getattr(args, "embedding_timeout", None),
+    )
 
 
 def _guard_document_space(store: Any, provider: Any) -> tuple[int | None, str | None]:
@@ -158,12 +193,18 @@ def _apply_tier(args: argparse.Namespace) -> dict | None:
 
 def cmd_health(args: argparse.Namespace) -> int:
     try:
-        provider = get_provider(args.provider, **model_kwargs(_embedding_model(args)))
+        provider = get_provider(args.provider, **_provider_kwargs_from_args(args))
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
 
-    print(f"Provider: {provider.name} (dim={provider.dimension})")
+    try:
+        dim: int | str = provider.dimension
+    except ProviderProbeError as e:
+        print(f"Provider: {provider.name}")
+        print(f"  embedding: DOWN — {e}")
+        return 2
+    print(f"Provider: {provider.name} (dim={dim})")
     ok, msg = provider.health_check()
     status = "OK" if ok else "DOWN"
     print(f"  embedding: {status} — {msg}")
@@ -1615,7 +1656,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     provider = None
     if provider_known:
         try:
-            provider = get_provider(provider_name, **model_kwargs(_embedding_model(args)))
+            provider = get_provider(provider_name, **_provider_kwargs_from_args(args))
         except ValueError as e:
             add("embedding", "misconfig", str(e), _api_key_hint(cfg))
         except Exception as e:  # noqa: BLE001
@@ -1631,6 +1672,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 )
             except Exception as e:  # noqa: BLE001
                 add("embedding", "down", f"{provider.name}: {e}")
+            endpoint = getattr(provider, "endpoint", None)
+            if endpoint is not None:
+                host = getattr(provider, "host", "")
+                add(
+                    "embedding_transport",
+                    "ok",
+                    f"host {_redact_host(host)} — endpoint {endpoint}, "
+                    f"timeout {getattr(provider, 'timeout', '?')}s"
+                    + (
+                        " (LEGACY fallback: upgrade Ollama for native batching)"
+                        if endpoint == "api/embeddings"
+                        else ""
+                    ),
+                )
             profile = getattr(provider, "profile", None)
             if profile is not None:
                 # Transforms are reported by profile identity only — never
@@ -1653,8 +1708,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                         f"{profile.name} v{profile.version} — doc_space {fp or 'n/a'}",
                     )
 
-    # Qdrant (a hard recall dependency), read-only.
-    expected_dim = provider.dimension if provider is not None else None
+    # Qdrant (a hard recall dependency), read-only. A failed dimension
+    # discovery was already reported in the embedding section — the size
+    # comparison just has nothing to compare against.
+    try:
+        expected_dim = provider.dimension if provider is not None else None
+    except ProviderProbeError:
+        expected_dim = None
     _doctor_qdrant(
         add,
         args.qdrant,
@@ -1839,7 +1899,7 @@ def cmd_invalidate(args: argparse.Namespace) -> int:
 
 def cmd_search(args: argparse.Namespace) -> int:
     profile = _apply_tier(args)
-    provider = get_provider(args.provider, **model_kwargs(_embedding_model(args)))
+    provider = get_provider(args.provider, **_provider_kwargs_from_args(args))
     store = VectorStore(
         collection=args.collection,
         dimension=provider.dimension,
@@ -1924,7 +1984,7 @@ def cmd_synthesize(args: argparse.Namespace) -> int:
     )
     _needs_store_only = _lexical_selected and _lexical_mode in ("qdrant_bm25", "sparse")
     if _needs_provider:
-        provider = get_provider(args.provider, **model_kwargs(_embedding_model(args)))
+        provider = get_provider(args.provider, **_provider_kwargs_from_args(args))
     if _needs_provider or _needs_store_only:
         store = VectorStore(
             collection=args.collection,
@@ -1961,7 +2021,7 @@ def cmd_synthesize(args: argparse.Namespace) -> int:
 
 def cmd_answer(args: argparse.Namespace) -> int:
     profile = _apply_tier(args)
-    provider = get_provider(args.provider, **model_kwargs(_embedding_model(args)))
+    provider = get_provider(args.provider, **_provider_kwargs_from_args(args))
     store = VectorStore(
         collection=args.collection,
         dimension=provider.dimension,
@@ -2280,7 +2340,7 @@ def cmd_index(args: argparse.Namespace) -> int:
         print(f"error: path does not exist: {target}", file=sys.stderr)
         return 2
 
-    provider = get_provider(args.provider, **model_kwargs(_embedding_model(args)))
+    provider = get_provider(args.provider, **_provider_kwargs_from_args(args))
     store = _indexing_store(args, provider)
     if args.recreate and not args.yes:
         if not sys.stdin.isatty():
@@ -2635,7 +2695,7 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
 
         watch_baseline = _scan_mtimes(target)
 
-    provider = get_provider(args.provider, **model_kwargs(_embedding_model(args)))
+    provider = get_provider(args.provider, **_provider_kwargs_from_args(args))
     store = _indexing_store(args, provider)
 
     # Collect and validate the file set BEFORE any destructive collection call:
@@ -3021,6 +3081,25 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         "--embedding-model",
         default=cfg.embedding.model,
         help="Embedding model override (default: provider default or config value)",
+    )
+    common.add_argument(
+        "--ollama-host",
+        default=cfg.embedding.ollama_host,
+        help=(
+            "Ollama endpoint for the embedding provider, e.g. "
+            "http://192.0.2.10:11434 (default: config/env, then the native "
+            "OLLAMA_HOST variable, then localhost)"
+        ),
+    )
+    common.add_argument(
+        "--embedding-timeout",
+        type=_positive_int,
+        default=cfg.embedding.timeout,
+        help=(
+            "Embedding request timeout in seconds — independent of the short "
+            "vector liveness timeout; local model cold starts can be slow "
+            "(default: provider default)"
+        ),
     )
     common.add_argument(
         "--collection", default=cfg.vector.collection, help="Qdrant collection name"
@@ -3978,6 +4057,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
     cfg = ServerConfig(
         provider_name=args.provider,
         embedding_model=_embedding_model(args),
+        ollama_host=getattr(args, "ollama_host", None),
+        embedding_timeout=getattr(args, "embedding_timeout", None),
         llm_name=args.llm,
         llm_model=_llm_model(args),
         collection=args.collection,
@@ -4091,6 +4172,8 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     cfg = ServerConfig(
         provider_name=args.provider,
         embedding_model=_embedding_model(args),
+        ollama_host=getattr(args, "ollama_host", None),
+        embedding_timeout=getattr(args, "embedding_timeout", None),
         collection=args.collection,
         qdrant_url=args.qdrant,
         graph_uri=args.memgraph_uri,
@@ -4149,6 +4232,8 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
         collection=args.collection,
         embedding_provider=args.provider,
         embedding_model=_embedding_model(args),
+        ollama_host=getattr(args, "ollama_host", None),
+        embedding_timeout=getattr(args, "embedding_timeout", None),
         llm_provider=args.llm,
         llm_model=_llm_model(args),
         qdrant_host=args.qdrant,
@@ -4243,7 +4328,14 @@ def main(argv: list[str] | None = None) -> int:
     else:
         parser = build_parser(config_light=subcmd in {"keys", "quota"})
     args = parser.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except (ProviderProbeError, EmbeddingSpaceError) as e:
+        # Typed, operator-actionable refusals (dimension undiscoverable,
+        # embedding spaces would mix) follow the CLI's error convention —
+        # a clean message and exit 2, never a raw traceback.
+        print(f"error: {e}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
