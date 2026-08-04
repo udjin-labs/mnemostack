@@ -1279,6 +1279,12 @@ class Recaller:
         # whole multi-tenant corpus. tkw only when set — custom stores unaffected.
         tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
         if self.embedding and self.vector:
+            # The fallback performs DIRECT vector work with the legacy pair
+            # even in retrievers mode (where _recall_once skips the own-pair
+            # guard) — guard here, before embedding, and let
+            # EmbeddingSpaceError propagate instead of being swallowed by
+            # the fail-open except below.
+            self._ensure_space_compat()
             try:
                 query_vec = embed_query_via(self.embedding, query)
             except Exception:

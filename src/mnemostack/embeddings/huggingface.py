@@ -91,10 +91,16 @@ class HuggingFaceProvider(EmbeddingProvider):
         device: str | None = None,
         pooling: str | None = None,
         revision: str | None = None,
+        model_id: str | None = None,
     ):
         if not _AVAILABLE:
             raise ImportError("HuggingFaceProvider requires `pip install mnemostack[huggingface]`")
         self.model_name = model
+        # Canonical identity for profile resolution / space fingerprints —
+        # essential when `model` is an opaque LOCAL path ("/models/embedder")
+        # that reveals neither the family (pooling default, query transform)
+        # nor a stable model name. Defaults to the load source.
+        self._model_id = model_id or model
         # The OLD provider compared the raw string against exact-lowercase
         # "cls", so "CLS" silently mean-pooled. Normalization changes that
         # same configuration's semantics — remember it, because such a
@@ -103,10 +109,24 @@ class HuggingFaceProvider(EmbeddingProvider):
         self._pooling_semantics_changed = (
             pooling is not None and pooling != pooling.lower() and pooling.lower() == "cls"
         )
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.model = AutoModel.from_pretrained(model, revision=revision).to(self.device).eval()
+        commit = getattr(self.model.config, "_commit_hash", None)
+        # ONE immutable revision for both artifacts: a mutable branch can
+        # advance between two downloads, silently pairing tokenizer A with
+        # model B under a fingerprint that records only B — the tokenizer is
+        # pinned to the commit the model actually resolved.
+        self.tokenizer = AutoTokenizer.from_pretrained(model, revision=commit or revision)
         if pooling is None:
+            # Family detection uses the canonical identity AND the loaded
+            # config's architecture — an opaque local path must still give a
+            # decoder checkpoint its last-token default.
+            ident = self._model_id.lower()
+            model_type = str(getattr(self.model.config, "model_type", "") or "").lower()
             pooling = (
                 "last"
-                if any(f in model.lower() for f in self._LAST_TOKEN_FAMILIES)
+                if any(f in ident for f in self._LAST_TOKEN_FAMILIES)
+                or model_type in ("qwen3", "mistral")
                 else "mean"
             )
         # Normalized and validated: pooling participates in the space
@@ -115,9 +135,6 @@ class HuggingFaceProvider(EmbeddingProvider):
         self.pooling = pooling.lower()
         if self.pooling not in ("mean", "cls", "last"):
             raise ValueError(f"pooling must be 'mean', 'cls' or 'last', got {pooling!r}")
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.tokenizer = AutoTokenizer.from_pretrained(model, revision=revision)
-        self.model = AutoModel.from_pretrained(model, revision=revision).to(self.device).eval()
         # The RESOLVED weights identity: a mutable branch label ("main") can
         # be repointed to different weights, so the space fingerprint pins
         # the commit hash when the hub provides one — and a content signature
@@ -125,7 +142,6 @@ class HuggingFaceProvider(EmbeddingProvider):
         # signature wins over a caller-supplied `revision`: Transformers
         # ignores revisions for local files, so an arbitrary label would
         # mask an in-place file swap.
-        commit = getattr(self.model.config, "_commit_hash", None)
         model_dir = Path(model)
         self.revision: str | None
         if commit is None and model_dir.is_dir():
@@ -141,7 +157,7 @@ class HuggingFaceProvider(EmbeddingProvider):
 
     @property
     def name(self) -> str:
-        return f"huggingface:{self.model_name}"
+        return f"huggingface:{self._model_id}"
 
     def _legacy_space_compatible(self) -> bool:
         # Pre-fingerprint mnemostack supported exactly mean (the default)

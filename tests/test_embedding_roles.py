@@ -703,6 +703,34 @@ def test_own_pair_guard_skipped_in_retrievers_mode_but_kept_for_search_many():
         recaller.search_many([[0.1, 0.2]], limit=5)  # own pair used → guarded
 
 
+def test_vector_fallback_is_guarded_in_retrievers_mode():
+    # The zero-hit vector fallback does DIRECT vector work with the legacy
+    # pair even in retrievers mode — it must guard, and the error must not
+    # be swallowed by the fallback's fail-open except.
+    from mnemostack.embeddings.roles import EmbeddingSpaceError
+    from mnemostack.recall.recaller import Recaller
+    from mnemostack.recall.retrievers import VectorRetriever
+
+    class _Vec(_ScrollStore):
+        def search(self, *a, **kw):
+            return []
+
+    class _Identity(_AsymmetricProvider):
+        @property
+        def name(self):
+            return "ollama:nomic-embed-text"
+
+    ok_arm = VectorRetriever(embedding=_Identity(), vector_store=_Vec([]))
+    recaller = Recaller(
+        embedding_provider=_AsymmetricProvider(),
+        vector_store=_Vec([{EMBEDDING_SPACE_KEY: "es1:other"}]),
+        retrievers=[ok_arm],
+        fallback_threshold=5,
+    )
+    with pytest.raises(EmbeddingSpaceError, match="different spaces"):
+        recaller.recall("вопрос")
+
+
 def test_unqualified_provider_name_gets_no_space_identity():
     # The documented custom-provider contract never required "provider:model"
     # names — such a provider has no model identity, so no fingerprint is
