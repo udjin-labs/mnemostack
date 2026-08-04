@@ -691,14 +691,22 @@ def test_own_pair_guard_skipped_in_retrievers_mode_but_kept_for_search_many():
         def name(self):
             return "ollama:nomic-embed-text"
 
+    from mnemostack.vector.qdrant import Hit
+
+    class _VecWithHit(_Vec):
+        def search(self, *a, **kw):
+            return [Hit(id="h1", score=0.9, payload={"text": "найдено"})]
+
     mismatched = _Vec([{EMBEDDING_SPACE_KEY: "es1:other"}])
-    ok_arm = VectorRetriever(embedding=_Identity(), vector_store=_Vec([]))
+    ok_arm = VectorRetriever(embedding=_Identity(), vector_store=_VecWithHit([]))
     recaller = Recaller(
         embedding_provider=_AsymmetricProvider(),
         vector_store=mismatched,
         retrievers=[ok_arm],
     )
-    assert recaller.recall("вопрос") == []  # legacy pair unused → no veto
+    # The arm satisfies the recall — the legacy pair performs no vector
+    # work (no fallback engages), so its mismatch must not veto.
+    assert [r.id for r in recaller.recall("вопрос")] == ["h1"]
     with pytest.raises(EmbeddingSpaceError, match="different spaces"):
         recaller.search_many([[0.1, 0.2]], limit=5)  # own pair used → guarded
 
@@ -1103,7 +1111,10 @@ def test_recaller_guard_retries_after_inconclusive_check():
 
         def scroll(self):
             self.scroll_calls += 1
-            if self.scroll_calls == 1:
+            # Two failures: the first recall probes twice (main guard + the
+            # guarded zero-hit fallback), and both must be inconclusive for
+            # the recall to fail open.
+            if self.scroll_calls <= 2:
                 raise ConnectionError("store hiccup")
             for p in self._payloads:
                 yield SimpleNamespace(id="x", payload=p)
@@ -1113,7 +1124,7 @@ def test_recaller_guard_retries_after_inconclusive_check():
 
     store = _FlakyVec([{EMBEDDING_SPACE_KEY: "es1:other"}])
     recaller = Recaller(embedding_provider=_AsymmetricProvider(), vector_store=store)
-    # First recall: check inconclusive → fail open, do NOT cache.
+    # First recall: checks inconclusive → fail open, do NOT cache.
     assert recaller.recall("вопрос") == []
     # Store recovered: the retried check finds the mismatch and refuses.
     with pytest.raises(EmbeddingSpaceError, match="different spaces"):
