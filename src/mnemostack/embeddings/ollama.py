@@ -97,7 +97,10 @@ class OllamaProvider(EmbeddingProvider):
         # can't fire duplicate probes or duplicate fallback warnings — the
         # "once per instance" claim holds under threads.
         self._endpoint: str | None = None
-        self._detect_lock = threading.Lock()
+        # RLock: the dimension probe holds it while calling _embed_api,
+        # whose legacy-fallback branch re-acquires it — a plain Lock
+        # would deadlock unknown-model probes against old servers.
+        self._detect_lock = threading.RLock()
         self._dim: int | None = dimension or self._lookup_dimension(model)
 
     @classmethod

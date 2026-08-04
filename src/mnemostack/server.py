@@ -364,11 +364,6 @@ def _make_probe_client(url: str, timeout: int) -> Any:
 class ServerConfig:
     provider_name: str = "gemini"
     embedding_model: str | None = None
-    # Provider knobs resolved by the shared config/env precedence — passed to
-    # get_provider() so a configured Ollama host/timeout actually reaches the
-    # provider on this surface too (they used to silently stop at the config).
-    ollama_host: str | None = None
-    embedding_timeout: int | None = None
     llm_name: str = "gemini"
     llm_model: str | None = None
     collection: str = "mnemostack"
@@ -414,6 +409,14 @@ class ServerConfig:
     # the HTTP surface entirely (fail closed). Env: MNEMOSTACK_RESOLVE_ROOTS
     # (os.pathsep-separated).
     resolve_roots: list[str] = field(default_factory=list)
+    # Provider knobs resolved by the shared config/env precedence — passed to
+    # get_provider() so a configured Ollama host/timeout actually reaches the
+    # provider on this surface too (they used to silently stop at the config).
+    # Appended at the TAIL on purpose: ServerConfig is documented stable and
+    # may be constructed positionally — inserting mid-signature would shift
+    # every later argument.
+    ollama_host: str | None = None
+    embedding_timeout: int | None = None
 
     def __post_init__(self) -> None:
         if self.rerank_mode not in RERANK_MODES:

@@ -56,8 +56,6 @@ def build_server(
     collection: str = "mnemostack",
     embedding_provider: str = "gemini",
     embedding_model: str | None = None,
-    ollama_host: str | None = None,
-    embedding_timeout: int | None = None,
     llm_provider: str = "gemini",
     llm_model: str | None = None,
     qdrant_host: str = "http://localhost:6333",
@@ -84,6 +82,10 @@ def build_server(
     text_search: str = "auto",
     text_search_fields: dict[str, float] | None = None,
     resolve_roots: list[str] | None = None,
+    # Provider knobs — appended at the TAIL to preserve positional
+    # back-compat for existing library callers.
+    ollama_host: str | None = None,
+    embedding_timeout: int | None = None,
 ) -> Any:
     """Build and return a configured FastMCP server.
 

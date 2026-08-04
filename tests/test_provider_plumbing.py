@@ -220,3 +220,38 @@ def test_cli_main_reports_probe_errors_cleanly(monkeypatch, capsys):
     assert rc == 2
     err = capsys.readouterr().err
     assert "error:" in err and "no fallback dimension" in err
+
+
+def test_unknown_model_probe_on_legacy_server_does_not_deadlock(monkeypatch):
+    """The dimension probe holds the detection lock while _embed_api may take
+    the legacy-fallback branch that re-acquires it — must complete, not hang."""
+    import urllib.error
+
+    def fake_urlopen(req, timeout=None):
+        if req.full_url.endswith("/api/embed"):
+            raise urllib.error.HTTPError(req.full_url, 404, "nf", {}, None)
+        return _Resp(jsonlib.dumps({"embedding": [0.1, 0.2]}).encode())
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    p = OllamaProvider(model="brand-new-embedder")
+    assert p.dimension == 2
+    assert p.endpoint == "api/embeddings"
+
+
+def test_new_knobs_stay_at_the_positional_tail():
+    """ServerConfig and build_server are documented stable and may be used
+    positionally — the new provider knobs must never shift older arguments."""
+    import dataclasses
+    import inspect
+
+    pytest.importorskip("fastapi")
+    from mnemostack.server import ServerConfig
+
+    field_names = [f.name for f in dataclasses.fields(ServerConfig)]
+    assert field_names[-2:] == ["ollama_host", "embedding_timeout"]
+
+    pytest.importorskip("fastmcp")
+    from mnemostack.mcp import build_server
+
+    params = list(inspect.signature(build_server).parameters)
+    assert params[-2:] == ["ollama_host", "embedding_timeout"]

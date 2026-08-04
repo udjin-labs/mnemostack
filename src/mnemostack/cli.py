@@ -201,9 +201,11 @@ def cmd_health(args: argparse.Namespace) -> int:
     try:
         dim: int | str = provider.dimension
     except ProviderProbeError as e:
+        # A failed probe is an OUTAGE (exit 1, like health_check's down),
+        # not a misconfiguration — deployment checks distinguish the two.
         print(f"Provider: {provider.name}")
         print(f"  embedding: DOWN — {e}")
-        return 2
+        return 1
     print(f"Provider: {provider.name} (dim={dim})")
     ok, msg = provider.health_check()
     status = "OK" if ok else "DOWN"
