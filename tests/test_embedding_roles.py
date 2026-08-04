@@ -443,6 +443,54 @@ def test_unguardable_store_skips_fingerprint_resolution():
     assert check_document_space(SimpleNamespace(), _RaisingFp())[0] == "unknown"
 
 
+def test_ineligible_arm_does_not_veto_tenant_recall():
+    # Under a tenant, an arm the retriever loop skips (no accepts_tenant)
+    # can never contribute — its mismatched collection must not veto the
+    # recall. Unscoped recall still enforces every arm.
+    from mnemostack.embeddings.roles import EmbeddingSpaceError
+    from mnemostack.recall.recaller import Recaller
+    from mnemostack.recall.retrievers import VectorRetriever
+
+    class _Vec(_ScrollStore):
+        def search(self, *a, **kw):
+            return []
+
+    class _NoTenantArm(VectorRetriever):
+        accepts_tenant = False
+
+    class _Identity(_AsymmetricProvider):
+        @property
+        def name(self):
+            return "ollama:nomic-embed-text"
+
+    ok_arm = VectorRetriever(embedding=_Identity(), vector_store=_Vec([]))
+    bad_arm = _NoTenantArm(
+        embedding=_AsymmetricProvider(),
+        vector_store=_Vec([{EMBEDDING_SPACE_KEY: "es1:other"}]),
+    )
+    recaller = Recaller(retrievers=[ok_arm, bad_arm])
+    assert recaller.recall("вопрос", tenant="t1") == []  # bad arm skipped
+    with pytest.raises(EmbeddingSpaceError):
+        recaller.recall("вопрос")  # unscoped: every arm enforced
+
+
+def test_native_document_override_is_not_legacy_compatible():
+    # Pre-fingerprint points came through the NEUTRAL primitives — a
+    # provider with a native document role does not reproduce them.
+    from mnemostack.recall.retrievers import _SharedQueryEmbedding
+
+    class _NativeDoc(_AsymmetricProvider):
+        def embed_document(self, text):
+            return [9.9]
+
+    assert _NativeDoc()._legacy_space_compatible() is False
+    assert _AsymmetricProvider()._legacy_space_compatible() is True
+    # The memo wrapper overrides role methods for caching only — it must
+    # forward the INNER provider's answer, not its own overrides.
+    assert _SharedQueryEmbedding(_AsymmetricProvider())._legacy_space_compatible() is True
+    assert _SharedQueryEmbedding(_NativeDoc())._legacy_space_compatible() is False
+
+
 def test_ingestor_rechecks_space_on_every_flush():
     # Write-side staleness is unacceptable even within a TTL: a repoint
     # BETWEEN two ingests must be refused at the very next flush.

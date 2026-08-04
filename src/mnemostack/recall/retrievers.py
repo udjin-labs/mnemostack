@@ -670,6 +670,13 @@ class _SharedQueryEmbedding(EmbeddingProvider):
     def profile(self, value) -> None:
         self._embedding.profile = value
 
+    def _legacy_space_compatible(self) -> bool:
+        # Forwarded: the wrapper overrides role methods for memoization only
+        # — the base override-detection heuristic would wrongly answer False
+        # for it. The INNER provider's answer is the truth.
+        method = getattr(self._embedding, "_legacy_space_compatible", None)
+        return method() if method is not None else True
+
     def document_space_fingerprint(self) -> str:
         # Forwarded so the wrapped provider's own fingerprint extras
         # (e.g. HuggingFace pooling) are not lost; a duck-typed inner falls

@@ -136,11 +136,14 @@ class HuggingFaceProvider(EmbeddingProvider):
         return f"huggingface:{self.model_name}"
 
     def _legacy_space_compatible(self) -> bool:
-        # Pre-fingerprint mnemostack always mean-pooled: only an active mean
-        # configuration reproduces those legacy vectors. The last-token
-        # auto-default (correct for decoder families) must NOT silently adopt
-        # a collection that was mean-pooled before the upgrade.
-        return self.pooling == "mean"
+        # Pre-fingerprint mnemostack supported exactly mean (the default)
+        # and explicit cls pooling — an active mean/cls configuration
+        # reproduces those legacy vectors byte-for-byte, so upgrading with
+        # the SAME setting keeps the collection. "last" did not exist then
+        # (the old code silently mean-pooled anything else), so the new
+        # last-token mode — auto-selected or explicit — must never adopt an
+        # unstamped collection.
+        return self.pooling in ("mean", "cls")
 
     def _fingerprint_extras(self) -> dict[str, str]:
         # Pooling changes the vector space for the same model, so it must

@@ -185,7 +185,10 @@ class Recaller:
     timestamp_format = "iso"
     #: Space-guard defaults for the same construction style; the class-level
     #: lock only serializes lazy guard-list creation, which is idempotent.
-    _space_guards: list[SpaceGuard] | None = None
+    #: Entries are (retriever | None, guard) — None marks the recaller's own
+    #: legacy pair; the retriever handle lets a request skip guards of arms
+    #: ineligible for it (e.g. tenant-incapable arms under a tenant).
+    _space_guards: list[tuple[Any, SpaceGuard]] | None = None
     _space_lock = threading.Lock()
 
     # Default weight profiles per detected query shape. Picked conservatively
@@ -328,53 +331,56 @@ class Recaller:
         self._space_guards: list[SpaceGuard] | None = None
         self._space_lock = threading.Lock()
 
-    def _space_check_pairs(self) -> list[tuple[Any, Any]]:
-        """Every distinct (store, provider) pair this recaller can query.
+    def _build_space_guards(self) -> list[tuple[Any, SpaceGuard]]:
+        """(retriever, guard) entries for every pair this recaller can query.
 
-        The legacy path holds one pair directly; retrievers mode publicly
-        permits arbitrary arms over different collections/providers, so each
-        distinct pair is checked — a compatible first arm must not speak for
-        an incompatible later one. The multi-field arms share one wrapper
-        and one store, so they dedup to a single pair.
+        The legacy path holds one pair directly (entry key None); retrievers
+        mode publicly permits arbitrary arms over different collections and
+        providers, so each vector-backed arm gets its own guard — a
+        compatible first arm must not speak for an incompatible later one.
         """
-        pairs: list[tuple[Any, Any]] = []
-        seen: set[tuple[int, int]] = set()
-
-        def _add(store: Any, emb: Any) -> None:
-            if store is None or emb is None:
-                return
-            key = (id(store), id(emb))
-            if key not in seen:
-                seen.add(key)
-                pairs.append((store, emb))
-
+        entries: list[tuple[Any, SpaceGuard]] = []
         # getattr throughout: instances built without __init__ (documented
         # test-fake pattern) may lack any of these attributes.
-        _add(getattr(self, "vector", None), getattr(self, "embedding", None))
+        own_store = getattr(self, "vector", None)
+        own_emb = getattr(self, "embedding", None)
+        if own_store is not None and own_emb is not None:
+            entries.append((None, SpaceGuard(own_store, own_emb)))
         for retriever in getattr(self, "retrievers", None) or []:
-            _add(getattr(retriever, "vector_store", None), getattr(retriever, "embedding", None))
-        return pairs
+            store = getattr(retriever, "vector_store", None)
+            emb = getattr(retriever, "embedding", None)
+            if store is not None and emb is not None:
+                entries.append((retriever, SpaceGuard(store, emb)))
+        return entries
 
-    def _ensure_space_compat(self) -> None:
+    def _ensure_space_compat(self, tenant: str | None = None) -> None:
         """Fail loud when the query and stored vectors would come from
         different embedding spaces.
 
         A profile-transformed query against vectors from another space — or
         stamped with a different fingerprint — degrades retrieval with no
         error at all; that silent failure mode is exactly what the space
-        fingerprints exist to prevent, so recall refuses instead. Each
-        distinct pair gets a :class:`SpaceGuard`: conclusive verdicts are
-        cached and REVALIDATED after a bounded interval, so a collection
+        fingerprints exist to prevent, so recall refuses instead. Verdicts
+        are cached and REVALIDATED after a bounded interval, so a collection
         recreated under a different configuration — or healed by a correct
         reindex — is noticed by a long-lived server without a restart.
+
+        Only arms ELIGIBLE for this request are enforced: under a tenant,
+        an arm the retriever loop would skip anyway (no ``accepts_tenant``)
+        cannot contribute results, so its collection must not veto the
+        recall either.
         """
         if self._space_guards is None:
             with self._space_lock:
                 if self._space_guards is None:
-                    self._space_guards = [
-                        SpaceGuard(store, emb) for store, emb in self._space_check_pairs()
-                    ]
-        for guard in self._space_guards:
+                    self._space_guards = self._build_space_guards()
+        for retriever, guard in self._space_guards:
+            if (
+                retriever is not None
+                and tenant is not None
+                and not getattr(retriever, "accepts_tenant", False)
+            ):
+                continue
             guard.ensure()
 
     def _vector_filters(self, filters: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -554,7 +560,7 @@ class Recaller:
         tenant: str | None = None,
     ) -> list[RecallResult]:
         # Before ANY path embeds the query — retrievers mode included.
-        self._ensure_space_compat()
+        self._ensure_space_compat(tenant=tenant)
         # Retrievers mode: fuse N arbitrary ranked lists
         if self.retrievers:
             return self._recall_via_retrievers(
@@ -753,7 +759,7 @@ class Recaller:
             return []
         # Direct search surface (expansion retry, library callers) — must be
         # space-guarded like every other path that queries the collection.
-        self._ensure_space_compat()
+        self._ensure_space_compat(tenant=tenant)
 
         fetch = _fetch_limit(limit, include_invalidated, as_of)
         tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}

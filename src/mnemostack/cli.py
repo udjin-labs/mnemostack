@@ -2420,7 +2420,34 @@ def cmd_index(args: argparse.Namespace) -> int:
     failed = 0
     failed_sources: set[str] = set()
     doc_fp = document_space_fingerprint_via(provider)
+
+    def _fingerprint_still(current_of: str | None) -> bool:
+        """Re-resolve the fingerprint and compare — a mutable tag repointed
+        DURING a long run would otherwise stamp old-digest labels onto
+        new-weights vectors, mixing the collection under one apparently
+        valid fingerprint."""
+        if current_of is None:
+            return True
+        try:
+            return document_space_fingerprint_via(provider) == current_of
+        except EmbeddingSpaceError:
+            return False
+
+    _FP_RECHECK_EVERY = 64
+    since_check = 0
     for cid, text, payload in to_embed:
+        since_check += 1
+        if since_check >= _FP_RECHECK_EVERY:
+            since_check = 0
+            if not _fingerprint_still(doc_fp):
+                print(
+                    "EMBEDDING SPACE CHANGED mid-run (the model tag was "
+                    "repointed or became unresolvable) — aborting. Points "
+                    "written so far are consistent; rerunning will be "
+                    "refused until you --recreate or use a new --collection.",
+                    file=sys.stderr,
+                )
+                return 1
         vec = embed_document_via(provider, text)
         if not vec:
             failed += 1
@@ -2434,6 +2461,16 @@ def cmd_index(args: argparse.Namespace) -> int:
     refreshed = 0
     foreign_skipped = 0
     foreign_space_skipped = 0
+    if args.refresh_payloads and existing_ids and not _fingerprint_still(doc_fp):
+        # A refresh stamps doc_fp onto points WITHOUT re-embedding — if the
+        # tag repointed since the run started, that label no longer names
+        # the space those vectors are in.
+        print(
+            "EMBEDDING SPACE CHANGED mid-run — skipping --refresh-payloads "
+            "(stamping the old fingerprint now would mislabel points).",
+            file=sys.stderr,
+        )
+        return 1
     if args.refresh_payloads and existing_ids:
         # Payload-only rewrite of chunks that were skipped as already
         # indexed: applies new payload fields (enrichment output,

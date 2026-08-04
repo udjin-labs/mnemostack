@@ -73,12 +73,19 @@ class EmbeddingProvider(ABC):
         an older (pre-fingerprint) mnemostack would have produced.
 
         The legacy-adoption path assumes unstamped points are byte-compatible
-        with what the current configuration embeds. Override to return False
-        when a config default changed the output for the same model (e.g.
-        HuggingFace auto-selecting last-token pooling where the old default
-        was mean) — the guard then refuses the legacy collection instead of
-        silently mixing spaces.
+        with what the current configuration embeds. Pre-fingerprint points
+        were always created through the NEUTRAL primitives, so a provider
+        that overrides a document role method (backend-native document task
+        types) does not reproduce them — the default answers False for such
+        providers; they may override this to attest compatibility explicitly.
+        Providers should also override when a config default changed the
+        output for the same model (e.g. HuggingFace auto-selecting
+        last-token pooling where the old default was mean).
         """
+        cls = type(self)
+        for name in ("embed_document", "embed_documents"):
+            if getattr(cls, name, None) is not getattr(EmbeddingProvider, name):
+                return False
         return True
 
     def _fingerprint_extras(self) -> Mapping[str, str]:
