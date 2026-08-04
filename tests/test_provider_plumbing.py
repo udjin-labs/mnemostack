@@ -380,22 +380,51 @@ def test_embedding_batch_size_config_validation(monkeypatch, tmp_path):
         Config.load(path=bad)
 
 
-def test_resilient_ladder_normalizes_wrong_cardinality():
-    # A provider answering with the wrong vector count must not let trailing
-    # items vanish uncounted — missing entries are explicit failures.
+def test_resilient_ladder_retries_per_item_on_wrong_cardinality():
+    # A wrong-length batch response has LOST alignment (it may have skipped
+    # an early or middle item) — padding/truncating would attach vectors to
+    # the wrong chunk ids, so the only safe recovery is per-item.
     from mnemostack.embeddings.roles import embed_documents_resilient
 
     class _ShortBatch(_BatchCountingProvider):
         def embed_batch(self, texts):
-            return [[0.1]]  # one vector for many inputs
+            return [[9.9]]  # one vector for many inputs — alignment unknown
 
-    assert embed_documents_resilient(_ShortBatch(), ["a", "b", "c"]) == [[0.1], [], []]
+    assert embed_documents_resilient(_ShortBatch(), ["a", "b", "c"]) == [
+        [0.1, 0.2],
+        [0.1, 0.2],
+        [0.1, 0.2],
+    ]  # per-item results, correctly aligned — never the misaligned [9.9]
 
     class _LongBatch(_BatchCountingProvider):
         def embed_batch(self, texts):
-            return [[0.1]] * (len(texts) + 2)
+            return [[9.9]] * (len(texts) + 2)
 
-    assert embed_documents_resilient(_LongBatch(), ["a"]) == [[0.1]]
+    assert embed_documents_resilient(_LongBatch(), ["a"]) == [[0.1, 0.2]]
+
+
+def test_resilient_ladder_retries_per_item_on_wholesale_batch_failure():
+    # Graceful providers report batch-level failure as all-empty vectors
+    # (Ollama's embed_batch contract) — the group must go per-item, not die.
+    from mnemostack.embeddings.roles import embed_documents_resilient
+
+    class _BatchDies(_BatchCountingProvider):
+        def embed_batch(self, texts):
+            if len(texts) > 1:
+                return [[] for _ in texts]  # grouped request rejected
+            return [[0.1, 0.2] for _ in texts]
+
+    assert embed_documents_resilient(_BatchDies(), ["a", "b"]) == [
+        [0.1, 0.2],
+        [0.1, 0.2],
+    ]
+    # A single failed item inside an otherwise good batch stays a single
+    # failure — no wholesale retry.
+    class _OneBad(_BatchCountingProvider):
+        def embed_batch(self, texts):
+            return [[0.1, 0.2], []]
+
+    assert embed_documents_resilient(_OneBad(), ["a", "b"]) == [[0.1, 0.2], []]
 
 
 def test_resilient_ladder_degrades_without_batch_api():

@@ -141,13 +141,8 @@ def embed_documents_resilient(provider: Any, texts: list[str]) -> list[list[floa
     """
     if not texts:
         return []
-    try:
-        vectors = list(embed_documents_via(provider, texts))
-    except AttributeError:
-        # Provider without batch API — fall back to single-item.
-        return [embed_document_via(provider, t) for t in texts]
-    except Exception as exc:  # noqa: BLE001 — degradation ladder, loudly logged
-        logger.warning("document batch embedding failed (%s) — retrying per item", exc)
+
+    def _per_item() -> list[list[float]]:
         out: list[list[float]] = []
         for text in texts:
             try:
@@ -155,14 +150,35 @@ def embed_documents_resilient(provider: Any, texts: list[str]) -> list[list[floa
             except Exception:  # noqa: BLE001 — isolate the poisoned item
                 out.append([])
         return out
-    # The RESULT length is part of the contract: a provider answering with
-    # the wrong cardinality must not let trailing items vanish uncounted
-    # through a lenient zip downstream — missing entries are explicit
-    # failures, surplus entries are dropped.
-    if len(vectors) < len(texts):
-        vectors.extend([] for _ in range(len(texts) - len(vectors)))
-    elif len(vectors) > len(texts):
-        del vectors[len(texts) :]
+
+    try:
+        vectors = list(embed_documents_via(provider, texts))
+    except AttributeError:
+        # Provider without batch API — fall back to single-item.
+        return [embed_document_via(provider, t) for t in texts]
+    except Exception as exc:  # noqa: BLE001 — degradation ladder, loudly logged
+        logger.warning("document batch embedding failed (%s) — retrying per item", exc)
+        return _per_item()
+    if len(vectors) != len(texts):
+        # A wrong-length response has LOST alignment: it may have omitted an
+        # early or middle item, so neither padding nor truncation can pair
+        # the remaining vectors with the right chunks — positional zips
+        # downstream would silently attach vectors to the wrong ids. The
+        # only safe recovery is per-item, where alignment is trivial.
+        logger.warning(
+            "document batch returned %d vector(s) for %d input(s) — "
+            "alignment lost, retrying per item",
+            len(vectors),
+            len(texts),
+        )
+        return _per_item()
+    if all(not v for v in vectors):
+        # Graceful providers report a BATCH-level failure as one empty
+        # vector per input instead of raising (e.g. a rejected grouped
+        # request). Single items may still succeed — retry per item rather
+        # than failing the whole commit group.
+        logger.warning("document batch failed wholesale — retrying per item")
+        return _per_item()
     return vectors
 
 
