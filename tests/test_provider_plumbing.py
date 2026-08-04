@@ -265,3 +265,260 @@ def test_config_sdk_helper_carries_provider_knobs(monkeypatch):
     kw = cfg.embedding_provider_kwargs()
     assert kw["host"] == "http://192.0.2.10:11434"
     assert kw["timeout"] == 240
+
+
+# ------------------------------------------------------- bounded ingestion
+
+
+class _BatchCountingProvider(EmbeddingProvider):
+    def __init__(self):
+        self.batch_calls: list[int] = []
+
+    def embed(self, text):
+        return [0.1, 0.2]
+
+    def embed_batch(self, texts):
+        self.batch_calls.append(len(texts))
+        return [[0.1, 0.2] for _ in texts]
+
+    @property
+    def dimension(self):
+        return 2
+
+    @property
+    def name(self):
+        return "custom:batch-counter"
+
+
+class _BatchStore:
+    def __init__(self):
+        self.upsert_batches: list[int] = []
+        self.single_upserts = 0
+
+    def upsert(self, cid, vec, payload, **kw):
+        self.single_upserts += 1
+
+    def upsert_batch(self, points, **kw):
+        self.upsert_batches.append(len(points))
+
+    def set_payload(self, cid, payload, **kw):
+        pass
+
+    def delete_payload_keys(self, cid, keys, **kw):
+        pass
+
+
+def _chunks(n):
+    return [(f"id{i}", f"text {i}", {"text": f"text {i}", "source": "a.md"}) for i in range(n)]
+
+
+def test_markdown_sync_embeds_and_upserts_in_bounded_groups():
+    from mnemostack.markdown.sync import upsert_markdown_chunks
+
+    provider = _BatchCountingProvider()
+    store = _BatchStore()
+    res = upsert_markdown_chunks(
+        store, provider, _chunks(5), existing_payloads={}, embedding_batch_size=2
+    )
+    assert res.inserted == 5
+    # ONE provider batch call per group, never the whole corpus at once…
+    assert provider.batch_calls == [2, 2, 1]
+    # …and one store round-trip per group (no per-point fallback used).
+    assert store.upsert_batches == [2, 2, 1]
+    assert store.single_upserts == 0
+
+
+def test_markdown_sync_quota_path_batches_but_checks_totals_once():
+    from mnemostack.markdown.sync import upsert_markdown_chunks
+
+    provider = _BatchCountingProvider()
+    store = _BatchStore()
+    hook_calls: list[int] = []
+
+    def hook(inserts, failed_sources):
+        hook_calls.append(inserts)
+
+    res = upsert_markdown_chunks(
+        store,
+        provider,
+        _chunks(5),
+        existing_payloads={},
+        before_upsert=hook,
+        embedding_batch_size=2,
+    )
+    assert res.inserted == 5
+    assert provider.batch_calls == [2, 2, 1]  # bounded provider groups
+    assert hook_calls == [5]  # the quota check still sees ONE total
+
+
+def test_resilient_ladder_isolates_poisoned_items():
+    from mnemostack.embeddings.roles import embed_documents_resilient
+
+    class _PoisonedBatch(_BatchCountingProvider):
+        def embed_batch(self, texts):
+            raise RuntimeError("batch endpoint exploded")
+
+        def embed(self, text):
+            if "bad" in text:
+                raise RuntimeError("poisoned item")
+            return [0.5]
+
+    vectors = embed_documents_resilient(_PoisonedBatch(), ["ok one", "bad apple", "ok two"])
+    assert vectors == [[0.5], [], [0.5]]
+
+
+def test_embedding_batch_size_config_validation(monkeypatch, tmp_path):
+    monkeypatch.setenv("MNEMOSTACK_EMBEDDING_BATCH_SIZE", "16")
+    assert Config.load(path=None).embedding.batch_size == 16
+    monkeypatch.setenv("MNEMOSTACK_EMBEDDING_BATCH_SIZE", "0")
+    with pytest.raises(ValueError):
+        Config.load(path=None)
+    monkeypatch.delenv("MNEMOSTACK_EMBEDDING_BATCH_SIZE")
+    bad = tmp_path / "cfg.yaml"
+    bad.write_text("embedding:\n  batch_size: -3\n")
+    with pytest.raises(ValueError):
+        Config.load(path=bad)
+
+
+def test_resilient_ladder_retries_per_item_on_wrong_cardinality():
+    # A wrong-length batch response has LOST alignment (it may have skipped
+    # an early or middle item) — padding/truncating would attach vectors to
+    # the wrong chunk ids, so the only safe recovery is per-item.
+    from mnemostack.embeddings.roles import embed_documents_resilient
+
+    class _ShortBatch(_BatchCountingProvider):
+        def embed_batch(self, texts):
+            return [[9.9]]  # one vector for many inputs — alignment unknown
+
+    assert embed_documents_resilient(_ShortBatch(), ["a", "b", "c"]) == [
+        [0.1, 0.2],
+        [0.1, 0.2],
+        [0.1, 0.2],
+    ]  # per-item results, correctly aligned — never the misaligned [9.9]
+
+    class _LongBatch(_BatchCountingProvider):
+        def embed_batch(self, texts):
+            return [[9.9]] * (len(texts) + 2)
+
+    assert embed_documents_resilient(_LongBatch(), ["a"]) == [[0.1, 0.2]]
+
+
+def test_resilient_ladder_retries_per_item_on_wholesale_batch_failure():
+    # Graceful providers report batch-level failure as all-empty vectors
+    # (Ollama's embed_batch contract) — the group must go per-item, not die.
+    from mnemostack.embeddings.roles import embed_documents_resilient
+
+    class _BatchDies(_BatchCountingProvider):
+        def embed_batch(self, texts):
+            if len(texts) > 1:
+                return [[] for _ in texts]  # grouped request rejected
+            return [[0.1, 0.2] for _ in texts]
+
+    assert embed_documents_resilient(_BatchDies(), ["a", "b"]) == [
+        [0.1, 0.2],
+        [0.1, 0.2],
+    ]
+    # A single failed item inside an otherwise good batch stays a single
+    # failure — no wholesale retry.
+    class _OneBad(_BatchCountingProvider):
+        def embed_batch(self, texts):
+            return [[0.1, 0.2], []]
+
+    assert embed_documents_resilient(_OneBad(), ["a", "b"]) == [[0.1, 0.2], []]
+
+
+def test_resilient_ladder_degrades_without_batch_api():
+    from mnemostack.embeddings.roles import embed_documents_resilient
+
+    class _NoBatch:
+        def __init__(self):
+            self.calls: list[str] = []
+
+        def embed(self, text):
+            self.calls.append(text)
+            return [0.7]
+
+    duck = _NoBatch()
+    assert embed_documents_resilient(duck, ["a", "b"]) == [[0.7], [0.7]]
+    assert duck.calls == ["a", "b"]  # per-item, raw text (duck contract)
+
+
+def test_cmd_index_embeds_and_upserts_in_bounded_groups(tmp_path, monkeypatch, capsys):
+    import mnemostack.cli as cli
+
+    for i in range(3):
+        (tmp_path / f"doc{i}.md").write_text(f"content number {i}")
+
+    provider = _BatchCountingProvider()
+
+    class _Store(_BatchStore):
+        def __init__(self, **kw):
+            super().__init__()
+
+        def collection_exists(self):
+            return False
+
+        def ensure_collection(self, recreate=False):
+            pass
+
+        def iter_ids(self):
+            return iter(())
+
+        def scroll(self, *a, **kw):
+            return iter(())
+
+        def count(self):
+            return 0
+
+    store_box: list[_Store] = []
+
+    def make_store(**kw):
+        store_box.append(_Store())
+        return store_box[-1]
+
+    monkeypatch.setattr(cli, "get_provider", lambda *a, **kw: provider)
+    monkeypatch.setattr(cli, "VectorStore", make_store)
+    rc = cli.main(
+        [
+            "index",
+            str(tmp_path),
+            "--chunk-size",
+            "2000",
+            "--embedding-batch-size",
+            "2",
+        ]
+    )
+    assert rc == 0, capsys.readouterr()
+    # 3 one-chunk files, batch size 2 → provider batches [2, 1]…
+    assert provider.batch_calls == [2, 1]
+    # …and one store round-trip per group.
+    assert store_box[-1].upsert_batches == [2, 1]
+    assert store_box[-1].single_upserts == 0
+
+
+def test_wholesale_retry_respects_storm_guarded_providers():
+    # A provider whose embed_batch already degraded per item internally
+    # (Gemini's sequential fallback) reports provider-wide failure as
+    # all-empty — the ladder must NOT replay every item into the outage.
+    from mnemostack.embeddings.gemini import GeminiProvider
+    from mnemostack.embeddings.roles import embed_documents_resilient
+
+    assert GeminiProvider._batch_includes_per_item_fallback is True
+
+    class _StormGuarded(_BatchCountingProvider):
+        _batch_includes_per_item_fallback = True
+
+        def __init__(self):
+            super().__init__()
+            self.single_calls = 0
+
+        def embed(self, text):
+            self.single_calls += 1
+            return [0.1, 0.2]
+
+        def embed_batch(self, texts):
+            return [[] for _ in texts]  # provider-wide failure, guarded
+
+    p = _StormGuarded()
+    assert embed_documents_resilient(p, ["a", "b"]) == [[], []]
+    assert p.single_calls == 0  # no replay into the failing service

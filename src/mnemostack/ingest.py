@@ -49,8 +49,7 @@ from mnemostack.embeddings.roles import (
     EmbeddingSpaceError,
     SpaceGuard,
     document_space_fingerprint_via,
-    embed_document_via,
-    embed_documents_via,
+    embed_documents_resilient,
 )
 from mnemostack.observability.recorder import counter, histogram
 from mnemostack.quotas import enforce_points_quota
@@ -710,14 +709,10 @@ class Ingestor:
             doc_space_fp = document_space_fingerprint_via(self.embedding)
         texts = [item.text for _, item in buffer]
         with histogram("mnemostack.ingest.embed_batch_ms"):
-            try:
-                vectors = embed_documents_via(self.embedding, texts)
-            except AttributeError:
-                # Provider without batch API — fall back to single-item
-                vectors = [embed_document_via(self.embedding, t) for t in texts]
-            except Exception as exc:
-                log.warning("embed_batch failed (%s) — falling back to per-item", exc)
-                vectors = [self._safe_embed_single(t) for t in texts]
+            # Shared degradation ladder (native batch → per-item on missing
+            # batch API → guarded per-item on batch exceptions) — identical
+            # semantics for Ingestor and the CLI/markdown group loops.
+            vectors = embed_documents_resilient(self.embedding, texts)
         # SANDWICH (same policy as the CLI/markdown paths): the fingerprint
         # must still be the guarded one AFTER embedding — a tag repointed
         # during the embed call must not have its vectors stamped as the
@@ -793,12 +788,6 @@ class Ingestor:
         if self._seen is not None:
             for p in points:
                 self._seen.add(p[0])
-
-    def _safe_embed_single(self, text: str) -> list[float]:
-        try:
-            return embed_document_via(self.embedding, text)
-        except Exception:
-            return []
 
     def _write_wrappers(
         self,

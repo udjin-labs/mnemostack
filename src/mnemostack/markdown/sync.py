@@ -24,7 +24,7 @@ from ..embeddings.roles import (
     EmbeddingSpaceError,
     SpaceGuard,
     document_space_fingerprint_via,
-    embed_document_via,
+    embed_documents_resilient,
 )
 from ..quotas import enforce_points_quota
 from .indexer import collect_markdown
@@ -141,6 +141,7 @@ def upsert_markdown_chunks(
     *,
     tenant: str | None = None,
     before_upsert: Callable[[int, set[str]], None] | None = None,
+    embedding_batch_size: int = 64,
 ) -> ChunkSyncResult:
     """Embed & upsert new chunks; refresh payloads of already-indexed ones.
 
@@ -198,58 +199,66 @@ def upsert_markdown_chunks(
             "or became unresolvable) — aborting before any mixed-space write"
         )
 
-    def _embed(text: str, source: str) -> list | None:
-        vec = embed_document_via(provider, text)
-        if not vec:
-            res.failed += 1
-            res.failed_sources.add(source)
-            return None
-        return vec
+    def _embed_group(
+        group: list[tuple[str, str, dict]],
+    ) -> list[tuple[str, list, dict]]:
+        """One provider batch call for a group; failures counted per item."""
+        vectors = embed_documents_resilient(provider, [text for _, text, _ in group])
+        embedded: list[tuple[str, list, dict]] = []
+        for (cid, _text, payload), vec in zip(group, vectors, strict=False):
+            if not vec:
+                res.failed += 1
+                res.failed_sources.add(payload["source"])
+                continue
+            embedded.append((cid, vec, payload))
+        return embedded
 
-    _FP_BATCH = 64
+    def _upsert_group(points: list[tuple[str, list, dict]]) -> None:
+        """One store round-trip per group where the store supports it."""
+        if not points:
+            return
+        try:
+            store.upsert_batch(points, **tkw)
+        except AttributeError:
+            for cid, vec, payload in points:
+                store.upsert(cid, vec, payload, **tkw)
+        res.inserted += len(points)
+
     if before_upsert is None:
         # No quota hook: bounded groups with a SANDWICH check — the
         # fingerprint is verified unchanged before a group is embedded and
         # again before the group is committed, so a tag repointed mid-corpus
         # can't stream mixed-space points. Memory stays bounded by the
         # group size, preserving the constant-footprint property.
-        for start in range(0, len(new_chunks), _FP_BATCH):
-            group = new_chunks[start : start + _FP_BATCH]
+        for start in range(0, len(new_chunks), embedding_batch_size):
+            group = new_chunks[start : start + embedding_batch_size]
             if start and not _fp_unchanged():
                 _raise_fp_changed()
-            embedded: list[tuple[str, list, dict]] = []
-            for cid, text, payload in group:
-                vec = _embed(text, payload["source"])
-                if vec is None:
-                    continue
-                embedded.append((cid, vec, payload))
+            embedded = _embed_group(group)
             if embedded and not _fp_unchanged():
                 _raise_fp_changed()
-            for cid, vec, payload in embedded:
-                if doc_fp is not None:
+            if doc_fp is not None:
+                for _cid, _vec, payload in embedded:
                     payload[EMBEDDING_SPACE_KEY] = doc_fp
-                store.upsert(cid, vec, payload, **tkw)
-                res.inserted += 1
+            _upsert_group(embedded)
     else:
         # Quota hook: it enforces on the total insert count and is all-or-nothing,
-        # so embed the whole batch first, run the check, then write only if it passes.
+        # so embed the whole batch first (in bounded provider groups), run the
+        # check, then write only if it passes.
         to_upsert: list[tuple[str, list, dict]] = []
-        for cid, text, payload in new_chunks:
-            vec = _embed(text, payload["source"])
-            if vec is None:
-                continue
-            if doc_fp is not None:
+        for start in range(0, len(new_chunks), embedding_batch_size):
+            to_upsert.extend(_embed_group(new_chunks[start : start + embedding_batch_size]))
+        if doc_fp is not None:
+            for _cid, _vec, payload in to_upsert:
                 payload[EMBEDDING_SPACE_KEY] = doc_fp
-            to_upsert.append((cid, vec, payload))
         before_upsert(len(to_upsert), res.failed_sources)
         # Post-embed check before ANY write: the quota path embeds the whole
         # batch first, so this closes the same mid-batch repoint window the
         # streaming path sandwiches per group.
         if to_upsert and not _fp_unchanged():
             _raise_fp_changed()
-        for cid, vec, payload in to_upsert:
-            store.upsert(cid, vec, payload, **tkw)
-            res.inserted += 1
+        for start in range(0, len(to_upsert), embedding_batch_size):
+            _upsert_group(to_upsert[start : start + embedding_batch_size])
 
     if res.inserted:
         # POST-COMMIT revalidation: no atomic empty-collection claim exists,
@@ -329,6 +338,7 @@ class MarkdownSyncer:
         subtree: str | None = None,
         tenant: str | None = None,
         max_points_resolver: Callable[[], int | None] | None = None,
+        embedding_batch_size: int = 64,
     ):
         self.store = store
         self.provider = provider
@@ -339,6 +349,7 @@ class MarkdownSyncer:
         # while the watch is running takes effect without a restart. None = no
         # resolver (no limit). Enforced per file in upsert_markdown_chunks.
         self.max_points_resolver = max_points_resolver
+        self.embedding_batch_size = embedding_batch_size
         # Scopes every store + graph read/write and the chunk-id derivation to one
         # tenant, so a markdown corpus is isolated (and tenant-scoped graph recall
         # can see its :File link nodes). None = unscoped (single-tenant), unchanged.
@@ -418,6 +429,7 @@ class MarkdownSyncer:
         cs = upsert_markdown_chunks(
             self.store, self.provider, chunks, existing,
             tenant=self.tenant, before_upsert=check,
+            embedding_batch_size=self.embedding_batch_size,
         )
 
         # Prune chunks this file no longer produces (shrunk / re-chunked). Skip a

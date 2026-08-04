@@ -27,6 +27,7 @@ __all__ = [
     "check_document_space",
     "document_space_fingerprint_via",
     "embed_document_via",
+    "embed_documents_resilient",
     "embed_documents_via",
     "embed_queries_via",
     "embed_query_via",
@@ -127,6 +128,64 @@ def embed_documents_via(provider: Any, texts: list[str]) -> list[list[float]]:
     if method is not None:
         return method(texts)
     return provider.embed_batch(texts)
+
+
+def embed_documents_resilient(provider: Any, texts: list[str]) -> list[list[float]]:
+    """Batch-embed documents with the established degradation ladder.
+
+    Native batch first; a provider without a batch API (AttributeError)
+    degrades to per-item role calls; a batch that RAISES retries per item
+    with each failure isolated to its own ``[]`` — one poisoned chunk must
+    not lose the whole group. This is the Ingestor's historical contract,
+    shared so the CLI/markdown group loops behave identically.
+    """
+    if not texts:
+        return []
+
+    def _per_item() -> list[list[float]]:
+        out: list[list[float]] = []
+        for text in texts:
+            try:
+                out.append(embed_document_via(provider, text))
+            except Exception:  # noqa: BLE001 — isolate the poisoned item
+                out.append([])
+        return out
+
+    try:
+        vectors = list(embed_documents_via(provider, texts))
+    except AttributeError:
+        # Provider without batch API — fall back to single-item.
+        return [embed_document_via(provider, t) for t in texts]
+    except Exception as exc:  # noqa: BLE001 — degradation ladder, loudly logged
+        logger.warning("document batch embedding failed (%s) — retrying per item", exc)
+        return _per_item()
+    if len(vectors) != len(texts):
+        # A wrong-length response has LOST alignment: it may have omitted an
+        # early or middle item, so neither padding nor truncation can pair
+        # the remaining vectors with the right chunks — positional zips
+        # downstream would silently attach vectors to the wrong ids. The
+        # only safe recovery is per-item, where alignment is trivial.
+        logger.warning(
+            "document batch returned %d vector(s) for %d input(s) — "
+            "alignment lost, retrying per item",
+            len(vectors),
+            len(texts),
+        )
+        return _per_item()
+    if all(not v for v in vectors) and not getattr(
+        provider, "_batch_includes_per_item_fallback", False
+    ):
+        # Graceful providers report a BATCH-level failure as one empty
+        # vector per input instead of raising (e.g. a rejected grouped
+        # request). Single items may still succeed — retry per item rather
+        # than failing the whole commit group. EXCEPT for providers whose
+        # batch already degraded per item internally (storm-guarded): their
+        # all-empty means per-item was tried and the outage is
+        # provider-wide — replaying would multiply requests into a failing
+        # service.
+        logger.warning("document batch failed wholesale — retrying per item")
+        return _per_item()
+    return vectors
 
 
 def document_space_fingerprint_via(provider: Any) -> str | None:

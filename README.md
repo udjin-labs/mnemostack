@@ -382,7 +382,8 @@ mnemostack index-markdown memory/ \
     --provider ollama \
     --embedding-model qwen3-embedding:8b \
     --ollama-host http://192.0.2.10:11434 \
-    --embedding-timeout 180
+    --embedding-timeout 180 \
+    --embedding-batch-size 64
 ```
 
 Embedding uses the batch `POST /api/embed` endpoint (one request per batch; servers too old for it are detected once and served per-item with a loud warning). The embedding timeout (`--embedding-timeout` / `MNEMOSTACK_EMBEDDING_TIMEOUT`, default 180s) is independent of the short Qdrant liveness timeout — cold loads of larger local models are legitimately slow. Vector dimensions come from the model tables (quantization-suffix aware) or, for unknown models, a one-shot probe of the live model — there is no blind fallback dimension, so a wrong-size collection can't be created.
