@@ -587,12 +587,14 @@ class Ingestor:
         self.window_separator = window_separator
         self.enrich = enrich
         self._seen = _SeenCache(seen_cache_size) if skip_seen else None
-        # Self-guarding writes: every flush revalidates (TTL-bounded) that
-        # the collection's stamped space matches this provider before any
-        # embedding/upsert — a long-lived ingestor must not stamp fresh
-        # fingerprints into a collection whose points belong to another
-        # space (e.g. after a mutable tag repoint).
-        self._space_guard = SpaceGuard(vector_store, embedding)
+        # Self-guarding writes: every flush revalidates UNCONDITIONALLY
+        # (recheck_seconds=0, same policy as the markdown sync) that the
+        # collection's stamped space matches this provider before any
+        # embedding/upsert. Write-side staleness is not acceptable even
+        # within a TTL: a repointed tag inside the window would stamp fresh
+        # fingerprints next to old-space points and corrupt the collection
+        # BEFORE any read-side revalidation could notice.
+        self._space_guard = SpaceGuard(vector_store, embedding, recheck_seconds=0.0)
 
     # ---- Public API ----
 

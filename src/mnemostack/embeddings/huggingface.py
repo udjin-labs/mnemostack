@@ -24,16 +24,24 @@ _TOKENIZER_ASSETS = (
 )
 
 
+# Per weight file, hash this many bytes from the head and from the tail in
+# addition to (name, size). A same-architecture checkpoint swap keeps names
+# and often sizes, but tensor data differs from the first bytes on — sampled
+# content catches it without reading gigabytes at startup.
+_WEIGHT_SAMPLE_BYTES = 1024 * 1024
+
+
 def _local_weights_signature(path: Path) -> str:
     """Cheap identity of a local model directory for space fingerprints.
 
     A local path has no hub commit hash, yet its contents can be swapped in
     place while provider/model/pooling/dimension all stay equal. Hashing
     gigabytes of weights on every startup is not viable, so this pins the
-    config and tokenizer asset BYTES (small files whose changes alter the
-    vectors) plus each weight file's (name, size) — catching config,
-    tokenizer and practically every weight swap. Residual: an in-place
-    same-size weight edit is not detected.
+    config and tokenizer asset BYTES in full (small files whose changes
+    alter the vectors) plus, per weight file, its name, size and a sampled
+    head+tail megabyte of content — catching config/tokenizer changes and
+    same-size checkpoint swaps. Residual: a weight edit confined strictly
+    to the unsampled middle of a file is not detected.
     """
     h = hashlib.sha256()
     for asset in ("config.json", *_TOKENIZER_ASSETS):
@@ -43,7 +51,15 @@ def _local_weights_signature(path: Path) -> str:
             h.update(f.read_bytes())
     for f in sorted(path.iterdir()):
         if f.suffix in (".safetensors", ".bin", ".pt") and f.is_file():
-            h.update(f"{f.name}:{f.stat().st_size}".encode())
+            size = f.stat().st_size
+            h.update(f"{f.name}:{size}".encode())
+            with f.open("rb") as fh:
+                if size <= 2 * _WEIGHT_SAMPLE_BYTES:
+                    h.update(fh.read())  # small file: hash it whole
+                else:
+                    h.update(fh.read(_WEIGHT_SAMPLE_BYTES))
+                    fh.seek(-_WEIGHT_SAMPLE_BYTES, 2)
+                    h.update(fh.read(_WEIGHT_SAMPLE_BYTES))
     return h.hexdigest()[:32]
 
 try:

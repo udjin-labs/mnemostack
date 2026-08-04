@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import time
 from abc import ABC, abstractmethod
 from calendar import monthrange
 from collections import defaultdict
@@ -552,11 +553,18 @@ class _SharedQueryEmbedding(EmbeddingProvider):
     """
 
     _MAX_ENTRIES = 32
+    #: Memo entries expire on the same bounded-freshness contract as
+    #: SpaceGuard verdicts: after a tag repoint or collection recreation, a
+    #: recurring query's cached vector (from the OLD weights) must not be
+    #: searched against the new vectors indefinitely — recomputing the
+    #: fingerprint on the hot path would be far costlier than re-embedding
+    #: one query every few minutes.
+    _MEMO_TTL_S = 300.0
 
     def __init__(self, embedding: EmbeddingProvider):
         self._embedding = embedding
         self._lock = threading.Lock()
-        self._memo: dict[Any, list[float]] = {}
+        self._memo: dict[Any, tuple[float, list[float]]] = {}
         self._inflight: dict[Any, tuple[threading.Event, list[list[float]]]] = {}
 
     def embed(self, text: str) -> list[float]:
@@ -597,8 +605,14 @@ class _SharedQueryEmbedding(EmbeddingProvider):
         # exactly what this wrapper exists to prevent. The first caller for a
         # key becomes the leader; concurrent callers wait on its event.
         with self._lock:
-            if key in self._memo:
-                return self._memo[key]
+            memo_entry = self._memo.get(key)
+            if memo_entry is not None:
+                stamp, cached = memo_entry
+                if time.monotonic() - stamp <= self._MEMO_TTL_S:
+                    return cached
+                # Expired: recompute so a repointed tag / recreated
+                # collection stops being served a stale vector.
+                self._memo.pop(key, None)
             entry = self._inflight.get(key)
             if entry is None:
                 entry = (threading.Event(), [])
@@ -624,7 +638,7 @@ class _SharedQueryEmbedding(EmbeddingProvider):
                         # FIFO eviction — a tiny bound is plenty; this only
                         # exists to stop growth.
                         self._memo.pop(next(iter(self._memo)))
-                    self._memo[key] = vec
+                    self._memo[key] = (time.monotonic(), vec)
                 self._inflight.pop(key, None)
             event.set()
         return vec

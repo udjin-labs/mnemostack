@@ -443,6 +443,53 @@ def test_unguardable_store_skips_fingerprint_resolution():
     assert check_document_space(SimpleNamespace(), _RaisingFp())[0] == "unknown"
 
 
+def test_ingestor_rechecks_space_on_every_flush():
+    # Write-side staleness is unacceptable even within a TTL: a repoint
+    # BETWEEN two ingests must be refused at the very next flush.
+    from mnemostack.embeddings.roles import EmbeddingSpaceError
+
+    class _Store(_ScrollStore, _RecordingStore):
+        def __init__(self, payloads):
+            _ScrollStore.__init__(self, payloads)
+            _RecordingStore.__init__(self)
+
+    emb = _AsymmetricProvider()
+    store = _Store([])
+    ingestor = Ingestor(embedding=emb, vector_store=store)
+    ingestor.ingest([IngestItem(text="one", source="a.md")])
+    assert len(store.upserts) == 1
+    store._payloads = [{EMBEDDING_SPACE_KEY: "es1:other"}]  # repointed meanwhile
+    with pytest.raises(EmbeddingSpaceError, match="different spaces"):
+        ingestor.ingest([IngestItem(text="two", source="a.md")])
+    assert len(store.upserts) == 1  # nothing written after the repoint
+
+
+def test_local_weights_signature_detects_same_size_content_swap(tmp_path):
+    from mnemostack.embeddings.huggingface import _local_weights_signature
+
+    (tmp_path / "config.json").write_text('{"model_type": "bert"}')
+    weights = tmp_path / "model.safetensors"
+    weights.write_bytes(b"A" * 4096)
+    sig_a = _local_weights_signature(tmp_path)
+    weights.write_bytes(b"B" * 4096)  # same name, same size, new content
+    sig_b = _local_weights_signature(tmp_path)
+    assert sig_a != sig_b
+    # Tokenizer asset changes count too.
+    (tmp_path / "tokenizer.json").write_text('{"version": "x"}')
+    assert _local_weights_signature(tmp_path) not in (sig_a, sig_b)
+
+
+def test_shared_query_embedding_memo_expires():
+    from mnemostack.recall.retrievers import _SharedQueryEmbedding
+
+    inner = _AsymmetricProvider()
+    shim = _SharedQueryEmbedding(inner)
+    shim._MEMO_TTL_S = 0.0  # every hit is expired → recompute
+    shim.embed_query("q")
+    shim.embed_query("q")
+    assert inner.seen == ["query: q", "query: q"]  # no stale reuse
+
+
 # ---------------------------------------------------- provider integrations
 
 
