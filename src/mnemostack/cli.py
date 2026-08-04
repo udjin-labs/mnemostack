@@ -25,6 +25,7 @@ from .config import DEFAULT_CONFIG_PATHS, Config, generate_example_config, model
 from .embeddings import get_provider, list_providers
 from .embeddings.roles import (
     EMBEDDING_SPACE_KEY,
+    EmbeddingSpaceError,
     check_document_space,
     document_space_fingerprint_via,
     embed_document_via,
@@ -74,7 +75,17 @@ def _guard_document_space(store: Any, provider: Any) -> int | None:
     proceed. Pre-fingerprint collections proceed with a note — new points are
     stamped and --refresh-payloads adopts owned points.
     """
-    status, expected, found = check_document_space(store, provider)
+    try:
+        status, expected, found = check_document_space(store, provider)
+    except EmbeddingSpaceError as e:
+        # Fail closed: writing unstamped/unverified vectors in this window
+        # could mix repointed weights into one collection.
+        print(
+            f"EMBEDDING SPACE UNVERIFIABLE: {e} — refusing to index; "
+            "retry when the embedding provider is fully reachable",
+            file=sys.stderr,
+        )
+        return 1
     if status == "mismatch":
         profile = getattr(provider, "profile", None)
         profile_name = getattr(profile, "name", "unknown")
@@ -1616,16 +1627,24 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             profile = getattr(provider, "profile", None)
             if profile is not None:
                 # Transforms are reported by profile identity only — never
-                # user text, transformed or otherwise. The fingerprint may be
-                # unavailable (e.g. Ollama digest lookup against a down host)
-                # — doctor reports, it never crashes.
-                fp = document_space_fingerprint_via(provider)
-                add(
-                    "embedding_profile",
-                    "ok" if fp else "down",
-                    f"{profile.name} v{profile.version} — doc_space {fp or 'unavailable'}",
-                    None if fp else "provider unreachable — space stamping/guarding degraded",
-                )
+                # user text, transformed or otherwise. Doctor is the one
+                # DIAGNOSTIC caller allowed to catch an unresolvable
+                # fingerprint and report it instead of failing closed.
+                try:
+                    fp = document_space_fingerprint_via(provider)
+                except EmbeddingSpaceError as e:
+                    add(
+                        "embedding_profile",
+                        "down",
+                        f"{profile.name} v{profile.version} — {e}",
+                        "index/recall fail closed until the provider is fully reachable",
+                    )
+                else:
+                    add(
+                        "embedding_profile",
+                        "ok",
+                        f"{profile.name} v{profile.version} — doc_space {fp or 'n/a'}",
+                    )
 
     # Qdrant (a hard recall dependency), read-only.
     expected_dim = provider.dimension if provider is not None else None

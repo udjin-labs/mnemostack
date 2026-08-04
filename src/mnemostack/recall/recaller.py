@@ -372,7 +372,13 @@ class Recaller:
                     for store, emb in self._space_check_pairs():
                         try:
                             error = recall_space_error(store, emb)
-                        except Exception as exc:  # noqa: BLE001 — must not break recall
+                        except EmbeddingSpaceError:
+                            # Fingerprint exists but can't be resolved right
+                            # now — the space can't be VERIFIED, so this
+                            # recall fails closed; nothing is cached and the
+                            # next recall retries.
+                            raise
+                        except Exception as exc:  # noqa: BLE001 — store hiccup must not break recall
                             conclusive = False
                             logger.warning(
                                 "embedding-space compatibility check inconclusive "

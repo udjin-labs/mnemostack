@@ -68,27 +68,26 @@ def embed_documents_via(provider: Any, texts: list[str]) -> list[list[float]]:
 
 
 def document_space_fingerprint_via(provider: Any) -> str | None:
-    """The provider's document-space fingerprint, or None when unavailable.
+    """The provider's document-space fingerprint.
 
-    None covers both legacy providers without fingerprint support and a
-    fingerprint that cannot be computed right now (e.g. the Ollama digest
-    lookup against an unreachable host). Degrading to "no stamp, no guard"
-    is safe: embedding calls against the same host fail the same way, so no
-    mis-stamped point can be written — at worst points land unstamped and
-    are adopted later via the documented legacy path.
+    None means the provider has no fingerprint support at all (legacy duck
+    type) — a permanent property, safe to treat as "no stamping, no guard".
+    A fingerprint that EXISTS but cannot be resolved right now (e.g. the
+    Ollama digest lookup failing while embeddings still work) raises
+    :class:`EmbeddingSpaceError` instead: writing unstamped vectors or
+    recalling unverified in that window could mix repointed weights into one
+    collection, so indexing and recall must fail closed and retry — only
+    diagnostic callers (doctor) catch and report it.
     """
     method = getattr(provider, "document_space_fingerprint", None)
     if method is None:
         return None
     try:
         return method()
-    except Exception as exc:  # noqa: BLE001 — degraded, not broken
-        logger.warning(
-            "document-space fingerprint unavailable (%s) — proceeding without "
-            "space stamping/guarding",
-            exc,
-        )
-        return None
+    except Exception as exc:
+        raise EmbeddingSpaceError(
+            f"document-space fingerprint unavailable: {exc}"
+        ) from exc
 
 
 def recall_space_error(store: Any, provider: Any) -> str | None:

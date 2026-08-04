@@ -96,10 +96,15 @@ class HuggingFaceProvider(EmbeddingProvider):
         if self.pooling == "cls":
             pooled = token_embs[:, 0]
         elif self.pooling == "last":
-            # Last non-padding token per sequence (right-padded batches).
-            lengths = inputs["attention_mask"].sum(dim=1) - 1
+            # Last non-padding token per sequence. Computed as the position
+            # of the mask's last 1 so it is correct for BOTH padding sides —
+            # decoder tokenizers (Qwen, E5-mistral) often pad left, where
+            # `mask.sum()-1` would land on padding or a mid-sequence token.
+            att = inputs["attention_mask"]
+            positions = torch.arange(att.size(1), device=token_embs.device).unsqueeze(0)
+            last_idx = (att * positions).argmax(dim=1)
             rows = torch.arange(token_embs.size(0), device=token_embs.device)
-            pooled = token_embs[rows, lengths]
+            pooled = token_embs[rows, last_idx]
         else:
             pooled = (token_embs * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-9)
         # L2 normalize

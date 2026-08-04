@@ -389,17 +389,55 @@ def test_ollama_fingerprint_pins_the_pulled_model_digest(monkeypatch):
     assert fp_a != fp_b
 
 
-def test_ollama_fingerprint_degrades_to_none_when_host_unreachable(monkeypatch):
+def test_ollama_fingerprint_failure_fails_closed(monkeypatch):
+    # A fingerprint that EXISTS but can't be resolved (tags endpoint down
+    # while embeddings still work) must fail closed — writing unstamped
+    # vectors in that window could mix repointed weights into one space.
     from mnemostack.embeddings.ollama import OllamaProvider
+    from mnemostack.embeddings.roles import EmbeddingSpaceError
 
     def fake_urlopen(url, timeout=None):
         raise OSError("connection refused")
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     p = OllamaProvider(model="qwen3-embedding:8b")
-    # The helper degrades to "no stamp, no guard" instead of crashing the
-    # consumer — embedding calls against the same host fail the same way.
-    assert document_space_fingerprint_via(p) is None
+    with pytest.raises(EmbeddingSpaceError, match="fingerprint unavailable"):
+        document_space_fingerprint_via(p)
+
+
+def test_cli_guard_fails_closed_when_fingerprint_unresolvable():
+    from mnemostack.cli import _guard_document_space
+
+    class _FlakyFp(_AsymmetricProvider):
+        def document_space_fingerprint(self) -> str:
+            raise RuntimeError("tags endpoint down")
+
+    assert _guard_document_space(_ScrollStore([]), _FlakyFp()) == 1
+
+
+def test_recaller_fails_closed_on_unresolvable_fingerprint_and_retries():
+    from mnemostack.embeddings.roles import EmbeddingSpaceError
+    from mnemostack.recall.recaller import Recaller
+
+    class _FlakyFp(_AsymmetricProvider):
+        fail = True
+
+        def document_space_fingerprint(self) -> str:
+            if self.fail:
+                raise RuntimeError("tags endpoint down")
+            return super().document_space_fingerprint()
+
+    class _Vec(_ScrollStore):
+        def search(self, *a, **kw):
+            return []
+
+    provider = _FlakyFp()
+    recaller = Recaller(embedding_provider=provider, vector_store=_Vec([]))
+    with pytest.raises(EmbeddingSpaceError, match="fingerprint unavailable"):
+        recaller.recall("вопрос")
+    # Nothing was cached — after the provider recovers, recall works.
+    provider.fail = False
+    assert recaller.recall("вопрос") == []
 
 
 def test_shared_query_embedding_forwards_profile_and_fingerprints():

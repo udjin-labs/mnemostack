@@ -52,7 +52,11 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 from mnemostack import __version__
 from mnemostack.config import model_kwargs
 from mnemostack.embeddings import get_provider
-from mnemostack.embeddings.roles import embed_query_via, recall_space_error
+from mnemostack.embeddings.roles import (
+    EmbeddingSpaceError,
+    embed_query_via,
+    recall_space_error,
+)
 from mnemostack.server import ServerConfig, _make_probe_client
 from mnemostack.vector import VectorStore
 from mnemostack.vector.qdrant import (
@@ -447,7 +451,11 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
             return _space_verdict["verdict"]
         try:
             verdict = recall_space_error(store, _get_provider())
-        except Exception:  # noqa: BLE001 — inconclusive must not block the tool
+        except EmbeddingSpaceError as e:
+            # Fingerprint unresolvable: fail closed for THIS search (results
+            # could silently cross spaces), retry on the next one.
+            return str(e)
+        except Exception:  # noqa: BLE001 — store hiccup must not block the tool
             return None
         _space_verdict["verdict"] = verdict
         return verdict
