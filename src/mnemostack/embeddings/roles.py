@@ -27,6 +27,7 @@ __all__ = [
     "check_document_space",
     "document_space_fingerprint_via",
     "embed_document_via",
+    "embed_documents_resilient",
     "embed_documents_via",
     "embed_queries_via",
     "embed_query_via",
@@ -127,6 +128,42 @@ def embed_documents_via(provider: Any, texts: list[str]) -> list[list[float]]:
     if method is not None:
         return method(texts)
     return provider.embed_batch(texts)
+
+
+def embed_documents_resilient(provider: Any, texts: list[str]) -> list[list[float]]:
+    """Batch-embed documents with the established degradation ladder.
+
+    Native batch first; a provider without a batch API (AttributeError)
+    degrades to per-item role calls; a batch that RAISES retries per item
+    with each failure isolated to its own ``[]`` — one poisoned chunk must
+    not lose the whole group. This is the Ingestor's historical contract,
+    shared so the CLI/markdown group loops behave identically.
+    """
+    if not texts:
+        return []
+    try:
+        vectors = list(embed_documents_via(provider, texts))
+    except AttributeError:
+        # Provider without batch API — fall back to single-item.
+        return [embed_document_via(provider, t) for t in texts]
+    except Exception as exc:  # noqa: BLE001 — degradation ladder, loudly logged
+        logger.warning("document batch embedding failed (%s) — retrying per item", exc)
+        out: list[list[float]] = []
+        for text in texts:
+            try:
+                out.append(embed_document_via(provider, text))
+            except Exception:  # noqa: BLE001 — isolate the poisoned item
+                out.append([])
+        return out
+    # The RESULT length is part of the contract: a provider answering with
+    # the wrong cardinality must not let trailing items vanish uncounted
+    # through a lenient zip downstream — missing entries are explicit
+    # failures, surplus entries are dropped.
+    if len(vectors) < len(texts):
+        vectors.extend([] for _ in range(len(texts) - len(vectors)))
+    elif len(vectors) > len(texts):
+        del vectors[len(texts) :]
+    return vectors
 
 
 def document_space_fingerprint_via(provider: Any) -> str | None:

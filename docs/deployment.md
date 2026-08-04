@@ -842,6 +842,7 @@ export MNEMOSTACK_COLLECTION=production-memory
 # embedding timeout is independent of the short Qdrant liveness timeout.
 export MNEMOSTACK_OLLAMA_HOST=http://192.0.2.10:11434
 export MNEMOSTACK_EMBEDDING_TIMEOUT=180
+export MNEMOSTACK_EMBEDDING_BATCH_SIZE=64
 ```
 
 Migration to a new model should use a new collection, not in-place mutation.
