@@ -214,7 +214,10 @@ def test_expansion_retry_stays_inside_filtered_scope():
         return type("R", (), attrs)()
 
     recaller = MagicMock()
-    recaller.embedding.embed_batch.return_value = [[0.1], [0.2], [0.3], [0.4]]
+    # The retry embeds [query, 2 rephrases] as queries and the hypothetical
+    # answer as a (batch-of-one) document.
+    recaller.embedding.embed_queries.return_value = [[0.1], [0.2], [0.3]]
+    recaller.embedding.embed_documents.return_value = [[0.4]]
     recaller.search_many.return_value = [_mem("a", "in-scope memory")]
 
     gen = AnswerGenerator(

@@ -23,6 +23,13 @@ from typing import Any
 from . import __version__
 from .config import DEFAULT_CONFIG_PATHS, Config, generate_example_config, model_kwargs
 from .embeddings import get_provider, list_providers
+from .embeddings.roles import (
+    EMBEDDING_SPACE_KEY,
+    EmbeddingSpaceError,
+    check_document_space,
+    document_space_fingerprint_via,
+    embed_document_via,
+)
 from .llm import get_llm, list_llms
 from .recall import (
     RERANK_MODES,
@@ -57,6 +64,77 @@ TIER_PROFILES: dict[int, dict] = {
 
 def _embedding_model(args: argparse.Namespace) -> str | None:
     return getattr(args, "embedding_model", None)
+
+
+def _guard_document_space(store: Any, provider: Any) -> tuple[int | None, str | None]:
+    """Refuse to index into a collection embedded under a different document space.
+
+    Dimension alone can't catch this (two different models can share a
+    dimension), so the guard compares the document-space fingerprint stamped
+    on existing points. Returns ``(exit_code, validated_fp)`` — exit_code
+    None means proceed, and the fingerprint is the SAME resolution the
+    verdict came from: the index command must stamp exactly it, or a tag
+    repointed between guard and stamping would pass under space A and label
+    points space B. Pre-fingerprint collections proceed with a note — new
+    points are stamped and --refresh-payloads adopts owned points.
+    """
+    try:
+        status, expected, found = check_document_space(store, provider)
+    except EmbeddingSpaceError as e:
+        # Fail closed: writing unstamped/unverified vectors in this window
+        # could mix repointed weights into one collection.
+        print(
+            f"EMBEDDING SPACE UNVERIFIABLE: {e} — refusing to index; "
+            "retry when the embedding provider is fully reachable",
+            file=sys.stderr,
+        )
+        return 1, None
+    if status == "mismatch":
+        profile = getattr(provider, "profile", None)
+        profile_name = getattr(profile, "name", "unknown")
+        print(
+            "EMBEDDING SPACE MISMATCH: this collection's points were embedded "
+            "under a different document space:\n"
+            f"  stored:  {found}\n"
+            f"  current: {expected} ({provider.name}, profile {profile_name})\n"
+            "A collection must hold exactly one embedding space — mixing them "
+            "silently corrupts retrieval. Index into a new --collection, or "
+            "rerun with --recreate to drop and rebuild this one.",
+            file=sys.stderr,
+        )
+        return 1, None
+    if status == "legacy":
+        # Pre-fingerprint points were embedded from RAW text under the
+        # provider's THEN-default settings. If the active profile transforms
+        # documents — or the active provider config no longer reproduces the
+        # legacy default (e.g. last-token pooling replacing mean) — those
+        # vectors live in a DIFFERENT space than what this run would write;
+        # adoption would mislabel them, so refuse.
+        profile = getattr(provider, "profile", None)
+        doc_transform = getattr(profile, "document_transform", None) or {}
+        legacy_ok = getattr(provider, "_legacy_space_compatible", None)
+        if doc_transform.get("kind", "identity") != "identity" or (
+            legacy_ok is not None and not legacy_ok()
+        ):
+            print(
+                "EMBEDDING SPACE MISMATCH: existing points carry no "
+                "embedding-space fingerprint (indexed by an older mnemostack), "
+                "and the active profile/provider configuration embeds "
+                "differently than that era's defaults — the old vectors are "
+                "NOT in this space. Reindex into a new --collection, or rerun "
+                "with --recreate to drop and rebuild this one.",
+                file=sys.stderr,
+            )
+            return 1, None
+        print(
+            "note: existing points carry no embedding-space fingerprint "
+            "(indexed by an older mnemostack). The active profile embeds "
+            "documents unchanged, so the old vectors are compatible: new "
+            f"points are stamped with {expected}; --refresh-payloads adopts "
+            "it for owned points.",
+            file=sys.stderr,
+        )
+    return None, expected
 
 
 def _llm_model(args: argparse.Namespace) -> str | None:
@@ -1553,6 +1631,27 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 )
             except Exception as e:  # noqa: BLE001
                 add("embedding", "down", f"{provider.name}: {e}")
+            profile = getattr(provider, "profile", None)
+            if profile is not None:
+                # Transforms are reported by profile identity only — never
+                # user text, transformed or otherwise. Doctor is the one
+                # DIAGNOSTIC caller allowed to catch an unresolvable
+                # fingerprint and report it instead of failing closed.
+                try:
+                    fp = document_space_fingerprint_via(provider)
+                except EmbeddingSpaceError as e:
+                    add(
+                        "embedding_profile",
+                        "down",
+                        f"{profile.name} v{profile.version} — {e}",
+                        "index/recall fail closed until the provider is fully reachable",
+                    )
+                else:
+                    add(
+                        "embedding_profile",
+                        "ok",
+                        f"{profile.name} v{profile.version} — doc_space {fp or 'n/a'}",
+                    )
 
     # Qdrant (a hard recall dependency), read-only.
     expected_dim = provider.dimension if provider is not None else None
@@ -2197,6 +2296,9 @@ def cmd_index(args: argparse.Namespace) -> int:
             print("aborted")
             return 1
     store.ensure_collection(recreate=args.recreate)
+    guard_rc, guard_fp = _guard_document_space(store, provider)
+    if guard_rc is not None:
+        return guard_rc
 
     files = (
         [target]
@@ -2320,17 +2422,82 @@ def cmd_index(args: argparse.Namespace) -> int:
     inserted = 0
     failed = 0
     failed_sources: set[str] = set()
-    for cid, text, payload in to_embed:
-        vec = provider.embed(text)
-        if not vec:
-            failed += 1
-            failed_sources.add(payload["source"])
-            continue
-        store.upsert(cid, vec, payload)
-        inserted += 1
+    # The guard's OWN resolution: stamping anything else would open a
+    # guard-approved-A / stamped-B window. Fallback resolution only for an
+    # unguardable pair (no verdict exists to race against).
+    doc_fp = guard_fp if guard_fp is not None else document_space_fingerprint_via(provider)
+
+    def _fingerprint_still(current_of: str | None) -> bool:
+        """Re-resolve the fingerprint and compare — a mutable tag repointed
+        DURING a long run would otherwise stamp old-digest labels onto
+        new-weights vectors, mixing the collection under one apparently
+        valid fingerprint."""
+        if current_of is None:
+            return True
+        try:
+            return document_space_fingerprint_via(provider) == current_of
+        except EmbeddingSpaceError:
+            return False
+
+    # Bounded batches with a SANDWICH check: the fingerprint is verified
+    # unchanged both before a group is embedded and again before the group
+    # is committed — per-point writes between two checks would let a tag
+    # repointed right after a check mix up to a whole window of points into
+    # the collection before detection.
+    _FP_BATCH = 64
+
+    def _abort_mid_run() -> int:
+        print(
+            "EMBEDDING SPACE CHANGED mid-run (the model tag was repointed "
+            "or became unresolvable) — aborting. Points written so far are "
+            "consistent; rerunning will be refused until you --recreate or "
+            "use a new --collection.",
+            file=sys.stderr,
+        )
+        return 1
+
+    for start in range(0, len(to_embed), _FP_BATCH):
+        group = to_embed[start : start + _FP_BATCH]
+        if doc_fp is not None and start and not _fingerprint_still(doc_fp):
+            return _abort_mid_run()
+        embedded: list[tuple[str, list[float], dict[str, Any]]] = []
+        for cid, text, payload in group:
+            vec = embed_document_via(provider, text)
+            if not vec:
+                failed += 1
+                failed_sources.add(payload["source"])
+                continue
+            embedded.append((cid, vec, payload))
+        if doc_fp is not None and embedded and not _fingerprint_still(doc_fp):
+            # Nothing from this group has been written yet — clean abort.
+            return _abort_mid_run()
+        for cid, vec, payload in embedded:
+            if doc_fp is not None:
+                payload[EMBEDDING_SPACE_KEY] = doc_fp
+            store.upsert(cid, vec, payload)
+            inserted += 1
+
+    if inserted:
+        # POST-COMMIT revalidation (no atomic empty-collection claim
+        # exists): a concurrent writer bootstrapping this collection under
+        # another space is caught by re-sampling after our writes.
+        post_rc, _post_fp = _guard_document_space(store, provider)
+        if post_rc is not None:
+            return post_rc
 
     refreshed = 0
     foreign_skipped = 0
+    foreign_space_skipped = 0
+    if args.refresh_payloads and existing_ids and not _fingerprint_still(doc_fp):
+        # A refresh stamps doc_fp onto points WITHOUT re-embedding — if the
+        # tag repointed since the run started, that label no longer names
+        # the space those vectors are in.
+        print(
+            "EMBEDDING SPACE CHANGED mid-run — skipping --refresh-payloads "
+            "(stamping the old fingerprint now would mislabel points).",
+            file=sys.stderr,
+        )
+        return 1
     if args.refresh_payloads and existing_ids:
         # Payload-only rewrite of chunks that were skipped as already
         # indexed: applies new payload fields (enrichment output,
@@ -2351,17 +2518,37 @@ def cmd_index(args: argparse.Namespace) -> int:
             # stale facts. The _enrich_keys ownership record names exactly
             # what the previous enrichment wrote — delete what it owned and
             # the new payload doesn't claim, leaving foreign fields alone.
+            old_fp = old_payload.get(EMBEDDING_SPACE_KEY)
+            if doc_fp is not None and old_fp is not None and old_fp != doc_fp:
+                # The guard samples a bounded scroll prefix, so a conflicting
+                # stamp can exist beyond it — never overwrite ("launder") it
+                # into the current space; leave the point untouched and loud.
+                foreign_space_skipped += 1
+                continue
             old_enrich = old_payload.get("_enrich_keys") or []
             stale_keys = [k for k in old_enrich if k not in payload]
             if old_enrich and "_enrich_keys" not in payload:
                 stale_keys.append("_enrich_keys")
             store.delete_payload_keys(cid, stale_keys)
+            # Adoption path for pre-fingerprint points: a refresh doesn't
+            # re-embed, and the space guard has already rejected a sampled
+            # mismatch, so stamping here records the space these vectors
+            # were verified (or operator-asserted) to belong to.
+            if doc_fp is not None:
+                payload[EMBEDDING_SPACE_KEY] = doc_fp
             store.set_payload(cid, payload)
             refreshed += 1
         if foreign_skipped:
             print(
                 f"warning: {foreign_skipped} chunk(s) skipped by --refresh-payloads: "
                 "owned by another index root",
+                file=sys.stderr,
+            )
+        if foreign_space_skipped:
+            print(
+                f"warning: {foreign_space_skipped} chunk(s) skipped by "
+                "--refresh-payloads: stamped with a DIFFERENT embedding space — "
+                "the collection mixes spaces; reindex it cleanly",
                 file=sys.stderr,
             )
 
@@ -2508,6 +2695,9 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
             print("aborted")
             return 1
     store.ensure_collection(recreate=args.recreate)
+    guard_rc, _guard_fp = _guard_document_space(store, provider)
+    if guard_rc is not None:
+        return guard_rc
 
     chunks = [(c.id, c.text, c.payload) for c in col.chunks]
     # Fetch existing points (with payloads) for this root so a chunk whose id is
@@ -2556,6 +2746,13 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
         cs = ChunkSyncResult()
         initial_skipped = True
     inserted, refreshed, failed = cs.inserted, cs.refreshed, cs.failed
+    if cs.space_conflicts:
+        print(
+            f"warning: {cs.space_conflicts} existing chunk(s) left untouched: "
+            "stamped with a DIFFERENT embedding space — the collection mixes "
+            "spaces; reindex it cleanly",
+            file=sys.stderr,
+        )
     failed_sources = cs.failed_sources
 
     # When the initial index was skipped over quota, NOTHING was upserted, so the

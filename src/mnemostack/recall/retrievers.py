@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import time
 from abc import ABC, abstractmethod
 from calendar import monthrange
 from collections import defaultdict
@@ -28,6 +29,7 @@ from typing import Any, cast
 from urllib.parse import quote
 
 from ..embeddings.base import EmbeddingProvider
+from ..embeddings.roles import SpaceGuard, embed_document_via, embed_query_via
 from ..llm.base import LLMProvider
 from ..observability import counter
 from ..vector import VectorStore
@@ -121,6 +123,10 @@ class VectorRetriever(Retriever):
     ):
         self.embedding = embedding
         self.vector_store = vector_store
+        # Every vector-backed retriever carries its own revalidating guard so
+        # DIRECT use (synthesis, library callers) is protected too, not only
+        # the Recaller path. TTL-cached: negligible per-search cost.
+        self._space_guard = SpaceGuard(vector_store, embedding)
         #: Payload schema of the collection — configurable so recall works
         #: over a pre-existing collection's own field names and timestamp
         #: domain (same knobs as ``bm25_docs_from_qdrant``).
@@ -139,7 +145,8 @@ class VectorRetriever(Retriever):
     def search(
         self, query, limit=20, filters=None, as_of=None, include_invalidated=False, tenant=None
     ):
-        vec = self.embedding.embed(query)
+        self._space_guard.ensure()
+        vec = embed_query_via(self.embedding, query)
         if not vec:
             return []
         hide_invalidated = as_of is None and not include_invalidated
@@ -448,6 +455,7 @@ class QdrantTextRetriever(Retriever):
     ):
         self.embedding = embedding
         self.vector_store = vector_store
+        self._space_guard = SpaceGuard(vector_store, embedding)
         self.text_key = text_key
         # The field the MatchText gate runs on. Distinct from text_key on
         # purpose: an arm gating on a title/heading field must still RETURN
@@ -492,7 +500,8 @@ class QdrantTextRetriever(Retriever):
         tokens = self._gate_tokens(query)
         if not tokens:
             return []
-        vec = self.embedding.embed(query)
+        self._space_guard.ensure()
+        vec = embed_query_via(self.embedding, query)
         if not vec:
             return []
         filters = convert_timestamp_filter(
@@ -526,34 +535,112 @@ class _SharedQueryEmbedding(EmbeddingProvider):
     """Memoizing wrapper shared by the arms of one multi-field lexical set.
 
     The arms differ only in their MatchText gate field — the query vector is
-    identical, yet each ``search()`` would call ``embedding.embed(query)``
-    independently (concurrently, from the recaller's thread pool): N fields =
-    N identical billable provider requests per recall. One bounded memo keyed
-    by query text collapses them to one. Scoped to the factory's arm set on
-    purpose — nothing outside the multi-field feature changes behavior.
+    identical, yet each ``search()`` would embed the query independently
+    (concurrently, from the recaller's thread pool): N fields = N identical
+    billable provider requests per recall. One bounded memo collapses them to
+    one. Scoped to the factory's arm set on purpose — nothing outside the
+    multi-field feature changes behavior.
+
+    Role note: the arms reach this wrapper through ``embed_query``. For a
+    declaratively-profiled inner provider that inherits the base role
+    methods, the transform applies exactly once (in the inherited
+    ``embed_query``) and lands in the memoized ``embed`` — the memo key is
+    the already-transformed inference input. An inner provider that
+    OVERRIDES a role method (native backend query/document task types) is
+    delegated to directly instead, memoized under a role-tagged key —
+    otherwise the base implementation would route around its override and
+    embed queries in the wrong mode.
     """
 
     _MAX_ENTRIES = 32
+    #: Memo entries expire on the same bounded-freshness contract as
+    #: SpaceGuard verdicts: after a tag repoint or collection recreation, a
+    #: recurring query's cached vector (from the OLD weights) must not be
+    #: searched against the new vectors indefinitely — recomputing the
+    #: fingerprint on the hot path would be far costlier than re-embedding
+    #: one query every few minutes. The memo's expiry is deliberately NOT
+    #: synchronized with guard revalidation: an entry can outlive a guard
+    #: recheck by up to this TTL, which is exactly the staleness the
+    #: read-side guard itself permits between its own revalidations — the
+    #: system-wide freshness bound is max(guard TTL, memo TTL), both 300s,
+    #: never worse than the documented contract.
+    _MEMO_TTL_S = 300.0
 
     def __init__(self, embedding: EmbeddingProvider):
         self._embedding = embedding
         self._lock = threading.Lock()
-        self._memo: dict[str, list[float]] = {}
-        self._inflight: dict[str, tuple[threading.Event, list[list[float]]]] = {}
+        self._memo: dict[Any, tuple[float, list[float]]] = {}
+        self._inflight: dict[Any, tuple[threading.Event, list[list[float]]]] = {}
 
     def embed(self, text: str) -> list[float]:
+        return self._single_flight(text, lambda: self._embedding.embed(text))
+
+    def _inner_overrides(self, name: str) -> bool:
+        method = getattr(type(self._embedding), name, None)
+        return method is not None and method is not getattr(EmbeddingProvider, name)
+
+    # The role methods below spell out the declarative fallback instead of
+    # calling super(): the base defaults dispatch through OVERRIDDEN
+    # counterparts, and this wrapper overrides all four for memoization —
+    # super() would bounce between the base singular/batch defaults forever.
+
+    def embed_query(self, text: str) -> list[float]:
+        if self._inner_overrides("embed_query"):
+            return self._single_flight(
+                ("native", "query", text), lambda: self._embedding.embed_query(text)
+            )
+        if self._inner_overrides("embed_queries"):
+            return self._single_flight(
+                ("native", "query", text),
+                lambda: next(iter(self._embedding.embed_queries([text])), []),
+            )
+        return self.embed(self.profile.apply_query(text))
+
+    def embed_queries(self, texts: list[str]) -> list[list[float]]:
+        if self._inner_overrides("embed_queries"):
+            return self._embedding.embed_queries(texts)
+        if self._inner_overrides("embed_query"):
+            return [self.embed_query(t) for t in texts]
+        return self.embed_batch([self.profile.apply_query(t) for t in texts])
+
+    def embed_document(self, text: str) -> list[float]:
+        if self._inner_overrides("embed_document"):
+            return self._single_flight(
+                ("native", "document", text), lambda: self._embedding.embed_document(text)
+            )
+        if self._inner_overrides("embed_documents"):
+            return self._single_flight(
+                ("native", "document", text),
+                lambda: next(iter(self._embedding.embed_documents([text])), []),
+            )
+        return self.embed(self.profile.apply_document(text))
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        if self._inner_overrides("embed_documents"):
+            return self._embedding.embed_documents(texts)
+        if self._inner_overrides("embed_document"):
+            return [self.embed_document(t) for t in texts]
+        return self.embed_batch([self.profile.apply_document(t) for t in texts])
+
+    def _single_flight(self, key: Any, compute: Callable[[], list[float]]) -> list[float]:
         # Single-flight: the arms run CONCURRENTLY from the recaller's thread
         # pool, so a plain check-then-compute memo lets every arm miss before
         # any result lands — N identical billable requests on every new query,
         # exactly what this wrapper exists to prevent. The first caller for a
-        # text becomes the leader; concurrent callers wait on its event.
+        # key becomes the leader; concurrent callers wait on its event.
         with self._lock:
-            if text in self._memo:
-                return self._memo[text]
-            entry = self._inflight.get(text)
+            memo_entry = self._memo.get(key)
+            if memo_entry is not None:
+                stamp, cached = memo_entry
+                if time.monotonic() - stamp <= self._MEMO_TTL_S:
+                    return cached
+                # Expired: recompute so a repointed tag / recreated
+                # collection stops being served a stale vector.
+                self._memo.pop(key, None)
+            entry = self._inflight.get(key)
             if entry is None:
                 entry = (threading.Event(), [])
-                self._inflight[text] = entry
+                self._inflight[key] = entry
                 leader = True
             else:
                 leader = False
@@ -563,7 +650,7 @@ class _SharedQueryEmbedding(EmbeddingProvider):
             return box[0] if box else []
         vec: list[float] = []  # empty = the providers' own failure contract
         try:
-            vec = self._embedding.embed(text)
+            vec = compute()
         finally:
             with self._lock:
                 box.append(vec)
@@ -575,8 +662,8 @@ class _SharedQueryEmbedding(EmbeddingProvider):
                         # FIFO eviction — a tiny bound is plenty; this only
                         # exists to stop growth.
                         self._memo.pop(next(iter(self._memo)))
-                    self._memo[text] = vec
-                self._inflight.pop(text, None)
+                    self._memo[key] = (time.monotonic(), vec)
+                self._inflight.pop(key, None)
             event.set()
         return vec
 
@@ -590,6 +677,44 @@ class _SharedQueryEmbedding(EmbeddingProvider):
     @property
     def name(self) -> str:
         return self._embedding.name
+
+    @property
+    def profile(self):
+        # Delegate instead of re-resolving from `name`: an instance-level
+        # profile override on the wrapped provider must win here too. A
+        # duck-typed inner without profiles keeps today's identity behavior.
+        prof = getattr(self._embedding, "profile", None)
+        if prof is not None:
+            return prof
+        from ..embeddings.profiles import IDENTITY_PROFILE
+
+        return IDENTITY_PROFILE
+
+    @profile.setter
+    def profile(self, value) -> None:
+        self._embedding.profile = value
+
+    def _legacy_space_compatible(self) -> bool:
+        # Forwarded: the wrapper overrides role methods for memoization only
+        # — the base override-detection heuristic would wrongly answer False
+        # for it. The INNER provider's answer is the truth.
+        method = getattr(self._embedding, "_legacy_space_compatible", None)
+        return method() if method is not None else True
+
+    def document_space_fingerprint(self) -> str:
+        # Forwarded so the wrapped provider's own fingerprint extras
+        # (e.g. HuggingFace pooling) are not lost; a duck-typed inner falls
+        # back to the base computation over the delegated name/profile.
+        method = getattr(self._embedding, "document_space_fingerprint", None)
+        if method is not None:
+            return method()
+        return super().document_space_fingerprint()
+
+    def query_profile_fingerprint(self) -> str:
+        method = getattr(self._embedding, "query_profile_fingerprint", None)
+        if method is not None:
+            return method()
+        return super().query_profile_fingerprint()
 
     def health_check(self) -> tuple[bool, str]:
         return self._embedding.health_check()
@@ -933,6 +1058,7 @@ class HyDERetriever(Retriever):
         self.llm = llm
         self.embedding = embedding
         self.vector_store = vector_store
+        self._space_guard = SpaceGuard(vector_store, embedding)
         self.max_tokens = max_tokens
         self.text_key = text_key
         self.timestamp_key = timestamp_key
@@ -951,10 +1077,15 @@ class HyDERetriever(Retriever):
             return None
 
     def search(self, query, limit=20, filters=None):
+        # Guard BEFORE the LLM call — no point paying for a hypothetical
+        # that cannot be embedded into a compatible space.
+        self._space_guard.ensure()
         hypo = self._generate_hypothetical(query)
         if not hypo:
             return []
-        vec = self.embedding.embed(hypo)
+        # HyDE's whole premise is that the hypothetical lives in DOCUMENT
+        # space (it imitates a stored memory), so it takes the document role.
+        vec = embed_document_via(self.embedding, hypo)
         if not vec:
             return []
         hits = self.vector_store.search(
@@ -1701,6 +1832,7 @@ class TemporalRetriever(Retriever):
             )
         self.embedding = embedding
         self.vector_store = vector_store
+        self._space_guard = SpaceGuard(vector_store, embedding)
         self.extractor = extractor
         self.text_key = text_key
         self.timestamp_key = timestamp_key
@@ -1833,7 +1965,8 @@ class TemporalRetriever(Retriever):
                     exc,
                 )
 
-        vec = self.embedding.embed(query)
+        self._space_guard.ensure()
+        vec = embed_query_via(self.embedding, query)
         if not vec:
             return []
         try:

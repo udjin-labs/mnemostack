@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
+from ..embeddings.roles import embed_documents_via, embed_queries_via
 from ..llm.base import LLMProvider
 from ..observability import counter, histogram
 from .inference_retry import decompose_query, merge_results, should_retry
@@ -716,9 +717,17 @@ class AnswerGenerator:
         if len(expanded_texts) < 3:
             return draft, memories
 
-        queries = [query, *expanded_texts[:3]]
+        # The parsed expansion is [rephrase, rephrase, hypothetical answer]
+        # (prompt order): the rephrases are QUERIES, but the hypothetical is a
+        # HyDE-style synthetic DOCUMENT — it must be embedded in the document
+        # space or an asymmetric profile would put it on the wrong side.
         try:
-            vectors = self.recaller.embedding.embed_batch(queries)
+            vectors = embed_queries_via(
+                self.recaller.embedding, [query, *expanded_texts[:2]]
+            )
+            # Batch-of-one on purpose: this path has always been batch-only,
+            # so a provider implementing just embed_batch keeps working.
+            vectors.extend(embed_documents_via(self.recaller.embedding, [expanded_texts[2]]))
         except Exception:
             return draft, memories
         vectors = [v for v in vectors if v]

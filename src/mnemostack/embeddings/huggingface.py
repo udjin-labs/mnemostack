@@ -5,7 +5,62 @@ Requires: pip install mnemostack[huggingface]
 
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
+
 from .base import EmbeddingProvider
+
+# Small text assets that change tokenization — and therefore the vectors —
+# without touching config.json or the weight files. Hashed by CONTENT.
+_TOKENIZER_ASSETS = (
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "vocab.json",
+    "vocab.txt",
+    "merges.txt",
+    "spiece.model",
+    "sentencepiece.bpe.model",
+)
+
+
+# Per weight file, hash this many bytes from the head and from the tail in
+# addition to (name, size). A same-architecture checkpoint swap keeps names
+# and often sizes, but tensor data differs from the first bytes on — sampled
+# content catches it without reading gigabytes at startup.
+_WEIGHT_SAMPLE_BYTES = 1024 * 1024
+
+
+def _local_weights_signature(path: Path) -> str:
+    """Cheap identity of a local model directory for space fingerprints.
+
+    A local path has no hub commit hash, yet its contents can be swapped in
+    place while provider/model/pooling/dimension all stay equal. Hashing
+    gigabytes of weights on every startup is not viable, so this pins the
+    config and tokenizer asset BYTES in full (small files whose changes
+    alter the vectors) plus, per weight file, its name, size and a sampled
+    head+tail megabyte of content — catching config/tokenizer changes and
+    same-size checkpoint swaps. Residual: a weight edit confined strictly
+    to the unsampled middle of a file is not detected.
+    """
+    h = hashlib.sha256()
+    for asset in ("config.json", *_TOKENIZER_ASSETS):
+        f = path / asset
+        if f.is_file():
+            h.update(asset.encode())
+            h.update(f.read_bytes())
+    for f in sorted(path.iterdir()):
+        if f.suffix in (".safetensors", ".bin", ".pt") and f.is_file():
+            size = f.stat().st_size
+            h.update(f"{f.name}:{size}".encode())
+            with f.open("rb") as fh:
+                if size <= 2 * _WEIGHT_SAMPLE_BYTES:
+                    h.update(fh.read())  # small file: hash it whole
+                else:
+                    h.update(fh.read(_WEIGHT_SAMPLE_BYTES))
+                    fh.seek(-_WEIGHT_SAMPLE_BYTES, 2)
+                    h.update(fh.read(_WEIGHT_SAMPLE_BYTES))
+    return h.hexdigest()[:32]
 
 try:
     import torch
@@ -25,19 +80,74 @@ class HuggingFaceProvider(EmbeddingProvider):
 
     DEFAULT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
+    # Decoder-based embedding families derive the sentence vector from the
+    # final non-padding token — mean/CLS silently produce the wrong
+    # representation for them, so they get a different pooling DEFAULT.
+    _LAST_TOKEN_FAMILIES = ("qwen3-embedding", "e5-mistral")
+
     def __init__(
         self,
         model: str = DEFAULT_MODEL,
         device: str | None = None,
-        pooling: str = "mean",
+        pooling: str | None = None,
+        revision: str | None = None,
+        model_id: str | None = None,
     ):
         if not _AVAILABLE:
             raise ImportError("HuggingFaceProvider requires `pip install mnemostack[huggingface]`")
         self.model_name = model
-        self.pooling = pooling
+        # Canonical identity for profile resolution / space fingerprints —
+        # essential when `model` is an opaque LOCAL path ("/models/embedder")
+        # that reveals neither the family (pooling default, query transform)
+        # nor a stable model name. Defaults to the load source.
+        self._model_id = model_id or model
+        # The OLD provider compared the raw string against exact-lowercase
+        # "cls", so "CLS" silently mean-pooled. Normalization changes that
+        # same configuration's semantics — remember it, because such a
+        # config must not adopt a legacy (mean-pooled) collection as if
+        # nothing changed.
+        self._pooling_semantics_changed = (
+            pooling is not None and pooling != pooling.lower() and pooling.lower() == "cls"
+        )
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.tokenizer = AutoTokenizer.from_pretrained(model)
-        self.model = AutoModel.from_pretrained(model).to(self.device).eval()
+        self.model = AutoModel.from_pretrained(model, revision=revision).to(self.device).eval()
+        commit = getattr(self.model.config, "_commit_hash", None)
+        # ONE immutable revision for both artifacts: a mutable branch can
+        # advance between two downloads, silently pairing tokenizer A with
+        # model B under a fingerprint that records only B — the tokenizer is
+        # pinned to the commit the model actually resolved.
+        self.tokenizer = AutoTokenizer.from_pretrained(model, revision=commit or revision)
+        if pooling is None:
+            # Family detection uses the canonical identity AND the loaded
+            # config's architecture — an opaque local path must still give a
+            # decoder checkpoint its last-token default.
+            ident = self._model_id.lower()
+            model_type = str(getattr(self.model.config, "model_type", "") or "").lower()
+            pooling = (
+                "last"
+                if any(f in ident for f in self._LAST_TOKEN_FAMILIES)
+                or model_type in ("qwen3", "mistral")
+                else "mean"
+            )
+        # Normalized and validated: pooling participates in the space
+        # fingerprints, so "CLS" silently mean-pooling while fingerprinting
+        # as a distinct space would corrupt both sides.
+        self.pooling = pooling.lower()
+        if self.pooling not in ("mean", "cls", "last"):
+            raise ValueError(f"pooling must be 'mean', 'cls' or 'last', got {pooling!r}")
+        # The RESOLVED weights identity: a mutable branch label ("main") can
+        # be repointed to different weights, so the space fingerprint pins
+        # the commit hash when the hub provides one — and a content signature
+        # when the model is a LOCAL directory. For local directories the
+        # signature wins over a caller-supplied `revision`: Transformers
+        # ignores revisions for local files, so an arbitrary label would
+        # mask an in-place file swap.
+        model_dir = Path(model)
+        self.revision: str | None
+        if commit is None and model_dir.is_dir():
+            self.revision = f"local:{_local_weights_signature(model_dir)}"
+        else:
+            self.revision = commit or revision
         # Infer dimension from a probe embedding
         self._dim = len(self.embed("dim probe"))
 
@@ -47,7 +157,26 @@ class HuggingFaceProvider(EmbeddingProvider):
 
     @property
     def name(self) -> str:
-        return f"huggingface:{self.model_name}"
+        return f"huggingface:{self._model_id}"
+
+    def _legacy_space_compatible(self) -> bool:
+        # Pre-fingerprint mnemostack supported exactly mean (the default)
+        # and explicit lowercase-"cls" pooling — an active mean/cls
+        # configuration reproduces those legacy vectors byte-for-byte, so
+        # upgrading with the SAME setting keeps the collection. "last" did
+        # not exist then, and an uppercase "CLS" used to silently mean-pool
+        # (normalization changed its meaning) — neither may adopt an
+        # unstamped collection.
+        return self.pooling in ("mean", "cls") and not self._pooling_semantics_changed
+
+    def _fingerprint_extras(self) -> dict[str, str]:
+        # Pooling changes the vector space for the same model, so it must
+        # participate in the embedding-space fingerprints — as must the
+        # resolved weights revision (mutable labels can be repointed).
+        extras = {"pooling": self.pooling}
+        if self.revision:
+            extras["revision"] = str(self.revision)
+        return extras
 
     def embed(self, text: str) -> list[float]:
         return self.embed_batch([text])[0]
@@ -65,6 +194,16 @@ class HuggingFaceProvider(EmbeddingProvider):
         token_embs = outputs.last_hidden_state
         if self.pooling == "cls":
             pooled = token_embs[:, 0]
+        elif self.pooling == "last":
+            # Last non-padding token per sequence. Computed as the position
+            # of the mask's last 1 so it is correct for BOTH padding sides —
+            # decoder tokenizers (Qwen, E5-mistral) often pad left, where
+            # `mask.sum()-1` would land on padding or a mid-sequence token.
+            att = inputs["attention_mask"]
+            positions = torch.arange(att.size(1), device=token_embs.device).unsqueeze(0)
+            last_idx = (att * positions).argmax(dim=1)
+            rows = torch.arange(token_embs.size(0), device=token_embs.device)
+            pooled = token_embs[rows, last_idx]
         else:
             pooled = (token_embs * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-9)
         # L2 normalize

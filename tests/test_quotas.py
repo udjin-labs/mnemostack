@@ -354,9 +354,12 @@ def _md(source):
     return {"source": source, "_md_keys": ["text", "source", "offset"]}
 
 
-def test_markdown_upsert_streams_without_hook():
-    # No quota hook (the common unscoped path): embed+upsert must interleave so a
-    # large corpus isn't fully buffered in memory before the first write.
+def test_markdown_upsert_streams_in_bounded_groups_without_hook():
+    # No quota hook (the common unscoped path): embed+upsert proceed in
+    # BOUNDED groups (the fingerprint-sandwich unit), so a large corpus is
+    # never fully buffered in memory before the first write — but a group
+    # IS embedded before the group's writes (the sandwich needs to verify
+    # the fingerprint after embedding and before committing).
     from mnemostack.markdown.sync import upsert_markdown_chunks
 
     upserted: list[str] = []
@@ -377,11 +380,14 @@ def test_markdown_upsert_streams_without_hook():
             embed_saw.append(len(upserted))  # writes completed before this embed
             return [0.1]
 
-    chunks = [(f"id{i}", f"t{i}", _md("a.md")) for i in range(3)]
+    chunks = [(f"id{i}", f"t{i}", _md("a.md")) for i in range(65)]
     res = upsert_markdown_chunks(_Store(), _Prov(), chunks, {})
-    assert res.inserted == 3
-    assert embed_saw == [0, 1, 2]  # streamed: each embed sees the prior upsert
-    # (a buffered path would embed all three before any upsert -> [0, 0, 0])
+    assert res.inserted == 65
+    # First group (64 chunks) embeds before any write; the 65th chunk is in
+    # the SECOND group and must observe the whole first group committed —
+    # proof the corpus is not buffered end-to-end.
+    assert embed_saw[:64] == [0] * 64
+    assert embed_saw[64] == 64
 
 
 def test_markdown_upsert_refuses_over_quota():

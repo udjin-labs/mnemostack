@@ -19,6 +19,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ..embeddings.roles import (
+    EMBEDDING_SPACE_KEY,
+    EmbeddingSpaceError,
+    SpaceGuard,
+    document_space_fingerprint_via,
+    embed_document_via,
+)
 from ..quotas import enforce_points_quota
 from .indexer import collect_markdown
 
@@ -40,6 +47,10 @@ class ChunkSyncResult:
     refreshed: int = 0
     failed: int = 0
     failed_sources: set[str] = field(default_factory=set)
+    # Existing points whose stored `_embedding_space` stamp conflicts with the
+    # active provider's — refresh leaves them untouched instead of laundering
+    # them into the current space.
+    space_conflicts: int = 0
 
 
 def markdown_prune_count(
@@ -150,29 +161,75 @@ def upsert_markdown_chunks(
     footprint. The hook needs the total insert count before any write and is
     all-or-nothing, so *that* path must embed the whole batch before writing —
     bounded in practice by the tenant's cap, since a run past it is rejected.
+
+    Embedding-space contract: every invocation guards the collection BEFORE
+    embedding (raising ``EmbeddingSpaceError`` on a conflict — essential in
+    the watch loop, where a mutable tag can be repointed long after the CLI
+    startup guard ran) and stamps new points and refreshed payloads with the
+    provider's document-space fingerprint. A refresh never overwrites a
+    point stamped with a DIFFERENT space; such points are counted in
+    ``space_conflicts`` and left untouched.
     """
+    # Self-guarding: every invocation (one watched-file batch in the watch
+    # loop) rechecks the collection's space BEFORE embedding — the CLI guard
+    # at command start cannot cover a tag repointed while the watcher runs.
+    # The stamp reuses EXACTLY the fingerprint the guard validated (one
+    # resolution — no check-vs-stamp window); the fallback only runs for an
+    # unguardable store, where no verdict exists to race against.
+    doc_fp = SpaceGuard(store, provider, recheck_seconds=0.0).ensure()
+    if doc_fp is None:
+        doc_fp = document_space_fingerprint_via(provider)
     tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
     existing_ids = set(existing_payloads)
     res = ChunkSyncResult()
     new_chunks = [c for c in chunks if c[0] not in existing_ids]
 
+    def _fp_unchanged() -> bool:
+        if doc_fp is None:
+            return True
+        try:
+            return document_space_fingerprint_via(provider) == doc_fp
+        except EmbeddingSpaceError:
+            return False
+
+    def _raise_fp_changed() -> None:
+        raise EmbeddingSpaceError(
+            "embedding space changed mid-sync (the model tag was repointed "
+            "or became unresolvable) — aborting before any mixed-space write"
+        )
+
     def _embed(text: str, source: str) -> list | None:
-        vec = provider.embed(text)
+        vec = embed_document_via(provider, text)
         if not vec:
             res.failed += 1
             res.failed_sources.add(source)
             return None
         return vec
 
+    _FP_BATCH = 64
     if before_upsert is None:
-        # No quota hook: stream embed+upsert per chunk so indexing a large corpus
-        # doesn't hold every vector in memory at once.
-        for cid, text, payload in new_chunks:
-            vec = _embed(text, payload["source"])
-            if vec is None:
-                continue
-            store.upsert(cid, vec, payload, **tkw)
-            res.inserted += 1
+        # No quota hook: bounded groups with a SANDWICH check — the
+        # fingerprint is verified unchanged before a group is embedded and
+        # again before the group is committed, so a tag repointed mid-corpus
+        # can't stream mixed-space points. Memory stays bounded by the
+        # group size, preserving the constant-footprint property.
+        for start in range(0, len(new_chunks), _FP_BATCH):
+            group = new_chunks[start : start + _FP_BATCH]
+            if start and not _fp_unchanged():
+                _raise_fp_changed()
+            embedded: list[tuple[str, list, dict]] = []
+            for cid, text, payload in group:
+                vec = _embed(text, payload["source"])
+                if vec is None:
+                    continue
+                embedded.append((cid, vec, payload))
+            if embedded and not _fp_unchanged():
+                _raise_fp_changed()
+            for cid, vec, payload in embedded:
+                if doc_fp is not None:
+                    payload[EMBEDDING_SPACE_KEY] = doc_fp
+                store.upsert(cid, vec, payload, **tkw)
+                res.inserted += 1
     else:
         # Quota hook: it enforces on the total insert count and is all-or-nothing,
         # so embed the whole batch first, run the check, then write only if it passes.
@@ -181,20 +238,44 @@ def upsert_markdown_chunks(
             vec = _embed(text, payload["source"])
             if vec is None:
                 continue
+            if doc_fp is not None:
+                payload[EMBEDDING_SPACE_KEY] = doc_fp
             to_upsert.append((cid, vec, payload))
         before_upsert(len(to_upsert), res.failed_sources)
+        # Post-embed check before ANY write: the quota path embeds the whole
+        # batch first, so this closes the same mid-batch repoint window the
+        # streaming path sandwiches per group.
+        if to_upsert and not _fp_unchanged():
+            _raise_fp_changed()
         for cid, vec, payload in to_upsert:
             store.upsert(cid, vec, payload, **tkw)
             res.inserted += 1
+
+    if res.inserted:
+        # POST-COMMIT revalidation: no atomic empty-collection claim exists,
+        # so a concurrent writer bootstrapping the same empty collection
+        # under another space is detected by re-sampling after our writes —
+        # exposure bounded to one interleaved invocation, all later writes
+        # refused by the normal mismatch verdict.
+        SpaceGuard(store, provider, recheck_seconds=0.0).ensure()
 
     for cid, _text, payload in chunks:
         if cid not in existing_ids:
             continue
         old = existing_payloads.get(cid, {})
+        old_fp = old.get(EMBEDDING_SPACE_KEY)
+        if doc_fp is not None and old_fp is not None and old_fp != doc_fp:
+            # A conflicting stamp (possible outside the guard's sample
+            # window) must never be overwritten with the current fingerprint —
+            # that would make the mixed state permanently invisible.
+            res.space_conflicts += 1
+            continue
         owned = old.get("_md_keys") or []
         stale = [k for k in owned if k not in payload]
         if stale:
             store.delete_payload_keys(cid, stale, **tkw)
+        if doc_fp is not None:
+            payload[EMBEDDING_SPACE_KEY] = doc_fp
         store.set_payload(cid, payload, **tkw)
         res.refreshed += 1
     return res

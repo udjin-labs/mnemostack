@@ -54,8 +54,9 @@ src/mnemostack/
 ## Adding a new embedding provider
 
 1. Subclass `mnemostack.embeddings.EmbeddingProvider`, implement `embed`, `embed_batch`, `dimension`, `name`.
-2. Optionally register lazily in `embeddings/registry.py:_lazy_register_builtins`.
-3. Add tests in `tests/test_embeddings.py`.
+2. The role methods (`embed_query`/`embed_document` + batch forms) are inherited — they apply the resolved embedding profile and delegate to your primitives. Override them only if your backend exposes native query/document task types; otherwise add an `EmbeddingProfile` (declarative transforms) via `register_embedding_profile` instead.
+3. Optionally register lazily in `embeddings/registry.py:_lazy_register_builtins`.
+4. Add tests in `tests/test_embeddings.py`.
 
 ## Adding a new LLM provider
 

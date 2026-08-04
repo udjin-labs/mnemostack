@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from ..embeddings.base import EmbeddingProvider
+from ..embeddings.roles import EmbeddingSpaceError, SpaceGuard, embed_query_via
 from ..observability import counter, histogram
 from ..observability.recorder import get_recorder
 from ..vector.qdrant import Hit, VectorStore
@@ -181,6 +183,13 @@ class Recaller:
     text_key = "text"
     timestamp_key = "timestamp"
     timestamp_format = "iso"
+    #: Space-guard defaults for the same construction style; the class-level
+    #: lock only serializes lazy guard-list creation, which is idempotent.
+    #: Entries are (retriever | None, guard) — None marks the recaller's own
+    #: legacy pair; the retriever handle lets a request skip guards of arms
+    #: ineligible for it (e.g. tenant-incapable arms under a tenant).
+    _space_guards: list[tuple[Any, SpaceGuard]] | None = None
+    _space_lock = threading.Lock()
 
     # Default weight profiles per detected query shape. Picked conservatively
     # so that switching `adaptive_weights=True` cannot lower recall@K by more
@@ -314,6 +323,52 @@ class Recaller:
         self.timestamp_key = timestamp_key or derived.get("timestamp_key", "timestamp")
         self.timestamp_format = timestamp_format or derived.get("timestamp_format", "iso")
         self._query_expansion_cache: dict[str, list[str]] = {}
+        # Recall-side embedding-space compatibility: one revalidating guard
+        # per distinct (store, provider) pair, built lazily on the first
+        # vector recall. A determined incompatibility is re-raised on EVERY
+        # recall until it ages out and rechecks (silent degradation is the
+        # failure mode this exists to prevent).
+        self._space_guards: list[SpaceGuard] | None = None
+        self._space_lock = threading.Lock()
+
+    def _ensure_space_compat(self, tenant: str | None = None) -> None:
+        """Fail loud when the query and stored vectors would come from
+        different embedding spaces.
+
+        A profile-transformed query against vectors from another space — or
+        stamped with a different fingerprint — degrades retrieval with no
+        error at all; that silent failure mode is exactly what the space
+        fingerprints exist to prevent, so recall refuses instead. The
+        verdict is cached and REVALIDATED after a bounded interval, so a
+        collection recreated under a different configuration — or healed by
+        a correct reindex — is noticed by a long-lived server without a
+        restart.
+
+        Deliberately guards only the recaller's OWN (vector, embedding)
+        pair, and only on paths that actually USE it: retrievers-mode
+        recall never touches the legacy pair (a CLI construction passes the
+        same provider/store to both the Recaller and its arms, and the arm
+        may legitimately return before any vector work), so there the arms
+        enforce compatibility themselves inside ``search()`` — after their
+        own early returns and request-eligibility skips — and their
+        :class:`EmbeddingSpaceError` propagates out of the retrieval loop
+        instead of being degraded away. ``search_many`` always queries the
+        own pair directly, so it always guards.
+        """
+        del tenant  # eligibility is enforced where arms run, not here
+        if self._space_guards is None:
+            with self._space_lock:
+                if self._space_guards is None:
+                    entries: list[tuple[Any, SpaceGuard]] = []
+                    # getattr: instances built without __init__ (documented
+                    # test-fake pattern) may lack these attributes.
+                    own_store = getattr(self, "vector", None)
+                    own_emb = getattr(self, "embedding", None)
+                    if own_store is not None and own_emb is not None:
+                        entries.append((None, SpaceGuard(own_store, own_emb)))
+                    self._space_guards = entries
+        for _owner, guard in self._space_guards:
+            guard.ensure()
 
     def _vector_filters(self, filters: dict[str, Any] | None) -> dict[str, Any] | None:
         """Caller filters with the timestamp condition converted into the
@@ -491,6 +546,10 @@ class Recaller:
         as_of: str | None = None,
         tenant: str | None = None,
     ) -> list[RecallResult]:
+        # Legacy-pair guard only when the legacy path will actually run —
+        # in retrievers mode the arms guard themselves at their boundaries.
+        if not self.retrievers:
+            self._ensure_space_compat(tenant=tenant)
         # Retrievers mode: fuse N arbitrary ranked lists
         if self.retrievers:
             return self._recall_via_retrievers(
@@ -525,7 +584,7 @@ class Recaller:
             # Vector search
             vector_hits: list[Hit] = []
             with histogram("mnemostack.recall.embed_latency_ms"):
-                query_vec = self.embedding.embed(query)
+                query_vec = embed_query_via(self.embedding, query)
             if query_vec:
                 with histogram("mnemostack.recall.vector_latency_ms"):
                     vector_hits = self.vector.search(
@@ -687,6 +746,9 @@ class Recaller:
         """
         if not self.vector:
             return []
+        # Direct search surface (expansion retry, library callers) — must be
+        # space-guarded like every other path that queries the collection.
+        self._ensure_space_compat(tenant=tenant)
 
         fetch = _fetch_limit(limit, include_invalidated, as_of)
         tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
@@ -911,6 +973,11 @@ class Recaller:
                         h.payload, include_invalidated=include_invalidated, as_of=as_of
                     )
                 ][:per_source_limit]
+            except EmbeddingSpaceError:
+                # An arm refusing to cross embedding spaces is not a broken
+                # arm — degrading it away would silently serve results while
+                # part of the configured surface is incompatible. Loud.
+                raise
             except Exception as exc:  # noqa: BLE001 — fail-open: one broken retriever must not kill recall
                 hits = []
                 err = f"{type(exc).__name__}: {exc}"
@@ -1212,8 +1279,14 @@ class Recaller:
         # whole multi-tenant corpus. tkw only when set — custom stores unaffected.
         tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
         if self.embedding and self.vector:
+            # The fallback performs DIRECT vector work with the legacy pair
+            # even in retrievers mode (where _recall_once skips the own-pair
+            # guard) — guard here, before embedding, and let
+            # EmbeddingSpaceError propagate instead of being swallowed by
+            # the fail-open except below.
+            self._ensure_space_compat()
             try:
-                query_vec = self.embedding.embed(query)
+                query_vec = embed_query_via(self.embedding, query)
             except Exception:
                 return []
             if not query_vec:
