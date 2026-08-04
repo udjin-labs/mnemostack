@@ -23,7 +23,7 @@ except ImportError:  # pragma: no cover
     Field = None  # type: ignore[assignment]
     _FASTMCP_AVAILABLE = False
 
-from ..config import Config, model_kwargs
+from ..config import Config, model_kwargs, provider_kwargs
 from ..embeddings import get_provider
 from ..feedback import apply_feedback
 from ..llm import get_llm
@@ -82,6 +82,10 @@ def build_server(
     text_search: str = "auto",
     text_search_fields: dict[str, float] | None = None,
     resolve_roots: list[str] | None = None,
+    # Provider knobs — appended at the TAIL to preserve positional
+    # back-compat for existing library callers.
+    ollama_host: str | None = None,
+    embedding_timeout: int | None = None,
 ) -> Any:
     """Build and return a configured FastMCP server.
 
@@ -89,6 +93,10 @@ def build_server(
         collection: Qdrant collection name
         embedding_provider: embedding provider name (registered in mnemostack.embeddings)
         embedding_model: embedding model override (None uses provider default)
+        ollama_host: Ollama endpoint for the embedding provider (None = the
+            provider's own resolution: native OLLAMA_HOST env, then localhost)
+        embedding_timeout: embedding request timeout in seconds (None =
+            provider default)
         llm_provider: LLM provider name for answer generation
         llm_model: LLM model override (None uses provider default)
         qdrant_host: Qdrant URL
@@ -188,7 +196,15 @@ def build_server(
     def _get_embedding():
         return _component(
             "embedding",
-            lambda: get_provider(embedding_provider, **model_kwargs(embedding_model)),
+            lambda: get_provider(
+                embedding_provider,
+                **provider_kwargs(
+                    embedding_provider,
+                    model=embedding_model,
+                    ollama_host=ollama_host,
+                    timeout=embedding_timeout,
+                ),
+            ),
         )
 
     def _get_vector():
@@ -924,6 +940,8 @@ def main() -> None:
         collection=cfg.vector.collection,
         embedding_provider=cfg.embedding.provider,
         embedding_model=cfg.embedding.model,
+        ollama_host=cfg.embedding.ollama_host,
+        embedding_timeout=cfg.embedding.timeout,
         llm_provider=cfg.llm.provider,
         llm_model=cfg.llm.model,
         qdrant_host=cfg.vector.host,

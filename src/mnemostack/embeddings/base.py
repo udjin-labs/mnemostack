@@ -4,9 +4,36 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 from . import profiles as _profiles
 from .profiles import EmbeddingProfile
+
+
+class ProviderProbeError(RuntimeError):
+    """A capability probe could not produce a validated result.
+
+    Raised instead of returning an empty vector: probes exist to make
+    decisions (vector dimension, endpoint support) BEFORE collections are
+    created, and an empty answer at that point must be loud, not a silent
+    768-shaped guess.
+    """
+
+
+@dataclass(frozen=True)
+class EmbeddingCapabilities:
+    """Validated, probe-backed facts about a provider/model pair.
+
+    ``dimension`` is always a real measured/declared value (never a
+    fallback); ``batch`` says whether the backend has a native batch
+    endpoint; ``endpoint`` names the selected API surface when the provider
+    distinguishes one (e.g. Ollama's ``api/embed`` vs legacy
+    ``api/embeddings``).
+    """
+
+    dimension: int
+    batch: bool = False
+    endpoint: str | None = None
 
 
 class EmbeddingProvider(ABC):
@@ -194,6 +221,28 @@ class EmbeddingProvider(ABC):
     @abstractmethod
     def name(self) -> str:
         """Short identifier like 'gemini:embedding-001' — used in logs and config."""
+
+    def probe_capabilities(self) -> EmbeddingCapabilities:
+        """Probe the backend and return VALIDATED capabilities.
+
+        Non-abstract on purpose — existing third-party providers stay
+        source-compatible. The default runs one neutral probe through
+        ``embed`` and either returns a validated result or raises
+        :class:`ProviderProbeError`; it never returns an empty or malformed
+        answer (the legacy lenient behavior of ``embed`` itself is
+        unchanged). Providers with richer backends override this to report
+        native batch support / the selected endpoint.
+        """
+        try:
+            vec = self.embed("capability probe")
+        except Exception as exc:  # noqa: BLE001 — typed, loud, actionable
+            raise ProviderProbeError(f"embedding probe failed: {exc}") from exc
+        if not vec or not all(isinstance(x, (int, float)) for x in vec):
+            raise ProviderProbeError(
+                "embedding probe returned an empty or non-numeric vector — "
+                "the provider is reachable but not usable"
+            )
+        return EmbeddingCapabilities(dimension=len(vec))
 
     def health_check(self) -> tuple[bool, str]:
         """Lightweight reachability check. Returns (is_healthy, message)."""
