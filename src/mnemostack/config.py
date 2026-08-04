@@ -133,6 +133,11 @@ class EmbeddingConfig:
     # model cold starts legitimately exceed short liveness timeouts, so this
     # is configurable independently of vector.health_timeout.
     timeout: int | None = None
+    # Ingestion batch size: how many chunks the index commands embed per
+    # provider batch call (and per fingerprint-sandwich commit group).
+    # Bounds memory during large ingests — vectors are held per group,
+    # never for the whole corpus.
+    batch_size: int = 64
 
 
 @dataclass
@@ -387,6 +392,11 @@ class Config:
                     "embedding.timeout must be a positive integer number of "
                     f"seconds, got {timeout!r}"
                 )
+        batch = cfg.embedding.batch_size
+        if isinstance(batch, bool) or not isinstance(batch, int) or batch < 1:
+            raise ValueError(
+                f"embedding.batch_size must be a positive integer, got {batch!r}"
+            )
 
         return cfg
 
@@ -436,6 +446,7 @@ def _apply_env_overrides(cfg: Config) -> Config:
         MNEMOSTACK_EMBEDDING_MODEL
         MNEMOSTACK_OLLAMA_HOST      (Ollama endpoint for the embedding provider)
         MNEMOSTACK_EMBEDDING_TIMEOUT (seconds; embedding requests only)
+        MNEMOSTACK_EMBEDDING_BATCH_SIZE (chunks per provider batch during indexing)
         MNEMOSTACK_VECTOR_HOST
         MNEMOSTACK_QDRANT_URL       (alias for VECTOR_HOST)
         MNEMOSTACK_VECTOR_COLLECTION
@@ -474,6 +485,8 @@ def _apply_env_overrides(cfg: Config) -> Config:
         cfg.embedding.model = v
     if v := env.get("MNEMOSTACK_OLLAMA_HOST"):
         cfg.embedding.ollama_host = v
+    if v := env.get("MNEMOSTACK_EMBEDDING_BATCH_SIZE"):
+        cfg.embedding.batch_size = int(v)
     if v := env.get("MNEMOSTACK_EMBEDDING_TIMEOUT"):
         # Strict parse on purpose: a malformed value must fail at startup,
         # not silently fall back to (or be clamped toward) a default —
@@ -558,6 +571,7 @@ embedding:
   api_key_env: GEMINI_API_KEY
   ollama_host: null          # null = native OLLAMA_HOST env, then localhost
   timeout: null              # embedding request timeout (s); null = provider default
+  batch_size: 64             # chunks per provider batch call during indexing
 
 vector:
   host: http://localhost:6333

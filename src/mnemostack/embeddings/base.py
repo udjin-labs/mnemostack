@@ -55,6 +55,13 @@ class EmbeddingProvider(ABC):
     # third-party subclasses that never call a base __init__ still work.
     _profile: EmbeddingProfile | None = None
 
+    #: Set True by providers whose ``embed_batch`` ALREADY degrades to
+    #: per-item calls internally (with their own retry/storm-guard policy).
+    #: An all-empty batch from such a provider means per-item was tried and
+    #: the failure is provider-wide — external recovery layers must NOT
+    #: replay every item again and defeat the storm guard.
+    _batch_includes_per_item_fallback = False
+
     @abstractmethod
     def embed(self, text: str) -> list[float]:
         """Return embedding vector for a single text. Empty list on failure."""

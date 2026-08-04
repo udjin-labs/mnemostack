@@ -34,7 +34,7 @@ from .embeddings.roles import (
     EmbeddingSpaceError,
     check_document_space,
     document_space_fingerprint_via,
-    embed_document_via,
+    embed_documents_resilient,
 )
 from .llm import get_llm, list_llms
 from .recall import (
@@ -76,7 +76,7 @@ def _positive_int(value: str) -> int:
     """argparse type: the same positive-integer contract as the config path."""
     parsed = int(value)
     if parsed < 1:
-        raise argparse.ArgumentTypeError("must be a positive integer number of seconds")
+        raise argparse.ArgumentTypeError("must be a positive integer")
     return parsed
 
 
@@ -2506,7 +2506,7 @@ def cmd_index(args: argparse.Namespace) -> int:
     # is committed — per-point writes between two checks would let a tag
     # repointed right after a check mix up to a whole window of points into
     # the collection before detection.
-    _FP_BATCH = 64
+    batch_size = getattr(args, "embedding_batch_size", None) or 64
 
     def _abort_mid_run() -> int:
         print(
@@ -2518,13 +2518,15 @@ def cmd_index(args: argparse.Namespace) -> int:
         )
         return 1
 
-    for start in range(0, len(to_embed), _FP_BATCH):
-        group = to_embed[start : start + _FP_BATCH]
+    for start in range(0, len(to_embed), batch_size):
+        group = to_embed[start : start + batch_size]
         if doc_fp is not None and start and not _fingerprint_still(doc_fp):
             return _abort_mid_run()
-        embedded: list[tuple[str, list[float], dict[str, Any]]] = []
-        for cid, text, payload in group:
-            vec = embed_document_via(provider, text)
+        # One provider batch call per group (native /api/embed & co.), with
+        # the shared degradation ladder isolating per-item failures.
+        vectors = embed_documents_resilient(provider, [text for _, text, _ in group])
+        embedded: list[tuple[str | int, list[float], dict[str, Any]]] = []
+        for (cid, _text, payload), vec in zip(group, vectors, strict=False):
             if not vec:
                 failed += 1
                 failed_sources.add(payload["source"])
@@ -2533,11 +2535,19 @@ def cmd_index(args: argparse.Namespace) -> int:
         if doc_fp is not None and embedded and not _fingerprint_still(doc_fp):
             # Nothing from this group has been written yet — clean abort.
             return _abort_mid_run()
-        for cid, vec, payload in embedded:
-            if doc_fp is not None:
+        if doc_fp is not None:
+            for _cid, _vec, payload in embedded:
                 payload[EMBEDDING_SPACE_KEY] = doc_fp
-            store.upsert(cid, vec, payload)
-            inserted += 1
+        if embedded:
+            # One store round-trip per group where the store supports it —
+            # otherwise HTTP overhead just moves from the embedding endpoint
+            # to one Qdrant request per point.
+            try:
+                store.upsert_batch(embedded)
+            except AttributeError:
+                for bcid, bvec, bpayload in embedded:
+                    store.upsert(bcid, bvec, bpayload)
+            inserted += len(embedded)
 
     if inserted:
         # POST-COMMIT revalidation (no atomic empty-collection claim
@@ -2796,6 +2806,7 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
         cs = upsert_markdown_chunks(
             store, provider, chunks, existing_payloads, tenant=tenant,
             before_upsert=_quota_check,
+            embedding_batch_size=getattr(args, "embedding_batch_size", None) or 64,
         )
     except QuotaExceededError as e:
         # In --watch mode, a startup corpus over quota must NOT kill the daemon:
@@ -2964,6 +2975,7 @@ def _watch_markdown(
         tenant=_watch_tenant,
         # A resolver (not a fixed value) so `quota set/rm` takes effect mid-watch.
         max_points_resolver=lambda: _resolve_max_points(args, _watch_tenant),
+        embedding_batch_size=getattr(args, "embedding_batch_size", None) or 64,
     )
 
     def _on_result(res: Any) -> None:
@@ -3091,6 +3103,16 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
             "Ollama endpoint for the embedding provider, e.g. "
             "http://192.0.2.10:11434 (default: config/env, then the native "
             "OLLAMA_HOST variable, then localhost)"
+        ),
+    )
+    common.add_argument(
+        "--embedding-batch-size",
+        type=_positive_int,
+        default=cfg.embedding.batch_size,
+        help=(
+            "Chunks embedded per provider batch call during indexing (also "
+            "the commit-group size) — bounds memory on large ingests "
+            "(default: 64)"
         ),
     )
     common.add_argument(

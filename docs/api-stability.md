@@ -141,9 +141,12 @@ arm names follow `qdrant_text[:<field>]`),
 `embedding.ollama_host` / `MNEMOSTACK_OLLAMA_HOST` / `--ollama-host` (now
 wired through every provider factory — CLI, HTTP server, MCP, inspector;
 explicit flag > env > config > the native `OLLAMA_HOST` variable >
-localhost), and `embedding.timeout` / `MNEMOSTACK_EMBEDDING_TIMEOUT` /
+localhost), `embedding.timeout` / `MNEMOSTACK_EMBEDDING_TIMEOUT` /
 `--embedding-timeout` (embedding requests only, independent of
-`vector.health_timeout`; malformed values are rejected at startup).
+`vector.health_timeout`; malformed values are rejected at startup), and
+`embedding.batch_size` / `MNEMOSTACK_EMBEDDING_BATCH_SIZE` /
+`--embedding-batch-size` (chunks per provider batch call and per commit
+group during indexing; positive integer, validated at startup).
 
 🟡 **Experimental — embedding profiles** (`mnemostack.embeddings.profiles`):
 `EmbeddingProfile`, `register_embedding_profile`, `resolve_profile`, the

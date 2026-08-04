@@ -27,6 +27,11 @@ class GeminiProvider(EmbeddingProvider):
     Set `GEMINI_API_KEY` env var or pass `api_key` directly.
     """
 
+    #: embed_batch falls back to _sequential_fallback with a storm guard —
+    #: an all-empty result already went through per-item retries, so outer
+    #: recovery layers must not replay the batch again.
+    _batch_includes_per_item_fallback = True
+
     BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
     DEFAULT_MODEL = "gemini-embedding-001"
     MODEL_DIMS = {
