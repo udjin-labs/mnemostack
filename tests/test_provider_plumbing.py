@@ -255,3 +255,13 @@ def test_new_knobs_stay_at_the_positional_tail():
 
     params = list(inspect.signature(build_server).parameters)
     assert params[-2:] == ["ollama_host", "embedding_timeout"]
+
+
+def test_config_sdk_helper_carries_provider_knobs(monkeypatch):
+    monkeypatch.setenv("MNEMOSTACK_PROVIDER", "ollama")
+    monkeypatch.setenv("MNEMOSTACK_OLLAMA_HOST", "http://192.0.2.10:11434")
+    monkeypatch.setenv("MNEMOSTACK_EMBEDDING_TIMEOUT", "240")
+    cfg = Config.load(path=None)
+    kw = cfg.embedding_provider_kwargs()
+    assert kw["host"] == "http://192.0.2.10:11434"
+    assert kw["timeout"] == 240

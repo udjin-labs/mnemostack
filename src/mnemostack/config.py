@@ -330,8 +330,19 @@ class Config:
         return asdict(self)
 
     def embedding_provider_kwargs(self) -> dict[str, Any]:
-        """Keyword arguments for the configured embedding provider."""
-        return model_kwargs(self.embedding.model)
+        """Keyword arguments for the configured embedding provider.
+
+        Delegates to :func:`provider_kwargs` so the SDK path
+        (``get_provider(cfg.embedding.provider, **cfg.embedding_provider_kwargs())``)
+        carries the same host/timeout knobs as every built-in entry point —
+        a config-accepted value must never be dropped on one surface.
+        """
+        return provider_kwargs(
+            self.embedding.provider,
+            model=self.embedding.model,
+            ollama_host=self.embedding.ollama_host,
+            timeout=self.embedding.timeout,
+        )
 
     def llm_provider_kwargs(self) -> dict[str, Any]:
         """Keyword arguments for the configured LLM provider."""
