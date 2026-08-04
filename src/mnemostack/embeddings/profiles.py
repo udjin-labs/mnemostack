@@ -114,6 +114,12 @@ class EmbeddingProfile:
         object.__setattr__(
             self, "known_dimensions", {k.lower(): int(v) for k, v in self.known_dimensions.items()}
         )
+        # Patterns normalize like the model names they match — a canonical
+        # mixed-case HF identifier pasted verbatim must not silently resolve
+        # to the identity profile.
+        object.__setattr__(
+            self, "model_patterns", tuple(p.lower() for p in self.model_patterns)
+        )
 
     def apply_query(self, text: str) -> str:
         return apply_transform(self.query_transform, text)

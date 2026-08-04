@@ -183,6 +183,10 @@ class Recaller:
     text_key = "text"
     timestamp_key = "timestamp"
     timestamp_format = "iso"
+    #: Space-guard defaults for the same construction style; the class-level
+    #: lock only serializes lazy guard-list creation, which is idempotent.
+    _space_guards: list[SpaceGuard] | None = None
+    _space_lock = threading.Lock()
 
     # Default weight profiles per detected query shape. Picked conservatively
     # so that switching `adaptive_weights=True` cannot lower recall@K by more
@@ -344,8 +348,10 @@ class Recaller:
                 seen.add(key)
                 pairs.append((store, emb))
 
-        _add(self.vector, self.embedding)
-        for retriever in self.retrievers:
+        # getattr throughout: instances built without __init__ (documented
+        # test-fake pattern) may lack any of these attributes.
+        _add(getattr(self, "vector", None), getattr(self, "embedding", None))
+        for retriever in getattr(self, "retrievers", None) or []:
             _add(getattr(retriever, "vector_store", None), getattr(retriever, "embedding", None))
         return pairs
 
@@ -745,6 +751,9 @@ class Recaller:
         """
         if not self.vector:
             return []
+        # Direct search surface (expansion retry, library callers) — must be
+        # space-guarded like every other path that queries the collection.
+        self._ensure_space_compat()
 
         fetch = _fetch_limit(limit, include_invalidated, as_of)
         tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}

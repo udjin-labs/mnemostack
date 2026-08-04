@@ -37,7 +37,7 @@ dependencies = [
 gemini = []
 ollama = []
 huggingface = [
-    "transformers>=4.40",
+    "transformers>=4.51",
     "torch>=2.0",
 ]
 mcp = [

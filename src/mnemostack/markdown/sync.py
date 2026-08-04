@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..embeddings.roles import (
     EMBEDDING_SPACE_KEY,
+    SpaceGuard,
     document_space_fingerprint_via,
     embed_document_via,
 )
@@ -160,21 +161,26 @@ def upsert_markdown_chunks(
     all-or-nothing, so *that* path must embed the whole batch before writing —
     bounded in practice by the tenant's cap, since a run past it is rejected.
 
-    Embedding-space contract: new points and refreshed payloads are stamped
-    with the provider's document-space fingerprint, but this function does
-    not guard the collection — callers must run ``check_document_space``
-    first (the CLI does). A refresh never overwrites a point stamped with a
-    DIFFERENT space; such points are counted in ``space_conflicts`` and left
-    untouched.
+    Embedding-space contract: every invocation guards the collection BEFORE
+    embedding (raising ``EmbeddingSpaceError`` on a conflict — essential in
+    the watch loop, where a mutable tag can be repointed long after the CLI
+    startup guard ran) and stamps new points and refreshed payloads with the
+    provider's document-space fingerprint. A refresh never overwrites a
+    point stamped with a DIFFERENT space; such points are counted in
+    ``space_conflicts`` and left untouched.
     """
+    # Self-guarding: every invocation (one watched-file batch in the watch
+    # loop) rechecks the collection's space BEFORE embedding — the CLI guard
+    # at command start cannot cover a tag repointed while the watcher runs.
+    SpaceGuard(store, provider, recheck_seconds=0.0).ensure()
     tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
     existing_ids = set(existing_payloads)
     res = ChunkSyncResult()
     new_chunks = [c for c in chunks if c[0] not in existing_ids]
     # Stamped on new points AND on payload refreshes: a refresh does not
     # re-embed, so stamping there is the sanctioned adoption path for legacy
-    # (pre-fingerprint) points — the index-command guard has already rejected
-    # a genuinely mismatched collection before this runs.
+    # (pre-fingerprint) points — the guard above has already rejected a
+    # genuinely mismatched collection.
     doc_fp = document_space_fingerprint_via(provider)
 
     def _embed(text: str, source: str) -> list | None:

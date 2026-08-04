@@ -335,6 +335,114 @@ def test_markdown_sync_stamps_new_and_refreshed_chunks():
     assert emb.seen == ["passage: fresh text"]
 
 
+def test_markdown_sync_guards_each_invocation():
+    # The watch loop calls this per file batch long after the CLI startup
+    # guard ran — each invocation must recheck before embedding.
+    from mnemostack.embeddings.roles import EmbeddingSpaceError
+    from mnemostack.markdown.sync import upsert_markdown_chunks
+
+    class _Store(_ScrollStore, _RecordingStore):
+        def __init__(self, payloads):
+            _ScrollStore.__init__(self, payloads)
+            _RecordingStore.__init__(self)
+
+    store = _Store([{EMBEDDING_SPACE_KEY: "es1:other"}])
+    with pytest.raises(EmbeddingSpaceError, match="different spaces"):
+        upsert_markdown_chunks(
+            store,
+            _AsymmetricProvider(),
+            [("c1", "text", {"text": "text", "source": "a.md"})],
+            existing_payloads={},
+        )
+    assert store.upserts == []
+
+
+def test_ingestor_refuses_mismatched_collection():
+    from mnemostack.embeddings.roles import EmbeddingSpaceError
+
+    class _Store(_ScrollStore, _RecordingStore):
+        def __init__(self, payloads):
+            _ScrollStore.__init__(self, payloads)
+            _RecordingStore.__init__(self)
+
+    store = _Store([{EMBEDDING_SPACE_KEY: "es1:other"}])
+    ingestor = Ingestor(embedding=_AsymmetricProvider(), vector_store=store)
+    with pytest.raises(EmbeddingSpaceError, match="different spaces"):
+        ingestor.ingest([IngestItem(text="hello", source="a.md")])
+    assert store.upserts == []
+
+
+def test_guard_refuses_legacy_when_provider_defaults_changed():
+    # Pre-fingerprint vectors were produced under the provider's THEN-default
+    # settings; an active config that no longer reproduces them (last-token
+    # pooling vs the old mean default) must refuse the legacy collection.
+    from mnemostack.cli import _guard_document_space
+    from mnemostack.embeddings.roles import recall_space_error
+
+    class _RepooledProvider(_AsymmetricProvider):
+        @property
+        def name(self) -> str:
+            return "huggingface:qwen/qwen3-embedding-0.6b"  # identity doc transform
+
+        def _legacy_space_compatible(self) -> bool:
+            return False
+
+    legacy_store = _ScrollStore([{"text": "old unstamped point"}])
+    err = recall_space_error(legacy_store, _RepooledProvider())
+    assert err is not None and "does not reproduce" in err
+    assert _guard_document_space(legacy_store, _RepooledProvider()) == 1
+    # Same model with legacy-compatible settings still adopts.
+    class _MeanProvider(_RepooledProvider):
+        def _legacy_space_compatible(self) -> bool:
+            return True
+
+    assert recall_space_error(legacy_store, _MeanProvider()) is None
+
+
+def test_registered_patterns_are_case_normalized():
+    from mnemostack.embeddings.profiles import (
+        EmbeddingProfile,
+        register_embedding_profile,
+        resolve_profile,
+    )
+
+    register_embedding_profile(
+        "testprov-case",
+        EmbeddingProfile(
+            name="acme", version=1, model_patterns=("Acme/MyEmbed-*",)
+        ),
+    )
+    assert resolve_profile("testprov-case", "acme/myembed-v2").name == "acme"
+    assert resolve_profile("testprov-case", "Acme/MyEmbed-v2").name == "acme"
+
+
+def test_search_many_is_space_guarded():
+    from mnemostack.embeddings.roles import EmbeddingSpaceError
+    from mnemostack.recall.recaller import Recaller
+
+    class _Vec(_ScrollStore):
+        def search(self, *a, **kw):
+            return []
+
+    recaller = Recaller(
+        embedding_provider=_AsymmetricProvider(),
+        vector_store=_Vec([{EMBEDDING_SPACE_KEY: "es1:other"}]),
+    )
+    with pytest.raises(EmbeddingSpaceError, match="different spaces"):
+        recaller.search_many([[0.1, 0.2]], limit=5)
+
+
+def test_unguardable_store_skips_fingerprint_resolution():
+    # A store without scroll cannot be guarded at all — the (potentially
+    # failing) fingerprint lookup must not run and break the legacy-store
+    # fallback.
+    class _RaisingFp(_AsymmetricProvider):
+        def document_space_fingerprint(self) -> str:
+            raise RuntimeError("tags endpoint unsupported")
+
+    assert check_document_space(SimpleNamespace(), _RaisingFp())[0] == "unknown"
+
+
 # ---------------------------------------------------- provider integrations
 
 

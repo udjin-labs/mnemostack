@@ -68,6 +68,19 @@ class EmbeddingProvider(ABC):
         """Embed documents/chunks for indexing (applies the document transform once)."""
         return self.embed_batch([self.profile.apply_document(t) for t in texts])
 
+    def _legacy_space_compatible(self) -> bool:
+        """Whether this provider's ACTIVE configuration reproduces the vectors
+        an older (pre-fingerprint) mnemostack would have produced.
+
+        The legacy-adoption path assumes unstamped points are byte-compatible
+        with what the current configuration embeds. Override to return False
+        when a config default changed the output for the same model (e.g.
+        HuggingFace auto-selecting last-token pooling where the old default
+        was mean) — the guard then refuses the legacy collection instead of
+        silently mixing spaces.
+        """
+        return True
+
     def _fingerprint_extras(self) -> Mapping[str, str]:
         """Provider-configurable knobs that change the vector space.
 

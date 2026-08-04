@@ -101,21 +101,25 @@ def _guard_document_space(store: Any, provider: Any) -> int | None:
         )
         return 1
     if status == "legacy":
-        # Pre-fingerprint points were embedded from RAW text (no profile
-        # transforms existed). If the active profile transforms documents,
-        # those raw-embedded vectors live in a DIFFERENT space than what this
-        # run would write — adoption would mislabel them, so refuse.
+        # Pre-fingerprint points were embedded from RAW text under the
+        # provider's THEN-default settings. If the active profile transforms
+        # documents — or the active provider config no longer reproduces the
+        # legacy default (e.g. last-token pooling replacing mean) — those
+        # vectors live in a DIFFERENT space than what this run would write;
+        # adoption would mislabel them, so refuse.
         profile = getattr(provider, "profile", None)
         doc_transform = getattr(profile, "document_transform", None) or {}
-        if doc_transform.get("kind", "identity") != "identity":
+        legacy_ok = getattr(provider, "_legacy_space_compatible", None)
+        if doc_transform.get("kind", "identity") != "identity" or (
+            legacy_ok is not None and not legacy_ok()
+        ):
             print(
                 "EMBEDDING SPACE MISMATCH: existing points carry no "
-                "embedding-space fingerprint (indexed by an older mnemostack, "
-                "from raw text), but the active profile "
-                f"'{getattr(profile, 'name', 'unknown')}' transforms documents "
-                "before embedding — the old vectors are NOT in this space. "
-                "Reindex into a new --collection, or rerun with --recreate to "
-                "drop and rebuild this one.",
+                "embedding-space fingerprint (indexed by an older mnemostack), "
+                "and the active profile/provider configuration embeds "
+                "differently than that era's defaults — the old vectors are "
+                "NOT in this space. Reindex into a new --collection, or rerun "
+                "with --recreate to drop and rebuild this one.",
                 file=sys.stderr,
             )
             return 1

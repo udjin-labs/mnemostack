@@ -164,9 +164,9 @@ def recall_space_error(store: Any, provider: Any) -> str | None:
     if status == "mismatch":
         return (
             f"collection points are stamped with embedding space {found}, but "
-            f"the active provider embeds in {expected} — recall would compare "
-            "vectors from different spaces; fix the embedding config or "
-            "reindex the collection"
+            f"the active provider embeds in {expected} — operating on this "
+            "collection would cross vectors from different spaces; fix the "
+            "embedding config or reindex the collection"
         )
     if status == "legacy":
         profile = getattr(provider, "profile", None)
@@ -179,6 +179,17 @@ def recall_space_error(store: Any, provider: Any) -> str | None:
                 "before embedding — the stored vectors are not in this space. "
                 "Reindex the collection, or register an identity profile for "
                 "this model to keep the legacy behavior"
+            )
+        legacy_ok = getattr(provider, "_legacy_space_compatible", None)
+        if legacy_ok is not None and not legacy_ok():
+            return (
+                "existing points carry no embedding-space fingerprint (embedded "
+                "by an older mnemostack under its then-default provider "
+                "settings), and the active provider configuration does not "
+                "reproduce that default (e.g. last-token pooling replacing the "
+                "old mean default) — the stored vectors are not in this space. "
+                "Reindex the collection, or configure the provider to the "
+                "legacy settings to keep the old behavior"
             )
     return None
 
@@ -213,15 +224,22 @@ def check_document_space(
     undetected mismatch stays visible instead of being laundered into the
     current space.
 
-    Callers that stamp fingerprints (the CLI index commands) run this check
-    FIRST. Library consumers driving `Ingestor` or `upsert_markdown_chunks`
-    directly are responsible for calling it themselves — those building
-    blocks stamp but do not guard.
+    Every built-in path that stamps fingerprints guards first: the CLI index
+    commands call this before embedding, and `Ingestor` /
+    `upsert_markdown_chunks` self-guard per flush/invocation via
+    :class:`SpaceGuard`, so a mutable tag repointed under a long-lived
+    writer is refused at the next batch instead of writing mixed spaces.
     """
-    expected = document_space_fingerprint_via(provider)
+    # Scroll support first: a store that cannot be inspected cannot be
+    # guarded at all, so the (potentially failing) fingerprint lookup must
+    # not run — otherwise an Ollama-compatible endpoint without /api/tags
+    # would break the advertised legacy-store fallback.
     scroll = getattr(store, "scroll", None)
-    if expected is None or scroll is None:
-        return "unknown", expected, None
+    if scroll is None:
+        return "unknown", None, None
+    expected = document_space_fingerprint_via(provider)
+    if expected is None:
+        return "unknown", None, None
     sampled = 0
     unstamped = 0
     found: str | None = None

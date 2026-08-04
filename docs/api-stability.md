@@ -148,10 +148,11 @@ the `_embedding_space` payload key). The intended contract: transforms apply
 exactly once inside the role methods and never change stored text; a
 document-fingerprint change requires a new collection or explicit recreate,
 a query-fingerprint change only invalidates query caches. The mixed-space
-guard (`check_document_space` / `SpaceGuard`) is enforced by the CLI index
-commands, the `Recaller`, the built-in vector retrievers and the inspector,
-and is sample-based; library consumers driving `Ingestor` /
-`upsert_markdown_chunks` directly must call it themselves. Freshness is a
+guard (`check_document_space` / `SpaceGuard`) is sample-based and enforced
+everywhere built-in code reads or writes vectors: the CLI index commands,
+`Ingestor` (per flush) and `upsert_markdown_chunks` (per invocation — watch
+batches included) on the write side; the `Recaller` (incl. `search_many`),
+the built-in vector retrievers and the inspector on the read side. Freshness is a
 BOUNDED contract, not an instantaneous one: verdicts are cached and
 revalidated on an interval, fingerprints pin the resolved weights (HF
 revision / local-directory signature, Ollama digest re-resolved per batch)

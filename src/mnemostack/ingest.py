@@ -46,6 +46,7 @@ from typing import Any
 from mnemostack.embeddings.base import EmbeddingProvider
 from mnemostack.embeddings.roles import (
     EMBEDDING_SPACE_KEY,
+    SpaceGuard,
     document_space_fingerprint_via,
     embed_document_via,
     embed_documents_via,
@@ -540,11 +541,10 @@ class Ingestor:
     yourself. This keeps the ingestor cheap to instantiate in servers where
     the collection is set up once at startup.
 
-    It also does NOT verify the collection's embedding space: every point is
-    stamped with the provider's document-space fingerprint, but checking that
-    the collection was built under the SAME space is the caller's setup step —
-    run `mnemostack.embeddings.roles.check_document_space(store, provider)`
-    once alongside `ensure_collection()` (the CLI index commands do).
+    Writes are space-guarded: every flush revalidates (TTL-bounded) that the
+    collection's stamped embedding space matches this provider and stamps
+    each point with the provider's document-space fingerprint. A conflict
+    raises `EmbeddingSpaceError` instead of writing mixed-space vectors.
     """
 
     def __init__(
@@ -587,6 +587,12 @@ class Ingestor:
         self.window_separator = window_separator
         self.enrich = enrich
         self._seen = _SeenCache(seen_cache_size) if skip_seen else None
+        # Self-guarding writes: every flush revalidates (TTL-bounded) that
+        # the collection's stamped space matches this provider before any
+        # embedding/upsert — a long-lived ingestor must not stamp fresh
+        # fingerprints into a collection whose points belong to another
+        # space (e.g. after a mutable tag repoint).
+        self._space_guard = SpaceGuard(vector_store, embedding)
 
     # ---- Public API ----
 
@@ -690,6 +696,9 @@ class Ingestor:
         )
 
     def _flush(self, buffer: list[tuple[str, IngestItem]], stats: IngestStats) -> None:
+        # Guard BEFORE embedding: raises EmbeddingSpaceError when this
+        # provider's space conflicts with the collection's stamped points.
+        self._space_guard.ensure()
         # Resolved per flush, not per Ingestor lifetime: a long-lived ingestor
         # must stamp the space of the weights CURRENTLY served (mutable tags
         # can be repointed under a running process). None only for duck-typed
