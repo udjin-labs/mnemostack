@@ -172,11 +172,17 @@ def embed_documents_resilient(provider: Any, texts: list[str]) -> list[list[floa
             len(texts),
         )
         return _per_item()
-    if all(not v for v in vectors):
+    if all(not v for v in vectors) and not getattr(
+        provider, "_batch_includes_per_item_fallback", False
+    ):
         # Graceful providers report a BATCH-level failure as one empty
         # vector per input instead of raising (e.g. a rejected grouped
         # request). Single items may still succeed — retry per item rather
-        # than failing the whole commit group.
+        # than failing the whole commit group. EXCEPT for providers whose
+        # batch already degraded per item internally (storm-guarded): their
+        # all-empty means per-item was tried and the outage is
+        # provider-wide — replaying would multiply requests into a failing
+        # service.
         logger.warning("document batch failed wholesale — retrying per item")
         return _per_item()
     return vectors

@@ -494,3 +494,31 @@ def test_cmd_index_embeds_and_upserts_in_bounded_groups(tmp_path, monkeypatch, c
     # …and one store round-trip per group.
     assert store_box[-1].upsert_batches == [2, 1]
     assert store_box[-1].single_upserts == 0
+
+
+def test_wholesale_retry_respects_storm_guarded_providers():
+    # A provider whose embed_batch already degraded per item internally
+    # (Gemini's sequential fallback) reports provider-wide failure as
+    # all-empty — the ladder must NOT replay every item into the outage.
+    from mnemostack.embeddings.gemini import GeminiProvider
+    from mnemostack.embeddings.roles import embed_documents_resilient
+
+    assert GeminiProvider._batch_includes_per_item_fallback is True
+
+    class _StormGuarded(_BatchCountingProvider):
+        _batch_includes_per_item_fallback = True
+
+        def __init__(self):
+            super().__init__()
+            self.single_calls = 0
+
+        def embed(self, text):
+            self.single_calls += 1
+            return [0.1, 0.2]
+
+        def embed_batch(self, texts):
+            return [[] for _ in texts]  # provider-wide failure, guarded
+
+    p = _StormGuarded()
+    assert embed_documents_resilient(p, ["a", "b"]) == [[], []]
+    assert p.single_calls == 0  # no replay into the failing service
