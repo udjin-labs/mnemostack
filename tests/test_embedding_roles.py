@@ -651,6 +651,32 @@ def test_singular_role_defaults_dispatch_through_batch_overrides():
     assert _NativeBatchQueries().embed_query("q") == [6.6]
 
 
+def test_cooperative_super_overrides_of_both_forms_do_not_recurse():
+    # Overriding BOTH forms and delegating to super() (logging wrappers,
+    # backend setup) must land on the declarative path, not bounce between
+    # the two base defaults until RecursionError.
+    class _Cooperative(_AsymmetricProvider):
+        def embed_query(self, text):
+            return super().embed_query(text)
+
+        def embed_queries(self, texts):
+            return super().embed_queries(texts)
+
+        def embed_document(self, text):
+            return super().embed_document(text)
+
+        def embed_documents(self, texts):
+            return super().embed_documents(texts)
+
+    p = _Cooperative()
+    assert p.embed_query("q") == [1.0, 2.0]
+    assert p.embed_queries(["a", "b"]) == [[1.0, 2.0], [1.0, 2.0]]
+    assert p.embed_document("d") == [1.0, 2.0]
+    assert p.embed_documents(["x"]) == [[1.0, 2.0]]
+    # And the declarative transforms still applied exactly once.
+    assert p.seen == ["query: q", "query: a", "query: b", "passage: d", "passage: x"]
+
+
 def test_batch_role_defaults_dispatch_through_singular_overrides():
     # A provider overriding only the SINGULAR native role must keep it on
     # batch paths — not silently fall back to neutral vectors there.

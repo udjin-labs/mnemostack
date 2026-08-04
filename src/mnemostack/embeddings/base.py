@@ -52,15 +52,20 @@ class EmbeddingProvider(ABC):
     def profile(self, value: EmbeddingProfile) -> None:
         self._profile = value
 
+    def _overrides(self, name: str) -> bool:
+        return getattr(type(self), name, None) is not getattr(EmbeddingProvider, name)
+
     def embed_query(self, text: str) -> list[float]:
         """Embed a retrieval query (applies the profile query transform once).
 
-        Dispatches through an overridden ``embed_queries`` so a provider
-        implementing only the BATCH native role keeps it on singular paths
-        too (mirror of the batch→singular dispatch below). No recursion is
-        possible: each default delegates only to an OVERRIDDEN counterpart.
+        Cross-dispatches through an overridden ``embed_queries`` ONLY when
+        the singular form itself is not overridden — so a provider
+        implementing only the batch native role keeps it on singular paths,
+        while a provider overriding BOTH forms can safely call ``super()``
+        (it lands on the declarative path instead of bouncing to the
+        sibling override until RecursionError).
         """
-        if type(self).embed_queries is not EmbeddingProvider.embed_queries:
+        if self._overrides("embed_queries") and not self._overrides("embed_query"):
             vecs = self.embed_queries([text])
             return vecs[0] if vecs else []
         return self.embed(self.profile.apply_query(text))
@@ -68,24 +73,21 @@ class EmbeddingProvider(ABC):
     def embed_queries(self, texts: list[str]) -> list[list[float]]:
         """Embed retrieval queries (applies the profile query transform once).
 
-        Dispatches through an overridden ``embed_query`` so a provider that
-        implements only the SINGULAR native role keeps it on batch paths too
-        — otherwise expansion retries would silently fall back to neutral
-        vectors. Providers wanting batched native calls override this too.
+        Cross-dispatches through an overridden ``embed_query`` ONLY when the
+        batch form itself is not overridden — a singular-only native role
+        keeps working on batch paths (expansion retries), and cooperative
+        ``super()`` calls from a both-forms override never recurse.
         """
-        if type(self).embed_query is not EmbeddingProvider.embed_query:
+        if self._overrides("embed_query") and not self._overrides("embed_queries"):
             return [self.embed_query(t) for t in texts]
         return self.embed_batch([self.profile.apply_query(t) for t in texts])
 
     def embed_document(self, text: str) -> list[float]:
         """Embed a document/chunk for indexing (applies the document transform once).
 
-        Dispatches through an overridden ``embed_documents`` so a provider
-        implementing only the BATCH native role keeps it on singular paths
-        (CLI/markdown indexing) too — otherwise those routes would produce
-        neutral vectors under the same native-role fingerprint.
+        Cross-dispatch rules identical to :meth:`embed_query` — see there.
         """
-        if type(self).embed_documents is not EmbeddingProvider.embed_documents:
+        if self._overrides("embed_documents") and not self._overrides("embed_document"):
             vecs = self.embed_documents([text])
             return vecs[0] if vecs else []
         return self.embed(self.profile.apply_document(text))
@@ -93,12 +95,9 @@ class EmbeddingProvider(ABC):
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         """Embed documents/chunks for indexing (applies the document transform once).
 
-        Dispatches through an overridden ``embed_document`` so a provider
-        that implements only the SINGULAR native role keeps it on batch
-        paths too — otherwise `Ingestor` would silently index neutral
-        vectors while markdown indexing used the native ones.
+        Cross-dispatch rules identical to :meth:`embed_queries` — see there.
         """
-        if type(self).embed_document is not EmbeddingProvider.embed_document:
+        if self._overrides("embed_document") and not self._overrides("embed_documents"):
             return [self.embed_document(t) for t in texts]
         return self.embed_batch([self.profile.apply_document(t) for t in texts])
 
