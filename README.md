@@ -375,7 +375,17 @@ The mnemostack container runs the HTTP API on port 8000 by default. Interactive 
 
 Tear down with `docker compose -f examples/docker-compose.yml down -v` (the `-v` wipes Qdrant + Memgraph state).
 
-Prefer Ollama (no cloud key needed)? Run Ollama on the host, set `OLLAMA_HOST=http://host.docker.internal:11434`, and pass `--provider ollama` everywhere instead of `gemini`.
+Prefer Ollama (no cloud key needed)? Run Ollama on the host and pass `--provider ollama` everywhere instead of `gemini`. The endpoint resolves as: `--ollama-host` flag > `MNEMOSTACK_OLLAMA_HOST` env / `embedding.ollama_host` config > the native `OLLAMA_HOST` variable > `http://localhost:11434` — so a client running in a container or VM can reach a remote Ollama daemon directly:
+
+```bash
+mnemostack index-markdown memory/ \
+    --provider ollama \
+    --embedding-model qwen3-embedding:8b \
+    --ollama-host http://192.0.2.10:11434 \
+    --embedding-timeout 180
+```
+
+Embedding uses the batch `POST /api/embed` endpoint (one request per batch; servers too old for it are detected once and served per-item with a loud warning). The embedding timeout (`--embedding-timeout` / `MNEMOSTACK_EMBEDDING_TIMEOUT`, default 180s) is independent of the short Qdrant liveness timeout — cold loads of larger local models are legitimately slow. Vector dimensions come from the model tables (quantization-suffix aware) or, for unknown models, a one-shot probe of the live model — there is no blind fallback dimension, so a wrong-size collection can't be created.
 
 **Reasoning models** (qwen3, deepseek-r1 and similar): mnemostack disables thinking by default (`think=False` in `OllamaLLM`) — with thinking on, these models spend the whole token budget on thoughts and return empty text, silently degrading reranking, expansion and extraction. Pass `get_llm("ollama", think=None)` to keep the model's own default, or `think=True` to force it on models that support thinking. Extra generation options go through `options={...}` (e.g. `{"num_ctx": 8192}`).
 

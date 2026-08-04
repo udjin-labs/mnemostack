@@ -42,6 +42,7 @@ from mnemostack.config import (
     Config,
     ensure_text_fields_mode,
     model_kwargs,
+    provider_kwargs,
     resolve_text_search_mode,
 )
 from mnemostack.embeddings import get_provider
@@ -408,6 +409,14 @@ class ServerConfig:
     # the HTTP surface entirely (fail closed). Env: MNEMOSTACK_RESOLVE_ROOTS
     # (os.pathsep-separated).
     resolve_roots: list[str] = field(default_factory=list)
+    # Provider knobs resolved by the shared config/env precedence — passed to
+    # get_provider() so a configured Ollama host/timeout actually reaches the
+    # provider on this surface too (they used to silently stop at the config).
+    # Appended at the TAIL on purpose: ServerConfig is documented stable and
+    # may be constructed positionally — inserting mid-signature would shift
+    # every later argument.
+    ollama_host: str | None = None
+    embedding_timeout: int | None = None
 
     def __post_init__(self) -> None:
         if self.rerank_mode not in RERANK_MODES:
@@ -424,6 +433,8 @@ class ServerConfig:
         return cls(
             provider_name=cfg.embedding.provider,
             embedding_model=cfg.embedding.model,
+            ollama_host=cfg.embedding.ollama_host,
+            embedding_timeout=cfg.embedding.timeout,
             llm_name=cfg.llm.provider,
             llm_model=cfg.llm.model,
             collection=cfg.vector.collection,
@@ -604,7 +615,15 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     # handles single-worker fine.
     set_recorder(InMemoryRecorder())
 
-    provider = get_provider(cfg.provider_name, **model_kwargs(cfg.embedding_model))
+    provider = get_provider(
+        cfg.provider_name,
+        **provider_kwargs(
+            cfg.provider_name,
+            model=cfg.embedding_model,
+            ollama_host=cfg.ollama_host,
+            timeout=cfg.embedding_timeout,
+        ),
+    )
     text_mode = resolve_text_search_mode(cfg.text_search, cfg.bm25_paths)
     ensure_text_fields_mode(text_mode, cfg.text_search_fields)
     store = VectorStore(

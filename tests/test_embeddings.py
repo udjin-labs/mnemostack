@@ -97,19 +97,130 @@ def test_ollama_batch_empty_returns_empty():
     assert provider.embed_batch([]) == []
 
 
-def test_ollama_batch_single_item_uses_embed(monkeypatch):
-    """Single-item batch should just call embed once, not use pool."""
+def test_ollama_batch_uses_native_api_embed(monkeypatch):
+    """A batch is ONE /api/embed request with array input, not N calls."""
+    import json as jsonlib
+    from io import BytesIO
+
     provider = get_provider("ollama")
-    called = []
+    requests: list[tuple[str, dict]] = []
 
-    def fake_embed(self, text):
-        called.append(text)
-        return [0.0] * 768
+    class _Resp(BytesIO):
+        def __enter__(self):
+            return self
 
-    monkeypatch.setattr(type(provider), "embed", fake_embed)
-    result = provider.embed_batch(["just one"])
-    assert len(result) == 1
-    assert called == ["just one"]
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        payload = jsonlib.loads(req.data.decode())
+        requests.append((req.full_url, payload))
+        vecs = [[0.1, 0.2] for _ in payload["input"]]
+        return _Resp(jsonlib.dumps({"embeddings": vecs}).encode())
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    result = provider.embed_batch(["a", "b", "c"])
+    assert result == [[0.1, 0.2]] * 3
+    assert len(requests) == 1
+    url, payload = requests[0]
+    assert url.endswith("/api/embed")
+    assert payload["input"] == ["a", "b", "c"]
+    assert provider.endpoint == "api/embed"
+
+
+def test_ollama_falls_back_to_legacy_endpoint_only_on_404(monkeypatch):
+    """Legacy /api/embeddings engages on PROVEN absence (404) — once — while
+    a 500 propagates instead of being masked as an old server."""
+    import json as jsonlib
+    import urllib.error
+    from io import BytesIO
+
+    provider = get_provider("ollama")
+    calls: list[str] = []
+
+    class _Resp(BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        calls.append(req.full_url)
+        if req.full_url.endswith("/api/embed"):
+            raise urllib.error.HTTPError(req.full_url, 404, "not found", {}, None)
+        payload = jsonlib.loads(req.data.decode())
+        return _Resp(jsonlib.dumps({"embedding": [0.5, 0.5, len(payload["prompt"])]}).encode())
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    assert provider.embed_batch(["x", "y"]) == [[0.5, 0.5, 1.0], [0.5, 0.5, 1.0]]
+    assert provider.endpoint == "api/embeddings"
+    # Detection is remembered: no second /api/embed attempt.
+    assert provider.embed("z") == [0.5, 0.5, 1.0]
+    assert calls.count(f"{provider.host}/api/embed") == 1
+
+    fresh = get_provider("ollama")
+
+    def failing_urlopen(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 500, "boom", {}, None)
+
+    monkeypatch.setattr("urllib.request.urlopen", failing_urlopen)
+    # 5xx is NOT an old server: public embed contract degrades to [] but the
+    # endpoint selection must stay modern (no silent downgrade).
+    assert fresh.embed_batch(["x"]) == [[]]
+    assert fresh.endpoint == "api/embed"
+
+
+def test_ollama_batch_cardinality_mismatch_is_not_partial_success(monkeypatch):
+    import json as jsonlib
+    from io import BytesIO
+
+    provider = get_provider("ollama")
+
+    class _Resp(BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        return _Resp(jsonlib.dumps({"embeddings": [[0.1]]}).encode())
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    # 1 vector for 2 inputs → every item fails, nothing partial.
+    assert provider.embed_batch(["a", "b"]) == [[], []]
+
+
+def test_ollama_unknown_dimension_is_probed_not_guessed(monkeypatch):
+    """No blind 768: unknown models discover their real dimension from the
+    live model, and an unreachable host fails LOUD before any collection
+    could be created with a wrong size."""
+    import json as jsonlib
+    from io import BytesIO
+
+    from mnemostack.embeddings import ProviderProbeError
+    from mnemostack.embeddings.ollama import OllamaProvider
+
+    class _Resp(BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        return _Resp(jsonlib.dumps({"embeddings": [[0.1] * 4096]}).encode())
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    assert OllamaProvider(model="brand-new-embedder").dimension == 4096
+
+    def refusing_urlopen(req, timeout=None):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr("urllib.request.urlopen", refusing_urlopen)
+    with pytest.raises(ProviderProbeError, match="no fallback dimension"):
+        _ = OllamaProvider(model="brand-new-embedder").dimension
 
 
 def test_gemini_uses_api_key_header_not_query_string(monkeypatch):

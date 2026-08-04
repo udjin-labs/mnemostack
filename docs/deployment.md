@@ -837,6 +837,11 @@ Do not rely on provider defaults for production unless you pin the package versi
 export MNEMOSTACK_PROVIDER=gemini
 export MNEMOSTACK_EMBEDDING_MODEL=text-embedding-004
 export MNEMOSTACK_COLLECTION=production-memory
+# Ollama deployments: the endpoint and the embedding timeout are first-class
+# (flag > MNEMOSTACK_* env/config > native OLLAMA_HOST > localhost); the
+# embedding timeout is independent of the short Qdrant liveness timeout.
+export MNEMOSTACK_OLLAMA_HOST=http://192.0.2.10:11434
+export MNEMOSTACK_EMBEDDING_TIMEOUT=180
 ```
 
 Migration to a new model should use a new collection, not in-place mutation.

@@ -863,10 +863,11 @@ def test_ollama_provider_uses_profile_known_dimension():
 
     assert OllamaProvider(model="qwen3-embedding:8b").dimension == 4096
     assert OllamaProvider(model="qwen3-embedding:0.6b").dimension == 1024
-    # Explicit dimension always wins; legacy table and fallback unchanged.
+    # Explicit dimension always wins; the legacy table is unchanged.
     assert OllamaProvider(model="qwen3-embedding:8b", dimension=7).dimension == 7
     assert OllamaProvider(model="nomic-embed-text").dimension == 768
-    assert OllamaProvider(model="completely-unknown").dimension == 768
+    # A fully unknown model has NO fallback — it probes the live model
+    # (covered in test_embeddings.py::test_ollama_unknown_dimension_is_probed_not_guessed).
 
 
 def test_ollama_provider_resolves_quantized_tag_dimensions():
