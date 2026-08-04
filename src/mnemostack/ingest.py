@@ -594,7 +594,7 @@ class Ingestor:
         # within a TTL: a repointed tag inside the window would stamp fresh
         # fingerprints next to old-space points and corrupt the collection
         # BEFORE any read-side revalidation could notice.
-        self._space_guard = SpaceGuard(vector_store, embedding, recheck_seconds=0.0)
+        self._space_guard = SpaceGuard(vector_store, embedding, recheck_seconds=0.0, fail_closed=True)
 
     # ---- Public API ----
 

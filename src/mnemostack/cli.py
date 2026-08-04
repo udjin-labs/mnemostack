@@ -124,6 +124,17 @@ def _guard_document_space(store: Any, provider: Any) -> tuple[int | None, str | 
             file=sys.stderr,
         )
         return 1, None
+    except Exception as e:  # noqa: BLE001 — indexing is a WRITE path
+        # A check that ERRORS (store scroll failure, a write-capable key
+        # without read rights) means the space cannot be VERIFIED — same
+        # fail-closed rule as an unresolvable fingerprint.
+        print(
+            f"EMBEDDING SPACE UNVERIFIABLE: the collection check failed "
+            f"({type(e).__name__}: {e}) — refusing to index unverified; "
+            "fix store access and retry",
+            file=sys.stderr,
+        )
+        return 1, None
     if status == "mismatch":
         profile = getattr(provider, "profile", None)
         profile_name = getattr(profile, "name", "unknown")
