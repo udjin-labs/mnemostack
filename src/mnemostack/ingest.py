@@ -698,15 +698,15 @@ class Ingestor:
         )
 
     def _flush(self, buffer: list[tuple[str, IngestItem]], stats: IngestStats) -> None:
-        # Guard BEFORE embedding: raises EmbeddingSpaceError when this
-        # provider's space conflicts with the collection's stamped points.
-        self._space_guard.ensure()
-        # Resolved per flush, not per Ingestor lifetime: a long-lived ingestor
-        # must stamp the space of the weights CURRENTLY served (mutable tags
-        # can be repointed under a running process). None only for duck-typed
-        # providers without fingerprint support — their points stay unstamped;
-        # an EXISTING but unresolvable fingerprint raises (fail closed).
-        doc_space_fp = document_space_fingerprint_via(self.embedding)
+        # Guard BEFORE embedding (raises EmbeddingSpaceError on conflict) and
+        # stamp EXACTLY the fingerprint the guard validated — one resolution,
+        # so a tag repointed between "check" and "stamp" cannot pass the
+        # guard under space A and label the points space B. The fallback
+        # resolution only runs for an unguardable pair (store without
+        # scroll), where no verdict exists to race against.
+        doc_space_fp = self._space_guard.ensure()
+        if doc_space_fp is None:
+            doc_space_fp = document_space_fingerprint_via(self.embedding)
         texts = [item.text for _, item in buffer]
         with histogram("mnemostack.ingest.embed_batch_ms"):
             try:

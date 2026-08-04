@@ -57,7 +57,15 @@ class EmbeddingProvider(ABC):
         return self.embed(self.profile.apply_query(text))
 
     def embed_queries(self, texts: list[str]) -> list[list[float]]:
-        """Embed retrieval queries (applies the profile query transform once)."""
+        """Embed retrieval queries (applies the profile query transform once).
+
+        Dispatches through an overridden ``embed_query`` so a provider that
+        implements only the SINGULAR native role keeps it on batch paths too
+        — otherwise expansion retries would silently fall back to neutral
+        vectors. Providers wanting batched native calls override this too.
+        """
+        if type(self).embed_query is not EmbeddingProvider.embed_query:
+            return [self.embed_query(t) for t in texts]
         return self.embed_batch([self.profile.apply_query(t) for t in texts])
 
     def embed_document(self, text: str) -> list[float]:
@@ -65,7 +73,15 @@ class EmbeddingProvider(ABC):
         return self.embed(self.profile.apply_document(text))
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        """Embed documents/chunks for indexing (applies the document transform once)."""
+        """Embed documents/chunks for indexing (applies the document transform once).
+
+        Dispatches through an overridden ``embed_document`` so a provider
+        that implements only the SINGULAR native role keeps it on batch
+        paths too — otherwise `Ingestor` would silently index neutral
+        vectors while markdown indexing used the native ones.
+        """
+        if type(self).embed_document is not EmbeddingProvider.embed_document:
+            return [self.embed_document(t) for t in texts]
         return self.embed_batch([self.profile.apply_document(t) for t in texts])
 
     def _legacy_space_compatible(self) -> bool:

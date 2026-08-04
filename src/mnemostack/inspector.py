@@ -32,6 +32,7 @@ Install the server extra: ``pip install 'mnemostack[server]'``.
 from __future__ import annotations
 
 import logging
+import threading
 from typing import TYPE_CHECKING, Any, cast
 
 try:
@@ -430,10 +431,18 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
     probe_client = _make_probe_client(cfg.qdrant_url, cfg.qdrant_health_timeout)
     _provider: dict[str, Any] = {}
 
+    _provider_lock = threading.Lock()
+
     def _get_provider() -> Any:
-        if "p" not in _provider:
-            _provider["p"] = get_provider(cfg.provider_name, **model_kwargs(cfg.embedding_model))
-        return _provider["p"]
+        # Single-flight: concurrent first searches run in FastAPI worker
+        # threads — without the lock both could construct the provider (for
+        # HuggingFace that can load the model onto the GPU twice).
+        with _provider_lock:
+            if "p" not in _provider:
+                _provider["p"] = get_provider(
+                    cfg.provider_name, **model_kwargs(cfg.embedding_model)
+                )
+            return _provider["p"]
 
     def _embed(text: str) -> list[float]:
         # Operator-typed search text is a retrieval query.

@@ -95,6 +95,14 @@ class HuggingFaceProvider(EmbeddingProvider):
         if not _AVAILABLE:
             raise ImportError("HuggingFaceProvider requires `pip install mnemostack[huggingface]`")
         self.model_name = model
+        # The OLD provider compared the raw string against exact-lowercase
+        # "cls", so "CLS" silently mean-pooled. Normalization changes that
+        # same configuration's semantics — remember it, because such a
+        # config must not adopt a legacy (mean-pooled) collection as if
+        # nothing changed.
+        self._pooling_semantics_changed = (
+            pooling is not None and pooling != pooling.lower() and pooling.lower() == "cls"
+        )
         if pooling is None:
             pooling = (
                 "last"
@@ -137,13 +145,13 @@ class HuggingFaceProvider(EmbeddingProvider):
 
     def _legacy_space_compatible(self) -> bool:
         # Pre-fingerprint mnemostack supported exactly mean (the default)
-        # and explicit cls pooling — an active mean/cls configuration
-        # reproduces those legacy vectors byte-for-byte, so upgrading with
-        # the SAME setting keeps the collection. "last" did not exist then
-        # (the old code silently mean-pooled anything else), so the new
-        # last-token mode — auto-selected or explicit — must never adopt an
+        # and explicit lowercase-"cls" pooling — an active mean/cls
+        # configuration reproduces those legacy vectors byte-for-byte, so
+        # upgrading with the SAME setting keeps the collection. "last" did
+        # not exist then, and an uppercase "CLS" used to silently mean-pool
+        # (normalization changed its meaning) — neither may adopt an
         # unstamped collection.
-        return self.pooling in ("mean", "cls")
+        return self.pooling in ("mean", "cls") and not self._pooling_semantics_changed
 
     def _fingerprint_extras(self) -> dict[str, str]:
         # Pooling changes the vector space for the same model, so it must

@@ -558,7 +558,12 @@ class _SharedQueryEmbedding(EmbeddingProvider):
     #: recurring query's cached vector (from the OLD weights) must not be
     #: searched against the new vectors indefinitely — recomputing the
     #: fingerprint on the hot path would be far costlier than re-embedding
-    #: one query every few minutes.
+    #: one query every few minutes. The memo's expiry is deliberately NOT
+    #: synchronized with guard revalidation: an entry can outlive a guard
+    #: recheck by up to this TTL, which is exactly the staleness the
+    #: read-side guard itself permits between its own revalidations — the
+    #: system-wide freshness bound is max(guard TTL, memo TTL), both 300s,
+    #: never worse than the documented contract.
     _MEMO_TTL_S = 300.0
 
     def __init__(self, embedding: EmbeddingProvider):

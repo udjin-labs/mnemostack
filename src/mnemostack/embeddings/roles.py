@@ -57,6 +57,7 @@ class SpaceGuard:
         self._recheck = recheck_seconds
         self._lock = threading.Lock()
         self._error: str | None = None
+        self._validated: str | None = None
         self._checked_at: float | None = None
 
     def _stale(self) -> bool:
@@ -65,13 +66,19 @@ class SpaceGuard:
             or time.monotonic() - self._checked_at > self._recheck
         )
 
-    def ensure(self) -> None:
-        """Raise :class:`EmbeddingSpaceError` when the pair is incompatible."""
+    def ensure(self) -> str | None:
+        """Raise :class:`EmbeddingSpaceError` when the pair is incompatible.
+
+        Returns the fingerprint the verdict was computed FROM (None when the
+        pair is unguardable/duck-typed). Write paths must stamp exactly this
+        value — re-resolving separately would open a window where the guard
+        validated space A and the stamp records space B.
+        """
         if self._stale():
             with self._lock:
                 if self._stale():
                     try:
-                        error = recall_space_error(self._store, self._provider)
+                        error, validated = _space_verdict(self._store, self._provider)
                     except EmbeddingSpaceError:
                         # Fingerprint unresolvable: fail closed for this
                         # call, cache nothing, retry on the next one.
@@ -83,9 +90,11 @@ class SpaceGuard:
                         )
                     else:
                         self._error = error
+                        self._validated = validated
                         self._checked_at = time.monotonic()
         if self._error:
             raise EmbeddingSpaceError(self._error)
+        return self._validated
 
 
 def embed_query_via(provider: Any, text: str) -> list[float]:
@@ -160,6 +169,17 @@ def recall_space_error(store: Any, provider: Any) -> str | None:
     how the family is meant to search them — that is the contract's
     "adding a query transform never requires reindexing".
     """
+    return _space_verdict(store, provider)[0]
+
+
+def _space_verdict(store: Any, provider: Any) -> tuple[str | None, str | None]:
+    """(error, validated_fingerprint) for one (store, provider) pair.
+
+    The fingerprint is the SAME resolution the verdict was computed from —
+    callers that stamp points must use it verbatim instead of re-resolving,
+    or a tag repointed between two lookups would pass the guard under space
+    A and stamp space B.
+    """
     status, expected, found = check_document_space(store, provider)
     if status == "mismatch":
         return (
@@ -167,7 +187,7 @@ def recall_space_error(store: Any, provider: Any) -> str | None:
             f"the active provider embeds in {expected} — operating on this "
             "collection would cross vectors from different spaces; fix the "
             "embedding config or reindex the collection"
-        )
+        ), expected
     if status == "legacy":
         profile = getattr(provider, "profile", None)
         doc_tf = getattr(profile, "document_transform", None) or {}
@@ -179,7 +199,7 @@ def recall_space_error(store: Any, provider: Any) -> str | None:
                 "before embedding — the stored vectors are not in this space. "
                 "Reindex the collection, or register an identity profile for "
                 "this model to keep the legacy behavior"
-            )
+            ), expected
         legacy_ok = getattr(provider, "_legacy_space_compatible", None)
         if legacy_ok is not None and not legacy_ok():
             return (
@@ -190,8 +210,8 @@ def recall_space_error(store: Any, provider: Any) -> str | None:
                 "old mean default) — the stored vectors are not in this space. "
                 "Reindex the collection, or configure the provider to the "
                 "legacy settings to keep the old behavior"
-            )
-    return None
+            ), expected
+    return None, expected
 
 
 def check_document_space(

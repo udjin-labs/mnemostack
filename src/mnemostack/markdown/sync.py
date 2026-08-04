@@ -172,16 +172,16 @@ def upsert_markdown_chunks(
     # Self-guarding: every invocation (one watched-file batch in the watch
     # loop) rechecks the collection's space BEFORE embedding — the CLI guard
     # at command start cannot cover a tag repointed while the watcher runs.
-    SpaceGuard(store, provider, recheck_seconds=0.0).ensure()
+    # The stamp reuses EXACTLY the fingerprint the guard validated (one
+    # resolution — no check-vs-stamp window); the fallback only runs for an
+    # unguardable store, where no verdict exists to race against.
+    doc_fp = SpaceGuard(store, provider, recheck_seconds=0.0).ensure()
+    if doc_fp is None:
+        doc_fp = document_space_fingerprint_via(provider)
     tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
     existing_ids = set(existing_payloads)
     res = ChunkSyncResult()
     new_chunks = [c for c in chunks if c[0] not in existing_ids]
-    # Stamped on new points AND on payload refreshes: a refresh does not
-    # re-embed, so stamping there is the sanctioned adoption path for legacy
-    # (pre-fingerprint) points — the guard above has already rejected a
-    # genuinely mismatched collection.
-    doc_fp = document_space_fingerprint_via(provider)
 
     def _embed(text: str, source: str) -> list | None:
         vec = embed_document_via(provider, text)

@@ -491,6 +491,59 @@ def test_native_document_override_is_not_legacy_compatible():
     assert _SharedQueryEmbedding(_NativeDoc())._legacy_space_compatible() is False
 
 
+def test_ingestor_stamps_the_guard_validated_fingerprint():
+    # ONE resolution per flush: the stamp must be the exact fingerprint the
+    # guard validated — a second independent lookup would open a window
+    # where the guard passed space A and the stamp recorded space B.
+    class _Flipping(_AsymmetricProvider):
+        def __init__(self):
+            super().__init__()
+            self.resolutions = 0
+
+        def _fingerprint_extras(self):
+            self.resolutions += 1
+            return {"rev": str(self.resolutions)}
+
+    class _Store(_ScrollStore, _RecordingStore):
+        def __init__(self, payloads):
+            _ScrollStore.__init__(self, payloads)
+            _RecordingStore.__init__(self)
+
+    emb = _Flipping()
+    store = _Store([])
+    Ingestor(embedding=emb, vector_store=store).ingest(
+        [IngestItem(text="hello", source="a.md")]
+    )
+    assert emb.resolutions == 1  # guard's resolution IS the stamp's
+    assert EMBEDDING_SPACE_KEY in store.upserts[0][2]
+
+
+def test_batch_role_defaults_dispatch_through_singular_overrides():
+    # A provider overriding only the SINGULAR native role must keep it on
+    # batch paths — not silently fall back to neutral vectors there.
+    class _NativeQuery(_AsymmetricProvider):
+        def embed_query(self, text):
+            self.seen.append(("native_q", text))
+            return [7.0]
+
+    p = _NativeQuery()
+    assert p.embed_queries(["a", "b"]) == [[7.0], [7.0]]
+    assert p.seen == [("native_q", "a"), ("native_q", "b")]
+
+    class _NativeDoc(_AsymmetricProvider):
+        def embed_document(self, text):
+            self.seen.append(("native_d", text))
+            return [8.0]
+
+    d = _NativeDoc()
+    assert d.embed_documents(["x"]) == [[8.0]]
+    assert d.seen == [("native_d", "x")]
+    # No singular override → the batched declarative path is unchanged.
+    plain = _AsymmetricProvider()
+    plain.embed_queries(["a"])
+    assert plain.seen == ["query: a"]
+
+
 def test_ingestor_rechecks_space_on_every_flush():
     # Write-side staleness is unacceptable even within a TTL: a repoint
     # BETWEEN two ingests must be refused at the very next flush.

@@ -2433,30 +2433,43 @@ def cmd_index(args: argparse.Namespace) -> int:
         except EmbeddingSpaceError:
             return False
 
-    _FP_RECHECK_EVERY = 64
-    since_check = 0
-    for cid, text, payload in to_embed:
-        since_check += 1
-        if since_check >= _FP_RECHECK_EVERY:
-            since_check = 0
-            if not _fingerprint_still(doc_fp):
-                print(
-                    "EMBEDDING SPACE CHANGED mid-run (the model tag was "
-                    "repointed or became unresolvable) — aborting. Points "
-                    "written so far are consistent; rerunning will be "
-                    "refused until you --recreate or use a new --collection.",
-                    file=sys.stderr,
-                )
-                return 1
-        vec = embed_document_via(provider, text)
-        if not vec:
-            failed += 1
-            failed_sources.add(payload["source"])
-            continue
-        if doc_fp is not None:
-            payload[EMBEDDING_SPACE_KEY] = doc_fp
-        store.upsert(cid, vec, payload)
-        inserted += 1
+    # Bounded batches with a SANDWICH check: the fingerprint is verified
+    # unchanged both before a group is embedded and again before the group
+    # is committed — per-point writes between two checks would let a tag
+    # repointed right after a check mix up to a whole window of points into
+    # the collection before detection.
+    _FP_BATCH = 64
+
+    def _abort_mid_run() -> int:
+        print(
+            "EMBEDDING SPACE CHANGED mid-run (the model tag was repointed "
+            "or became unresolvable) — aborting. Points written so far are "
+            "consistent; rerunning will be refused until you --recreate or "
+            "use a new --collection.",
+            file=sys.stderr,
+        )
+        return 1
+
+    for start in range(0, len(to_embed), _FP_BATCH):
+        group = to_embed[start : start + _FP_BATCH]
+        if doc_fp is not None and start and not _fingerprint_still(doc_fp):
+            return _abort_mid_run()
+        embedded: list[tuple[str, list[float], dict[str, Any]]] = []
+        for cid, text, payload in group:
+            vec = embed_document_via(provider, text)
+            if not vec:
+                failed += 1
+                failed_sources.add(payload["source"])
+                continue
+            embedded.append((cid, vec, payload))
+        if doc_fp is not None and embedded and not _fingerprint_still(doc_fp):
+            # Nothing from this group has been written yet — clean abort.
+            return _abort_mid_run()
+        for cid, vec, payload in embedded:
+            if doc_fp is not None:
+                payload[EMBEDDING_SPACE_KEY] = doc_fp
+            store.upsert(cid, vec, payload)
+            inserted += 1
 
     refreshed = 0
     foreign_skipped = 0
