@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from ..embeddings.base import EmbeddingProvider
-from ..embeddings.roles import EmbeddingSpaceError, embed_query_via, recall_space_error
+from ..embeddings.roles import SpaceGuard, embed_query_via
 from ..observability import counter, histogram
 from ..observability.recorder import get_recorder
 from ..vector.qdrant import Hit, VectorStore
@@ -316,12 +316,12 @@ class Recaller:
         self.timestamp_key = timestamp_key or derived.get("timestamp_key", "timestamp")
         self.timestamp_format = timestamp_format or derived.get("timestamp_format", "iso")
         self._query_expansion_cache: dict[str, list[str]] = {}
-        # Recall-side embedding-space compatibility: checked once per
-        # instance on the first vector recall; a determined incompatibility
-        # is remembered and re-raised on EVERY recall (silent degradation is
-        # the failure mode this exists to prevent).
-        self._space_checked = False
-        self._space_error: str | None = None
+        # Recall-side embedding-space compatibility: one revalidating guard
+        # per distinct (store, provider) pair, built lazily on the first
+        # vector recall. A determined incompatibility is re-raised on EVERY
+        # recall until it ages out and rechecks (silent degradation is the
+        # failure mode this exists to prevent).
+        self._space_guards: list[SpaceGuard] | None = None
         self._space_lock = threading.Lock()
 
     def _space_check_pairs(self) -> list[tuple[Any, Any]]:
@@ -350,49 +350,26 @@ class Recaller:
         return pairs
 
     def _ensure_space_compat(self) -> None:
-        """Fail loud (once determined, on every recall) when the query and
-        stored vectors would come from different embedding spaces.
+        """Fail loud when the query and stored vectors would come from
+        different embedding spaces.
 
         A profile-transformed query against vectors from another space — or
         stamped with a different fingerprint — degrades retrieval with no
         error at all; that silent failure mode is exactly what the space
-        fingerprints exist to prevent, so recall refuses instead. The check
-        samples each queried collection once per Recaller instance
-        (serialized — the loser of a concurrent first recall waits instead
-        of skipping the verdict). A check that ERRORS (store hiccup) logs,
-        lets the current recall proceed, and is RETRIED on a later recall —
-        a transient outage at first-recall time must not disable the guard
-        for the instance's lifetime.
+        fingerprints exist to prevent, so recall refuses instead. Each
+        distinct pair gets a :class:`SpaceGuard`: conclusive verdicts are
+        cached and REVALIDATED after a bounded interval, so a collection
+        recreated under a different configuration — or healed by a correct
+        reindex — is noticed by a long-lived server without a restart.
         """
-        if not self._space_checked:
+        if self._space_guards is None:
             with self._space_lock:
-                if not self._space_checked:
-                    error: str | None = None
-                    conclusive = True
-                    for store, emb in self._space_check_pairs():
-                        try:
-                            error = recall_space_error(store, emb)
-                        except EmbeddingSpaceError:
-                            # Fingerprint exists but can't be resolved right
-                            # now — the space can't be VERIFIED, so this
-                            # recall fails closed; nothing is cached and the
-                            # next recall retries.
-                            raise
-                        except Exception as exc:  # noqa: BLE001 — store hiccup must not break recall
-                            conclusive = False
-                            logger.warning(
-                                "embedding-space compatibility check inconclusive "
-                                "(%s) — will retry on a later recall",
-                                exc,
-                            )
-                            continue
-                        if error:
-                            break
-                    self._space_error = error
-                    if conclusive or error:
-                        self._space_checked = True
-        if self._space_error:
-            raise EmbeddingSpaceError(self._space_error)
+                if self._space_guards is None:
+                    self._space_guards = [
+                        SpaceGuard(store, emb) for store, emb in self._space_check_pairs()
+                    ]
+        for guard in self._space_guards:
+            guard.ensure()
 
     def _vector_filters(self, filters: dict[str, Any] | None) -> dict[str, Any] | None:
         """Caller filters with the timestamp condition converted into the

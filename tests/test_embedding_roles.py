@@ -383,10 +383,11 @@ def test_ollama_fingerprint_pins_the_pulled_model_digest(monkeypatch):
     p = OllamaProvider(model="qwen3-embedding:8b")
     fp_a = p.document_space_fingerprint()
     assert p._fingerprint_extras() == {"digest": "sha256:aaa"}
-    # A repointed tag (new digest) is a DIFFERENT space.
+    # A repointed tag (new digest) is a DIFFERENT space — noticed by the
+    # SAME long-lived instance (no lifetime cache), not only a fresh one.
     digests["qwen3-embedding:8b"] = "sha256:bbb"
-    fp_b = OllamaProvider(model="qwen3-embedding:8b").document_space_fingerprint()
-    assert fp_a != fp_b
+    assert p.document_space_fingerprint() != fp_a
+    assert OllamaProvider(model="qwen3-embedding:8b").document_space_fingerprint() != fp_a
 
 
 def test_ollama_fingerprint_failure_fails_closed(monkeypatch):
@@ -605,6 +606,61 @@ def test_recaller_guard_retries_after_inconclusive_check():
     # Store recovered: the retried check finds the mismatch and refuses.
     with pytest.raises(EmbeddingSpaceError, match="different spaces"):
         recaller.recall("вопрос")
+
+
+def test_space_guard_revalidates_verdicts_both_directions():
+    # Verdicts age out: a live process must notice both a HEALED collection
+    # (operator reindexed) and a freshly-recreated incompatible one.
+    from mnemostack.embeddings.roles import EmbeddingSpaceError, SpaceGuard
+
+    p = _AsymmetricProvider()
+    store = _ScrollStore([{EMBEDDING_SPACE_KEY: "es1:other"}])
+    guard = SpaceGuard(store, p, recheck_seconds=0.0)
+    with pytest.raises(EmbeddingSpaceError):
+        guard.ensure()
+    store._payloads = [{EMBEDDING_SPACE_KEY: p.document_space_fingerprint()}]
+    guard.ensure()  # healed without a restart
+    store._payloads = [{EMBEDDING_SPACE_KEY: "es1:other"}]
+    with pytest.raises(EmbeddingSpaceError):
+        guard.ensure()  # recreation under a different config is caught
+
+
+def test_vector_retriever_guards_direct_search():
+    # synthesis/library callers hit retrievers WITHOUT a Recaller — the
+    # guard must live at the retriever boundary too.
+    from mnemostack.embeddings.roles import EmbeddingSpaceError
+    from mnemostack.recall.retrievers import VectorRetriever
+
+    class _Vec(_ScrollStore):
+        def search(self, *a, **kw):
+            return []
+
+    arm = VectorRetriever(
+        embedding=_AsymmetricProvider(),
+        vector_store=_Vec([{EMBEDDING_SPACE_KEY: "es1:other"}]),
+    )
+    with pytest.raises(EmbeddingSpaceError, match="different spaces"):
+        arm.search("вопрос")
+
+
+def test_ingestor_stamps_fresh_fingerprint_per_flush():
+    # A long-lived ingestor must stamp the space of the weights CURRENTLY
+    # served, not one resolved at construction (mutable tags repoint).
+    class _MutatingFp(_AsymmetricProvider):
+        rev = "a"
+
+        def _fingerprint_extras(self):
+            return {"rev": self.rev}
+
+    emb = _MutatingFp()
+    store = _RecordingStore()
+    ingestor = Ingestor(embedding=emb, vector_store=store)
+    ingestor.ingest([IngestItem(text="one", source="a.md")])
+    emb.rev = "b"
+    ingestor.ingest([IngestItem(text="two", source="a.md")])
+    fp_first = store.upserts[0][2][EMBEDDING_SPACE_KEY]
+    fp_second = store.upserts[1][2][EMBEDDING_SPACE_KEY]
+    assert fp_first != fp_second
 
 
 def test_recaller_allows_matching_and_identity_legacy_spaces():

@@ -54,8 +54,8 @@ from mnemostack.config import model_kwargs
 from mnemostack.embeddings import get_provider
 from mnemostack.embeddings.roles import (
     EmbeddingSpaceError,
+    SpaceGuard,
     embed_query_via,
-    recall_space_error,
 )
 from mnemostack.server import ServerConfig, _make_probe_client
 from mnemostack.vector import VectorStore
@@ -439,26 +439,23 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
         # Operator-typed search text is a retrieval query.
         return embed_query_via(_get_provider(), text)
 
-    _space_verdict: dict[str, str | None] = {}
+    _space_guard: dict[str, SpaceGuard] = {}
 
     def _space_error_cached() -> str | None:
         # The inspector searches the store directly (no Recaller), so it
         # needs its own embedding-space guard — silently misleading results
-        # in an operator debugging tool are worse than an error. Conclusive
-        # verdicts are cached per process; an inconclusive check (store
-        # hiccup) lets the search proceed and is retried next time.
-        if "verdict" in _space_verdict:
-            return _space_verdict["verdict"]
+        # in an operator debugging tool are worse than an error. SpaceGuard
+        # semantics: conclusive verdicts are cached and revalidated after a
+        # bounded interval (a recreated collection is noticed without a
+        # restart); an unresolvable fingerprint fails THIS search closed and
+        # retries; a store hiccup lets the search proceed and retries.
+        if "g" not in _space_guard:
+            _space_guard["g"] = SpaceGuard(store, _get_provider())
         try:
-            verdict = recall_space_error(store, _get_provider())
+            _space_guard["g"].ensure()
         except EmbeddingSpaceError as e:
-            # Fingerprint unresolvable: fail closed for THIS search (results
-            # could silently cross spaces), retry on the next one.
             return str(e)
-        except Exception:  # noqa: BLE001 — store hiccup must not block the tool
-            return None
-        _space_verdict["verdict"] = verdict
-        return verdict
+        return None
 
     app = FastAPI(title="mnemostack inspector", version=__version__)
 

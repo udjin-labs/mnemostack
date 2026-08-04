@@ -587,10 +587,6 @@ class Ingestor:
         self.window_separator = window_separator
         self.enrich = enrich
         self._seen = _SeenCache(seen_cache_size) if skip_seen else None
-        # Stamped on every ingested point so mixed embedding spaces in one
-        # collection are detectable. None for duck-typed legacy providers
-        # without fingerprint support — their points simply stay unstamped.
-        self._doc_space_fp = document_space_fingerprint_via(embedding)
 
     # ---- Public API ----
 
@@ -694,6 +690,12 @@ class Ingestor:
         )
 
     def _flush(self, buffer: list[tuple[str, IngestItem]], stats: IngestStats) -> None:
+        # Resolved per flush, not per Ingestor lifetime: a long-lived ingestor
+        # must stamp the space of the weights CURRENTLY served (mutable tags
+        # can be repointed under a running process). None only for duck-typed
+        # providers without fingerprint support — their points stay unstamped;
+        # an EXISTING but unresolvable fingerprint raises (fail closed).
+        doc_space_fp = document_space_fingerprint_via(self.embedding)
         texts = [item.text for _, item in buffer]
         with histogram("mnemostack.ingest.embed_batch_ms"):
             try:
@@ -723,8 +725,8 @@ class Ingestor:
             # (the write-side of the isolation boundary) — never by metadata or
             # an enrich hook. Drop any planted value so it can't be spoofed.
             payload.pop("tenant_id", None)
-            if self._doc_space_fp is not None:
-                payload[EMBEDDING_SPACE_KEY] = self._doc_space_fp
+            if doc_space_fp is not None:
+                payload[EMBEDDING_SPACE_KEY] = doc_space_fp
             payload.setdefault("indexed_at", datetime.now(timezone.utc).isoformat())
             tags = _item_tags(item)
             if tags:

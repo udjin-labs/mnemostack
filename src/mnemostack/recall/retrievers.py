@@ -28,7 +28,7 @@ from typing import Any, cast
 from urllib.parse import quote
 
 from ..embeddings.base import EmbeddingProvider
-from ..embeddings.roles import embed_document_via, embed_query_via
+from ..embeddings.roles import SpaceGuard, embed_document_via, embed_query_via
 from ..llm.base import LLMProvider
 from ..observability import counter
 from ..vector import VectorStore
@@ -122,6 +122,10 @@ class VectorRetriever(Retriever):
     ):
         self.embedding = embedding
         self.vector_store = vector_store
+        # Every vector-backed retriever carries its own revalidating guard so
+        # DIRECT use (synthesis, library callers) is protected too, not only
+        # the Recaller path. TTL-cached: negligible per-search cost.
+        self._space_guard = SpaceGuard(vector_store, embedding)
         #: Payload schema of the collection — configurable so recall works
         #: over a pre-existing collection's own field names and timestamp
         #: domain (same knobs as ``bm25_docs_from_qdrant``).
@@ -140,6 +144,7 @@ class VectorRetriever(Retriever):
     def search(
         self, query, limit=20, filters=None, as_of=None, include_invalidated=False, tenant=None
     ):
+        self._space_guard.ensure()
         vec = embed_query_via(self.embedding, query)
         if not vec:
             return []
@@ -449,6 +454,7 @@ class QdrantTextRetriever(Retriever):
     ):
         self.embedding = embedding
         self.vector_store = vector_store
+        self._space_guard = SpaceGuard(vector_store, embedding)
         self.text_key = text_key
         # The field the MatchText gate runs on. Distinct from text_key on
         # purpose: an arm gating on a title/heading field must still RETURN
@@ -493,6 +499,7 @@ class QdrantTextRetriever(Retriever):
         tokens = self._gate_tokens(query)
         if not tokens:
             return []
+        self._space_guard.ensure()
         vec = embed_query_via(self.embedding, query)
         if not vec:
             return []
@@ -1006,6 +1013,7 @@ class HyDERetriever(Retriever):
         self.llm = llm
         self.embedding = embedding
         self.vector_store = vector_store
+        self._space_guard = SpaceGuard(vector_store, embedding)
         self.max_tokens = max_tokens
         self.text_key = text_key
         self.timestamp_key = timestamp_key
@@ -1024,6 +1032,9 @@ class HyDERetriever(Retriever):
             return None
 
     def search(self, query, limit=20, filters=None):
+        # Guard BEFORE the LLM call — no point paying for a hypothetical
+        # that cannot be embedded into a compatible space.
+        self._space_guard.ensure()
         hypo = self._generate_hypothetical(query)
         if not hypo:
             return []
@@ -1776,6 +1787,7 @@ class TemporalRetriever(Retriever):
             )
         self.embedding = embedding
         self.vector_store = vector_store
+        self._space_guard = SpaceGuard(vector_store, embedding)
         self.extractor = extractor
         self.text_key = text_key
         self.timestamp_key = timestamp_key
@@ -1908,6 +1920,7 @@ class TemporalRetriever(Retriever):
                     exc,
                 )
 
+        self._space_guard.ensure()
         vec = embed_query_via(self.embedding, query)
         if not vec:
             return []

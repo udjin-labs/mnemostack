@@ -5,7 +5,30 @@ Requires: pip install mnemostack[huggingface]
 
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
+
 from .base import EmbeddingProvider
+
+
+def _local_weights_signature(path: Path) -> str:
+    """Cheap identity of a local weights directory for space fingerprints.
+
+    A local path has no hub commit hash, yet its weights can be swapped in
+    place while provider/model/pooling/dimension all stay equal. Hashing
+    gigabytes of weights on every startup is not viable, so this pins the
+    config bytes plus each weight file's (name, size) — catching config/
+    architecture changes and practically every weight swap. Residual: an
+    in-place same-size weight edit is not detected.
+    """
+    h = hashlib.sha256()
+    config = path / "config.json"
+    if config.is_file():
+        h.update(config.read_bytes())
+    for f in sorted(path.iterdir()):
+        if f.suffix in (".safetensors", ".bin", ".pt") and f.is_file():
+            h.update(f"{f.name}:{f.stat().st_size}".encode())
+    return h.hexdigest()[:32]
 
 try:
     import torch
@@ -57,8 +80,13 @@ class HuggingFaceProvider(EmbeddingProvider):
         self.model = AutoModel.from_pretrained(model, revision=revision).to(self.device).eval()
         # The RESOLVED weights identity: a mutable branch label ("main") can
         # be repointed to different weights, so the space fingerprint pins
-        # the commit hash when the hub provides one.
+        # the commit hash when the hub provides one — and a content signature
+        # when the model is a LOCAL directory (no hub hash exists there, yet
+        # the weights at the same path can be replaced).
         self.revision = getattr(self.model.config, "_commit_hash", None) or revision
+        model_dir = Path(model)
+        if self.revision is None and model_dir.is_dir():
+            self.revision = f"local:{_local_weights_signature(model_dir)}"
         # Infer dimension from a probe embedding
         self._dim = len(self.embed("dim probe"))
 

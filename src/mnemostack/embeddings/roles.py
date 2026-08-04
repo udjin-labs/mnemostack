@@ -11,6 +11,8 @@ role methods, so the fallback only fires for objects that never had them.
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from itertools import islice
 from typing import Any
 
@@ -21,6 +23,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "EMBEDDING_SPACE_KEY",
     "EmbeddingSpaceError",
+    "SpaceGuard",
     "check_document_space",
     "document_space_fingerprint_via",
     "embed_document_via",
@@ -33,6 +36,56 @@ __all__ = [
 
 class EmbeddingSpaceError(RuntimeError):
     """Recalling or indexing would cross incompatible embedding spaces."""
+
+
+class SpaceGuard:
+    """Lazy, revalidating embedding-space guard for one (store, provider) pair.
+
+    ``ensure()`` is cheap after the first call: a conclusive verdict is
+    cached and revalidated after ``recheck_seconds``. Verdicts age out on
+    purpose — a live process must notice a recreated/reindexed collection
+    (both a NEW mismatch and a HEALED one) without a restart. This is the
+    guard's freshness contract: incompatibility introduced under a running
+    process is detected at the next revalidation or process start, not
+    instantaneously. Fingerprint-resolution failures raise and are never
+    cached (fail closed, retried); store hiccups log, fail open and retry.
+    """
+
+    def __init__(self, store: Any, provider: Any, *, recheck_seconds: float = 300.0):
+        self._store = store
+        self._provider = provider
+        self._recheck = recheck_seconds
+        self._lock = threading.Lock()
+        self._error: str | None = None
+        self._checked_at: float | None = None
+
+    def _stale(self) -> bool:
+        return (
+            self._checked_at is None
+            or time.monotonic() - self._checked_at > self._recheck
+        )
+
+    def ensure(self) -> None:
+        """Raise :class:`EmbeddingSpaceError` when the pair is incompatible."""
+        if self._stale():
+            with self._lock:
+                if self._stale():
+                    try:
+                        error = recall_space_error(self._store, self._provider)
+                    except EmbeddingSpaceError:
+                        # Fingerprint unresolvable: fail closed for this
+                        # call, cache nothing, retry on the next one.
+                        raise
+                    except Exception as exc:  # noqa: BLE001 — store hiccup: fail open, retry
+                        logger.warning(
+                            "embedding-space check inconclusive (%s) — will retry",
+                            exc,
+                        )
+                    else:
+                        self._error = error
+                        self._checked_at = time.monotonic()
+        if self._error:
+            raise EmbeddingSpaceError(self._error)
 
 
 def embed_query_via(provider: Any, text: str) -> list[float]:

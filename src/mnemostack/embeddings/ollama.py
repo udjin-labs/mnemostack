@@ -34,9 +34,6 @@ class OllamaProvider(EmbeddingProvider):
         self.model = model
         self.host = host.rstrip("/")
         self.timeout = timeout
-        # Digest of the pulled model (mutable tags like :latest can be
-        # repointed) — resolved lazily on first fingerprint use, cached.
-        self._digest: str | None = None
         # Profile tables know newer model families (e.g. qwen3-embedding);
         # the blind 768 fallback for a fully unknown model is a known trap
         # slated for replacement by capability discovery.
@@ -71,26 +68,27 @@ class OllamaProvider(EmbeddingProvider):
 
         A repointed tag (`:latest`, re-pushed size tag) can serve different
         weights under the same model string; the digest from `/api/tags`
-        disambiguates. Resolved once per instance and REQUIRED — every
-        fingerprint consumer needs a reachable provider moments later anyway,
-        and an optional digest would give the same configuration two
-        different fingerprints depending on reachability.
+        disambiguates. Re-resolved on EVERY call on purpose — a long-lived
+        process (watch daemon, server) must fingerprint the weights CURRENTLY
+        pulled, not ones cached at construction; callers bound the frequency
+        (per index batch / guard revalidation). REQUIRED, never optional —
+        an optional digest would give one configuration two different
+        fingerprints depending on reachability. Residual: a tag repointed
+        between this lookup and the embedding call itself is a race no
+        Ollama API can close atomically; the next batch/revalidation
+        detects it.
         """
-        if self._digest is None:
-            url = f"{self.host}/api/tags"
-            with urllib.request.urlopen(url, timeout=self.timeout) as resp:
-                data = json.loads(resp.read())
-            wanted = {self.model, f"{self.model}:latest"}
-            for entry in data.get("models", []):
-                if entry.get("name") in wanted and entry.get("digest"):
-                    self._digest = str(entry["digest"])
-                    break
-            else:
-                raise RuntimeError(
-                    f"model {self.model!r} not found on the Ollama host — "
-                    "pull it before indexing/resolving its embedding space"
-                )
-        return {"digest": self._digest}
+        url = f"{self.host}/api/tags"
+        with urllib.request.urlopen(url, timeout=self.timeout) as resp:
+            data = json.loads(resp.read())
+        wanted = {self.model, f"{self.model}:latest"}
+        for entry in data.get("models", []):
+            if entry.get("name") in wanted and entry.get("digest"):
+                return {"digest": str(entry["digest"])}
+        raise RuntimeError(
+            f"model {self.model!r} not found on the Ollama host — "
+            "pull it before indexing/resolving its embedding space"
+        )
 
     @property
     def dimension(self) -> int:
