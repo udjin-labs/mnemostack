@@ -49,7 +49,7 @@ bit-identical to the primitives. Transforms touch only inference input:
 stored text, chunk ids, BM25 input and citations always keep the original
 document text.
 
-Critical constraint: **use the same provider/model for indexing and searching**. Mixing dimensions or models breaks similarity scores silently. Indexed points are stamped with a *document-space fingerprint* (provider + model + profile + document transform + dimension), and the index commands refuse a collection whose stored fingerprint differs — dimension alone can't catch two different models sharing a size.
+Critical constraint: **use the same provider/model for indexing and searching**. Mixing dimensions or models breaks similarity scores silently. Indexed points are stamped with a *document-space fingerprint* (provider + model + document transform + dimension + provider inference knobs; profile name/version are metadata and never hashed), and the index commands refuse a collection whose stored fingerprint differs — dimension alone can't catch two different models sharing a size.
 
 ### Vector store
 

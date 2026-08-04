@@ -135,6 +135,16 @@ def test_multilingual_e5_instruct_gets_its_own_profile():
     assert known_dimension("huggingface", "intfloat/multilingual-e5-large-instruct") == 1024
 
 
+def test_e5_mistral_instruct_does_not_fall_through_to_plain_e5():
+    # `*/e5-*` would otherwise hand this instruct model the plain
+    # query:/passage: convention it was never trained with.
+    profile = resolve_profile("huggingface", "intfloat/e5-mistral-7b-instruct")
+    assert profile.name == "e5-instruct"
+    assert profile.apply_document("текст") == "текст"
+    assert profile.apply_query("q").startswith("Instruct: ")
+    assert known_dimension("huggingface", "intfloat/e5-mistral-7b-instruct") == 4096
+
+
 def test_instruct_separator_is_part_of_the_spec():
     qwen_style = apply_transform({"kind": "instruct", "instruction": "I"}, "q")
     e5_style = apply_transform(
@@ -278,12 +288,18 @@ def test_document_fingerprint_changes_with_model_and_dimension():
     assert document_space_fingerprint("gemini", "qwen3-embedding:8b", _qwen(), 4096) != base
 
 
-def test_document_fingerprint_distinguishes_profiles_with_same_doc_transform():
-    # qwen3 and identity both leave documents untouched, but the space is
-    # trained differently — profile identity must separate them.
+def test_document_fingerprint_is_content_based_not_profile_identity():
+    # A vector is fully determined by (provider, model, transformed input,
+    # knobs). qwen3 and identity both embed documents unchanged, so their
+    # DOCUMENT spaces are the same — a profile rename/introduction must not
+    # demand a reindex of byte-identical vectors.
     a = document_space_fingerprint("ollama", "m", _qwen(), 4096)
     b = document_space_fingerprint("ollama", "m", IDENTITY_PROFILE, 4096)
-    assert a != b
+    assert a == b
+    # ...while their QUERY pipelines differ (instruct vs none).
+    qa = query_profile_fingerprint("ollama", "m", _qwen(), 4096)
+    qb = query_profile_fingerprint("ollama", "m", IDENTITY_PROFILE, 4096)
+    assert qa != qb
 
 
 def test_document_fingerprint_ignores_query_transform():
@@ -311,10 +327,15 @@ def test_document_transform_change_changes_document_fingerprint():
     )
 
 
-def test_profile_version_bump_changes_fingerprints():
+def test_profile_name_and_version_never_change_fingerprints():
+    # name/version are registry metadata; only transform CONTENT is hashed —
+    # a version bump on an unchanged transform must not invalidate anything.
     v1 = EmbeddingProfile(name="p", version=1, model_patterns=())
-    v2 = EmbeddingProfile(name="p", version=2, model_patterns=())
-    assert document_space_fingerprint("h", "m", v1, 768) != document_space_fingerprint(
+    v2 = EmbeddingProfile(name="renamed", version=2, model_patterns=())
+    assert document_space_fingerprint("h", "m", v1, 768) == document_space_fingerprint(
+        "h", "m", v2, 768
+    )
+    assert query_profile_fingerprint("h", "m", v1, 768) == query_profile_fingerprint(
         "h", "m", v2, 768
     )
 

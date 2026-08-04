@@ -17,13 +17,19 @@ from .profiles import EMBEDDING_SPACE_KEY
 
 __all__ = [
     "EMBEDDING_SPACE_KEY",
+    "EmbeddingSpaceError",
     "check_document_space",
     "document_space_fingerprint_via",
     "embed_document_via",
     "embed_documents_via",
     "embed_queries_via",
     "embed_query_via",
+    "recall_space_error",
 ]
+
+
+class EmbeddingSpaceError(RuntimeError):
+    """Recalling or indexing would cross incompatible embedding spaces."""
 
 
 def embed_query_via(provider: Any, text: str) -> list[float]:
@@ -64,6 +70,46 @@ def document_space_fingerprint_via(provider: Any) -> str | None:
     return method() if method is not None else None
 
 
+def recall_space_error(store: Any, provider: Any) -> str | None:
+    """Explain why recalling with *provider* against *store* would cross
+    embedding spaces — or None when compatible (or not determinable).
+
+    The recall-side counterpart of the index guard: a mismatch means query
+    vectors and stored vectors come from different spaces, and a legacy
+    (unstamped) collection under a DOCUMENT-transforming profile means the
+    stored vectors were embedded from raw text while the profile's queries
+    target transformed documents. Both degrade retrieval silently, so recall
+    should fail loud with this message instead.
+
+    A query-only transform (e.g. Qwen3's instruction) is NOT an
+    incompatibility: legacy raw document vectors are byte-identical to what
+    the active profile would produce, and the transformed query is exactly
+    how the family is meant to search them — that is the contract's
+    "adding a query transform never requires reindexing".
+    """
+    status, expected, found = check_document_space(store, provider)
+    if status == "mismatch":
+        return (
+            f"collection points are stamped with embedding space {found}, but "
+            f"the active provider embeds in {expected} — recall would compare "
+            "vectors from different spaces; fix the embedding config or "
+            "reindex the collection"
+        )
+    if status == "legacy":
+        profile = getattr(provider, "profile", None)
+        doc_tf = getattr(profile, "document_transform", None) or {}
+        if doc_tf.get("kind", "identity") != "identity":
+            return (
+                "existing points carry no embedding-space fingerprint (embedded "
+                "from raw text by an older mnemostack), but the active profile "
+                f"'{getattr(profile, 'name', 'unknown')}' transforms documents "
+                "before embedding — the stored vectors are not in this space. "
+                "Reindex the collection, or register an identity profile for "
+                "this model to keep the legacy behavior"
+            )
+    return None
+
+
 def check_document_space(
     store: Any, provider: Any, *, sample_size: int = 16
 ) -> tuple[str, str | None, str | None]:
@@ -72,12 +118,15 @@ def check_document_space(
     Samples up to ``sample_size`` points (lazy scroll — never loads the
     collection). Returns ``(status, expected, found)`` where status is:
 
-    - ``"match"`` — a sampled point carries the current fingerprint;
+    - ``"match"`` — every sampled point carries the current fingerprint;
     - ``"mismatch"`` — a sampled point was embedded under a DIFFERENT
       document space; indexing must stop (recreate or use a new collection);
-    - ``"legacy"`` — points exist but none of the sample carries a
-      fingerprint (indexed before fingerprints existed); proceeding adopts
-      the current space for new points;
+    - ``"legacy"`` — the sample contains at least one point WITHOUT a
+      fingerprint (indexed before fingerprints existed) and no mismatching
+      one. Legacy dominates match on purpose: an unstamped point may have
+      been embedded from raw text, so under a document-transforming profile
+      the caller must treat the collection as legacy even when other points
+      already match;
     - ``"empty"`` — no points yet;
     - ``"unknown"`` — nothing to compare (provider without fingerprints or
       store without scroll).
@@ -101,17 +150,19 @@ def check_document_space(
     if expected is None or scroll is None:
         return "unknown", expected, None
     sampled = 0
+    unstamped = 0
     found: str | None = None
     for hit in islice(scroll(), sample_size):
         sampled += 1
         fp = (getattr(hit, "payload", None) or {}).get(EMBEDDING_SPACE_KEY)
         if fp is None:
+            unstamped += 1
             continue
         found = str(fp)
         if found != expected:
             return "mismatch", expected, found
     if sampled == 0:
         return "empty", expected, None
-    if found is None:
-        return "legacy", expected, None
+    if unstamped:
+        return "legacy", expected, found
     return "match", expected, found

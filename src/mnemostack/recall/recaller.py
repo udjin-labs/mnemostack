@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from ..embeddings.base import EmbeddingProvider
-from ..embeddings.roles import embed_query_via
+from ..embeddings.roles import EmbeddingSpaceError, embed_query_via, recall_space_error
 from ..observability import counter, histogram
 from ..observability.recorder import get_recorder
 from ..vector.qdrant import Hit, VectorStore
@@ -315,6 +316,58 @@ class Recaller:
         self.timestamp_key = timestamp_key or derived.get("timestamp_key", "timestamp")
         self.timestamp_format = timestamp_format or derived.get("timestamp_format", "iso")
         self._query_expansion_cache: dict[str, list[str]] = {}
+        # Recall-side embedding-space compatibility: checked once per
+        # instance on the first vector recall; a determined incompatibility
+        # is remembered and re-raised on EVERY recall (silent degradation is
+        # the failure mode this exists to prevent).
+        self._space_checked = False
+        self._space_error: str | None = None
+        self._space_lock = threading.Lock()
+
+    def _space_check_pair(self) -> tuple[Any, Any] | None:
+        """The (store, provider) pair to space-check, or None.
+
+        The legacy path holds them directly; in retrievers mode the Recaller
+        itself often has neither, so the first vector-backed retriever
+        (embedding + vector_store attributes) speaks for the collection —
+        all built-in vector arms share one store and one provider.
+        """
+        if self.embedding is not None and self.vector is not None:
+            return self.vector, self.embedding
+        for retriever in self.retrievers:
+            store = getattr(retriever, "vector_store", None)
+            emb = getattr(retriever, "embedding", None)
+            if store is not None and emb is not None:
+                return store, emb
+        return None
+
+    def _ensure_space_compat(self) -> None:
+        """Fail loud (once determined, on every recall) when the query and
+        stored vectors would come from different embedding spaces.
+
+        A profile-transformed query against vectors from another space — or
+        stamped with a different fingerprint — degrades retrieval with no
+        error at all; that silent failure mode is exactly what the space
+        fingerprints exist to prevent, so recall refuses instead. The check
+        samples the collection once per Recaller instance (serialized — the
+        loser of a concurrent first recall waits instead of skipping the
+        verdict); a check that ERRORS (store hiccup, custom store without
+        scroll semantics) logs and never blocks recall.
+        """
+        if not self._space_checked:
+            with self._space_lock:
+                if not self._space_checked:
+                    pair = self._space_check_pair()
+                    if pair is not None:
+                        try:
+                            self._space_error = recall_space_error(pair[0], pair[1])
+                        except Exception as exc:  # noqa: BLE001 — a broken check must not break recall
+                            logger.warning(
+                                "embedding-space compatibility check skipped (%s)", exc
+                            )
+                    self._space_checked = True
+        if self._space_error:
+            raise EmbeddingSpaceError(self._space_error)
 
     def _vector_filters(self, filters: dict[str, Any] | None) -> dict[str, Any] | None:
         """Caller filters with the timestamp condition converted into the
@@ -492,6 +545,8 @@ class Recaller:
         as_of: str | None = None,
         tenant: str | None = None,
     ) -> list[RecallResult]:
+        # Before ANY path embeds the query — retrievers mode included.
+        self._ensure_space_compat()
         # Retrievers mode: fuse N arbitrary ranked lists
         if self.retrievers:
             return self._recall_via_retrievers(

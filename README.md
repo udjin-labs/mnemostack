@@ -857,7 +857,8 @@ register_embedding_profile("ollama", EmbeddingProfile(
 ```
 
 Indexed points are stamped with a document-space fingerprint (provider +
-model + profile + document transform + dimension); `mnemostack index` /
+model + document transform + dimension + provider inference knobs —
+profile name/version are metadata and never hashed); `mnemostack index` /
 `index-markdown` refuse a collection embedded under a different space, and
 `doctor` reports the active profile and fingerprint.
 

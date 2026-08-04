@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from mnemostack.embeddings.base import EmbeddingProvider
 from mnemostack.embeddings.profiles import EMBEDDING_SPACE_KEY, EmbeddingProfile
 from mnemostack.embeddings.roles import (
@@ -131,11 +133,14 @@ def test_guard_samples_lazily():
     assert store.scroll_batches <= 5  # islice stops the scroll, no full scan
 
 
-def test_guard_mixed_legacy_and_stamped_sample_is_match():
+def test_guard_mixed_legacy_and_stamped_sample_is_legacy():
+    # Legacy dominates match: the unstamped point may be a raw-text vector,
+    # so a document-transforming profile must still see "legacy" and refuse —
+    # otherwise --refresh-payloads would launder that raw vector.
     p = _AsymmetricProvider()
     fp = p.document_space_fingerprint()
-    store = _ScrollStore([{"text": "legacy"}, {EMBEDDING_SPACE_KEY: fp}])
-    assert check_document_space(store, p)[0] == "match"
+    store = _ScrollStore([{EMBEDDING_SPACE_KEY: fp}, {"text": "legacy"}])
+    assert check_document_space(store, p)[0] == "legacy"
 
 
 def test_cli_guard_refuses_legacy_collection_under_document_transform():
@@ -359,6 +364,144 @@ def test_shared_query_embedding_forwards_profile_and_fingerprints():
     assert inner.seen == ["query: надо найти"]
     shim.embed_query("надо найти")
     assert inner.seen == ["query: надо найти"]  # memo hit, no second call
+
+
+def test_shared_query_embedding_delegates_native_role_overrides():
+    # An inner provider with NATIVE query/document task types must have its
+    # own role methods called (memoized), not be routed around via the base
+    # transform + neutral embed.
+    from mnemostack.recall.retrievers import _SharedQueryEmbedding
+
+    class _NativeRoles(EmbeddingProvider):
+        def __init__(self):
+            self.calls: list[tuple[str, str]] = []
+
+        def embed(self, text):
+            self.calls.append(("embed", text))
+            return [1.0]
+
+        def embed_batch(self, texts):
+            return [self.embed(t) for t in texts]
+
+        def embed_query(self, text):
+            self.calls.append(("embed_query", text))
+            return [2.0]
+
+        def embed_document(self, text):
+            self.calls.append(("embed_document", text))
+            return [3.0]
+
+        @property
+        def dimension(self):
+            return 1
+
+        @property
+        def name(self):
+            return "custom:native-task-types"
+
+    inner = _NativeRoles()
+    shim = _SharedQueryEmbedding(inner)
+    assert shim.embed_query("q") == [2.0]
+    assert shim.embed_query("q") == [2.0]  # memo hit
+    assert inner.calls == [("embed_query", "q")]
+    assert shim.embed_document("q") == [3.0]  # role-tagged key: no collision
+    assert shim.embed("q") == [1.0]
+    assert inner.calls == [
+        ("embed_query", "q"),
+        ("embed_document", "q"),
+        ("embed", "q"),
+    ]
+
+
+def test_recaller_refuses_recall_across_embedding_spaces():
+    # A legacy (unstamped) collection under a transforming profile — or a
+    # stamped mismatch — must fail loud on recall, not degrade silently.
+    from mnemostack.embeddings.roles import EmbeddingSpaceError
+    from mnemostack.recall.recaller import Recaller
+
+    class _Vec(_ScrollStore):
+        def search(self, *a, **kw):
+            return []
+
+    provider = _AsymmetricProvider()
+    recaller = Recaller(
+        embedding_provider=provider,
+        vector_store=_Vec([{"text": "legacy raw point"}]),
+    )
+    with pytest.raises(EmbeddingSpaceError, match="transforms documents"):
+        recaller.recall("вопрос")
+    # The determined incompatibility is re-raised on every recall.
+    with pytest.raises(EmbeddingSpaceError):
+        recaller.recall("вопрос")
+
+    mismatch = Recaller(
+        embedding_provider=provider,
+        vector_store=_Vec([{EMBEDDING_SPACE_KEY: "es1:other"}]),
+    )
+    with pytest.raises(EmbeddingSpaceError, match="different spaces"):
+        mismatch.recall("вопрос")
+
+
+def test_recaller_guard_covers_retrievers_mode():
+    # The primary server/MCP construction passes vector arms as retrievers
+    # (often with no Recaller-level embedding/vector at all) — the space
+    # check must derive the pair from the arm, not silently skip.
+    from mnemostack.embeddings.roles import EmbeddingSpaceError
+    from mnemostack.recall.recaller import Recaller
+    from mnemostack.recall.retrievers import VectorRetriever
+
+    class _Vec(_ScrollStore):
+        def search(self, *a, **kw):
+            return []
+
+    arm = VectorRetriever(
+        embedding=_AsymmetricProvider(),
+        vector_store=_Vec([{"text": "legacy raw point"}]),
+    )
+    recaller = Recaller(retrievers=[arm])
+    with pytest.raises(EmbeddingSpaceError, match="transforms documents"):
+        recaller.recall("вопрос")
+
+
+def test_recaller_allows_matching_and_identity_legacy_spaces():
+    from mnemostack.recall.recaller import Recaller
+
+    class _Vec(_ScrollStore):
+        def search(self, *a, **kw):
+            return []
+
+    provider = _AsymmetricProvider()
+    ok = Recaller(
+        embedding_provider=provider,
+        vector_store=_Vec([{EMBEDDING_SPACE_KEY: provider.document_space_fingerprint()}]),
+    )
+    assert ok.recall("вопрос") == []
+
+    # Identity profile against a legacy collection: raw == transformed.
+    class _Identity(_AsymmetricProvider):
+        @property
+        def name(self):
+            return "ollama:nomic-embed-text"
+
+    legacy_ok = Recaller(
+        embedding_provider=_Identity(),
+        vector_store=_Vec([{"text": "legacy raw point"}]),
+    )
+    assert legacy_ok.recall("вопрос") == []
+
+    # Query-only transform (qwen3) against a legacy collection is the
+    # contract's "adding a query transform never requires reindexing" —
+    # raw document vectors are exactly what this profile produces.
+    class _Qwen(_AsymmetricProvider):
+        @property
+        def name(self):
+            return "ollama:qwen3-embedding:8b"
+
+    qwen_legacy_ok = Recaller(
+        embedding_provider=_Qwen(),
+        vector_store=_Vec([{"text": "legacy raw point"}]),
+    )
+    assert qwen_legacy_ok.recall("вопрос") == []
 
 
 def test_shared_query_embedding_with_instance_profile_override():

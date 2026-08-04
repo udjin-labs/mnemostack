@@ -533,13 +533,15 @@ class _SharedQueryEmbedding(EmbeddingProvider):
     one. Scoped to the factory's arm set on purpose — nothing outside the
     multi-field feature changes behavior.
 
-    Role note: the arms reach this wrapper through ``embed_query`` (inherited
-    from the base class), which applies the profile transform exactly once and
-    then lands in the memoized ``embed`` below — so the memo key is the
-    already-transformed inference input. That keeps the memo role-safe without
-    a role component in the key: one wrapper instance serves one provider and
-    one profile, and different roles produce different transformed inputs
-    whenever the profile distinguishes them.
+    Role note: the arms reach this wrapper through ``embed_query``. For a
+    declaratively-profiled inner provider that inherits the base role
+    methods, the transform applies exactly once (in the inherited
+    ``embed_query``) and lands in the memoized ``embed`` — the memo key is
+    the already-transformed inference input. An inner provider that
+    OVERRIDES a role method (native backend query/document task types) is
+    delegated to directly instead, memoized under a role-tagged key —
+    otherwise the base implementation would route around its override and
+    embed queries in the wrong mode.
     """
 
     _MAX_ENTRIES = 32
@@ -547,22 +549,53 @@ class _SharedQueryEmbedding(EmbeddingProvider):
     def __init__(self, embedding: EmbeddingProvider):
         self._embedding = embedding
         self._lock = threading.Lock()
-        self._memo: dict[str, list[float]] = {}
-        self._inflight: dict[str, tuple[threading.Event, list[list[float]]]] = {}
+        self._memo: dict[Any, list[float]] = {}
+        self._inflight: dict[Any, tuple[threading.Event, list[list[float]]]] = {}
 
     def embed(self, text: str) -> list[float]:
+        return self._single_flight(text, lambda: self._embedding.embed(text))
+
+    def _inner_overrides(self, name: str) -> bool:
+        method = getattr(type(self._embedding), name, None)
+        return method is not None and method is not getattr(EmbeddingProvider, name)
+
+    def embed_query(self, text: str) -> list[float]:
+        if self._inner_overrides("embed_query"):
+            return self._single_flight(
+                ("native", "query", text), lambda: self._embedding.embed_query(text)
+            )
+        return super().embed_query(text)
+
+    def embed_queries(self, texts: list[str]) -> list[list[float]]:
+        if self._inner_overrides("embed_queries"):
+            return self._embedding.embed_queries(texts)
+        return super().embed_queries(texts)
+
+    def embed_document(self, text: str) -> list[float]:
+        if self._inner_overrides("embed_document"):
+            return self._single_flight(
+                ("native", "document", text), lambda: self._embedding.embed_document(text)
+            )
+        return super().embed_document(text)
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        if self._inner_overrides("embed_documents"):
+            return self._embedding.embed_documents(texts)
+        return super().embed_documents(texts)
+
+    def _single_flight(self, key: Any, compute: Callable[[], list[float]]) -> list[float]:
         # Single-flight: the arms run CONCURRENTLY from the recaller's thread
         # pool, so a plain check-then-compute memo lets every arm miss before
         # any result lands — N identical billable requests on every new query,
         # exactly what this wrapper exists to prevent. The first caller for a
-        # text becomes the leader; concurrent callers wait on its event.
+        # key becomes the leader; concurrent callers wait on its event.
         with self._lock:
-            if text in self._memo:
-                return self._memo[text]
-            entry = self._inflight.get(text)
+            if key in self._memo:
+                return self._memo[key]
+            entry = self._inflight.get(key)
             if entry is None:
                 entry = (threading.Event(), [])
-                self._inflight[text] = entry
+                self._inflight[key] = entry
                 leader = True
             else:
                 leader = False
@@ -572,7 +605,7 @@ class _SharedQueryEmbedding(EmbeddingProvider):
             return box[0] if box else []
         vec: list[float] = []  # empty = the providers' own failure contract
         try:
-            vec = self._embedding.embed(text)
+            vec = compute()
         finally:
             with self._lock:
                 box.append(vec)
@@ -584,8 +617,8 @@ class _SharedQueryEmbedding(EmbeddingProvider):
                         # FIFO eviction — a tiny bound is plenty; this only
                         # exists to stop growth.
                         self._memo.pop(next(iter(self._memo)))
-                    self._memo[text] = vec
-                self._inflight.pop(text, None)
+                    self._memo[key] = vec
+                self._inflight.pop(key, None)
             event.set()
         return vec
 

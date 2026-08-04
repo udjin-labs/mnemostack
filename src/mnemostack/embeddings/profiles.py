@@ -93,8 +93,10 @@ class EmbeddingProfile:
 
     ``model_patterns`` are matched against the normalized (lowercased) model
     name; a pattern without wildcards is an exact tag and wins over family
-    wildcards. ``version`` participates in fingerprints — bump it whenever a
-    transform or template changes meaning.
+    wildcards. ``name`` and ``version`` are registry/diagnostic metadata —
+    fingerprints hash the transform CONTENT, so renaming or versioning a
+    profile never invalidates a collection whose actual inference input is
+    unchanged.
     """
 
     name: str
@@ -184,11 +186,13 @@ def _base_payload(
     dimension: int,
     extras: Mapping[str, str] | None,
 ) -> dict[str, object]:
+    # Deliberately CONTENT-based: a vector is fully determined by
+    # (provider, model, transformed input, inference knobs) — the profile's
+    # name and version are registry metadata and must NOT participate, or a
+    # rename/version bump would demand a reindex of byte-identical vectors.
     return {
         "provider": provider.lower(),
         "model": model.lower(),
-        "profile": profile.name,
-        "profile_version": profile.version,
         "document_transform": dict(profile.document_transform),
         "dimension": int(dimension),
         # Provider-configurable inference knobs that change the vector space
@@ -271,19 +275,24 @@ def _register_builtins() -> None:
         query_transform={"kind": "prefix", "prefix": "query: "},
         document_transform={"kind": "prefix", "prefix": "passage: "},
     )
-    # The instruct variant is NOT plain E5: it expects an instruction-formatted
-    # query (with a space after "Query:") and UNPREFIXED documents. Exact tags
-    # so it wins over the e5 family wildcards.
+    # The instruct variants are NOT plain E5: they expect an
+    # instruction-formatted query (with a space after "Query:") and
+    # UNPREFIXED documents. Exact tags win over wildcards by rank; the
+    # "*e5*instruct*" family wildcard ties with the plain-e5 wildcards at
+    # rank 1 and wins by later registration, so instruct variants (e.g.
+    # e5-mistral-7b-instruct) can never fall through to `query:`/`passage:`.
     e5_instruct = EmbeddingProfile(
         name="e5-instruct",
         version=1,
         model_patterns=(
             "intfloat/multilingual-e5-large-instruct",
             "multilingual-e5-large-instruct",
+            "*e5*instruct*",
         ),
         known_dimensions={
             "intfloat/multilingual-e5-large-instruct": 1024,
             "multilingual-e5-large-instruct": 1024,
+            "intfloat/e5-mistral-7b-instruct": 4096,
         },
         query_transform={
             "kind": "instruct",
