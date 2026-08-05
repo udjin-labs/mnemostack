@@ -733,66 +733,98 @@ class VectorStore:
 
         Semantics mirror the scalar guarded writes exactly:
 
-        - with ``tenant`` set, ownership is validated for the WHOLE group
-          BEFORE any mutation; foreign-owned or missing points are silently
-          skipped (never partially mutated mid-group), and the set side
+        - existence is validated for the WHOLE group BEFORE any mutation: a
+          real server 404s a batch that names a since-deleted point (and may
+          have applied the earlier operations by then — the local in-memory
+          client silently no-ops instead, which is why only a live server
+          shows this), so a point deleted concurrently is silently skipped
+          rather than crashing the refresh; the residual check-then-write
+          race is closed by re-filtering and retrying (idempotent
+          operations), never by ignoring the error;
+        - with ``tenant`` set, the same pre-check also validates ownership;
+          foreign-owned points are silently skipped, and the set side
           restores the server-owned ``tenant_id``;
         - unscoped patches can neither set nor delete ``tenant_id``;
         - per-point operation order (delete-then-set) and input order are
           preserved within a submitted batch;
-        - a backend rejection raises — a partial/ambiguous batch must never
-          look committed, so callers do not advance their checkpoints.
+        - any other backend rejection raises — a partial/ambiguous batch must
+          never look committed, so callers do not advance their checkpoints.
 
-        Returns the number of points actually patched (tenant-skipped points
-        are not counted).
+        Returns the number of points actually patched (tenant-skipped and
+        vanished points are not counted).
         """
         applied = 0
         for start in range(0, len(patches), max(1, batch_size)):
             group = list(patches[start : start + max(1, batch_size)])
-            if tenant is not None:
+            last_404: Exception | None = None
+            while True:
                 found = self.client.retrieve(
                     collection_name=self.collection,
                     ids=[p.id for p in group],
-                    with_payload=[TENANT_ID_KEY],
+                    with_payload=[TENANT_ID_KEY] if tenant is not None else False,
                 )
-                owned = {
-                    str(pt.id)
-                    for pt in found
-                    if (pt.payload or {}).get(TENANT_ID_KEY) == tenant
-                }
-                group = [p for p in group if str(p.id) in owned]
-            operations: list[Any] = []
-            for patch in group:
-                delete_keys = [k for k in patch.delete_keys if k != TENANT_ID_KEY]
-                if delete_keys:
-                    operations.append(
-                        DeletePayloadOperation(
-                            delete_payload=DeletePayload(
-                                keys=delete_keys, points=[patch.id]
+                if tenant is not None:
+                    keep = {
+                        str(pt.id)
+                        for pt in found
+                        if (pt.payload or {}).get(TENANT_ID_KEY) == tenant
+                    }
+                else:
+                    keep = {str(pt.id) for pt in found}
+                survivors = [p for p in group if str(p.id) in keep]
+                if last_404 is not None and len(survivors) == len(group):
+                    # The 404 was not explained by a vanished point — an
+                    # ambiguous rejection must propagate, not spin.
+                    raise last_404
+                group = survivors
+                operations: list[Any] = []
+                for patch in group:
+                    delete_keys = [k for k in patch.delete_keys if k != TENANT_ID_KEY]
+                    if delete_keys:
+                        operations.append(
+                            DeletePayloadOperation(
+                                delete_payload=DeletePayload(
+                                    keys=delete_keys, points=[patch.id]
+                                )
                             )
                         )
-                    )
-                if tenant is not None:
-                    values = {**dict(patch.set_values), TENANT_ID_KEY: tenant}
-                else:
-                    values = {
-                        k: v for k, v in patch.set_values.items() if k != TENANT_ID_KEY
-                    }
-                if values:
-                    operations.append(
-                        SetPayloadOperation(
-                            set_payload=SetPayload(payload=values, points=[patch.id])
+                    if tenant is not None:
+                        values = {**dict(patch.set_values), TENANT_ID_KEY: tenant}
+                    else:
+                        values = {
+                            k: v
+                            for k, v in patch.set_values.items()
+                            if k != TENANT_ID_KEY
+                        }
+                    if values:
+                        operations.append(
+                            SetPayloadOperation(
+                                set_payload=SetPayload(payload=values, points=[patch.id])
+                            )
                         )
+                if not operations:
+                    break
+                try:
+                    # wait=True: the scalar methods are synchronous — the
+                    # batched path must not return before the backend
+                    # confirms, or a caller's checkpoint could outrun an
+                    # uncommitted mutation.
+                    self.client.batch_update_points(
+                        collection_name=self.collection,
+                        update_operations=operations,
+                        wait=True,
                     )
-            if operations:
-                # wait=True: the scalar methods are synchronous — the batched
-                # path must not return before the backend confirms, or a
-                # caller's checkpoint could outrun an uncommitted mutation.
-                self.client.batch_update_points(
-                    collection_name=self.collection,
-                    update_operations=operations,
-                    wait=True,
-                )
+                    break
+                except UnexpectedResponse as exc:
+                    if getattr(exc, "status_code", None) != 404:
+                        raise
+                    # A point vanished between the existence check and the
+                    # batch; the server may have applied the earlier
+                    # operations before failing. Re-filter and re-apply the
+                    # survivors — delete-then-merge-set per point is
+                    # idempotent, and the group strictly shrinks (checked
+                    # above), so this terminates.
+                    last_404 = exc
             applied += len(group)
         return applied
 

@@ -58,9 +58,10 @@ def _is_within(path: str, base: str) -> bool:
 @dataclass
 class ChunkSyncResult:
     inserted: int = 0
-    #: Existing points whose owned payload actually CHANGED and was patched.
-    #: A warm sync of an unchanged corpus reports 0 here and issues zero
-    #: payload mutation requests.
+    #: Existing points whose owned payload actually CHANGED and whose patch
+    #: the store CONFIRMED applying (a tenant-skipped or since-vanished
+    #: point doesn't count). A warm sync of an unchanged corpus reports 0
+    #: here and issues zero payload mutation requests.
     refreshed: int = 0
     failed: int = 0
     failed_sources: set[str] = field(default_factory=set)
@@ -353,12 +354,14 @@ def upsert_markdown_chunks(
         if patch is None:
             res.unchanged += 1
             continue
+        # Counted when the batch APPLIES, from the store's own applied count:
+        # a tenant-skipped or since-vanished point never inflates the
+        # patched metric with a write that never landed.
         pending_patches.append(patch)
-        res.refreshed += 1
         if len(pending_patches) >= PAYLOAD_PATCH_BATCH:
-            apply_patches_via(store, pending_patches, tenant=tenant)
+            res.refreshed += apply_patches_via(store, pending_patches, tenant=tenant)
             pending_patches = []
-    apply_patches_via(store, pending_patches, tenant=tenant)
+    res.refreshed += apply_patches_via(store, pending_patches, tenant=tenant)
     if res.compared:
         counter("mnemostack.markdown.payloads_unchanged", res.unchanged)
         counter("mnemostack.markdown.payloads_patched", res.refreshed)

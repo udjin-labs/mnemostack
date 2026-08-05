@@ -2641,12 +2641,14 @@ def cmd_index(args: argparse.Namespace) -> int:
             if patch is None:
                 unchanged += 1
                 continue
+            # `refreshed` counts patches the store ACCEPTED (its applied
+            # count) — not per-pending intentions; see the markdown sync's
+            # matching accounting for the exact contract.
             pending_patches.append(patch)
-            refreshed += 1
             if len(pending_patches) >= PAYLOAD_PATCH_BATCH:
-                apply_patches_via(store, pending_patches)
+                refreshed += apply_patches_via(store, pending_patches)
                 pending_patches = []
-        apply_patches_via(store, pending_patches)
+        refreshed += apply_patches_via(store, pending_patches)
         if foreign_skipped:
             print(
                 f"warning: {foreign_skipped} chunk(s) skipped by --refresh-payloads: "
@@ -2681,7 +2683,8 @@ def cmd_index(args: argparse.Namespace) -> int:
             )
         # Discovery from the --refresh-payloads snapshot when it exists (zero
         # extra reads — points inserted this run are exactly the fresh ids);
-        # otherwise ONE root-scoped scroll inside — never a scan per source.
+        # otherwise the adaptive fallback inside: narrow per-source scans for
+        # a small walk, one root-scoped scroll for a bulk one.
         prune_snapshot = existing_payloads.items() if args.refresh_payloads else None
         pruned = prune_stale_chunks_from_snapshot(
             store, fresh_by_source, prune_snapshot, index_root=index_root

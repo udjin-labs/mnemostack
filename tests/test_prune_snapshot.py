@@ -216,6 +216,37 @@ def test_quota_estimate_skips_non_string_sources_like_the_prune():
 # ------------------------------------------------- fallback (no snapshot)
 
 
+def test_fallback_small_map_on_scroll_only_store_uses_the_scan():
+    """A custom store with scroll but WITHOUT iter_ids must not be routed
+    into the selective branch by a small fresh map — that worked before the
+    adaptive heuristic and must keep working."""
+
+    class _ScrollOnlyStore:
+        def __init__(self):
+            self.points = {
+                "stale": {"source": "a.md"},
+                "fresh": {"source": "a.md"},
+            }
+            self.deleted: list = []
+
+        def scroll(self, filters=None, **_kw):
+            from types import SimpleNamespace
+
+            for pid, pl in self.points.items():
+                if not filters or all(pl.get(k) == v for k, v in filters.items()):
+                    yield SimpleNamespace(id=pid, payload=dict(pl))
+
+        def delete_points(self, ids, **_kw):
+            self.deleted.extend(ids)
+            return len(ids)
+
+    store = _ScrollOnlyStore()
+    removed = prune_stale_chunks_from_snapshot(store, {"a.md": {"fresh"}})
+
+    assert removed == 1
+    assert store.deleted == ["stale"]
+
+
 def test_fallback_keeps_working_for_stores_without_scroll():
     """A custom store exposing only iter_ids/delete_points (the old
     prune_stale_chunks contract) still prunes via the per-source path."""
@@ -244,11 +275,13 @@ def test_fallback_keeps_working_for_stores_without_scroll():
     assert store.deleted == ["stale"]
 
 
-def test_fallback_uses_one_scroll_and_never_per_source_scans(store, monkeypatch):
+def test_fallback_bulk_map_uses_one_scroll_and_never_per_source_scans(
+    store, monkeypatch
+):
     root = "/data/a"
     fresh_map: dict[str, set[str]] = {}
     stale_ids = []
-    for i in range(10):
+    for i in range(20):  # above SELECTIVE_PRUNE_MAX_SOURCES — bulk mode
         src = f"doc{i}.md"
         keep = _put(store, src, 0, f"keep {i}", index_root=root)
         stale_ids.append(_put(store, src, 100, f"stale {i}", index_root=root))
@@ -265,19 +298,138 @@ def test_fallback_uses_one_scroll_and_never_per_source_scans(store, monkeypatch)
         store,
         "iter_ids",
         lambda *a, **kw: (_ for _ in ()).throw(
-            AssertionError("per-source iter_ids must never run")
+            AssertionError("per-source iter_ids must never run in bulk mode")
         ),
     )
 
     removed = prune_stale_chunks_from_snapshot(store, fresh_map, index_root=root)
 
-    assert removed == 10
+    assert removed == 20
     assert scroll_calls == [{"index_root": root}]  # ONE root-scoped scan
     monkeypatch.undo()
     assert not any(i in _remaining(store) for i in stale_ids)
 
 
-def test_fallback_without_root_scans_once_unfiltered(store, monkeypatch):
+def test_fallback_small_map_keeps_narrow_per_source_scans(store, monkeypatch):
+    """A selective re-index (a file or two in a large root) must not page the
+    whole root — the adaptive fallback keeps narrow source-filtered scans."""
+    root = "/data/a"
+    fresh = _put(store, "note.md", 0, "keep", index_root=root)
+    stale = _put(store, "note.md", 100, "drop", index_root=root)
+    for i in range(50):  # the large root the scan must NOT page through
+        _put(store, f"bulk{i}.md", 0, f"other {i}", index_root=root)
+    scroll_calls: list[dict | None] = []
+    real_scroll = store.scroll
+
+    def counting_scroll(*a, filters=None, **kw):
+        scroll_calls.append(filters)
+        return real_scroll(*a, filters=filters, **kw)
+
+    monkeypatch.setattr(store, "scroll", counting_scroll)
+    monkeypatch.setattr(
+        store,
+        "iter_ids",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            AssertionError("selective mode revalidates payloads — no raw id scans")
+        ),
+    )
+
+    removed = prune_stale_chunks_from_snapshot(
+        store, {"note.md": {fresh}}, index_root=root
+    )
+
+    assert removed == 1
+    # ONE narrow source-filtered scan — never a bare root page-through.
+    assert scroll_calls == [{"source": "note.md", "index_root": root}]
+    monkeypatch.undo()
+    assert stale not in _remaining(store)
+    assert store.count() == 51  # the bulk of the root untouched
+
+
+def test_selective_prune_skips_array_source_payloads(store, monkeypatch):
+    """A Qdrant MatchValue filter also matches ARRAY payloads containing the
+    value — a point with source=["a.md"] comes back from the filtered scan
+    but must be revalidated and left alone, exactly like the snapshot path
+    treats non-string sources."""
+    array_pid = "33333333-3333-3333-3333-333333333333"
+    fresh = _put(store, "a.md", 0, "keep")
+    store.upsert(array_pid, VEC, {"source": ["a.md"], "text": "custom point"})
+
+    removed = prune_stale_chunks_from_snapshot(store, {"a.md": {fresh}})
+
+    assert removed == 0
+    assert array_pid in _remaining(store)
+
+
+def test_selective_threshold_boundary(store, monkeypatch):
+    """Exactly SELECTIVE_PRUNE_MAX_SOURCES sources stay selective; one more
+    switches to the single root scan."""
+    from mnemostack.ingest import SELECTIVE_PRUNE_MAX_SOURCES as N
+
+    root = "/data/a"
+    fresh_map = {
+        f"doc{i}.md": {_put(store, f"doc{i}.md", 0, f"keep {i}", index_root=root)}
+        for i in range(N + 1)
+    }
+    reads: list[dict | None] = []
+    real_scroll = store.scroll
+
+    def counting_scroll(*a, filters=None, **kw):
+        reads.append(filters)
+        return real_scroll(*a, filters=filters, **kw)
+
+    monkeypatch.setattr(store, "scroll", counting_scroll)
+
+    small = dict(list(fresh_map.items())[:N])
+    prune_stale_chunks_from_snapshot(store, small, index_root=root)
+    # At the threshold: still selective — N narrow source-filtered scans.
+    assert len(reads) == N and all(f and "source" in f for f in reads)
+
+    reads.clear()
+    prune_stale_chunks_from_snapshot(store, fresh_map, index_root=root)
+    assert reads == [{"index_root": root}]  # one above: single root scan
+
+
+def test_selective_prune_deletes_integer_ids_by_raw_value(store):
+    """Integer Qdrant ids must be deleted RAW: `delete_points(["2"])` does
+    not remove point 2, yet would still be counted — the selective scan
+    stringifies only for the fresh-set membership check."""
+    store.upsert(1, VEC, {"source": "a.md"})
+    store.upsert(2, VEC, {"source": "a.md"})
+
+    removed = prune_stale_chunks_from_snapshot(store, {"a.md": {"1"}})
+
+    assert removed == 1
+    remaining = {str(pid) for pid in store.iter_ids()}
+    assert remaining == {"1"}  # point 2 truly gone, not just "reported gone"
+
+
+def test_selective_delete_batches_flush_across_sources(store, monkeypatch):
+    """The bounded-delete accumulator spans source boundaries in the
+    selective path — group size is delete_batch_size, not per-source."""
+    fresh_map: dict[str, set[str]] = {}
+    for i in range(3):
+        src = f"doc{i}.md"
+        _put(store, src, 100, f"stale {i}")
+        fresh_map[src] = set()  # everything stale, 1 point per source
+    calls: list[int] = []
+    real = store.delete_points
+
+    def counting(pids, **kw):
+        calls.append(len(pids))
+        return real(pids, **kw)
+
+    monkeypatch.setattr(store, "delete_points", counting)
+
+    removed = prune_stale_chunks_from_snapshot(
+        store, fresh_map, delete_batch_size=2
+    )
+
+    assert removed == 3
+    assert calls == [2, 1]  # 3 stale ids across 3 sources, flushed in 2s
+
+
+def test_fallback_forced_root_scan_without_root_filter(store, monkeypatch):
     fresh = _put(store, "a.md", 0, "keep")
     stale = _put(store, "a.md", 100, "drop")
     scroll_calls: list[dict | None] = []
@@ -289,7 +441,9 @@ def test_fallback_without_root_scans_once_unfiltered(store, monkeypatch):
 
     monkeypatch.setattr(store, "scroll", counting_scroll)
 
-    removed = prune_stale_chunks_from_snapshot(store, {"a.md": {fresh}})
+    removed = prune_stale_chunks_from_snapshot(
+        store, {"a.md": {fresh}}, selective_scan_max_sources=0
+    )
 
     assert removed == 1
     assert scroll_calls == [None]
@@ -352,11 +506,33 @@ def _index_args(tmp_path, **overrides) -> argparse.Namespace:
     return argparse.Namespace(**defaults)
 
 
-def test_cmd_index_prune_never_scans_per_source(monkeypatch, tmp_path, store, capsys):
+def test_cmd_index_prune_small_walk_stays_selective(monkeypatch, tmp_path, store, capsys):
     (tmp_path / "note.md").write_text("hello world", encoding="utf-8")
     (tmp_path / "other.md").write_text("second doc", encoding="utf-8")
     root = str(tmp_path.resolve())
     stale = _put(store, "note.md", 800, "removed second page", index_root=root)
+    reads = _instrument(monkeypatch, store)
+    _patch_stack(monkeypatch, store)
+
+    rc = cli.cmd_index(_index_args(tmp_path))
+
+    assert rc == 0
+    assert stale not in _remaining(store)
+    assert "pruned 1 stale" in capsys.readouterr().out
+    # Two visited sources — the adaptive fallback keeps the narrow
+    # source-filtered scans and never pages the root.
+    assert all(f is None or "index_root" in f for _m, f in reads)
+    filtered = [(m, f) for m, f in reads if f]
+    assert {m for m, _f in filtered} == {"scroll"}
+    assert sorted(f["source"] for _m, f in filtered) == ["note.md", "other.md"]
+    assert all(f["index_root"] == root for _m, f in filtered)
+
+
+def test_cmd_index_prune_bulk_walk_scans_root_once(monkeypatch, tmp_path, store, capsys):
+    for i in range(20):  # above the selective threshold — bulk mode
+        (tmp_path / f"doc{i}.md").write_text(f"body {i}", encoding="utf-8")
+    root = str(tmp_path.resolve())
+    stale = _put(store, "doc0.md", 800, "removed second page", index_root=root)
     reads = _instrument(monkeypatch, store)
     _patch_stack(monkeypatch, store)
 
