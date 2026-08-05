@@ -373,6 +373,20 @@ def test_selective_threshold_boundary(store, monkeypatch):
     assert reads == ["scroll"]  # one above: single root scan
 
 
+def test_selective_prune_deletes_integer_ids_by_raw_value(store):
+    """Integer Qdrant ids must be deleted RAW: `delete_points(["2"])` does
+    not remove point 2, yet would still be counted — the selective scan
+    stringifies only for the fresh-set membership check."""
+    store.upsert(1, VEC, {"source": "a.md"})
+    store.upsert(2, VEC, {"source": "a.md"})
+
+    removed = prune_stale_chunks_from_snapshot(store, {"a.md": {"1"}})
+
+    assert removed == 1
+    remaining = {str(pid) for pid in store.iter_ids()}
+    assert remaining == {"1"}  # point 2 truly gone, not just "reported gone"
+
+
 def test_selective_delete_batches_flush_across_sources(store, monkeypatch):
     """The bounded-delete accumulator spans source boundaries in the
     selective path — group size is delete_batch_size, not per-source."""

@@ -351,10 +351,14 @@ def prune_stale_chunks_from_snapshot(
             filters: dict[str, Any] = {"source": source}
             if index_root is not None:
                 filters["index_root"] = index_root
-            for pid in (str(p) for p in vector_store.iter_ids(filters=filters, **tkw)):
+            for raw_id in vector_store.iter_ids(filters=filters, **tkw):
                 scanned += 1
-                if pid not in fresh_ids:
-                    stale.append(pid)
+                # str() ONLY for the fresh-set membership check — the delete
+                # must carry the backend's raw id: an integer point 2 is not
+                # deletable as the string "2", and a stringified delete would
+                # still be COUNTED while leaving the point searchable.
+                if str(raw_id) not in fresh_ids:
+                    stale.append(raw_id)
                     if len(stale) >= delete_batch_size:
                         _flush()
     else:
