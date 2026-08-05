@@ -4,9 +4,9 @@ All notable changes to mnemostack will be documented here. Format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.0.0] - 2026-08-05
 
-> The next release is **2.0.0**: role-aware embedding changes the DEFAULT
+> **2.0.0 is a breaking release**: role-aware embedding changes the DEFAULT
 > semantics for known asymmetric model families (E5 transforms, decoder
 > last-token pooling, Ollama timeout/host resolution), and pre-2.0
 > collections of such families require an identity profile or a reindex.
