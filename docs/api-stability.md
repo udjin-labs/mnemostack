@@ -377,7 +377,8 @@ behave exactly as listed above.
 
 ### 🔴 Internal
 
-`apply_enrichment`, `prune_stale_chunks`, `_vector_floor_candidates` and any
+`apply_enrichment`, `prune_stale_chunks`, `prune_stale_chunks_from_snapshot`,
+`_vector_floor_candidates` and any
 `_`-prefixed payload key, and anything imported from a submodule but absent from
 that submodule's `__all__`.
 

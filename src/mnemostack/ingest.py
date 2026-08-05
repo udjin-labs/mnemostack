@@ -264,6 +264,95 @@ def prune_stale_chunks(
     return removed
 
 
+def prune_stale_chunks_from_snapshot(
+    vector_store: VectorStore,
+    fresh_ids_by_source: dict[str, set[str]],
+    existing: Iterable[tuple[str | int, dict[str, Any]]] | None = None,
+    *,
+    index_root: str | None = None,
+    tenant: str | None = None,
+    delete_batch_size: int = 256,
+) -> int:
+    """Delete stale chunks of re-indexed sources from ONE point snapshot.
+
+    Same contract as :func:`prune_stale_chunks` — only the listed sources are
+    touched, each fresh set MUST be complete, and a source whose chunks failed
+    to embed must not be listed — but discovery costs one pass instead of one
+    filtered scan per source: over *existing*, an ``(id, payload)`` snapshot
+    the caller already holds (both CLI paths scroll the collection's payloads
+    anyway), or — when *existing* is None — over a single root-scoped scroll.
+    Request count is O(collection pages), never O(sources).
+
+    Scoping mirrors the per-source filters exactly: with *index_root*, only
+    points whose payload records the same root are considered, so a point from
+    another root — or one with no recorded root — is never touched. The
+    snapshot must already be confined to *tenant* (the callers load it through
+    a tenant-scoped scroll); the stale ids are nevertheless re-validated by
+    the tenant-aware delete, so even a wrongly-scoped snapshot cannot delete a
+    foreign tenant's point.
+
+    Snapshot semantics: a point created after the snapshot was taken is not
+    seen and never deleted — this run's own upserts are exactly the fresh ids,
+    and a concurrent writer's new points are left alone (the old live re-scan
+    would have seeded a concurrently-created source for deletion on a
+    full-root walk; working from the snapshot closes that hazard and keeps the
+    prune consistent with the quota estimate computed from the same snapshot).
+    """
+    tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
+    if not fresh_ids_by_source:
+        # Nothing can match — and the per-source implementation issued zero
+        # scans here, so the fallback scroll must not run either.
+        counter("mnemostack.ingest.prune_points_scanned", 0)
+        counter("mnemostack.ingest.prune_delete_batches", 0)
+        counter("mnemostack.ingest.pruned", 0)
+        return 0
+    if existing is None:
+        if not hasattr(vector_store, "scroll"):
+            # A custom store exposing only iter_ids/delete_points predates the
+            # single-scan path — keep it working on the per-source
+            # implementation rather than failing on the missing method.
+            return prune_stale_chunks(
+                vector_store, fresh_ids_by_source, index_root=index_root, tenant=tenant
+            )
+        filters = {"index_root": index_root} if index_root is not None else None
+        existing = (
+            (hit.id, hit.payload or {})
+            for hit in vector_store.scroll(filters=filters, **tkw)
+        )
+    scanned = 0
+    removed = 0
+    batches = 0
+    stale: list[str | int] = []
+
+    def _flush() -> None:
+        nonlocal removed, batches
+        if stale:
+            removed += vector_store.delete_points(list(stale), **tkw)
+            batches += 1
+            stale.clear()
+
+    for pid, payload in existing:
+        scanned += 1
+        source = payload.get("source")
+        # A non-string source can never equal a fresh-map key (the per-source
+        # MatchValue filter wouldn't have matched it either) — and an
+        # unhashable one must not crash the membership test.
+        if not isinstance(source, str) or source not in fresh_ids_by_source:
+            continue
+        if index_root is not None and payload.get("index_root") != index_root:
+            continue
+        if str(pid) in fresh_ids_by_source[source]:
+            continue
+        stale.append(pid)
+        if len(stale) >= delete_batch_size:
+            _flush()
+    _flush()
+    counter("mnemostack.ingest.prune_points_scanned", scanned)
+    counter("mnemostack.ingest.prune_delete_batches", batches)
+    counter("mnemostack.ingest.pruned", removed)
+    return removed
+
+
 def _wrapper_filename(source: str) -> str:
     source_key = source or "item"
     basename = Path(source_key).stem or Path(source_key).name or "item"
@@ -812,4 +901,11 @@ class Ingestor:
                     log.warning("failed to sync wrapper graph for %s: %s", item.source, exc)
 
 
-__all__ = ["Ingestor", "IngestItem", "IngestStats", "prune_stale_chunks", "stable_chunk_id"]
+__all__ = [
+    "Ingestor",
+    "IngestItem",
+    "IngestStats",
+    "prune_stale_chunks",
+    "prune_stale_chunks_from_snapshot",
+    "stable_chunk_id",
+]
