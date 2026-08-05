@@ -333,30 +333,46 @@ def prune_stale_chunks_from_snapshot(
             batches += 1
             stale.clear()
 
+    has_scroll = hasattr(vector_store, "scroll")
     if (
         existing is None
-        and hasattr(vector_store, "iter_ids")
-        and (
-            not hasattr(vector_store, "scroll")
-            or len(fresh_ids_by_source) <= selective_scan_max_sources
-        )
+        and has_scroll
+        and len(fresh_ids_by_source) <= selective_scan_max_sources
     ):
-        # Selective re-index (or a custom store exposing only iter_ids):
-        # the narrow server-indexed scans, one per source — exactly the
-        # historical discovery, but with bounded deletes, tenant-validated
-        # removal and the scan counters of the snapshot path. A store
-        # without iter_ids always takes the scroll path below, whatever
-        # the map size.
+        # Selective re-index: narrow server-indexed scans, one per source —
+        # but payload-bearing, because a Qdrant MatchValue filter ALSO
+        # matches array payloads containing the value ({"source": ["a.md"]}
+        # matches source="a.md"), and such points must be revalidated and
+        # skipped exactly like the snapshot path skips them, never deleted.
         for source, fresh_ids in fresh_ids_by_source.items():
             filters: dict[str, Any] = {"source": source}
             if index_root is not None:
                 filters["index_root"] = index_root
-            for raw_id in vector_store.iter_ids(filters=filters, **tkw):
+            for hit in vector_store.scroll(filters=filters, **tkw):
                 scanned += 1
+                payload = hit.payload or {}
+                if payload.get("source") != source:
+                    continue  # array/malformed source merely matched the filter
+                if index_root is not None and payload.get("index_root") != index_root:
+                    continue
                 # str() ONLY for the fresh-set membership check — the delete
                 # must carry the backend's raw id: an integer point 2 is not
                 # deletable as the string "2", and a stringified delete would
                 # still be COUNTED while leaving the point searchable.
+                if str(hit.id) not in fresh_ids:
+                    stale.append(hit.id)
+                    if len(stale) >= delete_batch_size:
+                        _flush()
+    elif existing is None and not has_scroll:
+        # A custom store exposing only iter_ids/delete_points: keep the
+        # historical per-source discovery verbatim (its filters carry its
+        # own exact-match semantics), with bounded tenant-validated deletes.
+        for source, fresh_ids in fresh_ids_by_source.items():
+            filters = {"source": source}
+            if index_root is not None:
+                filters["index_root"] = index_root
+            for raw_id in vector_store.iter_ids(filters=filters, **tkw):
+                scanned += 1
                 if str(raw_id) not in fresh_ids:
                     stale.append(raw_id)
                     if len(stale) >= delete_batch_size:
@@ -373,9 +389,10 @@ def prune_stale_chunks_from_snapshot(
         for point_id, payload in existing:
             scanned += 1
             src = payload.get("source")
-            # A non-string source can never equal a fresh-map key (the
-            # per-source MatchValue filter wouldn't have matched it either) —
-            # and an unhashable one must not crash the membership test.
+            # A non-string source can never equal a fresh-map key — and an
+            # unhashable one must not crash the membership test. (A Qdrant
+            # source filter WOULD match an array containing the value; both
+            # discovery modes deliberately skip such points.)
             if not isinstance(src, str) or src not in fresh_ids_by_source:
                 continue
             if index_root is not None and payload.get("index_root") != index_root:

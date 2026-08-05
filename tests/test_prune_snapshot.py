@@ -312,25 +312,25 @@ def test_fallback_bulk_map_uses_one_scroll_and_never_per_source_scans(
 
 def test_fallback_small_map_keeps_narrow_per_source_scans(store, monkeypatch):
     """A selective re-index (a file or two in a large root) must not page the
-    whole root — the adaptive fallback keeps the indexed per-source scans."""
+    whole root — the adaptive fallback keeps narrow source-filtered scans."""
     root = "/data/a"
     fresh = _put(store, "note.md", 0, "keep", index_root=root)
     stale = _put(store, "note.md", 100, "drop", index_root=root)
     for i in range(50):  # the large root the scan must NOT page through
         _put(store, f"bulk{i}.md", 0, f"other {i}", index_root=root)
-    iter_calls: list[dict | None] = []
-    real_iter = store.iter_ids
+    scroll_calls: list[dict | None] = []
+    real_scroll = store.scroll
 
-    def counting_iter(*a, filters=None, **kw):
-        iter_calls.append(filters)
-        return real_iter(*a, filters=filters, **kw)
+    def counting_scroll(*a, filters=None, **kw):
+        scroll_calls.append(filters)
+        return real_scroll(*a, filters=filters, **kw)
 
-    monkeypatch.setattr(store, "iter_ids", counting_iter)
+    monkeypatch.setattr(store, "scroll", counting_scroll)
     monkeypatch.setattr(
         store,
-        "scroll",
+        "iter_ids",
         lambda *a, **kw: (_ for _ in ()).throw(
-            AssertionError("a small fresh map must not scroll the root")
+            AssertionError("selective mode revalidates payloads — no raw id scans")
         ),
     )
 
@@ -339,10 +339,26 @@ def test_fallback_small_map_keeps_narrow_per_source_scans(store, monkeypatch):
     )
 
     assert removed == 1
-    assert iter_calls == [{"source": "note.md", "index_root": root}]
+    # ONE narrow source-filtered scan — never a bare root page-through.
+    assert scroll_calls == [{"source": "note.md", "index_root": root}]
     monkeypatch.undo()
     assert stale not in _remaining(store)
     assert store.count() == 51  # the bulk of the root untouched
+
+
+def test_selective_prune_skips_array_source_payloads(store, monkeypatch):
+    """A Qdrant MatchValue filter also matches ARRAY payloads containing the
+    value — a point with source=["a.md"] comes back from the filtered scan
+    but must be revalidated and left alone, exactly like the snapshot path
+    treats non-string sources."""
+    array_pid = "33333333-3333-3333-3333-333333333333"
+    fresh = _put(store, "a.md", 0, "keep")
+    store.upsert(array_pid, VEC, {"source": ["a.md"], "text": "custom point"})
+
+    removed = prune_stale_chunks_from_snapshot(store, {"a.md": {fresh}})
+
+    assert removed == 0
+    assert array_pid in _remaining(store)
 
 
 def test_selective_threshold_boundary(store, monkeypatch):
@@ -355,22 +371,23 @@ def test_selective_threshold_boundary(store, monkeypatch):
         f"doc{i}.md": {_put(store, f"doc{i}.md", 0, f"keep {i}", index_root=root)}
         for i in range(N + 1)
     }
-    reads: list[str] = []
-    real_scroll, real_iter = store.scroll, store.iter_ids
-    monkeypatch.setattr(
-        store, "scroll", lambda *a, **kw: (reads.append("scroll"), real_scroll(*a, **kw))[1]
-    )
-    monkeypatch.setattr(
-        store, "iter_ids", lambda *a, **kw: (reads.append("iter_ids"), real_iter(*a, **kw))[1]
-    )
+    reads: list[dict | None] = []
+    real_scroll = store.scroll
+
+    def counting_scroll(*a, filters=None, **kw):
+        reads.append(filters)
+        return real_scroll(*a, filters=filters, **kw)
+
+    monkeypatch.setattr(store, "scroll", counting_scroll)
 
     small = dict(list(fresh_map.items())[:N])
     prune_stale_chunks_from_snapshot(store, small, index_root=root)
-    assert reads == ["iter_ids"] * N  # at the threshold: still selective
+    # At the threshold: still selective — N narrow source-filtered scans.
+    assert len(reads) == N and all(f and "source" in f for f in reads)
 
     reads.clear()
     prune_stale_chunks_from_snapshot(store, fresh_map, index_root=root)
-    assert reads == ["scroll"]  # one above: single root scan
+    assert reads == [{"index_root": root}]  # one above: single root scan
 
 
 def test_selective_prune_deletes_integer_ids_by_raw_value(store):
@@ -502,11 +519,11 @@ def test_cmd_index_prune_small_walk_stays_selective(monkeypatch, tmp_path, store
     assert rc == 0
     assert stale not in _remaining(store)
     assert "pruned 1 stale" in capsys.readouterr().out
-    # Two visited sources — the adaptive fallback keeps the narrow indexed
-    # per-source scans and never pages the root.
+    # Two visited sources — the adaptive fallback keeps the narrow
+    # source-filtered scans and never pages the root.
     assert all(f is None or "index_root" in f for _m, f in reads)
     filtered = [(m, f) for m, f in reads if f]
-    assert {m for m, _f in filtered} == {"iter_ids"}
+    assert {m for m, _f in filtered} == {"scroll"}
     assert sorted(f["source"] for _m, f in filtered) == ["note.md", "other.md"]
     assert all(f["index_root"] == root for _m, f in filtered)
 
