@@ -30,8 +30,18 @@ from ..embeddings.roles import (
 )
 from ..observability.recorder import counter
 from ..quotas import enforce_points_quota
-from ..vector.patch import carry_snapshot_capture_time, diff_payload
+from ..vector.patch import (
+    PayloadPatch,
+    apply_patches_via,
+    carry_snapshot_capture_time,
+    diff_payload,
+)
 from .indexer import collect_markdown
+
+#: Points per batched payload-patch round-trip. Independent of the
+#: embedding batch size on purpose — payload size and embedding memory have
+#: different limits.
+PAYLOAD_PATCH_BATCH = 100
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .indexer import MarkdownCollection
@@ -303,6 +313,10 @@ def upsert_markdown_chunks(
         # refused by the normal mismatch verdict.
         SpaceGuard(store, provider, recheck_seconds=0.0, fail_closed=True).ensure()
 
+    # Changed points are patched through the store's batched hook (one
+    # round-trip per bounded group; scalar fallback for stores without it) —
+    # only the pending group is buffered, never the whole corpus.
+    pending_patches: list[PayloadPatch] = []
     for cid, _text, payload in chunks:
         if cid not in existing_ids:
             continue
@@ -336,11 +350,12 @@ def upsert_markdown_chunks(
         if patch is None:
             res.unchanged += 1
             continue
-        if patch.delete_keys:
-            store.delete_payload_keys(cid, list(patch.delete_keys), **tkw)
-        if patch.set_values:
-            store.set_payload(cid, dict(patch.set_values), **tkw)
+        pending_patches.append(patch)
         res.refreshed += 1
+        if len(pending_patches) >= PAYLOAD_PATCH_BATCH:
+            apply_patches_via(store, pending_patches, tenant=tenant)
+            pending_patches = []
+    apply_patches_via(store, pending_patches, tenant=tenant)
     if res.compared:
         counter("mnemostack.markdown.payloads_unchanged", res.unchanged)
         counter("mnemostack.markdown.payloads_patched", res.refreshed)
