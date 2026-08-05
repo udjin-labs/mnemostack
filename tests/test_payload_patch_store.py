@@ -158,6 +158,154 @@ def test_facade_routes_to_the_store_hook_when_present():
     assert hooked.batches == [(3, "t1", 2)]
 
 
+def test_unscoped_batch_skips_missing_points_instead_of_404ing():
+    """A real Qdrant server 404s (and aborts) a batch naming a since-deleted
+    point — the in-memory client silently no-ops, which is exactly why this
+    guard exists: existence is pre-checked per group, so a vanished point is
+    skipped and NOT counted."""
+    s = _store()
+    _seed(s, CID_A, {"v": "old"})
+    applied = s.apply_payload_patches(
+        [
+            PayloadPatch(id=CID_A, set_values={"v": "new"}),
+            PayloadPatch(id=CID_B, set_values={"v": "new"}),  # never existed
+        ]
+    )
+    assert applied == 1
+    assert _payload_of(s, CID_A)["v"] == "new"
+
+
+def test_batch_retries_after_a_mid_flight_404_and_skips_the_vanished_point(monkeypatch):
+    """The residual race: a point passes the existence check, then vanishes
+    before the batch lands and the server 404s (having possibly applied the
+    earlier operations). The group is re-filtered and re-applied — idempotent
+    — and the vanished point is not counted."""
+    from qdrant_client.http.exceptions import UnexpectedResponse
+
+    s = _store()
+    _seed(s, CID_A, {"v": "old"})
+    _seed(s, CID_B, {"v": "old"})
+    real = s.client.batch_update_points
+    calls: list[int] = []
+
+    def racing(collection_name, update_operations, **kw):
+        calls.append(len(update_operations))
+        if len(calls) == 1:
+            # B vanishes AFTER the existence check, and the server rejects
+            # the whole batch the way a real one does.
+            s.client.delete(collection_name, points_selector=[CID_B])
+            raise UnexpectedResponse(404, "Not Found", b"", None)
+        return real(
+            collection_name=collection_name, update_operations=update_operations, **kw
+        )
+
+    monkeypatch.setattr(s.client, "batch_update_points", racing)
+
+    applied = s.apply_payload_patches(
+        [
+            PayloadPatch(id=CID_A, set_values={"v": "new"}),
+            PayloadPatch(id=CID_B, set_values={"v": "new"}),
+        ]
+    )
+
+    assert applied == 1  # only the surviving point
+    assert len(calls) == 2  # first attempt + one retry with the survivor
+    assert _payload_of(s, CID_A)["v"] == "new"
+
+
+def test_batch_404_without_a_vanished_point_propagates(monkeypatch):
+    """A 404 the existence re-check cannot explain (nothing vanished) must
+    raise, not spin or get swallowed."""
+    import pytest
+    from qdrant_client.http.exceptions import UnexpectedResponse
+
+    s = _store()
+    _seed(s, CID_A, {"v": "old"})
+
+    def always_404(collection_name, update_operations, **kw):
+        raise UnexpectedResponse(404, "Not Found", b"", None)
+
+    monkeypatch.setattr(s.client, "batch_update_points", always_404)
+
+    with pytest.raises(UnexpectedResponse):
+        s.apply_payload_patches([PayloadPatch(id=CID_A, set_values={"v": "new"})])
+
+
+def test_sync_flushes_bounded_groups_beyond_one_batch():
+    """More changed points than PAYLOAD_PATCH_BATCH flush in bounded groups."""
+    from mnemostack.markdown.sync import PAYLOAD_PATCH_BATCH, upsert_markdown_chunks
+
+    class _Prov:
+        def embed(self, text):
+            return [0.1]
+
+        def embed_batch(self, texts):
+            return [[0.1] for _ in texts]
+
+    class _HookedStore:
+        def __init__(self):
+            self.batches: list[int] = []
+
+        def apply_payload_patches(self, patches, *, tenant=None, batch_size=100):
+            self.batches.append(len(patches))
+            return len(patches)
+
+        def upsert(self, cid, vec, payload, **kw):
+            pass
+
+        def upsert_batch(self, points, **kw):
+            pass
+
+    n = PAYLOAD_PATCH_BATCH * 2 + 50
+    chunks = [
+        (f"id{i}", "body", {"text": "body", "source": "a.md", "title": f"T{i}"})
+        for i in range(n)
+    ]
+    existing = {
+        f"id{i}": {"text": "body", "source": "a.md", "title": "OLD"} for i in range(n)
+    }
+    store = _HookedStore()
+    res = upsert_markdown_chunks(store, _Prov(), chunks, existing_payloads=existing)
+    assert res.refreshed == n
+    assert store.batches == [PAYLOAD_PATCH_BATCH, PAYLOAD_PATCH_BATCH, 50]
+
+
+def test_refreshed_counts_only_patches_the_store_confirmed():
+    """A tenant-skipped / vanished point must not inflate `refreshed`: the
+    counter takes the store's own applied count, not the attempt count."""
+    from mnemostack.markdown.sync import upsert_markdown_chunks
+
+    class _Prov:
+        def embed(self, text):
+            return [0.1]
+
+        def embed_batch(self, texts):
+            return [[0.1] for _ in texts]
+
+    class _SkippingStore:
+        """Applies all but one patch per batch (e.g. a foreign-tenant skip)."""
+
+        def apply_payload_patches(self, patches, *, tenant=None, batch_size=100):
+            return max(0, len(patches) - 1)
+
+        def upsert(self, cid, vec, payload, **kw):
+            pass
+
+        def upsert_batch(self, points, **kw):
+            pass
+
+    chunks = [
+        (f"id{i}", "body", {"text": "body", "source": "a.md", "title": f"T{i}"})
+        for i in range(3)
+    ]
+    existing = {
+        f"id{i}": {"text": "body", "source": "a.md", "title": "OLD"} for i in range(3)
+    }
+    res = upsert_markdown_chunks(_SkippingStore(), _Prov(), chunks, existing_payloads=existing)
+    assert res.compared == 3
+    assert res.refreshed == 2  # 3 attempted, 2 confirmed by the store
+
+
 def test_markdown_sync_patches_through_the_hook_in_bounded_groups():
     from mnemostack.markdown.sync import upsert_markdown_chunks
 
