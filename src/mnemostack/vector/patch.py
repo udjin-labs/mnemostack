@@ -17,7 +17,9 @@ comparison and can never be set or deleted by a patch.
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -34,16 +36,74 @@ class PayloadPatch:
     delete_keys: tuple[str, ...] = ()
 
 
+def _instant(value: _dt.date | _dt.datetime | _dt.time) -> str:
+    """One canonical rendering per instant, matching the backend's ISO form.
+
+    A YAML frontmatter timestamp arrives as a ``datetime``/``date`` OBJECT,
+    while the stored payload comes back as the ISO STRING the backend
+    serialized it to (``T`` separator; UTC may render as ``Z`` or
+    ``+00:00``; offsets are kept) — ``str(datetime)`` uses a SPACE
+    separator, so comparing through ``str()`` marked every timestamped
+    point changed on every warm run. Aware datetimes are reduced to UTC so
+    every spelling of the same instant compares equal.
+    """
+    if isinstance(value, _dt.datetime):
+        if value.tzinfo is not None:
+            value = value.astimezone(_dt.timezone.utc)
+        return value.isoformat()
+    return value.isoformat()
+
+
+#: Calendar-date timestamps only, in exactly the shapes the backend (and
+#: ``datetime.isoformat``) emits: T or space separator, optional seconds,
+#: optional 3- or 6-digit fraction, optional Z / ±HH:MM offset. Every match
+#: parses identically on all supported interpreters — delegating the guard
+#: to ``fromisoformat``'s full acceptance surface would make normalization
+#: Python-version-dependent (3.11 grew week dates, ordinal dates and
+#: arbitrary fraction lengths), i.e. two runs of the same corpus could
+#: disagree on what "unchanged" means.
+_TEMPORAL_STRING = re.compile(
+    r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{3}|\.\d{6})?)?"
+    r"(?:Z|[+-]\d{2}:\d{2})?"
+)
+
+
+def _normalize_temporal_string(value: str) -> str:
+    """Map an ISO datetime STRING onto the same canonical instant form.
+
+    The stored side of a comparison is always a string; only strings
+    matching the exact backend-emitted shapes are rewritten, and a
+    date-only string stays as-is — mirroring the object branch, where a
+    ``date`` never grows a time part. Both sides pass through here, so a
+    plain string field that merely looks like a timestamp still compares
+    consistently against another string.
+    """
+    if not _TEMPORAL_STRING.fullmatch(value):
+        return value
+    try:
+        parsed = _dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:  # right shape, impossible date (month 13, hour 25, …)
+        return value
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(_dt.timezone.utc)
+    return parsed.isoformat()
+
+
 def _normalize(value: Any) -> Any:
     """Recursively coerce to the shape a JSON backend round-trip produces.
 
     Mapping keys become strings (mixed int/str keys are VALID YAML and must
-    not crash the sort), tuples become lists.
+    not crash the sort), tuples become lists, and timestamps — objects and
+    ISO strings alike — collapse onto one canonical instant form.
     """
     if isinstance(value, Mapping):
         return {str(k): _normalize(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [_normalize(v) for v in value]
+    if isinstance(value, (_dt.datetime, _dt.date, _dt.time)):
+        return _instant(value)
+    if isinstance(value, str):
+        return _normalize_temporal_string(value)
     return value
 
 
@@ -54,11 +114,13 @@ def _canonical(value: Any) -> str:
     into lists, mapping order is arbitrary, mapping keys are strings) —
     equality must reflect the EFFECTIVE value, never object identity,
     container flavor or key order. A value that cannot be canonicalized at
-    all compares UNEQUAL to everything: the safe direction is a rewrite,
-    never a skipped real change.
+    all compares UNEQUAL to everything (no ``default=`` hook: a lossy
+    string fallback would let a ``Decimal("1.0")`` compare EQUAL to the
+    string ``"1.0"`` and skip a real change): the safe direction is a
+    rewrite, never a skipped one.
     """
     try:
-        return json.dumps(_normalize(value), sort_keys=True, default=str)
+        return json.dumps(_normalize(value), sort_keys=True)
     except (TypeError, ValueError):
         return f"__uncanonical__:{id(value)}"
 

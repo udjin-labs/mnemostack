@@ -210,6 +210,106 @@ def test_date_frontmatter_objects_compare_against_stored_iso_strings():
     assert diff_payload(old, new, point_id="p1") is None
 
 
+def test_datetime_frontmatter_objects_compare_against_stored_iso_strings():
+    """PyYAML resolves timestamps to datetime objects; the backend stores the
+    ISO ``T``-separated string (UTC as ``Z``, offsets kept). str(datetime)
+    uses a SPACE separator, so a naive comparison marks every timestamped
+    point changed on every warm run — the canonical instant form must not."""
+    import datetime
+
+    naive = datetime.datetime(2026, 1, 1, 12, 30)
+    utc = datetime.datetime(2026, 1, 1, 12, 30, tzinfo=datetime.timezone.utc)
+    offset = datetime.datetime(
+        2026, 1, 1, 12, 30,
+        tzinfo=datetime.timezone(datetime.timedelta(hours=3)),
+    )
+    # Exactly the strings the backend round-trip produces for those objects.
+    old = {
+        "dt": "2026-01-01T12:30:00",
+        "dtz": "2026-01-01T12:30:00Z",
+        "dtoff": "2026-01-01T12:30:00+03:00",
+    }
+    new = {"dt": naive, "dtz": utc, "dtoff": offset}
+    assert diff_payload(old, new, point_id="p1") is None
+
+    # A REAL timestamp change is still a change.
+    moved = {"dt": naive + datetime.timedelta(minutes=1), "dtz": utc, "dtoff": offset}
+    assert diff_payload(old, moved, point_id="p1") is not None
+
+
+def test_equivalent_timezone_spellings_of_one_instant_are_unchanged():
+    # +00:00 and Z spell the same instant; so do +03:00 and its UTC form.
+    old = {"a": "2026-01-01T12:30:00+00:00", "b": "2026-01-01T12:30:00+03:00"}
+    new = {"a": "2026-01-01T12:30:00Z", "b": "2026-01-01T09:30:00Z"}
+    assert diff_payload(old, new, point_id="p1") is None
+
+
+def test_datetime_payload_round_trip_through_qdrant_is_unchanged():
+    """Pin the REAL backend serialization: write datetime/date objects into
+    in-memory Qdrant, read the stored strings back, and prove a warm diff
+    against fresh YAML-parsed objects sees no change."""
+    import datetime
+
+    from qdrant_client import QdrantClient
+    from qdrant_client.models import Distance, PointStruct, VectorParams
+
+    frontmatter = {
+        "d": datetime.date(2026, 1, 1),
+        "dt": datetime.datetime(2026, 1, 1, 12, 30),
+        "dtz": datetime.datetime(2026, 1, 1, 12, 30, tzinfo=datetime.timezone.utc),
+        "dtoff": datetime.datetime(
+            2026, 1, 1, 12, 30,
+            tzinfo=datetime.timezone(datetime.timedelta(hours=3)),
+        ),
+    }
+    client = QdrantClient(":memory:")
+    client.create_collection(
+        "t", vectors_config=VectorParams(size=2, distance=Distance.COSINE)
+    )
+    client.upsert(
+        "t", points=[PointStruct(id=1, vector=[0.1, 0.2], payload=dict(frontmatter))]
+    )
+    stored = client.retrieve("t", ids=[1], with_payload=True)[0].payload or {}
+    assert all(isinstance(v, str) for v in stored.values())  # round trip happened
+
+    assert diff_payload(stored, dict(frontmatter), point_id="p1") is None
+
+
+def test_non_calendar_iso_shapes_stay_verbatim_on_every_python():
+    """Week dates, ordinal dates, basic format and odd fraction lengths are
+    accepted by fromisoformat only on some interpreter versions (3.11 grew
+    them) — the shape guard excludes them entirely, so normalization is
+    deterministic across 3.10–3.13 and a week-date string can never silently
+    equal its calendar spelling."""
+    for s in (
+        "2026-W01-1T10:00:00",
+        "2026-123T10:00:00",
+        "20260101T100000",
+        "2026-01-01T10:00:00.12",  # 2-digit fraction: not a backend shape
+    ):
+        assert diff_payload({"v": s}, {"v": s}, point_id="p1") is None
+    assert (
+        diff_payload(
+            {"v": "2025-12-29T10:00:00"},
+            {"v": "2026-W01-1T10:00:00"},
+            point_id="p1",
+        )
+        is not None
+    )
+
+
+def test_unsupported_types_never_compare_equal_to_their_string_form():
+    """No default=str fallback: Decimal("1.0") must not silently equal the
+    string "1.0" (a skipped REAL change); it compares unequal — the safe
+    direction is a rewrite."""
+    from decimal import Decimal
+
+    old = {"v": "1.0"}
+    new = {"v": Decimal("1.0")}
+    patch = diff_payload(old, new, point_id="p1")
+    assert patch is not None
+
+
 def test_cmd_index_warm_second_run_issues_zero_payload_writes(tmp_path, monkeypatch, capsys):
     import mnemostack.cli as cli
 
