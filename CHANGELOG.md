@@ -4,6 +4,12 @@ All notable changes to mnemostack will be documented here. Format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Diff-based payload refresh (`index-markdown` and `index --refresh-payloads`)**: a warm re-index used to rewrite EVERY already-indexed point's payload unconditionally — on a large collection that is tens of thousands of no-op HTTP writes (plus the backend's WAL/replication work) after all embedding is already done, and it dominated warm-run time now that embedding is batched. Refresh now compares every OWNED field per point (each key the new payload would set, by normalized JSON value — container flavor, key order and mixed YAML key types never register as changes — plus the formerly-owned stale keys) and skips the point entirely when nothing effectively changed: an unchanged warm sync issues ZERO payload mutation requests. A point that DID change is rewritten with the historical delete-stale + full-merge-write pair, so overlapping refreshes stay last-writer-coherent instead of interleaving per-key fragments. The per-run snapshot capture timestamp follows a parity rule — an unchanged content hash keeps its stored capture time — because otherwise the timestamp alone would mark every point changed and the zero-mutation guarantee would be fiction on any real corpus. Semantics are observationally identical to the old delete-stale-keys + merge-write sequence — foreign payload fields stay untouched and uncompared, stale `_md_keys`/`_enrich_keys` fields still get deleted, embedding-space adoption still writes the guard-validated fingerprint (the first post-upgrade run patches once, every run after is free), and space conflicts remain refused. The completion summary now reports `compared / unchanged / patched` (the `refreshed` counter counts REAL writes only), with matching `mnemostack.markdown.payloads_unchanged` / `payloads_patched` metrics — an accidental return to write-amplification is visible without reading backend access logs.
+
 ## [2.0.0] - 2026-08-05
 
 > **2.0.0 is a breaking release**: role-aware embedding changes the DEFAULT

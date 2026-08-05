@@ -54,6 +54,7 @@ from .recall import (
 from .recall.pipeline import FileStateStore, build_full_pipeline, default_state_path
 from .synthesis import synthesize
 from .vector import VectorStore
+from .vector.patch import carry_snapshot_capture_time, diff_payload
 
 # -- Progressive tiers --------------------------------------------------------
 # Tiered output budgets let agents pay only for the detail they need.
@@ -2569,6 +2570,8 @@ def cmd_index(args: argparse.Namespace) -> int:
             return post_rc
 
     refreshed = 0
+    compared = 0
+    unchanged = 0
     foreign_skipped = 0
     foreign_space_skipped = 0
     if args.refresh_payloads and existing_ids and not _fingerprint_still(doc_fp):
@@ -2608,18 +2611,32 @@ def cmd_index(args: argparse.Namespace) -> int:
                 # into the current space; leave the point untouched and loud.
                 foreign_space_skipped += 1
                 continue
-            old_enrich = old_payload.get("_enrich_keys") or []
-            stale_keys = [k for k in old_enrich if k not in payload]
-            if old_enrich and "_enrich_keys" not in payload:
-                stale_keys.append("_enrich_keys")
-            store.delete_payload_keys(cid, stale_keys)
             # Adoption path for pre-fingerprint points: a refresh doesn't
             # re-embed, and the space guard has already rejected a sampled
             # mismatch, so stamping here records the space these vectors
             # were verified (or operator-asserted) to belong to.
             if doc_fp is not None:
                 payload[EMBEDDING_SPACE_KEY] = doc_fp
-            store.set_payload(cid, payload)
+            # Same parity rule as the markdown sync: an unchanged content
+            # snapshot keeps its stored capture time, or every warm refresh
+            # would rewrite every point for the timestamp alone.
+            payload = carry_snapshot_capture_time(old_payload, payload)
+            old_enrich = old_payload.get("_enrich_keys") or []
+            stale_keys = [k for k in old_enrich if k not in payload]
+            if old_enrich and "_enrich_keys" not in payload:
+                stale_keys.append("_enrich_keys")
+            compared += 1
+            # Write-or-skip (same contract as the markdown sync): an
+            # unchanged point costs zero backend requests; a changed one is
+            # rewritten whole for last-writer coherence.
+            patch = diff_payload(old_payload, payload, point_id=cid, stale_keys=stale_keys)
+            if patch is None:
+                unchanged += 1
+                continue
+            if patch.delete_keys:
+                store.delete_payload_keys(cid, list(patch.delete_keys))
+            if patch.set_values:
+                store.set_payload(cid, dict(patch.set_values))
             refreshed += 1
         if foreign_skipped:
             print(
@@ -2658,7 +2675,12 @@ def cmd_index(args: argparse.Namespace) -> int:
     print(
         f"Done: inserted/updated {inserted}, skipped {skipped},"
         f" failed-embedding {failed}, total chunks seen {len(chunks)}"
-        + (f", refreshed {refreshed} payloads" if args.refresh_payloads else "")
+        + (
+            f", payloads: {compared} compared / {unchanged} unchanged / "
+            f"{refreshed} patched"
+            if args.refresh_payloads
+            else ""
+        )
         + (f", pruned {pruned} stale" if args.prune else "")
         + f" in collection '{args.collection}'."
     )
@@ -2924,7 +2946,12 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
     print(
         f"Done: inserted/updated {inserted}, skipped {skipped},"
         f" failed-embedding {failed}, total chunks {len(chunks)}"
-        + (f", refreshed {refreshed} payloads" if refreshed else "")
+        + (
+            f", payloads: {cs.compared} compared / {cs.unchanged} unchanged / "
+            f"{refreshed} patched"
+            if cs.compared
+            else ""
+        )
         + (f", pruned {pruned} stale" if args.prune else "")
         + (f", {edges_written} link edges" if graph_uri else "")
         + f" in collection '{args.collection}'."

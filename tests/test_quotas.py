@@ -503,7 +503,12 @@ def test_markdown_upsert_refresh_does_not_count():
     chunks = [("id0", "t0", _md("a.md"))]
     existing = {"id0": _md("a.md")}
     res = _md_upsert(store, _Emb(), chunks, existing, max_points=10, prune=True)
-    assert res.refreshed == 1 and res.inserted == 0
+    # Diff-based refresh: the identical payload is compared; the only write
+    # that may happen is the one-time embedding-space adoption (this fake
+    # provider carries a fingerprint). The quota-safety intent holds either
+    # way: refreshes never count as NEW points.
+    assert res.inserted == 0
+    assert res.compared == 1
 
 
 # ---------- CLI ----------

@@ -28,7 +28,9 @@ from ..embeddings.roles import (
     document_space_fingerprint_via,
     embed_documents_resilient,
 )
+from ..observability.recorder import counter
 from ..quotas import enforce_points_quota
+from ..vector.patch import carry_snapshot_capture_time, diff_payload
 from .indexer import collect_markdown
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -46,6 +48,9 @@ def _is_within(path: str, base: str) -> bool:
 @dataclass
 class ChunkSyncResult:
     inserted: int = 0
+    #: Existing points whose owned payload actually CHANGED and was patched.
+    #: A warm sync of an unchanged corpus reports 0 here and issues zero
+    #: payload mutation requests.
     refreshed: int = 0
     failed: int = 0
     failed_sources: set[str] = field(default_factory=set)
@@ -53,6 +58,11 @@ class ChunkSyncResult:
     # active provider's — refresh leaves them untouched instead of laundering
     # them into the current space.
     space_conflicts: int = 0
+    #: Existing points whose owned payload was compared against the fresh one.
+    compared: int = 0
+    #: Compared points whose effective owned payload was identical — skipped
+    #: without any backend request.
+    unchanged: int = 0
 
 
 def markdown_prune_count(
@@ -304,14 +314,36 @@ def upsert_markdown_chunks(
             # that would make the mixed state permanently invisible.
             res.space_conflicts += 1
             continue
-        owned = old.get("_md_keys") or []
-        stale = [k for k in owned if k not in payload]
-        if stale:
-            store.delete_payload_keys(cid, stale, **tkw)
         if doc_fp is not None:
             payload[EMBEDDING_SPACE_KEY] = doc_fp
-        store.set_payload(cid, payload, **tkw)
+        # Unchanged content keeps its stored capture time — otherwise the
+        # per-run snapshot timestamp alone would mark EVERY point changed
+        # and the warm-run zero-mutation guarantee would be fiction.
+        payload = carry_snapshot_capture_time(old, payload)
+        owned = old.get("_md_keys") or []
+        res.compared += 1
+        # Write-or-skip: an unchanged point costs ZERO backend requests; a
+        # changed one gets the historical delete-stale + full-merge-write
+        # pair (full payload on purpose — any single writer leaves the
+        # point coherent under last-writer-wins, unlike a per-key minimal
+        # patch that could interleave two overlapping refreshes).
+        patch = diff_payload(
+            old,
+            payload,
+            point_id=cid,
+            stale_keys=(k for k in owned if k not in payload),
+        )
+        if patch is None:
+            res.unchanged += 1
+            continue
+        if patch.delete_keys:
+            store.delete_payload_keys(cid, list(patch.delete_keys), **tkw)
+        if patch.set_values:
+            store.set_payload(cid, dict(patch.set_values), **tkw)
         res.refreshed += 1
+    if res.compared:
+        counter("mnemostack.markdown.payloads_unchanged", res.unchanged)
+        counter("mnemostack.markdown.payloads_patched", res.refreshed)
     return res
 
 
