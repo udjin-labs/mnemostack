@@ -254,15 +254,24 @@ def upsert_markdown_chunks(
         spooled: list[tuple[str, dict]] = []
         with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as spool:
             for start in range(0, len(new_chunks), embedding_batch_size):
-                for cid, vec, payload in _embed_group(
+                # The SAME per-group sandwich as the streaming path: with
+                # only whole-corpus checks, a mutable tag flipping A→B→A
+                # between them would mix B-vectors into the spool and the
+                # final check (back at A) would never notice.
+                if start and not _fp_unchanged():
+                    _raise_fp_changed()
+                group_embedded = _embed_group(
                     new_chunks[start : start + embedding_batch_size]
-                ):
+                )
+                if group_embedded and not _fp_unchanged():
+                    _raise_fp_changed()
+                for cid, vec, payload in group_embedded:
                     spool.write(json.dumps(vec))
                     spool.write("\n")
                     spooled.append((cid, payload))
             before_upsert(len(spooled), res.failed_sources)
-            # Post-embed check before ANY write: closes the same mid-batch
-            # repoint window the streaming path sandwiches per group.
+            # Final pre-write check: the hook ran after the last group's
+            # post-check, so this closes the hook-execution window too.
             if spooled and not _fp_unchanged():
                 _raise_fp_changed()
             spool.seek(0)

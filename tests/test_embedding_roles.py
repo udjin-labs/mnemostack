@@ -654,6 +654,9 @@ def test_singular_role_defaults_dispatch_through_batch_overrides():
 def test_profile_override_without_dimensions_keeps_builtin_table():
     # Registering a transform override (e.g. the identity profile the guard
     # error suggests) must not regress known tags to a wrong dimension.
+    # The registry is GLOBAL — snapshot/restore it so this test can't leak
+    # an "ollama" override into later tests (order independence).
+    from mnemostack.embeddings import profiles
     from mnemostack.embeddings.profiles import (
         EmbeddingProfile,
         known_dimension,
@@ -661,16 +664,24 @@ def test_profile_override_without_dimensions_keeps_builtin_table():
         resolve_profile,
     )
 
-    register_embedding_profile(
-        "ollama",
-        EmbeddingProfile(
-            name="qwen3-identity-override",
-            version=1,
-            model_patterns=("qwen3-embedding:0.6b",),
-        ),
-    )
-    assert resolve_profile("ollama", "qwen3-embedding:0.6b").name == "qwen3-identity-override"
-    assert known_dimension("ollama", "qwen3-embedding:0.6b") == 1024
+    snapshot = {k: list(v) for k, v in profiles._PROFILES.items()}
+    try:
+        register_embedding_profile(
+            "ollama",
+            EmbeddingProfile(
+                name="qwen3-identity-override",
+                version=1,
+                model_patterns=("qwen3-embedding:0.6b",),
+            ),
+        )
+        assert (
+            resolve_profile("ollama", "qwen3-embedding:0.6b").name
+            == "qwen3-identity-override"
+        )
+        assert known_dimension("ollama", "qwen3-embedding:0.6b") == 1024
+    finally:
+        profiles._PROFILES.clear()
+        profiles._PROFILES.update(snapshot)
 
 
 def test_own_pair_guard_skipped_in_retrievers_mode_but_kept_for_search_many():

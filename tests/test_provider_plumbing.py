@@ -625,3 +625,51 @@ def test_ollama_embed_batch_accepts_and_ignores_max_workers(monkeypatch):
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     provider = get_provider("ollama")
     assert provider.embed_batch(["a", "b"], max_workers=4) == [[0.1], [0.1]]
+
+
+def test_quota_path_catches_a_to_b_to_a_tag_flip():
+    """A mutable tag flipping A→B→A during quota-path embedding must be
+    caught by the per-group sandwich — whole-corpus-only checks would let
+    B-vectors into the spool and the final check (back at A) pass."""
+    from mnemostack.embeddings.roles import EmbeddingSpaceError
+    from mnemostack.markdown.sync import upsert_markdown_chunks
+
+    class _FlipFlop(_BatchCountingProvider):
+        def __init__(self, revs):
+            super().__init__()
+            self._revs = list(revs)
+
+        def _fingerprint_extras(self):
+            # Each resolution consumes the next scheduled revision; the tag
+            # settles on the last value once the schedule is exhausted.
+            rev = self._revs.pop(0) if len(self._revs) > 1 else self._revs[0]
+            return {"rev": rev}
+
+    store = _BatchStore()
+    hook_calls: list[int] = []
+    # Resolution order in the quota path: invocation guard (A), group-1
+    # post-check (B — the flip!), … final would have seen A again.
+    provider = _FlipFlop(["A", "B", "A"])
+    with pytest.raises(EmbeddingSpaceError, match="changed mid-sync"):
+        upsert_markdown_chunks(
+            store,
+            provider,
+            _chunks(4),
+            existing_payloads={},
+            before_upsert=lambda n, failed: hook_calls.append(n),
+            embedding_batch_size=2,
+        )
+    assert store.upsert_batches == [] and store.single_upserts == 0
+    assert hook_calls == []  # aborted before the hook, nothing written
+
+    # Control: a stable tag sails through the identical pipeline.
+    stable = _FlipFlop(["A"])
+    res = upsert_markdown_chunks(
+        _BatchStore(),
+        stable,
+        _chunks(4),
+        existing_payloads={},
+        before_upsert=lambda n, failed: None,
+        embedding_batch_size=2,
+    )
+    assert res.inserted == 4
