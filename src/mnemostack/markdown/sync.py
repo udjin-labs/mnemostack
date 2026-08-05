@@ -107,14 +107,17 @@ def markdown_prune_count(
     if full_root:
         for pl in existing_payloads.values():  # sources removed from the corpus
             src = pl.get("source")
-            if src is not None:
+            if isinstance(src, str):
                 fresh.setdefault(src, set())
     for src in failed_sources:
         fresh.pop(src, None)
     count = 0
     for cid, pl in existing_payloads.items():
         src = pl.get("source")
-        if src not in fresh or cid in fresh[src]:
+        # Same guard as the real snapshot prune: a non-string source can
+        # never match a fresh-map key, and an unhashable one must not crash
+        # the membership test — the estimate and the prune skip it alike.
+        if not isinstance(src, str) or src not in fresh or cid in fresh[src]:
             continue  # not a pruned source, or still a fresh id
         if md_owned_only and not pl.get("_md_keys"):
             continue

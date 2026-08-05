@@ -2663,7 +2663,7 @@ def cmd_index(args: argparse.Namespace) -> int:
 
     pruned = 0
     if args.prune and not args.recreate:
-        from .ingest import prune_stale_chunks
+        from .ingest import prune_stale_chunks_from_snapshot
 
         fresh_by_source: dict[str, set[str]] = {source: set() for source in visited_sources}
         for cid, _text, payload in chunks:
@@ -2679,7 +2679,13 @@ def cmd_index(args: argparse.Namespace) -> int:
                 "with failed embeddings; re-run after the provider recovers",
                 file=sys.stderr,
             )
-        pruned = prune_stale_chunks(store, fresh_by_source, index_root=index_root)
+        # Discovery from the --refresh-payloads snapshot when it exists (zero
+        # extra reads — points inserted this run are exactly the fresh ids);
+        # otherwise ONE root-scoped scroll inside — never a scan per source.
+        prune_snapshot = existing_payloads.items() if args.refresh_payloads else None
+        pruned = prune_stale_chunks_from_snapshot(
+            store, fresh_by_source, prune_snapshot, index_root=index_root
+        )
 
     print(
         f"Done: inserted/updated {inserted}, skipped {skipped},"
@@ -2878,7 +2884,7 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
     # quota instead.
     pruned = 0
     if args.prune and not args.recreate and not initial_skipped:
-        from .ingest import prune_stale_chunks
+        from .ingest import prune_stale_chunks_from_snapshot
 
         # Seed from EVERY visited file, not just files that produced chunks: a
         # file edited to empty / frontmatter-only yields no chunks but must
@@ -2891,11 +2897,14 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
         # longer present) with an empty fresh set so its stale points are pruned
         # instead of lingering searchable. ONLY for a full-root directory walk —
         # a single file or a nested subtree covers only part of the index_root,
-        # so reconciling here would wrongly prune untouched siblings.
+        # so reconciling here would wrongly prune untouched siblings. Seeded
+        # from the SAME snapshot the quota estimate used (markdown_prune_count),
+        # so the real prune can't diverge from the predicted one — and the
+        # second whole-root scroll this used to cost is gone.
         if full_root_walk:
-            for hit in store.scroll(filters={"index_root": index_root}, **mtkw):
-                prior = (hit.payload or {}).get("source")
-                if prior and prior not in fresh_by_source:
+            for pl in existing_payloads.values():
+                prior = pl.get("source")
+                if isinstance(prior, str) and prior and prior not in fresh_by_source:
                     fresh_by_source[prior] = set()
         for source in failed_sources:
             fresh_by_source.pop(source, None)
@@ -2905,7 +2914,16 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
                 "with failed embeddings; re-run after the provider recovers",
                 file=sys.stderr,
             )
-        pruned = prune_stale_chunks(store, fresh_by_source, index_root=index_root, tenant=tenant)
+        # Stale-id discovery from the snapshot loaded at command start — this
+        # run's own upserts are exactly the fresh ids, so nothing new is ever
+        # a candidate; zero additional store reads.
+        pruned = prune_stale_chunks_from_snapshot(
+            store,
+            fresh_by_source,
+            existing_payloads.items(),
+            index_root=index_root,
+            tenant=tenant,
+        )
 
     # Links -> graph edges. Only when a graph is configured; sources whose
     # embeddings failed are skipped so a partial index doesn't rewrite links.
