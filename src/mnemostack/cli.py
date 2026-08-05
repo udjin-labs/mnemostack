@@ -37,6 +37,7 @@ from .embeddings.roles import (
     embed_documents_resilient,
 )
 from .llm import get_llm, list_llms
+from .markdown.sync import PAYLOAD_PATCH_BATCH
 from .recall import (
     RERANK_MODES,
     AnswerGenerator,
@@ -54,7 +55,12 @@ from .recall import (
 from .recall.pipeline import FileStateStore, build_full_pipeline, default_state_path
 from .synthesis import synthesize
 from .vector import VectorStore
-from .vector.patch import carry_snapshot_capture_time, diff_payload
+from .vector.patch import (
+    PayloadPatch,
+    apply_patches_via,
+    carry_snapshot_capture_time,
+    diff_payload,
+)
 
 # -- Progressive tiers --------------------------------------------------------
 # Tiered output budgets let agents pay only for the detail they need.
@@ -2591,6 +2597,8 @@ def cmd_index(args: argparse.Namespace) -> int:
         # Only points owned by this root — or unattributed legacy points
         # (no index_root yet; adopting them IS the migration path) — are
         # touched; a point recorded under another root is left alone.
+        # Batched through the store hook, one round-trip per bounded group.
+        pending_patches: list[PayloadPatch] = []
         for cid, _text, payload in chunks:
             if cid not in existing_ids:
                 continue
@@ -2633,11 +2641,12 @@ def cmd_index(args: argparse.Namespace) -> int:
             if patch is None:
                 unchanged += 1
                 continue
-            if patch.delete_keys:
-                store.delete_payload_keys(cid, list(patch.delete_keys))
-            if patch.set_values:
-                store.set_payload(cid, dict(patch.set_values))
+            pending_patches.append(patch)
             refreshed += 1
+            if len(pending_patches) >= PAYLOAD_PATCH_BATCH:
+                apply_patches_via(store, pending_patches)
+                pending_patches = []
+        apply_patches_via(store, pending_patches)
         if foreign_skipped:
             print(
                 f"warning: {foreign_skipped} chunk(s) skipped by --refresh-payloads: "

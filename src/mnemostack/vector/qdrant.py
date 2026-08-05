@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, cast
@@ -11,6 +12,8 @@ from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.models import (
     DatetimeRange,
+    DeletePayload,
+    DeletePayloadOperation,
     Distance,
     FieldCondition,
     Filter,
@@ -25,6 +28,8 @@ from qdrant_client.models import (
     PointIdsList,
     PointStruct,
     Range,
+    SetPayload,
+    SetPayloadOperation,
     SparseVector,
     SparseVectorParams,
     TextIndexParams,
@@ -709,6 +714,87 @@ class VectorStore:
             keys=keys,
             points=[id],
         )
+
+    def apply_payload_patches(
+        self,
+        patches: Sequence[Any],
+        *,
+        tenant: str | None = None,
+        batch_size: int = 100,
+    ) -> int:
+        """Apply per-point payload patches in bounded batch operations.
+
+        Each patch (see :class:`mnemostack.vector.patch.PayloadPatch`)
+        carries the point id, the full payload mapping to merge-set and the
+        stale keys to delete — the batched equivalent of the scalar
+        ``delete_payload_keys`` + ``set_payload`` pair, submitted as ONE
+        ``batch_update_points`` round-trip per bounded group instead of two
+        HTTP requests per point.
+
+        Semantics mirror the scalar guarded writes exactly:
+
+        - with ``tenant`` set, ownership is validated for the WHOLE group
+          BEFORE any mutation; foreign-owned or missing points are silently
+          skipped (never partially mutated mid-group), and the set side
+          restores the server-owned ``tenant_id``;
+        - unscoped patches can neither set nor delete ``tenant_id``;
+        - per-point operation order (delete-then-set) and input order are
+          preserved within a submitted batch;
+        - a backend rejection raises — a partial/ambiguous batch must never
+          look committed, so callers do not advance their checkpoints.
+
+        Returns the number of points actually patched (tenant-skipped points
+        are not counted).
+        """
+        applied = 0
+        for start in range(0, len(patches), max(1, batch_size)):
+            group = list(patches[start : start + max(1, batch_size)])
+            if tenant is not None:
+                found = self.client.retrieve(
+                    collection_name=self.collection,
+                    ids=[p.id for p in group],
+                    with_payload=[TENANT_ID_KEY],
+                )
+                owned = {
+                    str(pt.id)
+                    for pt in found
+                    if (pt.payload or {}).get(TENANT_ID_KEY) == tenant
+                }
+                group = [p for p in group if str(p.id) in owned]
+            operations: list[Any] = []
+            for patch in group:
+                delete_keys = [k for k in patch.delete_keys if k != TENANT_ID_KEY]
+                if delete_keys:
+                    operations.append(
+                        DeletePayloadOperation(
+                            delete_payload=DeletePayload(
+                                keys=delete_keys, points=[patch.id]
+                            )
+                        )
+                    )
+                if tenant is not None:
+                    values = {**dict(patch.set_values), TENANT_ID_KEY: tenant}
+                else:
+                    values = {
+                        k: v for k, v in patch.set_values.items() if k != TENANT_ID_KEY
+                    }
+                if values:
+                    operations.append(
+                        SetPayloadOperation(
+                            set_payload=SetPayload(payload=values, points=[patch.id])
+                        )
+                    )
+            if operations:
+                # wait=True: the scalar methods are synchronous — the batched
+                # path must not return before the backend confirms, or a
+                # caller's checkpoint could outrun an uncommitted mutation.
+                self.client.batch_update_points(
+                    collection_name=self.collection,
+                    update_operations=operations,
+                    wait=True,
+                )
+            applied += len(group)
+        return applied
 
     def delete_points(
         self, ids: list[str | int], batch_size: int = 1000, *, tenant: str | None = None

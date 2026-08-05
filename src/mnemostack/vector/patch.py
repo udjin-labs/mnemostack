@@ -22,7 +22,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-__all__ = ["PayloadPatch", "carry_snapshot_capture_time", "diff_payload"]
+__all__ = ["PayloadPatch", "apply_patches_via", "carry_snapshot_capture_time", "diff_payload"]
 
 
 @dataclass(frozen=True)
@@ -123,3 +123,31 @@ def carry_snapshot_capture_time(
     ):
         new[captured_key] = old[captured_key]
     return new
+
+
+def apply_patches_via(
+    store: Any,
+    patches: list[PayloadPatch],
+    *,
+    tenant: str | None = None,
+    batch_size: int = 100,
+) -> int:
+    """Apply patches through the store's batch hook when it has one.
+
+    Stores without ``apply_payload_patches`` (custom/legacy implementations)
+    get the scalar delete-then-set pair per patch — byte-for-byte the
+    historical refresh behavior, including the tenant kwarg being passed
+    only when scoped so tenant-unaware stores keep working.
+    """
+    if not patches:
+        return 0
+    method = getattr(store, "apply_payload_patches", None)
+    if method is not None:
+        return int(method(patches, tenant=tenant, batch_size=batch_size))
+    tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
+    for patch in patches:
+        if patch.delete_keys:
+            store.delete_payload_keys(patch.id, list(patch.delete_keys), **tkw)
+        if patch.set_values:
+            store.set_payload(patch.id, dict(patch.set_values), **tkw)
+    return len(patches)
