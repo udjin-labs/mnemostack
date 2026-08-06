@@ -200,6 +200,52 @@ def test_leading_block_comment_travels_in_brace_family():
     assert second.text.startswith("/**")
 
 
+def test_kotlin_fun_definitions_are_boundaries():
+    kt_src = (
+        "package demo\n\n"
+        "fun firstThing(x: Int): Int {\n"
+        + "".join(f"    val a{i} = x + {i}\n" for i in range(20))
+        + "    return x\n}\n\n"
+        "fun secondThing(y: Int): Int {\n"
+        + "".join(f"    val b{i} = {i}\n" for i in range(20))
+        + "    return y\n}\n"
+    )
+    chunks = chunk_code(kt_src, "kotlin", max_chars=2000)
+    _assert_partition(kt_src, chunks)
+    symbols = [c.symbol for c in chunks]
+    assert "firstThing" in symbols and "secondThing" in symbols
+
+
+def test_annotations_and_templates_travel_with_their_definition():
+    java_src = (
+        "public class First {\n"
+        + "".join(f"    int a{i} = {i};\n" for i in range(20))
+        + "}\n\n"
+        "@Deprecated\n"
+        "public class Second {\n"
+        + "".join(f"    int b{i} = {i};\n" for i in range(20))
+        + "}\n"
+    )
+    chunks = chunk_code(java_src, "java", max_chars=2000)
+    _assert_partition(java_src, chunks)
+    second = next(c for c in chunks if c.symbol == "Second")
+    assert second.text.startswith("@Deprecated")
+
+    cpp_src = (
+        "static int first(void) {\n"
+        + "".join(f"    int a{i} = {i};\n" for i in range(20))
+        + "    return 0;\n}\n\n"
+        "template <typename T>\n"
+        "T second(T value) {\n"
+        + "".join(f"    T b{i} = value;\n" for i in range(20))
+        + "    return value;\n}\n"
+    )
+    cpp_chunks = chunk_code(cpp_src, "cpp", max_chars=2000)
+    _assert_partition(cpp_src, cpp_chunks)
+    templated = next(c for c in cpp_chunks if c.symbol == "second")
+    assert templated.text.startswith("template <typename T>")
+
+
 def test_small_chunk_size_still_bounds_and_partitions():
     # --chunk-size below the merge minimum must still be honored: pieces
     # never exceed max_chars and the partition holds.
@@ -391,6 +437,32 @@ def test_cmd_index_code_warm_second_run_is_zero_write(monkeypatch, tmp_path, sto
     second = {str(h.id): dict(h.payload or {}) for h in store.scroll()}
     assert second == first
     assert "0 patched" in out
+
+
+def test_refresh_without_code_flag_removes_stale_code_metadata(
+    monkeypatch, tmp_path, store, capsys
+):
+    """Opting back out of --code must not leave points falsely code-marked:
+    a small file keeps the same chunk id either way (same source/offset/
+    text), so the refresh must DELETE the code-owned keys, not merge over
+    them."""
+    src = tmp_path / "app.py"
+    src.write_text("def tiny():\n    return 1\n", encoding="utf-8")
+    _patch_stack(monkeypatch, store)
+
+    assert cli.cmd_index(_index_args(tmp_path, path=str(src), code=True)) == 0
+    code_payloads = [h.payload or {} for h in store.scroll()]
+    assert any(p.get("chunk_kind") == "code" for p in code_payloads)
+    code_ids = {str(h.id) for h in store.scroll()}
+
+    # Same single-file target, code mode off, payload refresh on: the chunk
+    # id is identical (same source/offset/text), payload must go prose.
+    assert cli.cmd_index(_index_args(tmp_path, path=str(src), refresh_payloads=True)) == 0
+    prose_payloads = {str(h.id): dict(h.payload or {}) for h in store.scroll()}
+    assert set(prose_payloads) == code_ids  # ids unchanged — refreshed in place
+    for p in prose_payloads.values():
+        for key in ("language", "chunk_kind", "code_tokens", "symbol", "_code_keys"):
+            assert key not in p
 
 
 def test_cmd_index_code_prune_removes_stale_chunks(monkeypatch, tmp_path, store):

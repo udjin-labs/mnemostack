@@ -2490,6 +2490,16 @@ def cmd_index(args: argparse.Namespace) -> int:
                     payload["symbol"] = cc.symbol
                 else:
                     payload.pop("symbol", None)
+                # Ownership record (mirrors _enrich_keys/_md_keys): names
+                # exactly what the code path wrote, so a later refresh
+                # WITHOUT --code deletes the stale code metadata instead of
+                # leaving the point falsely code-marked and lexically
+                # searchable through code_tokens.
+                payload["_code_keys"] = sorted(
+                    k
+                    for k in ("language", "chunk_kind", "code_tokens", "symbol")
+                    if k in payload
+                )
                 payload.update(snapshot)
                 payload["_id_scheme"] = "stable_chunk_id"
                 chunks.append((cid, cc.text, payload))
@@ -2712,6 +2722,13 @@ def cmd_index(args: argparse.Namespace) -> int:
             stale_keys = [k for k in old_enrich if k not in payload]
             if old_enrich and "_enrich_keys" not in payload:
                 stale_keys.append("_enrich_keys")
+            # Same ownership rule for code metadata: a refresh whose current
+            # chunk is prose (--code dropped, or the file left the code set)
+            # must delete the keys the code path owned last run.
+            old_code = old_payload.get("_code_keys") or []
+            stale_keys += [k for k in old_code if k not in payload]
+            if old_code and "_code_keys" not in payload:
+                stale_keys.append("_code_keys")
             compared += 1
             # Write-or-skip (same contract as the markdown sync): an
             # unchanged point costs zero backend requests; a changed one is

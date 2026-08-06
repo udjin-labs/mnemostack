@@ -87,7 +87,7 @@ _BRACE_BOUNDARY = re.compile(
     r"(?:function\s*\*?\s*(?P<fname>\w+)?|class\s+(?P<cname>\w+)|"
     r"interface\s+(?P<iname>\w+)|struct\s+(?P<sname>\w+)|enum\s+(?P<ename>\w+)|"
     r"trait\s+(?P<tname>\w+)|impl\b|func\s+(?:\([^)]*\)\s*)?(?P<gname>\w+)|"
-    r"fn\s+(?P<rname>\w+)|def\s+(?P<dname>\w+)|"
+    r"fn\s+(?P<rname>\w+)|fun\s+(?P<ktname>\w+)|def\s+(?P<dname>\w+)|"
     r"(?:const|let|var)\s+(?P<vname>\w+)\s*=|"
     r"(?:module|namespace|object|type)\s+(?P<mname>\w+))"
 )
@@ -121,10 +121,25 @@ _DEFAULT_BOUNDARY = _BRACE_BOUNDARY
 #: directly above a boundary must travel with the definition it documents.
 _COMMENT_PREFIXES = ("#", "//", "/*", "*", "--")
 
+_TEMPLATE_PREFIX = re.compile(r"template\s*<")
 
-def _is_comment_line(line: str) -> bool:
+
+def _is_carry_line(line: str) -> bool:
+    """A line that belongs to the DEFINITION below it, not the chunk above.
+
+    Doc comments, annotations/decorators (``@Deprecated``, ``@Component``)
+    and C++ ``template <...>`` prefixes are declaration prefixes: leaving
+    them in the previous chunk would attach them to an unrelated symbol and
+    strip the definition of its own metadata.
+    """
     stripped = line.lstrip()
-    return bool(stripped) and stripped.startswith(_COMMENT_PREFIXES)
+    if not stripped:
+        return False
+    return (
+        stripped.startswith(_COMMENT_PREFIXES)
+        or stripped.startswith("@")
+        or _TEMPLATE_PREFIX.match(stripped) is not None
+    )
 
 #: Below this many characters a segment keeps accumulating even across a
 #: boundary line — one chunk per two-line helper would fragment retrieval
@@ -226,11 +241,11 @@ def chunk_code(
         match = boundary.match(line)
         if match is not None:
             if seg_parts and seg_len >= min_chars:
-                # A doc comment directly above the definition belongs to the
-                # definition, not to the previous chunk: peel the trailing
-                # comment run off and carry it into the new segment.
+                # A doc comment / annotation / template prefix directly above
+                # the definition belongs to the definition, not the previous
+                # chunk: peel the trailing run off and carry it forward.
                 carry_idx = len(seg_parts)
-                while carry_idx > 0 and _is_comment_line(seg_parts[carry_idx - 1]):
+                while carry_idx > 0 and _is_carry_line(seg_parts[carry_idx - 1]):
                     carry_idx -= 1
                 head = seg_parts[:carry_idx]
                 carried = seg_parts[carry_idx:]
