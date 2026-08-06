@@ -278,6 +278,79 @@ def test_ruby_modules_and_methods_are_boundaries():
     assert "helper_method?" in symbols
 
 
+def test_scoped_enum_captures_the_declared_name():
+    src = (
+        "enum class Color {\n"
+        + "".join(f"    VALUE_{i},\n" for i in range(20))
+        + "};\n\n"
+        "enum Plain {\n"
+        + "".join(f"    P_{i},\n" for i in range(20))
+        + "};\n"
+    )
+    chunks = chunk_code(src, "cpp", max_chars=2000)
+    symbols = [c.symbol for c in chunks]
+    assert "Color" in symbols
+    assert "class" not in symbols
+    assert "Plain" in symbols
+
+
+def test_c_preprocessor_lines_are_not_carried_as_comments():
+    src = (
+        "#ifdef FEATURE\n"
+        "static int guarded(void) {\n"
+        + "".join(f"    int a{i} = {i};\n" for i in range(20))
+        + "    return 0;\n}\n"
+        "#endif\n"
+        "static int after(void) {\n"
+        + "".join(f"    int b{i} = {i};\n" for i in range(20))
+        + "    return 1;\n}\n"
+    )
+    chunks = chunk_code(src, "c", max_chars=2000)
+    _assert_partition(src, chunks)
+    guarded = next(c for c in chunks if c.symbol == "guarded")
+    after = next(c for c in chunks if c.symbol == "after")
+    # The #endif terminator stays with its conditional block.
+    assert "#endif" in guarded.text
+    assert not after.text.startswith("#endif")
+
+
+def test_one_line_c_function_definitions_are_boundaries():
+    src = (
+        "struct buf { int n; };\n"
+        + "".join(f"static int pad{i}(void) {{ return {i}; }}\n" for i in range(10))
+        + "\ninline int size(void) { return 4; }\n\n"
+        "int declared_only(int x);\n"
+        "static int big_one(void) {\n"
+        + "".join(f"    int c{i} = {i};\n" for i in range(20))
+        + "    return 0;\n}\n"
+    )
+    chunks = chunk_code(src, "c", max_chars=400)
+    _assert_partition(src, chunks)
+    symbols = [c.symbol for c in chunks]
+    assert "big_one" in symbols
+    assert "declared_only" not in symbols  # prototype: ends with ;
+    # One-line definitions were recognized as boundaries (any of them naming
+    # a chunk proves the `;`-in-body case no longer rejects the line).
+    assert any(s and s.startswith("pad") for s in symbols) or "size" in symbols
+
+
+def test_oversized_merge_resplits_at_the_internal_definition_boundary():
+    """A small helper merged with a large following function must split at
+    the function's start, not at an arbitrary character offset."""
+    helper = "def helper():\n" + "".join(f"    h{i} = {i}\n" for i in range(12))
+    big = "def big_function():\n" + "".join(
+        f"    value_{i} = {i} * 2\n" for i in range(90)
+    )
+    src = helper + big
+    assert len(helper) < 200  # below the merge minimum — gets merged
+    assert len(helper) + len(big) > 2000 > len(big)  # combined would char-split
+    chunks = chunk_code(src, "python", max_chars=2000)
+    _assert_partition(src, chunks)
+    by_symbol = {c.symbol: c for c in chunks}
+    assert by_symbol["helper"].text == helper
+    assert by_symbol["big_function"].text == big  # clean cut at the def line
+
+
 def test_small_chunk_size_still_bounds_and_partitions():
     # --chunk-size below the merge minimum must still be honored: pieces
     # never exceed max_chars and the partition holds.
@@ -524,6 +597,18 @@ def test_code_keys_record_is_reserved_and_validated(monkeypatch, tmp_path, store
     payload = next(iter(h.payload or {} for h in store.scroll()))
     assert payload.get("text") == "hello world"
     assert payload.get("extra") == "kept"
+    assert "_code_keys" not in payload
+
+    # A valid-LOOKING planted record naming a foreign field must not delete
+    # it either: membership in the closed code-owned set is enforced.
+    store.set_payload(cid, {"_code_keys": ["extra", "tags"], "tags": ["keep-me"]})
+    rc = cli.cmd_index(
+        _index_args(tmp_path, enrich="planting_enricher_mod:enrich", refresh_payloads=True)
+    )
+    assert rc == 0
+    payload = next(iter(h.payload or {} for h in store.scroll()))
+    assert payload.get("extra") == "kept"
+    assert payload.get("tags") == ["keep-me"]  # foreign field survived
     assert "_code_keys" not in payload
 
 

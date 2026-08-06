@@ -2495,10 +2495,10 @@ def cmd_index(args: argparse.Namespace) -> int:
                 # WITHOUT --code deletes the stale code metadata instead of
                 # leaving the point falsely code-marked and lexically
                 # searchable through code_tokens.
+                from .code import CODE_OWNED_KEYS
+
                 payload["_code_keys"] = sorted(
-                    k
-                    for k in ("language", "chunk_kind", "code_tokens", "symbol")
-                    if k in payload
+                    k for k in CODE_OWNED_KEYS if k in payload
                 )
                 payload.update(snapshot)
                 payload["_id_scheme"] = "stable_chunk_id"
@@ -2725,12 +2725,15 @@ def cmd_index(args: argparse.Namespace) -> int:
             # Same ownership rule for code metadata: a refresh whose current
             # chunk is prose (--code dropped, or the file left the code set)
             # must delete the keys the code path owned last run. The stored
-            # record is validated before use — a malformed value (legacy
-            # tamper, non-list) must neither crash the refresh nor mark
-            # arbitrary fields for deletion.
+            # record is validated against the CLOSED owned set — a malformed
+            # or planted value (legacy tamper; the key predates its
+            # reservation from enrichers) must neither crash the refresh nor
+            # mark any UNRELATED payload field for deletion.
+            from .code import CODE_OWNED_KEYS
+
             old_code_raw = old_payload.get("_code_keys")
             old_code = (
-                [k for k in old_code_raw if isinstance(k, str)]
+                [k for k in old_code_raw if isinstance(k, str) and k in CODE_OWNED_KEYS]
                 if isinstance(old_code_raw, list)
                 else []
             )
