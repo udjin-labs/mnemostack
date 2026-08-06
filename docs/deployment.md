@@ -664,6 +664,18 @@ arm; pick by collection size and whether you can re-index:
 - `lexical` needs the full-text payload index on a real server: run
   `mnemostack text-index` once (idempotent, non-destructive — safe on a
   mounted pre-existing collection; it indexes every configured gate field).
+- The same trap applies to **payload filters** (`filters={...}` on
+  `/recall`, the MCP tools, or library calls): a real server evaluates a
+  filter on an unindexed field by scanning candidate payloads — a
+  full-collection penalty per filtered query that is invisible locally,
+  because the in-memory client matches without indexes. Create an index
+  once per filtered field with `mnemostack payload-index <field> --schema
+  keyword|integer|float|bool|datetime` (idempotent; `keyword` for string
+  tags/ids, `datetime` for `timestamp_format: iso` timestamps,
+  `integer`/`float` for epoch timestamps and numerics). `mnemostack
+  payload-index` with no field lists the collection's existing indexes, and
+  `doctor` reports them (`tenant_id` is indexed automatically at collection
+  creation).
 - **Multi-field lexical arms** (`recall.text_search_fields`, env
   `MNEMOSTACK_TEXT_SEARCH_FIELDS="title:2.0,text:1.0"`): title/heading
   fields are usually far more precise lexical signals than chunk bodies —

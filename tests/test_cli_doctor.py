@@ -40,7 +40,10 @@ class _FakeLLM:
         return (True, "ok") if self._healthy else (False, "no key")
 
 
-def _fake_qdrant_cls(*, reachable=True, exists=True, count=5, size=8, created=None, coll_error=None):
+def _fake_qdrant_cls(
+    *, reachable=True, exists=True, count=5, size=8, created=None, coll_error=None,
+    payload_schema=None,
+):
     """A QdrantClient stand-in. `created` (a list) records ensure_collection-style
     side effects so a test can assert the diagnostic never creates a collection.
     `coll_error` raises an arbitrary exception from get_collection (e.g. an auth
@@ -63,7 +66,15 @@ def _fake_qdrant_cls(*, reachable=True, exists=True, count=5, size=8, created=No
             vectors = type("V", (), {"size": size})()
             params = type("P", (), {"vectors": vectors})()
             config = type("C", (), {"params": params})()
-            return type("Info", (), {"points_count": count, "config": config})()
+            return type(
+                "Info",
+                (),
+                {
+                    "points_count": count,
+                    "config": config,
+                    "payload_schema": dict(payload_schema or {}),
+                },
+            )()
 
         # A diagnostic must never call these; present so a call would be visible.
         def create_collection(self, *a, **k):  # pragma: no cover - must not run
@@ -277,3 +288,40 @@ def test_doctor_graph_reported_when_configured(patched, capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "nodes=12" in out and "edges=7" in out
+
+
+def test_doctor_lists_payload_indexes(patched, capsys):
+    from types import SimpleNamespace
+
+    from qdrant_client.models import PayloadSchemaType
+
+    patched(
+        provider=_FakeProvider(dim=8, healthy=True),
+        qdrant_cls=_fake_qdrant_cls(
+            reachable=True, exists=True, count=5, size=8,
+            payload_schema={
+                "tenant_id": SimpleNamespace(data_type=PayloadSchemaType.KEYWORD),
+                "captured": SimpleNamespace(data_type=PayloadSchemaType.DATETIME),
+            },
+        ),
+        llm=_FakeLLM(healthy=True),
+    )
+    rc = cli.cmd_doctor(_args())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "qdrant.payload_indexes" in out
+    assert "captured (datetime)" in out
+    assert "tenant_id (keyword)" in out
+
+
+def test_doctor_warns_when_no_payload_indexes_without_flipping_exit(patched, capsys):
+    patched(
+        provider=_FakeProvider(dim=8, healthy=True),
+        qdrant_cls=_fake_qdrant_cls(reachable=True, exists=True, count=5, size=8),
+        llm=_FakeLLM(healthy=True),
+    )
+    rc = cli.cmd_doctor(_args())
+    out = capsys.readouterr().out
+    assert rc == 0  # informational warn never flips the exit code
+    assert "qdrant.payload_indexes" in out
+    assert "mnemostack payload-index" in out
