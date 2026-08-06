@@ -177,8 +177,14 @@ def _is_carry_line(line: str, language: str) -> bool:
     prefixes = _CARRY_COMMENT_PREFIXES.get(language, _DEFAULT_CARRY_COMMENTS)
     if stripped.startswith(prefixes):
         return True
+    if language == "python":
+        # A column-0 `@...` in Python is ALWAYS a decorator — a declaration
+        # prefix of the def below it, even when the decorator block itself
+        # grew the segment past the flush minimum. (Ruby/shell `@`/`$` lines
+        # are not prefixes, hence per-language, not per-family.)
+        return line.startswith("@")
     if language in _CARRY_COMMENT_PREFIXES:
-        return False  # non-brace family: comments only
+        return False  # other non-brace families: comments only
     return (
         stripped.startswith("@")
         or stripped.startswith("#[")  # Rust attributes: #[derive(...)], #[cfg(...)]
@@ -199,7 +205,10 @@ MAX_IDENTIFIER_TOKENS = 256
 #: tampered record can never mark an unrelated payload field for deletion.
 CODE_OWNED_KEYS = ("chunk_kind", "code_tokens", "language", "symbol")
 
-_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# Unicode-aware on purpose: languages permit non-ASCII identifiers, and the
+# lexical retriever's query tokenizer is Unicode-aware — an ASCII-only
+# extractor would emit gate tokens that can never match such a definition.
+_IDENTIFIER = re.compile(r"[^\W\d]\w*")
 _CAMEL_SPLIT = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 
 

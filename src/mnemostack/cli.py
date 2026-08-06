@@ -2409,12 +2409,15 @@ def cmd_index(args: argparse.Namespace) -> int:
                     if language_for(fn) is not None:
                         code_files.append(Path(dirpath) / fn)
             files += sorted(code_files)
-            if args.window_size > 1:
-                print(
-                    "note: --window-size applies to prose files only; code "
-                    "files are chunked at definition boundaries",
-                    file=sys.stderr,
-                )
+    if index_code and args.window_size > 1:
+        # Outside the directory branch on purpose: a single-file
+        # `index app.py --code --window-size N` ignores windowing just the
+        # same and must say so.
+        print(
+            "note: --window-size applies to prose files only; code "
+            "files are chunked at definition boundaries",
+            file=sys.stderr,
+        )
     if not files:
         kinds = ".md/.txt/code" if index_code else ".md/.txt"
         print(f"error: no {kinds} files found under {target}", file=sys.stderr)

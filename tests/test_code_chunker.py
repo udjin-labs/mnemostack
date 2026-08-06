@@ -469,6 +469,34 @@ def test_doc_comment_prefix_stays_with_definition_when_resplitting():
     assert by_symbol["big_function"].text == big  # doc comment + attribute included
 
 
+def test_long_decorator_stack_stays_with_its_definition_at_flush():
+    """A stack of single-line decorators large enough to reach the flush
+    minimum on its own still travels with the def below it — pass-1 flush
+    peels decorator lines exactly like comments."""
+    helper = "def helper():\n" + "".join(f"    h{i} = {i}\n" for i in range(20))
+    decorators = "".join(
+        f"@app.middleware_number_{i}(priority={i})\n" for i in range(12)
+    )
+    big = decorators + "def decorated():\n" + "".join(
+        f"    d{i} = {i}\n" for i in range(20)
+    )
+    src = helper + big
+    assert len(decorators) > 200  # the stack alone exceeds the flush minimum
+    chunks = chunk_code(src, "python", max_chars=4000)
+    _assert_partition(src, chunks)
+    by_symbol = {c.symbol: c for c in chunks}
+    assert by_symbol["helper"].text == helper
+    assert by_symbol["decorated"].text == big  # full stack attached
+
+
+def test_identifier_tokens_are_unicode_aware():
+    tokens = identifier_tokens("def обработать_запрос(данные): return данные")
+    assert "обработать" in tokens
+    assert "запрос" in tokens
+    assert "обработать_запрос" in tokens
+    assert "данные" in tokens
+
+
 def test_sql_with_cte_keeps_its_final_select():
     filler = "".join(f"    , col_{i} AS (SELECT {i})\n" for i in range(20))
     src = (
@@ -750,6 +778,19 @@ def test_code_keys_record_is_reserved_and_validated(monkeypatch, tmp_path, store
     assert payload.get("extra") == "kept"
     assert payload.get("tags") == ["keep-me"]  # foreign field survived
     assert "_code_keys" not in payload
+
+
+def test_single_file_code_target_warns_about_ignored_window_size(
+    monkeypatch, tmp_path, store, capsys
+):
+    src = tmp_path / "app.py"
+    src.write_text("def f():\n    return 1\n", encoding="utf-8")
+    _patch_stack(monkeypatch, store)
+
+    rc = cli.cmd_index(_index_args(tmp_path, path=str(src), code=True, window_size=3))
+
+    assert rc == 0
+    assert "--window-size applies to prose files only" in capsys.readouterr().err
 
 
 def test_cmd_index_code_prune_removes_stale_chunks(monkeypatch, tmp_path, store):
