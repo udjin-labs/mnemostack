@@ -351,6 +351,59 @@ def test_oversized_merge_resplits_at_the_internal_definition_boundary():
     assert by_symbol["big_function"].text == big  # clean cut at the def line
 
 
+def test_rust_attributes_travel_with_their_definition():
+    src = (
+        "fn first() -> u32 {\n"
+        + "".join(f"    let a{i} = {i};\n" for i in range(20))
+        + "    0\n}\n\n"
+        "#[derive(Debug, Clone)]\n"
+        "#[cfg(feature = \"extra\")]\n"
+        "struct Config {\n"
+        + "".join(f"    field{i}: u32,\n" for i in range(20))
+        + "}\n"
+    )
+    chunks = chunk_code(src, "rust", max_chars=2000)
+    _assert_partition(src, chunks)
+    config = next(c for c in chunks if c.symbol == "Config")
+    assert config.text.startswith("#[derive")
+    first = next(c for c in chunks if c.symbol == "first")
+    assert "#[derive" not in first.text
+
+
+def test_lua_local_functions_are_boundaries():
+    src = (
+        "local M = {}\n\n"
+        "local function helper_one(x)\n"
+        + "".join(f"    local a{i} = x + {i}\n" for i in range(20))
+        + "    return x\nend\n\n"
+        "local function helper_two(y)\n"
+        + "".join(f"    local b{i} = {i}\n" for i in range(20))
+        + "    return y\nend\n"
+    )
+    chunks = chunk_code(src, "lua", max_chars=2000)
+    _assert_partition(src, chunks)
+    symbols = [c.symbol for c in chunks]
+    assert "helper_one" in symbols and "helper_two" in symbols
+
+
+def test_cpp_qualified_member_definitions_are_boundaries():
+    src = (
+        "#include \"widget.h\"\n\n"
+        "int Widget::render(const Frame &f) {\n"
+        + "".join(f"    int a{i} = {i};\n" for i in range(20))
+        + "    return 0;\n}\n\n"
+        "Widget::~Widget() {\n"
+        + "".join(f"    int b{i} = {i};\n" for i in range(20))
+        + "}\n"
+    )
+    chunks = chunk_code(src, "cpp", max_chars=2000)
+    _assert_partition(src, chunks)
+    symbols = [c.symbol for c in chunks]
+    # Qualified names record the member, not the qualification.
+    assert "render" in symbols
+    assert not any(s and "::" in s for s in symbols)
+
+
 def test_small_chunk_size_still_bounds_and_partitions():
     # --chunk-size below the merge minimum must still be honored: pieces
     # never exceed max_chars and the partition holds.
@@ -366,13 +419,17 @@ def test_identifier_tokens_split_camel_and_snake():
     tokens = identifier_tokens("def parseHttpRequest(user_id): return XMLHttpRequest")
     assert "parse" in tokens and "http" in tokens and "request" in tokens
     assert "parsehttprequest" in tokens  # full identifier kept for exact-name gates
-    assert "user" in tokens and "id" in tokens
+    assert "user" in tokens and "user_id" in tokens
     assert "xml" in tokens  # acronym boundary XMLHttp -> XML + Http
+    # Sub-3-char parts are dropped BY DESIGN: the lexical retriever's default
+    # min_token_len=3 strips them from every query gate, so emitting them
+    # would create tokens that can never match.
+    assert "id" not in tokens
 
 
 def test_identifier_tokens_dedupe_preserve_order_and_bound():
-    tokens = identifier_tokens("aa aa aa bb", limit=1)
-    assert tokens == ["aa"]
+    tokens = identifier_tokens("aaa aaa aaa bbb", limit=1)
+    assert tokens == ["aaa"]
     many = identifier_tokens(" ".join(f"name{i}" for i in range(1000)))
     assert len(many) <= 256
 

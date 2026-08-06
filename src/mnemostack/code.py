@@ -20,6 +20,14 @@ The design contract (deliberately narrow, so the heuristics can be simple):
   refresh and `mnemostack resolve` (hash + position) all work unchanged.
 - **Symbols are best-effort.** When the boundary line yields a name it is
   recorded in the payload; when it doesn't, the chunk simply has no symbol.
+- **The recognized-construct set is deliberately FROZEN.** The boundary
+  regexes cover the common top-level shapes of each family (definitions,
+  types, module/namespace headers, C-family type-prefixed and qualified
+  functions, declaration prefixes like doc comments / annotations /
+  attributes / templates). Every language has further corners; chasing
+  them is explicitly out of scope for a line heuristic — an unrecognized
+  construct degrades to character chunking, which the contract above
+  already prices in. Corpus-specific needs extend ``_BOUNDARIES``.
 """
 
 from __future__ import annotations
@@ -83,7 +91,7 @@ _BRACE_BOUNDARY = re.compile(
     r"^(?:export\s+(?:default\s+)?)?"
     r"(?:pub(?:\([^)]*\))?\s+|public\s+|private\s+|protected\s+|internal\s+|"
     r"static\s+|final\s+|abstract\s+|sealed\s+|partial\s+|unsafe\s+|"
-    r"(?:async\s+))*"
+    r"local\s+|(?:async\s+))*"
     r"(?:function\s*\*?\s*(?P<fname>\w+)?|class\s+(?P<cname>\w+)|"
     r"interface\s+(?P<iname>\w+)|struct\s+(?P<sname>\w+)|"
     r"enum\s+(?:class\s+|struct\s+)?(?P<ename>\w+)|"
@@ -106,7 +114,8 @@ _SQL_BOUNDARY = re.compile(
 # with an initializer call), while a one-line body `{ return n; }` is a
 # definition despite containing semicolons.
 _C_FUNC_PATTERN = (
-    r"^(?:[A-Za-z_][\w:<>,\*&\[\]]*[ \t]+)+[\*&]*(?P<cfn>[A-Za-z_]\w*)\s*\((?!.*;\s*$)"
+    r"^(?:[A-Za-z_][\w:<>,\*&\[\]]*[ \t]+)+[\*&]*"
+    r"(?P<cfn>[A-Za-z_]\w*(?:::~?\w+)*)\s*\((?!.*;\s*$)"
 )
 _C_BOUNDARY = re.compile(
     "(?:" + _BRACE_BOUNDARY.pattern + ")|(?:" + _C_FUNC_PATTERN + ")"
@@ -163,7 +172,11 @@ def _is_carry_line(line: str, language: str) -> bool:
         return True
     if language in _CARRY_COMMENT_PREFIXES:
         return False  # non-brace family: comments only
-    return stripped.startswith("@") or _TEMPLATE_PREFIX.match(stripped) is not None
+    return (
+        stripped.startswith("@")
+        or stripped.startswith("#[")  # Rust attributes: #[derive(...)], #[cfg(...)]
+        or _TEMPLATE_PREFIX.match(stripped) is not None
+    )
 
 #: Below this many characters a segment keeps accumulating even across a
 #: boundary line — one chunk per two-line helper would fragment retrieval
@@ -211,8 +224,11 @@ def identifier_tokens(text: str, *, limit: int = MAX_IDENTIFIER_TOKENS) -> list[
     ``parseHttpRequest`` / ``parse_http_request`` both yield
     ``["parse", "http", "request", "parsehttprequest", ...]`` — the full
     identifier is kept alongside its parts so exact-name queries still gate.
-    Order of first appearance is preserved; single characters are dropped
-    (pure noise for a token gate).
+    Order of first appearance is preserved. Tokens shorter than three
+    characters are dropped: the lexical retriever's default
+    ``min_token_len=3`` strips them from every QUERY gate anyway, so
+    emitting them would create tokens that can never match — the producer
+    minimum is deliberately aligned with the consumer's.
     """
     out: list[str] = []
     seen: set[str] = set()
@@ -221,7 +237,7 @@ def identifier_tokens(text: str, *, limit: int = MAX_IDENTIFIER_TOKENS) -> list[
         parts = [p for chunk in ident.split("_") for p in _CAMEL_SPLIT.split(chunk) if p]
         for token in (*parts, ident):
             low = token.lower()
-            if len(low) < 2 or low in seen:
+            if len(low) < 3 or low in seen:
                 continue
             seen.add(low)
             out.append(low)
@@ -233,7 +249,8 @@ def identifier_tokens(text: str, *, limit: int = MAX_IDENTIFIER_TOKENS) -> list[
 def _symbol_of(match: re.Match[str]) -> str | None:
     for value in match.groupdict().values():
         if value:
-            return value
+            # A qualified C++ name (`Widget::render`) records the member name.
+            return value.rsplit("::", 1)[-1]
     return None
 
 
