@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 __all__ = [
     "CODE_EXTENSIONS",
@@ -105,8 +106,13 @@ _RUBY_BOUNDARY = re.compile(
     r"def\s+(?:self\.)?(?P<name>\w+[?!]?))"
 )
 _SHELL_BOUNDARY = re.compile(r"^(?:function\s+(?P<name>\w+)|(?P<fname>[\w.-]+)\s*\(\)\s*\{)")
+# No SELECT here on purpose: a column-0 SELECT is as often the final query
+# of a WITH CTE as an independent statement, and a line heuristic cannot
+# tell them apart — splitting a CTE from its SELECT is strictly worse than
+# merging two statements (the hints contract prices merges in). WITH and
+# the DML/DDL keywords still open statements.
 _SQL_BOUNDARY = re.compile(
-    r"^(?:CREATE|ALTER|DROP|INSERT|UPDATE|DELETE|WITH|SELECT)\b", re.IGNORECASE
+    r"^(?:CREATE|ALTER|DROP|INSERT|UPDATE|DELETE|WITH)\b", re.IGNORECASE
 )
 # C/C++ functions are TYPE-prefixed, not keyword-led: `static int parse(...)`.
 # One-or-more type tokens, then the name, then an open paren — on a line NOT
@@ -286,8 +292,21 @@ def chunk_code(
     seg_parts: list[str] = []
     seg_len = 0
     seg_symbol: str | None = None
-    seg_internal: list[tuple[int, str | None]] = []
+    # Internal bounds as [offset, symbol, tail_line_start]: a nameless bound
+    # (a decorator line — `@app.route` matches the boundary regex but yields
+    # no name) extends through ADJACENT boundary lines instead of standing
+    # alone, so pass 2 never cuts a decorator away from its definition.
+    seg_internal: list[list[Any]] = []
+
+    def _note_internal(line_start: int, prev_start: int, sym: str | None) -> None:
+        if seg_internal and seg_internal[-1][1] is None and seg_internal[-1][2] == prev_start:
+            seg_internal[-1][1] = sym
+            seg_internal[-1][2] = line_start
+        else:
+            seg_internal.append([line_start, sym, line_start])
+
     offset = 0
+    prev_line_start = 0
     for line in lines:
         match = boundary.match(line)
         if match is not None:
@@ -301,7 +320,10 @@ def chunk_code(
                 head = seg_parts[:carry_idx]
                 carried = seg_parts[carry_idx:]
                 if head:
-                    segments.append((seg_start, "".join(head), seg_symbol, seg_internal))
+                    segments.append(
+                        (seg_start, "".join(head), seg_symbol,
+                         [(o, s) for o, s, _t in seg_internal])
+                    )
                     carried_len = sum(len(part) for part in carried)
                     seg_start = offset - carried_len
                     seg_parts = carried
@@ -313,7 +335,7 @@ def chunk_code(
                     # definition it precedes (and adopt the name).
                     seg_symbol = _symbol_of(match)
                 else:
-                    seg_internal.append((offset, _symbol_of(match)))
+                    _note_internal(offset, prev_line_start, _symbol_of(match))
             elif seg_symbol is None:
                 # A boundary merged into a still-small unnamed segment (file
                 # preamble, tiny helpers) names it — the first definition is
@@ -323,12 +345,16 @@ def chunk_code(
                 # A boundary inside a still-small NAMED segment is merged in
                 # (MIN_SEGMENT_CHARS), the opener's name stays — but pass 2
                 # remembers where the definition started.
-                seg_internal.append((offset, _symbol_of(match)))
+                _note_internal(offset, prev_line_start, _symbol_of(match))
         seg_parts.append(line)
         seg_len += len(line)
+        prev_line_start = offset
         offset += len(line)
     if seg_parts:
-        segments.append((seg_start, "".join(seg_parts), seg_symbol, seg_internal))
+        segments.append(
+            (seg_start, "".join(seg_parts), seg_symbol,
+             [(o, s) for o, s, _t in seg_internal])
+        )
 
     # Pass 2: enforce max size + drop whitespace-only chunks. An oversized
     # segment first re-splits at its recorded internal definition starts —

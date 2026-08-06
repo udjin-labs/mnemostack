@@ -425,6 +425,45 @@ def test_cpp_qualified_member_definitions_are_boundaries():
     assert not any(s and "::" in s for s in symbols)
 
 
+def test_decorator_stays_with_its_definition_when_resplitting():
+    """A tiny helper + decorated large function: the re-split must cut at
+    the DECORATOR line, never between the decorator and its def."""
+    helper = "def helper():\n" + "".join(f"    h{i} = {i}\n" for i in range(12))
+    big = (
+        "@app.route('/endpoint')\n"
+        "@cached\n"
+        "def big_function():\n"
+        + "".join(f"    value_{i} = {i} * 2\n" for i in range(85))
+    )
+    src = helper + big
+    assert len(helper) < 200 and len(helper) + len(big) > 2000 > len(big)
+    chunks = chunk_code(src, "python", max_chars=2000)
+    _assert_partition(src, chunks)
+    by_symbol = {c.symbol: c for c in chunks}
+    assert by_symbol["helper"].text == helper
+    assert by_symbol["big_function"].text == big  # decorators included
+    assert not any(c.text.strip() == "@app.route('/endpoint')\n@cached".strip()
+                   for c in chunks)
+
+
+def test_sql_with_cte_keeps_its_final_select():
+    filler = "".join(f"    , col_{i} AS (SELECT {i})\n" for i in range(20))
+    src = (
+        "CREATE TABLE t (id INT);\n\n"
+        "WITH base AS (\n    SELECT 1 AS x\n)\n"
+        + filler
+        + "SELECT * FROM base;\n\n"
+        "INSERT INTO t VALUES (1);\n"
+    )
+    chunks = chunk_code(src, "sql", max_chars=4000)
+    _assert_partition(src, chunks)
+    # The CTE's final SELECT never starts a chunk of its own — it stays in
+    # the same chunk as the WITH clause it belongs to.
+    assert not any(c.text.startswith("SELECT") for c in chunks)
+    with_chunk = next(c for c in chunks if "WITH base AS" in c.text)
+    assert "SELECT * FROM base;" in with_chunk.text
+
+
 def test_small_chunk_size_still_bounds_and_partitions():
     # --chunk-size below the merge minimum must still be honored: pieces
     # never exceed max_chars and the partition holds.
