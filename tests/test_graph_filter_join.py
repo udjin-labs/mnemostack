@@ -662,3 +662,16 @@ def test_attribution_marker_is_stripped_from_public_payloads():
     )
     assert "_attributed_filters" not in mem.metadata
     assert "_vector_floor_candidates" not in mem.metadata
+
+
+def test_self_provable_filters_pass_without_any_probe_configured():
+    """Round-6 pin: without a chunk probe, filters the node's trusted
+    metadata proves by itself (index_root) still pass — only chunk-proof
+    keys fail closed."""
+    retr = _retriever(FILES)  # no probe at all
+    out = retr.search(
+        "note.md", filters={"index_root": "/corpus/a"}, include_invalidated=True
+    )
+    assert [r.payload["name"] for r in out] == ["note.md"]
+    # Residual-needing filters keep the historical fail-closed drop.
+    assert retr.search("note.md", filters={"project": "x"}, include_invalidated=True) == []

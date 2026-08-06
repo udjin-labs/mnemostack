@@ -1412,15 +1412,12 @@ class MemgraphRetriever(Retriever):
     def search(
         self, query, limit=20, filters=None, as_of=None, include_invalidated=False, tenant=None
     ):
-        if filters and self.chunk_filter_probe is None:
-            # Caller payload `filters` (source, arbitrary keys, time range) can't
-            # be proven against graph nodes, which carry no chunk payload — under
-            # the isolation contract anything unattributable is excluded, not
-            # leaked. The dedicated `tenant` scope below is different: it's a
-            # server-owned graph property, so it IS honored (not via `filters`).
-            # With a chunk_filter_probe, hits are attributed per-result AFTER
-            # retrieval (see _attributed) instead of dropped wholesale.
-            return []
+        # Payload `filters` are enforced per-candidate by _attributed during
+        # the traversal below: keys the node's TRUSTED metadata proves pass
+        # with zero extra requests even without a chunk probe; keys needing
+        # chunk proof fail closed when no probe is configured (excluded,
+        # never leaked — the historical contract). The dedicated `tenant`
+        # scope is different: a server-owned graph property, always honored.
         driver = self._get_driver()
         if driver is None:
             return []

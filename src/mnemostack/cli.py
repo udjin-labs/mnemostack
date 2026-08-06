@@ -2040,7 +2040,7 @@ def cmd_search(args: argparse.Namespace) -> int:
                 entry["payload"] = {
                     key: value
                     for key, value in r.payload.items()
-                    if key != "_vector_floor_candidates"
+                    if key not in ("_vector_floor_candidates", "_attributed_filters")
                 }
             elif snippet_chars > 0:
                 entry["text"] = r.text[:snippet_chars]
