@@ -110,12 +110,13 @@ _SQL_BOUNDARY = re.compile(
 )
 # C/C++ functions are TYPE-prefixed, not keyword-led: `static int parse(...)`.
 # One-or-more type tokens, then the name, then an open paren — on a line NOT
-# ending in `;`: a trailing semicolon means a prototype (or a declaration
-# with an initializer call), while a one-line body `{ return n; }` is a
-# definition despite containing semicolons.
+# ending in `;` (optionally followed by a trailing comment): a terminating
+# semicolon means a prototype (or a declaration with an initializer call),
+# while a one-line body `{ return n; }` is a definition despite containing
+# semicolons.
 _C_FUNC_PATTERN = (
     r"^(?:[A-Za-z_][\w:<>,\*&\[\]]*[ \t]+)+[\*&]*"
-    r"(?P<cfn>[A-Za-z_]\w*(?:::~?\w+)*)\s*\((?!.*;\s*$)"
+    r"(?P<cfn>[A-Za-z_]\w*(?:::~?\w+)*)\s*\((?!.*;\s*(?://.*|/\*.*)?$)"
 )
 _C_BOUNDARY = re.compile(
     "(?:" + _BRACE_BOUNDARY.pattern + ")|(?:" + _C_FUNC_PATTERN + ")"

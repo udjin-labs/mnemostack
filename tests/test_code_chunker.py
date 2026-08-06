@@ -334,6 +334,27 @@ def test_one_line_c_function_definitions_are_boundaries():
     assert any(s and s.startswith("pad") for s in symbols) or "size" in symbols
 
 
+def test_c_prototypes_with_trailing_comments_are_not_boundaries():
+    src = (
+        "int commented_proto(int x); // API declaration\n"
+        "int block_proto(int y); /* legacy */\n\n"
+        + "".join(
+            f"static int real_def{i}(void) {{ return {i}; }} // one-liner\n"
+            for i in range(6)
+        )
+        + "\nstatic int big_def(void) {\n"
+        + "".join(f"    int a{i} = {i};\n" for i in range(20))
+        + "    return 0;\n}\n"
+    )
+    chunks = chunk_code(src, "c", max_chars=2000)
+    _assert_partition(src, chunks)
+    symbols = [c.symbol for c in chunks]
+    # Commented prototypes never name a chunk; real definitions do.
+    assert "commented_proto" not in symbols
+    assert "block_proto" not in symbols
+    assert any(s and s.startswith("real_def") for s in symbols)
+
+
 def test_oversized_merge_resplits_at_the_internal_definition_boundary():
     """A small helper merged with a large following function must split at
     the function's start, not at an arbitrary character offset."""
