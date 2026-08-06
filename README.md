@@ -750,7 +750,8 @@ Response shape (abridged):
   "results": [
     { "id": "...", "text": "...", "score": 0.72, "source": "notes/...md", "metadata": {} }
   ],
-  "degraded": [],  // components that fell back while serving the call, e.g. "retriever:bm25:failed", "reranker:fallback"; empty when healthy
+  "degraded": [],  // components that ACTUALLY fell back, e.g. "retriever:bm25:failed", "reranker:fallback"; empty when healthy
+  "notes": [],     // routine signals for stages that did not apply, e.g. "temporal:no_parse" on a date-less query; never a fault
   "tokens_estimate": 512   // estimated text tokens of the returned results
 }
 ```
@@ -761,7 +762,7 @@ Pass `"token_budget": 2000` to cap how much prompt space the results may occupy:
 
 Pass `"filters": {...}` to scope recall by payload fields — exact match (`{"tenant": "a"}`) or inclusive ranges (`{"timestamp": {"gte": "2026-01-01"}}`). Filters apply inside **every** retriever, not as a post-filter on the output: the candidate pool itself is restricted, so top-K stays full and results never include points outside the scope — this is the isolation contract for multi-tenant and per-user memory. Sources that cannot attribute their results to the scope (the knowledge-graph retriever — graph nodes carry no chunk payload) contribute nothing rather than leak. The same `filters` parameter is available on `/answer` (the answer is generated only from in-scope memories, including retry sub-recalls), on MCP `mnemostack_search` / `mnemostack_answer`, on the CLI as `--filters '{"tenant": "a"}'`, and in the library as `recaller.recall(query, filters=...)` / `recall_flow(..., filters=...)`.
 
-The `/answer` endpoint adds `{ answer, confidence, sources }` alongside the memories and carries the same `degraded` / opt-in `trace` fields, plus `tokens_used` — the LLM provider's reported token usage for the generation call that produced the answer (provider-specific semantics; `null` when the provider reports nothing). If the LLM isn't configured, `/answer` returns `503` and `/recall` still works — graceful degradation applies at the HTTP layer too.
+The `/answer` endpoint adds `{ answer, confidence, sources }` alongside the memories and carries the same `degraded` / `notes` / opt-in `trace` fields, plus `tokens_used` — the LLM provider's reported token usage for the generation call that produced the answer (provider-specific semantics; `null` when the provider reports nothing). If the LLM isn't configured, `/answer` returns `503` and `/recall` still works — graceful degradation applies at the HTTP layer too.
 
 Stateful learning is explicit. Start the server with `--auto-record-ior` if you want `/recall` and `/answer` responses to update inhibition-of-return state. Send user actions to `/feedback` to update Q-learning:
 

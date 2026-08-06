@@ -10,6 +10,7 @@ Usage:
     results = recaller.recall(query, trace=trace)
     results = apply_rerank_safe(reranker, query, results, trace)
     trace.degraded      # e.g. ["retriever:bm25:failed", "reranker:fallback"]
+    trace.notes         # routine signals, e.g. ["temporal:no_parse"]
     trace.to_dict()     # JSON-friendly dump for debug responses
 
 A trace object is per-call: never share one between concurrent requests.
@@ -38,6 +39,16 @@ DEGRADED_COUNTER = "mnemostack.recall.degraded"
 #: NOT count toward the operator's degraded-events total. `temporal:no_parse`
 #: fires on any non-temporal query (a parallel vector retriever still answers).
 _NON_DEGRADED_TAGS = frozenset({"temporal:no_parse"})
+
+#: Same classification for tags with a DYNAMIC prefix — each multi-field
+#: lexical arm reports its own gate verdict ("qdrant_text:title:no_tokens"),
+#: so an exact set can't name them; the shape is what's routine.
+_NON_DEGRADED_SUFFIXES = (":no_tokens",)
+
+
+def _is_routine(tag: str) -> bool:
+    """A stage-did-not-apply signal, not a fault."""
+    return tag in _NON_DEGRADED_TAGS or tag.endswith(_NON_DEGRADED_SUFFIXES)
 
 
 @dataclass
@@ -70,14 +81,21 @@ class RecallTrace:
     `fused` is the order recall returned (post-fusion, post-vector-floor);
     `post_rerank` is the reranker's order when a reranker ran. The final
     response list may still differ if vector-floor re-appends items after
-    rerank. `degraded` tags are stable strings: "retriever:<name>:failed",
-    "reranker:fallback", "reranker:unavailable", "temporal:no_parse".
+    rerank. Tags are stable strings; `degraded` carries components that
+    actually fell back while serving the call ("retriever:<name>:failed",
+    "reranker:fallback", "reranker:unavailable"), `notes` carries routine
+    stage-did-not-apply signals ("temporal:no_parse" — any query without a
+    parseable date; "<arm>:no_tokens" — a lexical arm whose gate found no
+    usable tokens in the query).
     """
 
     retrievers: list[RetrieverTrace] = field(default_factory=list)
     fused: list[tuple[str, float]] = field(default_factory=list)
     post_rerank: list[tuple[str, float]] | None = None
     degraded: list[str] = field(default_factory=list)
+    #: Routine signals — a stage that did not apply, not a fault. Same stable
+    #: strings as `degraded`; classified by `_NON_DEGRADED_TAGS`.
+    notes: list[str] = field(default_factory=list)
 
     def restrict_to_ids(self, allowed: Any) -> None:
         """Drop every trace entry whose id is outside ``allowed`` (tenant scrub).
@@ -95,19 +113,26 @@ class RecallTrace:
             self.post_rerank = [(rid, s) for rid, s in self.post_rerank if str(rid) in allow]
 
     def mark(self, tag: str) -> None:
+        # One classification, one surface story: a routine signal never
+        # reaches the per-call degraded list nor the process-wide counter,
+        # so a client can treat a non-empty `degraded` as a real fault.
+        if _is_routine(tag):
+            if tag not in self.notes:
+                self.notes.append(tag)
+            return
         if tag not in self.degraded:
             self.degraded.append(tag)
             # Mirror the (deduped-per-call) degradation into a process-wide
             # counter so /status and /metrics see trace-only degradations.
             # No-op under the default NullRecorder.
-            if tag not in _NON_DEGRADED_TAGS:
-                counter(DEGRADED_COUNTER, 1, labels={"reason": tag})
+            counter(DEGRADED_COUNTER, 1, labels={"reason": tag})
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
             "retrievers": [rt.to_dict() for rt in self.retrievers],
             "fused": [[rid, round(score, 6)] for rid, score in self.fused],
             "degraded": list(self.degraded),
+            "notes": list(self.notes),
         }
         if self.post_rerank is not None:
             d["post_rerank"] = [[rid, round(score, 6)] for rid, score in self.post_rerank]

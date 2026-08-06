@@ -659,7 +659,28 @@ def test_recall_response_degraded_default_empty(monkeypatch):
     assert resp.status_code == 200
     data = resp.json()
     assert data["degraded"] == []
+    assert data["notes"] == []  # HTTP surface mirrors the MCP payload shape
     assert data["trace"] is None
+
+
+def test_recall_no_parse_surfaces_as_note_not_degradation(monkeypatch):
+    """HTTP mirror of the MCP regression: a date-less query is routine —
+    the response reports a healthy call with a note, never a degradation."""
+    app, recaller = _patched_app(monkeypatch)
+    real_recall = recaller.recall
+
+    def marking_recall(query, limit=10, *, trace=None, **kw):
+        if trace is not None:
+            trace.mark("temporal:no_parse")  # temporal retriever's explain_empty
+        return real_recall(query, limit, **kw)
+
+    monkeypatch.setattr(recaller, "recall", marking_recall)
+    client = TestClient(app)
+    resp = client.post("/recall", json={"query": "hello"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["degraded"] == []
+    assert data["notes"] == ["temporal:no_parse"]
 
 
 def test_recall_trace_opt_in(monkeypatch):

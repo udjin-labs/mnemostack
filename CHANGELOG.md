@@ -4,6 +4,12 @@ All notable changes to mnemostack will be documented here. Format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **`RecallTrace` separates routine signals from degradations**: `mark()` now routes stage-did-not-apply tags into a new `notes` list instead of `degraded`. Two tags qualify: `temporal:no_parse` — which fires on every query without a parseable date, i.e. on essentially every non-temporal query — and the multi-field lexical arms' `<arm>:no_tokens` (classified by suffix, since each arm reports under its own name). A client (for the MCP server, an LLM reading the JSON payload) can finally treat a non-empty `degraded` as a real fault instead of learning to ignore the field. Both surfaces carry the new key: the MCP `search`/`answer` payloads and the HTTP `/recall`/`/answer` responses gain `notes` next to `degraded`, with tool/model descriptions stating the split (`degraded` = a component actually fell back; `notes` = a stage did not apply). The degraded-events counter always excluded `temporal:no_parse`; with this release `<arm>:no_tokens` stops counting there too, so `/status` `degraded_events` no longer inflates on lexical deployments with short/stopword queries. Callers matching on either tag in `degraded` should read `notes`.
+
 ## [2.0.1] - 2026-08-05
 
 ### Changed

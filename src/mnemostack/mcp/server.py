@@ -527,8 +527,10 @@ def build_server(
         Read-only, no side effects, no authentication required. Use this when
         you need raw memory matches rather than a synthesized answer. Returns a
         JSON object with ok, query, count, results, tokens_estimate (estimated
-        total text tokens of the results), and degraded (which
-        components fell back while serving the call; empty when healthy).
+        total text tokens of the results), degraded (components that actually
+        fell back while serving the call; empty when healthy), and notes
+        (routine signals for stages that did not apply to this query — e.g.
+        temporal:no_parse on any query without a date; NOT a fault).
         Results are ranked by reciprocal rank fusion of BM25, semantic, graph,
         and temporal retrievers when configured; each result includes id, text,
         score, sources, and payload. Stale facts (invalidated_at set) are
@@ -545,6 +547,7 @@ def build_server(
                 "query": query,
                 "count": len(results),
                 "degraded": trace.degraded,
+                "notes": trace.notes,
                 "tokens_estimate": sum_tokens(results),
                 "results": [
                     {
@@ -613,7 +616,9 @@ def build_server(
         you want a concise factual answer synthesized from memory search results
         instead of the raw matches returned by mnemostack_search. Returns a JSON
         object with ok, query, answer text, confidence (0.0-1.0), sources,
-        degraded (components that fell back while serving the call),
+        degraded (components that actually fell back while serving the call),
+        notes (routine signals for stages that did not apply — e.g.
+        temporal:no_parse on any query without a date; NOT a fault),
         fallback_recommended, tokens_estimate (estimated text tokens of the
         context memories), tokens_used (LLM-provider-reported usage for the
         answer call; null when unreported), and error. Stale facts are hidden
@@ -653,6 +658,7 @@ def build_server(
                 "confidence": round(answer.confidence, 3),
                 "sources": answer.sources,
                 "degraded": trace.degraded,
+                "notes": trace.notes,
                 "fallback_recommended": gen.should_fallback(answer),
                 "tokens_estimate": tokens_estimate,
                 "tokens_used": getattr(answer, "tokens_used", None),
