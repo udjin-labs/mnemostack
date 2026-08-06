@@ -1547,8 +1547,11 @@ def cmd_payload_index(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
-    store = VectorStore(collection=args.collection, dimension=1, host=args.qdrant)
     try:
+        # Construction inside the boundary too: an invalid --qdrant URL
+        # raises from the client constructor and must be a CLI error, not a
+        # traceback.
+        store = VectorStore(collection=args.collection, dimension=1, host=args.qdrant)
         if not store.collection_exists():
             print(f"error: collection '{args.collection}' does not exist", file=sys.stderr)
             return 1

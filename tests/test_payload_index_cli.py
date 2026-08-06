@@ -291,6 +291,18 @@ def test_lost_creation_race_is_reported_as_conflict():
         s.ensure_payload_index("project", "keyword")
 
 
+def test_store_construction_failure_is_a_cli_error_not_a_traceback(
+    monkeypatch, capsys
+):
+    def _bad_url(**_kw):
+        raise ValueError("Unsupported scheme: ftp")
+
+    monkeypatch.setattr(cli, "VectorStore", _bad_url)
+
+    assert cli.cmd_payload_index(_args(field="project", schema="keyword")) == 1
+    assert "cannot create payload index" in capsys.readouterr().err
+
+
 def test_parser_accepts_payload_index_command():
     parser = cli.build_parser()
     args = parser.parse_args(["payload-index", "project", "--schema", "keyword"])
