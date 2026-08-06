@@ -546,3 +546,80 @@ def test_deep_candidate_pools_are_traversed_until_attribution():
     )
     out = retr.search("note.md", filters={"project": "x"}, include_invalidated=True)
     assert [r.payload["index_root"] for r in out] == ["/corpus/037"]
+
+
+def test_placeholder_metadata_stays_probe_provable():
+    """Round-4 pin: sync writes :File nodes without memory_class; the ""
+    placeholder must not be treated as authoritative — the filter key goes
+    to the probe, where the file's chunks can prove it."""
+    calls: list[dict] = []
+
+    def probe(filters, tenant, include_invalidated, as_of):
+        calls.append(dict(filters))
+        return True
+
+    retr = _retriever(FILES, probe)
+    out = retr.search(
+        "note.md", filters={"memory_class": "decision"}, include_invalidated=True
+    )
+    assert [r.payload["name"] for r in out] == ["note.md"]
+    assert calls and calls[0]["memory_class"] == "decision"
+
+
+def test_filtered_hits_never_serialize_relationship_neighbors():
+    """Round-4 pin: an attributed hit's text must not name OTHER files via
+    edge serialization — a.md-[LINKS_TO]->b.md inside an attributed b.md hit
+    would leak a.md's existence across the filter boundary."""
+    retr = _retriever(FILES, lambda f, t, inv, ao: True)
+    out = retr.search("note.md", filters={"project": "x"}, include_invalidated=True)
+    assert out
+    assert "-[" not in out[0].text
+    assert "other.md" not in out[0].text  # the linked neighbor stays unnamed
+
+
+def test_filtered_traversal_issues_no_relationship_queries():
+    """Round-4 pin: rejected candidates cost zero graph round trips — the
+    relationship expansion is skipped entirely on the filtered path (no
+    validity view active)."""
+    rel_queries: list[str] = []
+
+    class _CountingSession(_Session):
+        def run(self, cypher, **params):
+            if "startNode" in cypher:
+                rel_queries.append(params.get("name", ""))
+            return super().run(cypher, **params)
+
+    class _D:
+        def session(self, **_):
+            return _CountingSession(FILES)
+
+    retr = MemgraphRetriever(
+        uri="bolt://x", driver=_D(), chunk_filter_probe=lambda f, t, inv, ao: False
+    )
+    assert retr.search("note.md", filters={"project": "x"}, include_invalidated=True) == []
+    assert rel_queries == []  # rejection cost: one probe, zero graph queries
+
+
+def test_probe_budget_bounds_backend_round_trips(monkeypatch):
+    """Round-4 pin: probes are capped per call — beyond the budget the
+    remaining candidates fail closed instead of hammering the store."""
+    import mnemostack.recall.retrievers as retrievers_mod
+
+    monkeypatch.setattr(retrievers_mod, "_MAX_ATTRIBUTION_PROBES", 2)
+    files = {(f"doc{i}.md", "/corpus/a"): [] for i in range(6)}
+    calls: list[dict] = []
+
+    def probe(filters, tenant, include_invalidated, as_of):
+        calls.append(dict(filters))
+        return False  # nothing attributes — every candidate wants a probe
+
+    retr = MemgraphRetriever(
+        uri="bolt://x", driver=_Driver(files), chunk_filter_probe=probe
+    )
+    out = retr.search(
+        "doc0.md doc1.md doc2.md doc3.md doc4.md doc5.md",
+        filters={"project": "x"},
+        include_invalidated=True,
+    )
+    assert out == []
+    assert len(calls) == 2  # budget, not candidate count

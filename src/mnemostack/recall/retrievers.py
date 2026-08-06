@@ -1159,6 +1159,28 @@ def graph_result_id(node_id: str, tenant: str | None) -> str:
 #: the deliberate bounded-work contract this retriever applies everywhere.
 _FILTERED_CANDIDATE_BUDGET = 500
 
+#: Per-CALL cap on chunk-existence probes (the Qdrant round trips of
+#: attribution). Candidate rows are cheap; probes are not — without a cap a
+#: broad token over a filter-rejecting corpus could turn one recall into
+#: hundreds of serial store requests. When the budget is exhausted the
+#: remaining candidates fail closed (missed, never leaked).
+_MAX_ATTRIBUTION_PROBES = 50
+
+
+class _ProbeBudget:
+    """Per-call probe allowance — local to one search, so thread-safe."""
+
+    __slots__ = ("left",)
+
+    def __init__(self, allowance: int):
+        self.left = allowance
+
+    def take(self) -> bool:
+        if self.left <= 0:
+            return False
+        self.left -= 1
+        return True
+
 
 def chunk_filter_probe_via(
     store: Any,
@@ -1299,6 +1321,7 @@ class MemgraphRetriever(Retriever):
         tenant: str | None,
         include_invalidated: bool,
         as_of: str | None,
+        probe_budget: _ProbeBudget | None = None,
     ) -> bool:
         """Can this graph hit be PROVEN to belong to the filtered scope?
 
@@ -1318,8 +1341,15 @@ class MemgraphRetriever(Retriever):
         """
         payload = result.payload or {}
         name = payload.get("name")
+        # A key is only "own" when the node metadata carries a REAL value:
+        # sync writes :File nodes without memory_class, and the result
+        # construction placeholders that as "" — treating a placeholder as
+        # authoritative would reject every file for a filter its chunks
+        # actually satisfy. Empty/None values stay residual (probe-provable).
         own = {
-            k: v for k, v in filters.items() if k != "source" and k in payload
+            k: v
+            for k, v in filters.items()
+            if k != "source" and payload.get(k) not in (None, "")
         }
         if own and not payload_matches(payload, own):
             return False
@@ -1333,7 +1363,7 @@ class MemgraphRetriever(Retriever):
             ):
                 return False
         residual = {
-            k: v for k, v in filters.items() if k != "source" and k not in payload
+            k: v for k, v in filters.items() if k != "source" and k not in own
         }
         if not residual:
             return True
@@ -1355,6 +1385,11 @@ class MemgraphRetriever(Retriever):
         probe_filters = dict(residual)
         probe_filters["source"] = name
         probe_filters["index_root"] = root
+        if probe_budget is not None and not probe_budget.take():
+            # Probe allowance for this call is spent — remaining candidates
+            # fail closed (missed, never leaked): bounded work over an
+            # unbounded rejecting corpus.
+            return False
         try:
             return bool(
                 self.chunk_filter_probe(probe_filters, tenant, include_invalidated, as_of)
@@ -1503,9 +1538,67 @@ class MemgraphRetriever(Retriever):
                 # doesn't hide valid ones below it before the bare-node skip.
                 ranked = sorted(counts.items(), key=lambda kv: -kv[1]["count"])[:node_budget]
                 results: list[RecallResult] = []
+                probe_budget = _ProbeBudget(_MAX_ATTRIBUTION_PROBES)
                 for (name, root_key), info in ranked:
                     if len(results) >= self.max_nodes:
                         break
+                    if filters:
+                        # FILTERED path: attribute FIRST — before any
+                        # relationship expansion — so a rejected candidate
+                        # costs at most one bounded Qdrant probe and zero
+                        # graph round trips (a broad token could otherwise
+                        # turn the candidate pool into hundreds of serial
+                        # backend requests). The hit's text stays node-only:
+                        # its edges name OTHER files/entities whose scope
+                        # membership was never proven, and serializing
+                        # `a.md-[LINKS_TO]->b.md` into an attributed b.md
+                        # hit would leak a.md's existence across a source/
+                        # project boundary.
+                        content = f"{info['type']}: {name}"
+                        node_id = f"{root_key}:{name}" if root_key else name
+                        payload = {
+                            "text": content,
+                            "source": "memgraph",
+                            "memory_class": info.get("mc", ""),
+                            "name": name,
+                            "type": info["type"],
+                            "index_root": root_key or None,
+                        }
+                        if tenant is not None:
+                            payload["tenant_id"] = tenant
+                        candidate = RecallResult(
+                            id=graph_result_id(node_id, tenant),
+                            text=content,
+                            score=float(info["count"]),
+                            payload=payload,
+                            sources=["memgraph"],
+                        )
+                        if not self._attributed(
+                            candidate,
+                            filters,
+                            tenant,
+                            include_invalidated,
+                            as_of,
+                            probe_budget,
+                        ):
+                            continue
+                        candidate.payload[ATTRIBUTED_FILTERS_KEY] = dict(filters)
+                        if validity_active:
+                            # The bare-node validity gate still applies — but
+                            # only attributed candidates pay the round trip.
+                            gate_rows = session.run(
+                                "MATCH (n {name: $name})-[r]-(m) "
+                                f"WHERE coalesce(n.index_root, '') = $root_key "
+                                f"AND {node_valid} AND {rel_valid} AND {target_valid}{trel} "
+                                "RETURN startNode(r).name AS from_n LIMIT 1",
+                                name=name,
+                                root_key=root_key,
+                                **extra,
+                            ).data()
+                            if not gate_rows:
+                                continue
+                        results.append(candidate)
+                        continue
                     rel_rows = session.run(
                         # Undirected: a target-only node (e.g. `Team A` in
                         # `Alice -[MEMBER_OF]-> Team A`) has a valid incoming
@@ -1567,29 +1660,15 @@ class MemgraphRetriever(Retriever):
                     if tenant is not None:
                         payload["tenant_id"] = tenant
                     result_id = graph_result_id(node_id, tenant)
-                    candidate = RecallResult(
-                        id=result_id,
-                        text=content[:300],
-                        score=float(info["count"]),
-                        payload=payload,
-                        sources=["memgraph"],
+                    results.append(
+                        RecallResult(
+                            id=result_id,
+                            text=content[:300],
+                            score=float(info["count"]),
+                            payload=payload,
+                            sources=["memgraph"],
+                        )
                     )
-                    if filters:
-                        # Attribute DURING candidate traversal, before the
-                        # max_nodes cut — a rejected candidate must not
-                        # consume the budget and starve an attributable
-                        # lower-ranked one (the candidate pool is
-                        # over-fetched for exactly this). The isolation
-                        # contract is unchanged, only the PROOF got richer
-                        # than "graph hits are never provable"; survivors
-                        # carry the marker so the post-pipeline backstop
-                        # (result_passes_filters) doesn't re-drop them.
-                        if not self._attributed(
-                            candidate, filters, tenant, include_invalidated, as_of
-                        ):
-                            continue
-                        candidate.payload[ATTRIBUTED_FILTERS_KEY] = dict(filters)
-                    results.append(candidate)
                 return results[:limit]
         except Exception:
             # Fail open (graph is optional), but log — a bad query or a malformed
