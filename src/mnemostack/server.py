@@ -191,8 +191,16 @@ class RecallResponse(BaseModel):
     degraded: list[str] = Field(
         default_factory=list,
         description=(
-            "Degradations that occurred while serving this call "
+            "Components that actually fell back while serving this call "
             "(e.g. retriever:bm25:failed, reranker:fallback). Empty when healthy."
+        ),
+    )
+    notes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Routine signals: stages that did not apply to this query "
+            "(e.g. temporal:no_parse on any query without a parseable date). "
+            "Not a fault — see degraded for real fallbacks."
         ),
     )
     trace: dict[str, Any] | None = Field(
@@ -220,6 +228,7 @@ class AnswerResponse(BaseModel):
     sources: list[str]
     memories: list[Memory]
     degraded: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
     trace: dict[str, Any] | None = None
     tokens_estimate: int = Field(
         0, description="Estimated total text tokens of the memories used as context."
@@ -1076,6 +1085,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             query=req.query,
             results=[_memory_of(r) for r in results],
             degraded=trace.degraded,
+            notes=trace.notes,
             trace=trace.to_dict() if req.include_trace else None,
             tokens_estimate=sum_tokens(results),
         )
@@ -1166,6 +1176,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             sources=list(getattr(ans, "sources", []) or []),
             memories=[_memory_of(r) for r in results],
             degraded=trace.degraded,
+            notes=trace.notes,
             trace=trace.to_dict() if req.include_trace else None,
             tokens_estimate=tokens_estimate,
             tokens_used=getattr(ans, "tokens_used", None),
