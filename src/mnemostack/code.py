@@ -88,8 +88,12 @@ _BRACE_BOUNDARY = re.compile(
     r"interface\s+(?P<iname>\w+)|struct\s+(?P<sname>\w+)|enum\s+(?P<ename>\w+)|"
     r"trait\s+(?P<tname>\w+)|impl\b|func\s+(?:\([^)]*\)\s*)?(?P<gname>\w+)|"
     r"fn\s+(?P<rname>\w+)|fun\s+(?P<ktname>\w+)|def\s+(?P<dname>\w+)|"
-    r"(?:const|let|var)\s+(?P<vname>\w+)\s*=|"
+    r"(?:const|let|var)\s+(?P<vname>\w+)\s*(?::[^=\n]*)?=|"
     r"(?:module|namespace|object|type)\s+(?P<mname>\w+))"
+)
+_RUBY_BOUNDARY = re.compile(
+    r"^(?:module\s+(?P<mname>\w+)|class\s+(?P<cname>\w+)|"
+    r"def\s+(?:self\.)?(?P<name>\w+[?!]?))"
 )
 _SHELL_BOUNDARY = re.compile(r"^(?:function\s+(?P<name>\w+)|(?P<fname>[\w.-]+)\s*\(\)\s*\{)")
 _SQL_BOUNDARY = re.compile(
@@ -107,7 +111,7 @@ _C_BOUNDARY = re.compile(
 
 _BOUNDARIES: dict[str, re.Pattern[str]] = {
     "python": _PY_BOUNDARY,
-    "ruby": _PY_BOUNDARY,  # def/class at column 0, same shape
+    "ruby": _RUBY_BOUNDARY,
     "shell": _SHELL_BOUNDARY,
     "sql": _SQL_BOUNDARY,
     "c": _C_BOUNDARY,

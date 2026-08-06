@@ -246,6 +246,38 @@ def test_annotations_and_templates_travel_with_their_definition():
     assert templated.text.startswith("template <typename T>")
 
 
+def test_typed_typescript_const_definitions_are_boundaries():
+    ts_src = (
+        "import { Handler } from 'lib';\n\n"
+        "export const firstHandler: Handler = async (req) => {\n"
+        + "".join(f"  const a{i} = {i};\n" for i in range(20))
+        + "  return req;\n};\n\n"
+        "export const secondHandler: Handler<Thing> = (req) => {\n"
+        + "".join(f"  const b{i} = {i};\n" for i in range(20))
+        + "  return req;\n};\n"
+    )
+    chunks = chunk_code(ts_src, "typescript", max_chars=2000)
+    _assert_partition(ts_src, chunks)
+    symbols = [c.symbol for c in chunks]
+    assert "firstHandler" in symbols and "secondHandler" in symbols
+
+
+def test_ruby_modules_and_methods_are_boundaries():
+    rb_src = (
+        "module Outer\n"
+        + "".join(f"  CONST_{i} = {i}\n" for i in range(20))
+        + "end\n\n"
+        "def helper_method?\n"
+        + "".join(f"  x{i} = {i}\n" for i in range(20))
+        + "end\n"
+    )
+    chunks = chunk_code(rb_src, "ruby", max_chars=2000)
+    _assert_partition(rb_src, chunks)
+    symbols = [c.symbol for c in chunks]
+    assert "Outer" in symbols
+    assert "helper_method?" in symbols
+
+
 def test_small_chunk_size_still_bounds_and_partitions():
     # --chunk-size below the merge minimum must still be honored: pieces
     # never exceed max_chars and the partition holds.
@@ -463,6 +495,36 @@ def test_refresh_without_code_flag_removes_stale_code_metadata(
     for p in prose_payloads.values():
         for key in ("language", "chunk_kind", "code_tokens", "symbol", "_code_keys"):
             assert key not in p
+
+
+def test_code_keys_record_is_reserved_and_validated(monkeypatch, tmp_path, store):
+    """An enricher cannot plant _code_keys (reserved key), and a malformed
+    stored record neither crashes the refresh nor deletes arbitrary fields
+    — it is simply cleared."""
+    src = tmp_path / "note.md"
+    src.write_text("hello world", encoding="utf-8")
+    mod = types.ModuleType("planting_enricher_mod")
+    mod.enrich = lambda item: {"_code_keys": ["text"], "extra": "kept"}
+    monkeypatch.setitem(__import__("sys").modules, "planting_enricher_mod", mod)
+    _patch_stack(monkeypatch, store)
+
+    rc = cli.cmd_index(_index_args(tmp_path, enrich="planting_enricher_mod:enrich"))
+    assert rc == 0
+    payload = next(iter(h.payload or {} for h in store.scroll()))
+    assert "_code_keys" not in payload  # reserved from enrichers
+
+    # Simulate a legacy/tampered malformed record already in the store: the
+    # refresh must survive it, keep real fields, and clear the record.
+    cid = next(str(h.id) for h in store.scroll())
+    store.set_payload(cid, {"_code_keys": 1})
+    rc = cli.cmd_index(
+        _index_args(tmp_path, enrich="planting_enricher_mod:enrich", refresh_payloads=True)
+    )
+    assert rc == 0
+    payload = next(iter(h.payload or {} for h in store.scroll()))
+    assert payload.get("text") == "hello world"
+    assert payload.get("extra") == "kept"
+    assert "_code_keys" not in payload
 
 
 def test_cmd_index_code_prune_removes_stale_chunks(monkeypatch, tmp_path, store):

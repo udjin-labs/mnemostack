@@ -2724,11 +2724,19 @@ def cmd_index(args: argparse.Namespace) -> int:
                 stale_keys.append("_enrich_keys")
             # Same ownership rule for code metadata: a refresh whose current
             # chunk is prose (--code dropped, or the file left the code set)
-            # must delete the keys the code path owned last run.
-            old_code = old_payload.get("_code_keys") or []
+            # must delete the keys the code path owned last run. The stored
+            # record is validated before use — a malformed value (legacy
+            # tamper, non-list) must neither crash the refresh nor mark
+            # arbitrary fields for deletion.
+            old_code_raw = old_payload.get("_code_keys")
+            old_code = (
+                [k for k in old_code_raw if isinstance(k, str)]
+                if isinstance(old_code_raw, list)
+                else []
+            )
             stale_keys += [k for k in old_code if k not in payload]
-            if old_code and "_code_keys" not in payload:
-                stale_keys.append("_code_keys")
+            if old_code_raw is not None and "_code_keys" not in payload:
+                stale_keys.append("_code_keys")  # incl. clearing a malformed record
             compared += 1
             # Write-or-skip (same contract as the markdown sync): an
             # unchanged point costs zero backend requests; a changed one is
