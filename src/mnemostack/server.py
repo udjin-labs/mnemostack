@@ -516,7 +516,13 @@ def _memory_of(result) -> Memory:
     payload = getattr(result, "payload", None)
     if not payload:
         payload = getattr(result, "metadata", None) or {}
-    payload = {key: value for key, value in payload.items() if key != "_vector_floor_candidates"}
+    # Internal recall mechanics stay internal: the vector-floor working set
+    # and the graph filter-attribution proof marker are not user metadata.
+    payload = {
+        key: value
+        for key, value in payload.items()
+        if key not in ("_vector_floor_candidates", "_attributed_filters")
+    }
     # Common source fields populated by our indexers. Order matters: explicit
     # 'source' wins, then the workspace conventions, finally nothing.
     source = (

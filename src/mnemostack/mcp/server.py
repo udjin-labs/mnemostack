@@ -51,7 +51,13 @@ from ..vector import VectorStore
 def _public_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
     if not payload:
         return {}
-    return {key: value for key, value in payload.items() if key != "_vector_floor_candidates"}
+    # Internal recall mechanics stay internal: the vector-floor working set
+    # and the graph filter-attribution proof marker are not user metadata.
+    return {
+        key: value
+        for key, value in payload.items()
+        if key not in ("_vector_floor_candidates", "_attributed_filters")
+    }
 
 
 def build_server(

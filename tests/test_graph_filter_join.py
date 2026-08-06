@@ -623,3 +623,42 @@ def test_probe_budget_bounds_backend_round_trips(monkeypatch):
     )
     assert out == []
     assert len(calls) == 2  # budget, not candidate count
+
+
+def test_synthetic_fields_never_self_attribute():
+    """Round-5 pin: `text` is synthesized locally ("File: note.md") — a
+    filter on it must go through the chunk probe, not self-attribute."""
+    calls: list[dict] = []
+
+    def probe(filters, tenant, include_invalidated, as_of):
+        calls.append(dict(filters))
+        return False  # the chunks do NOT contain this text
+
+    retr = _retriever(FILES, probe)
+    out = retr.search(
+        "note.md", filters={"text": "File: note.md"}, include_invalidated=True
+    )
+    assert out == []  # not admitted by its own synthetic text
+    assert calls and "text" in calls[0]  # the condition went to the probe
+
+
+def test_attribution_marker_is_stripped_from_public_payloads():
+    from mnemostack.mcp.server import _public_payload
+    from mnemostack.server import _memory_of
+
+    payload = {
+        "text": "File: note.md",
+        "name": "note.md",
+        "_attributed_filters": {"project": "x"},
+        "_vector_floor_candidates": ["a"],
+    }
+    assert "_attributed_filters" not in _public_payload(payload)
+    assert "_vector_floor_candidates" not in _public_payload(payload)
+
+    from types import SimpleNamespace
+
+    mem = _memory_of(
+        SimpleNamespace(id="g1", text="File: note.md", score=1.0, payload=dict(payload), sources=["memgraph"])
+    )
+    assert "_attributed_filters" not in mem.metadata
+    assert "_vector_floor_candidates" not in mem.metadata

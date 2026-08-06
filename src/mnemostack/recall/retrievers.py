@@ -1159,6 +1159,15 @@ def graph_result_id(node_id: str, tenant: str | None) -> str:
 #: the deliberate bounded-work contract this retriever applies everywhere.
 _FILTERED_CANDIDATE_BUDGET = 500
 
+#: The CLOSED set of graph-node metadata fields trusted for in-place filter
+#: attribution. Everything else on a graph payload is synthesized locally
+#: (`text` is "File: name", `source` is the arm marker) — letting a filter on
+#: such a field self-attribute would admit hits whose CHUNKS never satisfied
+#: the same condition. Unlisted keys always go through the chunk probe.
+_GRAPH_OWN_FILTER_KEYS = frozenset(
+    {"index_root", "name", "type", "memory_class", "tenant_id"}
+)
+
 #: Per-CALL cap on chunk-existence probes (the Qdrant round trips of
 #: attribution). Candidate rows are cheap; probes are not — without a cap a
 #: broad token over a filter-rejecting corpus could turn one recall into
@@ -1341,15 +1350,17 @@ class MemgraphRetriever(Retriever):
         """
         payload = result.payload or {}
         name = payload.get("name")
-        # A key is only "own" when the node metadata carries a REAL value:
+        # A key is "own" only when it is TRUSTED graph metadata (closed
+        # allowlist — anything synthesized locally, like the hit's `text`,
+        # must never self-attribute) AND the node carries a REAL value:
         # sync writes :File nodes without memory_class, and the result
         # construction placeholders that as "" — treating a placeholder as
         # authoritative would reject every file for a filter its chunks
-        # actually satisfy. Empty/None values stay residual (probe-provable).
+        # actually satisfy. Everything else stays residual (probe-provable).
         own = {
             k: v
             for k, v in filters.items()
-            if k != "source" and payload.get(k) not in (None, "")
+            if k in _GRAPH_OWN_FILTER_KEYS and payload.get(k) not in (None, "")
         }
         if own and not payload_matches(payload, own):
             return False
