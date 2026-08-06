@@ -401,14 +401,6 @@ class VectorStore:
         schema = getattr(info, "payload_schema", None) or {}
         return {name: payload_index_type_name(fi) for name, fi in schema.items()}
 
-    #: Bound on the client-side ``as_of`` validity scan in
-    #: :meth:`any_matching_point` — point-in-time bounds are not pushed down
-    #: server-side (bare-date ordering, see the invalidate notes), so the
-    #: probe examines at most this many filter-matching points and FAILS
-    #: CLOSED beyond it: a hit whose only valid-at-``as_of`` chunk hides
-    #: deeper is dropped, never leaked.
-    ANY_POINT_AS_OF_SAMPLE: ClassVar[int] = 64
-
     def any_matching_point(
         self,
         filters: dict[str, Any],
@@ -425,9 +417,13 @@ class VectorStore:
         at least one of its chunks is — under the SAME validity view as the
         parent recall, so a stale (invalidated) or out-of-window chunk never
         serves as proof. The current view (``include_invalidated=False``,
-        no ``as_of``) is pushed down server-side and costs one page of one;
-        an ``as_of`` view is evaluated client-side over a bounded sample
-        (:attr:`ANY_POINT_AS_OF_SAMPLE`), failing closed beyond it.
+        no ``as_of``) is pushed down server-side and costs one page of one.
+        An ``as_of`` view is evaluated client-side over EVERY matching point
+        (lazy pages; scroll order guarantees nothing about where a valid
+        historical chunk sits — e.g. a re-ingested document's new chunks can
+        precede the older still-valid ones): cost is proportional to the
+        filter's match count, which the attribution use pins to a single
+        document's chunks.
         """
         kwargs: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
         if as_of is None:
@@ -444,18 +440,14 @@ class VectorStore:
         # package imports this module at load time.
         from mnemostack.recall.validity import keep_payload
 
-        checked = 0
-        for hit in self.scroll(batch_size=32, filters=filters, **kwargs):
-            if checked >= self.ANY_POINT_AS_OF_SAMPLE:
-                break
-            checked += 1
-            if keep_payload(
+        return any(
+            keep_payload(
                 hit.payload or {},
                 include_invalidated=include_invalidated,
                 as_of=as_of,
-            ):
-                return True
-        return False
+            )
+            for hit in self.scroll(batch_size=128, filters=filters, **kwargs)
+        )
 
     def ensure_payload_index(self, field: str, schema: str) -> str:
         """Create a payload index for filtered recall; returns the type name.

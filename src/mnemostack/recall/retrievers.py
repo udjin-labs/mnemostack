@@ -1394,7 +1394,13 @@ class MemgraphRetriever(Retriever):
         # with the (name, index_root) grouping one filename can legitimately
         # match many nodes — one per root — and a hardcoded LIMIT would silently
         # drop roots before the grouping/ranking below could consider them.
-        node_budget = self.max_nodes * 3 if validity_active else self.max_nodes
+        # Over-fetch candidates whenever a later per-result filter (validity
+        # or payload-filter attribution) may reject some — otherwise the
+        # rejected ones would consume the whole candidate budget and starve
+        # filtered recall of attributable lower-ranked hits.
+        node_budget = (
+            self.max_nodes * 3 if (validity_active or filters) else self.max_nodes
+        )
         extra: dict[str, Any] = {"probe_lim": node_budget}
         if as_of is not None:
             extra["as_of"] = as_of
@@ -1544,31 +1550,29 @@ class MemgraphRetriever(Retriever):
                     if tenant is not None:
                         payload["tenant_id"] = tenant
                     result_id = graph_result_id(node_id, tenant)
-                    results.append(
-                        RecallResult(
-                            id=result_id,
-                            text=content[:300],
-                            score=float(info["count"]),
-                            payload=payload,
-                            sources=["memgraph"],
-                        )
+                    candidate = RecallResult(
+                        id=result_id,
+                        text=content[:300],
+                        score=float(info["count"]),
+                        payload=payload,
+                        sources=["memgraph"],
                     )
-                if filters:
-                    # Attribute each hit to the filtered scope, or drop it —
-                    # the isolation contract is unchanged, only the PROOF got
-                    # richer than "graph hits are never provable". Survivors
-                    # are stamped with the proof marker so the post-pipeline
-                    # filter backstop (result_passes_filters) doesn't re-drop
-                    # a hit whose payload legitimately lacks the filtered
-                    # fields.
-                    attributed_results: list[RecallResult] = []
-                    for r in results:
-                        if self._attributed(
-                            r, filters, tenant, include_invalidated, as_of
+                    if filters:
+                        # Attribute DURING candidate traversal, before the
+                        # max_nodes cut — a rejected candidate must not
+                        # consume the budget and starve an attributable
+                        # lower-ranked one (the candidate pool is
+                        # over-fetched for exactly this). The isolation
+                        # contract is unchanged, only the PROOF got richer
+                        # than "graph hits are never provable"; survivors
+                        # carry the marker so the post-pipeline backstop
+                        # (result_passes_filters) doesn't re-drop them.
+                        if not self._attributed(
+                            candidate, filters, tenant, include_invalidated, as_of
                         ):
-                            r.payload[ATTRIBUTED_FILTERS_KEY] = dict(filters)
-                            attributed_results.append(r)
-                    results = attributed_results
+                            continue
+                        candidate.payload[ATTRIBUTED_FILTERS_KEY] = dict(filters)
+                    results.append(candidate)
                 return results[:limit]
         except Exception:
             # Fail open (graph is optional), but log — a bad query or a malformed

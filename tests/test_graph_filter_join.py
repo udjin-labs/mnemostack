@@ -458,3 +458,72 @@ def test_any_matching_point_respects_validity_views():
     # Point-in-time: valid inside the window, not after it.
     assert s.any_matching_point(f, as_of="2026-01-10") is True
     assert s.any_matching_point(f, as_of="2026-02-01") is False
+
+
+def test_rejected_candidates_do_not_starve_the_node_budget():
+    """Round-2 pin: attribution runs during candidate traversal, before the
+    max_nodes cut — a higher-ranked unattributable file must not consume the
+    budget of an attributable lower-ranked one."""
+    files = {
+        ("aaa.md", "/corpus/a"): ["x.md"],
+        ("bbb.md", "/corpus/a"): ["y.md"],
+    }
+
+    def probe(filters, tenant, include_invalidated, as_of):
+        return filters.get("source") == "bbb.md"  # only the second attributes
+
+    retr = MemgraphRetriever(
+        uri="bolt://x",
+        driver=_Driver(files),
+        max_nodes=1,  # budget of ONE: the rejected aaa.md must not eat it
+        chunk_filter_probe=probe,
+    )
+    out = retr.search("aaa.md bbb.md", filters={"project": "x"}, include_invalidated=True)
+    assert [r.payload["name"] for r in out] == ["bbb.md"]
+
+
+def test_as_of_probe_scans_past_the_first_pages():
+    """Round-2 pin: an as_of probe must scan ALL matching chunks — scroll
+    order can put a re-ingested document's new (later-valid) chunks before
+    the older chunk that is actually valid at the requested instant."""
+    from uuid import uuid4
+
+    from qdrant_client.models import PointStruct
+
+    s = VectorStore.__new__(VectorStore)
+    s.collection = "asof-deep"
+    s.dimension = 2
+    s.client = QdrantClient(":memory:")
+    s.client.create_collection(
+        collection_name="asof-deep", vectors_config={"size": 2, "distance": "Cosine"}
+    )
+    points = [
+        PointStruct(
+            id=str(uuid4()),
+            vector=[0.1, 0.2],
+            payload={
+                "source": "a.md",
+                "project": "x",
+                "valid_from": "2026-06-01T00:00:00+00:00",  # after the snapshot
+            },
+        )
+        for _ in range(150)
+    ]
+    points.append(
+        PointStruct(
+            id=str(uuid4()),
+            vector=[0.1, 0.2],
+            payload={
+                "source": "a.md",
+                "project": "x",
+                "valid_from": "2026-01-01T00:00:00+00:00",
+                "valid_until": "2026-03-01T00:00:00+00:00",
+            },
+        )
+    )
+    s.client.upsert("asof-deep", points=points)
+
+    f = {"source": "a.md", "project": "x"}
+    # The only chunk valid at 2026-02-01 sits beyond the first pages.
+    assert s.any_matching_point(f, as_of="2026-02-01") is True
+    assert s.any_matching_point(f, as_of="2025-12-01") is False
