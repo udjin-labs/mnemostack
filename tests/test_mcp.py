@@ -333,6 +333,39 @@ def test_mcp_search_trace_opt_in(monkeypatch):
     assert "fused" in payload["trace"]
 
 
+def test_mcp_search_reports_no_parse_as_note_not_degradation(monkeypatch):
+    """The regression this change exists for: a query without a parseable
+    date is ROUTINE — the client payload must show a healthy call with a
+    note, not a degradation on essentially every non-temporal query."""
+    import mnemostack.mcp.server as srv
+
+    class _NoParseRecaller:
+        def __init__(self, **_):
+            pass
+
+        def recall(self, query, limit=10, **kwargs):
+            trace = kwargs.get("trace")
+            if trace is not None:
+                # What the temporal retriever's explain_empty produces on
+                # any date-less query.
+                trace.mark("temporal:no_parse")
+            return [
+                SimpleNamespace(
+                    id="a", text="text", score=0.9, sources=["vector"], payload={}
+                )
+            ]
+
+    _patch_minimal(monkeypatch, srv, _NoParseRecaller)
+    mcp = build_server(collection="test", embedding_provider="ollama")
+
+    result = asyncio.run(mcp.call_tool("mnemostack_search", {"query": "q"}))
+    payload = result.structured_content
+
+    assert payload["ok"] is True
+    assert payload["degraded"] == []
+    assert payload["notes"] == ["temporal:no_parse"]
+
+
 def test_mcp_search_degraded_on_reranker_failure(monkeypatch):
     import mnemostack.mcp.server as srv
 
@@ -378,6 +411,7 @@ def test_mcp_answer_carries_degraded(monkeypatch):
 
     assert payload["ok"] is True
     assert payload["degraded"] == []
+    assert payload["notes"] == []  # both lists present on the answer payload too
 
 
 def test_main_state_path_defaults_to_none(monkeypatch):

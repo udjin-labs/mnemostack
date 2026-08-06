@@ -96,7 +96,7 @@ def test_failed_retriever_marks_degraded_and_keeps_others():
     assert broken.error is not None and "backend down" in broken.error
 
 
-def test_empty_retriever_with_reason_marks_degraded():
+def test_empty_retriever_with_reason_marks_note():
     recaller = Recaller(
         retrievers=[
             _ListRetriever("vector", _results("vector", ["a"])),
@@ -106,7 +106,10 @@ def test_empty_retriever_with_reason_marks_degraded():
     trace = RecallTrace()
     recaller.recall("q", limit=5, trace=trace)
 
-    assert "temporal:no_parse" in trace.degraded
+    # Routine stage-did-not-apply signal: surfaces in notes, never as a
+    # degradation — an MCP client must not read a healthy call as degraded.
+    assert "temporal:no_parse" in trace.notes
+    assert "temporal:no_parse" not in trace.degraded
 
 
 def test_recall_without_trace_unchanged():
@@ -297,3 +300,65 @@ def test_trace_legacy_path_records_vector_and_fused():
     names = [rt.name for rt in trace.retrievers]
     assert "vector" in names and "bm25" in names
     assert [rid for rid, _ in trace.fused] == [str(r.id) for r in results]
+
+
+# ------------------------------------------------- notes vs degraded routing
+
+
+def test_mark_routes_routine_tags_to_notes_and_skips_the_counter(monkeypatch):
+    """A stage that did not apply is a note, never a degradation: it must not
+    reach the per-call degraded list nor the process-wide counter."""
+    import mnemostack.recall.trace as trace_mod
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(trace_mod, "counter", lambda *a, **k: calls.append(a))
+    trace = RecallTrace()
+    trace.mark("temporal:no_parse")
+    trace.mark("temporal:no_parse")  # deduped
+
+    assert trace.notes == ["temporal:no_parse"]
+    assert trace.degraded == []
+    assert calls == []
+
+
+def test_mark_degradations_still_count_and_dedupe(monkeypatch):
+    import mnemostack.recall.trace as trace_mod
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(trace_mod, "counter", lambda *a, **k: calls.append(a))
+    trace = RecallTrace()
+    trace.mark("reranker:fallback")
+    trace.mark("reranker:fallback")
+
+    assert trace.degraded == ["reranker:fallback"]
+    assert trace.notes == []
+    assert len(calls) == 1  # counted once per call, not per repeat
+
+
+def test_mark_routes_dynamic_no_tokens_tags_to_notes(monkeypatch):
+    """Per-arm gate verdicts carry the arm's own name, so the routine
+    classification is by suffix — a lexical arm with no usable query tokens
+    is a note, not a degradation, and must not count."""
+    import mnemostack.recall.trace as trace_mod
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(trace_mod, "counter", lambda *a, **k: calls.append(a))
+    trace = RecallTrace()
+    trace.mark("qdrant_text:title:no_tokens")
+    trace.mark("qdrant_text:no_tokens")
+
+    assert trace.notes == ["qdrant_text:title:no_tokens", "qdrant_text:no_tokens"]
+    assert trace.degraded == []
+    assert calls == []
+
+
+def test_to_dict_emits_both_lists():
+    trace = RecallTrace()
+    d = trace.to_dict()
+    assert d["degraded"] == [] and d["notes"] == []
+
+    trace.mark("temporal:no_parse")
+    trace.mark("reranker:fallback")
+    d = trace.to_dict()
+    assert d["notes"] == ["temporal:no_parse"]
+    assert d["degraded"] == ["reranker:fallback"]

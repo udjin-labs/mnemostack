@@ -273,7 +273,7 @@ On failure, a component contains `{"ok": false, "error": "..."}` and top-level `
 }
 ```
 
-`degraded` lists components that fell back while serving the call (e.g. `"retriever:bm25:failed"`, `"reranker:fallback"`, `"temporal:no_parse"`); it is empty when the stack was fully healthy. `tokens_estimate` is the estimated total text tokens of the returned results — the value `token_budget` is enforced against (heuristic: ≈4 chars/token for ASCII, ≈2 for non-ASCII scripts; leave margin rather than budgeting to an exact context limit). With `include_trace: true` the response additionally carries a `trace` object.
+`degraded` lists components that actually fell back while serving the call (e.g. `"retriever:bm25:failed"`, `"reranker:fallback"`); it is empty when the stack was fully healthy. `notes` lists routine signals for stages that did not apply to this query (e.g. `"temporal:no_parse"` on any query without a parseable date) — informational, never a fault. `tokens_estimate` is the estimated total text tokens of the returned results — the value `token_budget` is enforced against (heuristic: ≈4 chars/token for ASCII, ≈2 for non-ASCII scripts; leave margin rather than budgeting to an exact context limit). With `include_trace: true` the response additionally carries a `trace` object.
 
 On failure:
 
