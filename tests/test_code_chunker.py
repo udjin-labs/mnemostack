@@ -446,6 +446,29 @@ def test_decorator_stays_with_its_definition_when_resplitting():
                    for c in chunks)
 
 
+def test_doc_comment_prefix_stays_with_definition_when_resplitting():
+    """Round-6 completion: the internal cut is recorded BEFORE the trailing
+    doc-comment/attribute run, so a resplit never strands the prefix on the
+    preceding helper chunk."""
+    helper = "fn helper() -> u32 {\n" + "".join(
+        f"    let h{i} = {i};\n" for i in range(8)
+    ) + "    0\n}\n"
+    big = (
+        "/// Documents the big function.\n"
+        "#[inline]\n"
+        "fn big_function() -> u32 {\n"
+        + "".join(f"    let value_{i} = {i} * 2;\n" for i in range(70))
+        + "    0\n}\n"
+    )
+    src = helper + big
+    assert len(helper) < 200 and len(helper) + len(big) > 2000 > len(big)
+    chunks = chunk_code(src, "rust", max_chars=2000)
+    _assert_partition(src, chunks)
+    by_symbol = {c.symbol: c for c in chunks}
+    assert by_symbol["helper"].text == helper
+    assert by_symbol["big_function"].text == big  # doc comment + attribute included
+
+
 def test_sql_with_cte_keeps_its_final_select():
     filler = "".join(f"    , col_{i} AS (SELECT {i})\n" for i in range(20))
     src = (

@@ -302,8 +302,20 @@ def chunk_code(
         if seg_internal and seg_internal[-1][1] is None and seg_internal[-1][2] == prev_start:
             seg_internal[-1][1] = sym
             seg_internal[-1][2] = line_start
-        else:
-            seg_internal.append([line_start, sym, line_start])
+            return
+        # Back the cut up over the trailing declaration-prefix run (doc
+        # comments, annotations, attributes, templates) — pass 2 must cut
+        # BEFORE the prefix, exactly like the flush-time carry rule, or a
+        # resplit would strand the prefix on the preceding chunk. Falls back
+        # to the definition line if the walk-back would cross an earlier
+        # recorded bound.
+        carry_idx = len(seg_parts)
+        while carry_idx > 0 and _is_carry_line(seg_parts[carry_idx - 1], language):
+            carry_idx -= 1
+        start = line_start - sum(len(p) for p in seg_parts[carry_idx:])
+        if seg_internal and start <= seg_internal[-1][0]:
+            start = line_start
+        seg_internal.append([start, sym, line_start])
 
     offset = 0
     prev_line_start = 0
