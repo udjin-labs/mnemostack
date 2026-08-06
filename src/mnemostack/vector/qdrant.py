@@ -401,17 +401,61 @@ class VectorStore:
         schema = getattr(info, "payload_schema", None) or {}
         return {name: payload_index_type_name(fi) for name, fi in schema.items()}
 
-    def any_matching_point(
-        self, filters: dict[str, Any], *, tenant: str | None = None
-    ) -> bool:
-        """True when at least one point satisfies *filters* (+ tenant scope).
+    #: Bound on the client-side ``as_of`` validity scan in
+    #: :meth:`any_matching_point` — point-in-time bounds are not pushed down
+    #: server-side (bare-date ordering, see the invalidate notes), so the
+    #: probe examines at most this many filter-matching points and FAILS
+    #: CLOSED beyond it: a hit whose only valid-at-``as_of`` chunk hides
+    #: deeper is dropped, never leaked.
+    ANY_POINT_AS_OF_SAMPLE: ClassVar[int] = 64
 
-        One scroll page of size 1 — an existence probe, not a count. Backs
-        the graph retriever's filter attribution: a graph file hit is in the
-        filtered scope exactly when at least one of its chunks is.
+    def any_matching_point(
+        self,
+        filters: dict[str, Any],
+        *,
+        tenant: str | None = None,
+        include_invalidated: bool = True,
+        as_of: str | None = None,
+    ) -> bool:
+        """True when at least one point satisfies *filters* (+ tenant scope)
+        under the requested validity view.
+
+        An existence probe, not a count. Backs the graph retriever's filter
+        attribution: a graph file hit is in the filtered scope exactly when
+        at least one of its chunks is — under the SAME validity view as the
+        parent recall, so a stale (invalidated) or out-of-window chunk never
+        serves as proof. The current view (``include_invalidated=False``,
+        no ``as_of``) is pushed down server-side and costs one page of one;
+        an ``as_of`` view is evaluated client-side over a bounded sample
+        (:attr:`ANY_POINT_AS_OF_SAMPLE`), failing closed beyond it.
         """
         kwargs: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
-        return next(iter(self.scroll(batch_size=1, filters=filters, **kwargs)), None) is not None
+        if as_of is None:
+            hits = self.scroll(
+                batch_size=1,
+                filters=filters,
+                hide_invalidated=not include_invalidated,
+                **kwargs,
+            )
+            return next(iter(hits), None) is not None
+        # Point-in-time: validity bounds are evaluated in-process (server
+        # ranges would mis-order bare-date bounds) with the SAME primitive
+        # the recall path uses (keep_payload). Lazy import — the recall
+        # package imports this module at load time.
+        from mnemostack.recall.validity import keep_payload
+
+        checked = 0
+        for hit in self.scroll(batch_size=32, filters=filters, **kwargs):
+            if checked >= self.ANY_POINT_AS_OF_SAMPLE:
+                break
+            checked += 1
+            if keep_payload(
+                hit.payload or {},
+                include_invalidated=include_invalidated,
+                as_of=as_of,
+            ):
+                return True
+        return False
 
     def ensure_payload_index(self, field: str, schema: str) -> str:
         """Create a payload index for filtered recall; returns the type name.
@@ -534,6 +578,7 @@ class VectorStore:
         with_vectors: bool = False,
         *,
         tenant: str | None = None,
+        hide_invalidated: bool = False,
     ):
         """Iterate over points in the collection lazily.
 
@@ -542,12 +587,17 @@ class VectorStore:
         - Bulk export / migration
         - Aggregation over entire corpus
 
-        With ``tenant`` set, only that tenant's points are yielded. Yields `Hit`
-        objects (score=1.0 since this isn't a similarity query).
+        With ``tenant`` set, only that tenant's points are yielded. With
+        ``hide_invalidated`` set, points carrying an ``invalidated_at``
+        marker are excluded server-side (the same push-down ``search``
+        offers — the current-facts view). Yields `Hit` objects (score=1.0
+        since this isn't a similarity query).
         """
         must: list[Any] = list(self._build_filter(filters).must or []) if filters else []
         if tenant is not None:
             must.append(_tenant_condition(tenant))
+        if hide_invalidated:
+            must.append(_hide_invalidated_condition())
         qfilter = Filter(must=must) if must else None
         next_offset: Any = None
         while True:

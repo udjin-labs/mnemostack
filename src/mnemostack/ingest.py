@@ -164,6 +164,11 @@ _PROTECTED_PAYLOAD_KEYS = frozenset(
         # deletes when the chunk stops being code — a planted list would
         # mark unrelated payload fields for deletion.
         "_code_keys",
+        # Graph filter-attribution proof marker: honored by the post-pipeline
+        # filter backstop for graph-sourced results — a planted value on a
+        # vector point must never exist (the sources gate blocks it anyway;
+        # this keeps the key retriever-owned everywhere).
+        "_attributed_filters",
     }
 )
 

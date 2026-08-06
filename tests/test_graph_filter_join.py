@@ -77,8 +77,8 @@ def test_without_a_probe_filters_still_drop_everything():
 def test_residual_keys_are_proven_through_the_chunks():
     calls: list[tuple[dict, str | None]] = []
 
-    def probe(filters, tenant):
-        calls.append((dict(filters), tenant))
+    def probe(filters, tenant, include_invalidated, as_of):
+        calls.append((dict(filters), tenant, include_invalidated, as_of))
         return True
 
     retr = _retriever(FILES, probe)
@@ -86,17 +86,22 @@ def test_residual_keys_are_proven_through_the_chunks():
 
     assert [r.payload["name"] for r in out] == ["note.md"]
     assert calls == [
-        ({"project": "x", "source": "note.md", "index_root": "/corpus/a"}, None)
+        (
+            {"project": "x", "source": "note.md", "index_root": "/corpus/a"},
+            None,
+            True,
+            None,
+        )
     ]
 
 
 def test_unprovable_hits_are_dropped_not_leaked():
-    retr = _retriever(FILES, lambda f, t: False)  # no chunk matches
+    retr = _retriever(FILES, lambda f, t, inv, ao: False)  # no chunk matches
     assert retr.search("note.md", filters={"project": "x"}, include_invalidated=True) == []
 
 
 def test_own_payload_keys_short_circuit_without_a_probe_call():
-    def probe(_f, _t):  # pragma: no cover - must not run
+    def probe(*_a):  # pragma: no cover - must not run
         raise AssertionError("fully self-attributed hits must not probe")
 
     retr = _retriever(FILES, probe)
@@ -118,7 +123,7 @@ def test_source_filter_is_evaluated_against_the_node_name():
     """The graph payload's `source` key is the arm marker ("memgraph"), not a
     document — a caller's source condition must check the node NAME."""
 
-    def probe(_f, _t):  # pragma: no cover - must not run
+    def probe(*_a):  # pragma: no cover - must not run
         raise AssertionError("source is provable from the name — no probe")
 
     retr = _retriever(FILES, probe)
@@ -131,7 +136,7 @@ def test_source_filter_is_evaluated_against_the_node_name():
 
 
 def test_probe_failure_fails_closed():
-    def probe(_f, _t):
+    def probe(*_a):
         raise RuntimeError("store down")
 
     retr = _retriever(FILES, probe)
@@ -141,8 +146,8 @@ def test_probe_failure_fails_closed():
 def test_tenant_is_threaded_into_the_probe():
     calls: list[tuple[dict, str | None]] = []
 
-    def probe(filters, tenant):
-        calls.append((dict(filters), tenant))
+    def probe(filters, tenant, include_invalidated, as_of):
+        calls.append((dict(filters), tenant, include_invalidated, as_of))
         return True
 
     files = {("note.md", "/corpus/a"): ["other.md"]}
@@ -181,7 +186,7 @@ def test_entity_hits_are_never_probed_or_attributed():
     bare name would let an unrelated same-named chunk anywhere attribute it
     into the scope. It must be dropped WITHOUT a probe."""
 
-    def probe(_f, _t):  # pragma: no cover - must not run
+    def probe(*_a):  # pragma: no cover - must not run
         raise AssertionError("entity hits must never reach the chunk probe")
 
     class _D:
@@ -201,7 +206,7 @@ def test_entity_hits_with_explicit_none_root_fail_an_index_root_filter():
             return _EntitySession({})
 
     retr = MemgraphRetriever(
-        uri="bolt://x", driver=_D(), chunk_filter_probe=lambda f, t: True
+        uri="bolt://x", driver=_D(), chunk_filter_probe=lambda f, t, inv, ao: True
     )
     assert (
         retr.search("alice", filters={"index_root": "/x"}, include_invalidated=True)
@@ -228,7 +233,7 @@ def test_legacy_rootless_file_hits_are_dropped_not_probed():
     """Without a root there is no pin — a same-named document in another
     root could attribute the hit, so it stays unprovable (fail-closed)."""
 
-    def probe(_f, _t):  # pragma: no cover - must not run
+    def probe(*_a):  # pragma: no cover - must not run
         raise AssertionError("rootless file hits must never reach the probe")
 
     class _D:
@@ -267,10 +272,189 @@ def test_chunk_filter_probe_via_answers_from_the_store():
     )
     probe = chunk_filter_probe_via(s)
     assert probe is not None
-    assert probe({"source": "note.md", "project": "x"}, None) is True
-    assert probe({"source": "note.md", "project": "y"}, None) is False
+    assert probe({"source": "note.md", "project": "x"}, None, True, None) is True
+    assert probe({"source": "note.md", "project": "y"}, None, True, None) is False
 
 
 def test_chunk_filter_probe_via_none_for_duck_stores():
     assert chunk_filter_probe_via(None) is None
     assert chunk_filter_probe_via(MagicMock(spec=[])) is None
+
+
+def test_source_filter_never_admits_an_entity_named_like_a_document():
+    """P1: an entity whose NAME equals the requested source must not pass a
+    source-isolation boundary — the name-as-source shortcut is File-only."""
+
+    class _D:
+        def session(self, **_):
+            return _EntitySession({})
+
+    retr = MemgraphRetriever(
+        uri="bolt://x", driver=_D(), chunk_filter_probe=lambda f, t, inv, ao: True
+    )
+    assert (
+        retr.search("alice", filters={"source": "Alice"}, include_invalidated=True)
+        == []
+    )
+
+
+def test_tenant_id_filter_is_never_provable_by_chunks():
+    """P1: tenant identity is the isolation key itself — an unscoped recall
+    with a tenant_id filter must drop graph hits (whose nodes carry no
+    stamped tenant), not let another tenant's chunks prove them."""
+
+    def probe(*_a):  # pragma: no cover - must not run
+        raise AssertionError("tenant identity must never reach the chunk probe")
+
+    retr = _retriever(FILES, probe)
+    assert (
+        retr.search("note.md", filters={"tenant_id": "A"}, include_invalidated=True)
+        == []
+    )
+
+
+def test_validity_view_is_threaded_into_the_probe():
+    calls: list[tuple] = []
+
+    def probe(filters, tenant, include_invalidated, as_of):
+        calls.append((include_invalidated, as_of))
+        return True
+
+    retr = _retriever(FILES, probe)
+    out = retr.search(
+        "note.md",
+        filters={"project": "x"},
+        include_invalidated=True,
+        as_of="2026-01-01",
+    )
+    assert out
+    assert calls[0][0] is True
+    assert calls[0][1] is not None and calls[0][1].startswith("2026-01-01")
+
+
+def test_attributed_hits_carry_the_proof_marker():
+    retr = _retriever(FILES, lambda f, t, inv, ao: True)
+    out = retr.search("note.md", filters={"project": "x"}, include_invalidated=True)
+    assert out[0].payload["_attributed_filters"] == {"project": "x"}
+
+
+def test_result_passes_filters_honors_the_marker_for_graph_hits_only():
+    from types import SimpleNamespace
+
+    from mnemostack.recall.filters import result_passes_filters
+
+    filters = {"project": "x"}
+    graph_hit = SimpleNamespace(
+        payload={"name": "note.md", "_attributed_filters": {"project": "x"}},
+        sources=["memgraph"],
+    )
+    assert result_passes_filters(graph_hit, filters)
+
+    # A DIFFERENT filter set than the one proven — no pass.
+    assert not result_passes_filters(graph_hit, {"project": "y"})
+
+    # A vector hit with a planted marker must not bypass the filter.
+    spoofed = SimpleNamespace(
+        payload={"_attributed_filters": {"project": "x"}}, sources=["vector"]
+    )
+    assert not result_passes_filters(spoofed, filters)
+
+    # Ordinary payload matching still works.
+    plain = SimpleNamespace(payload={"project": "x"}, sources=["vector"])
+    assert result_passes_filters(plain, filters)
+
+
+def test_flow_post_filter_keeps_attributed_graph_hits():
+    """The P1 headline: without the marker, recall_flow's post-pipeline
+    filter re-dropped every graph hit the retriever had just proven."""
+    from mnemostack.recall import RecallResult, recall_flow
+
+    graph_hit = RecallResult(
+        id="graph:/corpus/a:note.md",
+        text="File: note.md",
+        score=1.0,
+        payload={"name": "note.md", "_attributed_filters": {"project": "x"}},
+        sources=["memgraph"],
+    )
+    vector_hit = RecallResult(
+        id="v1", text="chunk", score=0.9, payload={"project": "x"}, sources=["vector"]
+    )
+    stray = RecallResult(
+        id="v2", text="foreign", score=0.8, payload={"project": "y"}, sources=["vector"]
+    )
+
+    class _Recaller:
+        def recall(self, query, limit=10, **kwargs):
+            return [graph_hit, vector_hit, stray]
+
+    class _Pipeline:
+        def apply(self, query, results, **kw):
+            return list(results)
+
+        def __iter__(self):
+            return iter([])
+
+    out = recall_flow(
+        _Recaller(), "q", 10, pipeline=_Pipeline(), filters={"project": "x"}
+    )
+    ids = [r.id for r in out]
+    assert "graph:/corpus/a:note.md" in ids  # proven graph hit survives
+    assert "v1" in ids
+    assert "v2" not in ids  # unproven stays dropped
+
+
+def test_factory_converts_timestamp_bounds_and_forwards_validity():
+    calls: list[tuple] = []
+
+    class _Store:
+        def any_matching_point(self, filters, *, tenant=None, include_invalidated=True, as_of=None):
+            calls.append((dict(filters), tenant, include_invalidated, as_of))
+            return True
+
+    probe = chunk_filter_probe_via(
+        _Store(), timestamp_key="timestamp", timestamp_format="epoch"
+    )
+    assert probe is not None
+    assert probe(
+        {"timestamp": {"gte": "2026-01-01T00:00:00+00:00"}, "source": "a.md"},
+        None,
+        False,
+        "2026-02-01",
+    )
+    forwarded, tenant, inv, as_of = calls[0]
+    assert isinstance(forwarded["timestamp"]["gte"], (int, float))  # epoch domain
+    assert tenant is None and inv is False and as_of == "2026-02-01"
+
+
+def test_any_matching_point_respects_validity_views():
+    from qdrant_client.models import PointStruct
+
+    s = VectorStore.__new__(VectorStore)
+    s.collection = "validity"
+    s.dimension = 2
+    s.client = QdrantClient(":memory:")
+    s.client.create_collection(
+        collection_name="validity", vectors_config={"size": 2, "distance": "Cosine"}
+    )
+    s.client.upsert(
+        "validity",
+        points=[
+            PointStruct(
+                id="11111111-1111-1111-1111-111111111111",
+                vector=[0.1, 0.2],
+                payload={
+                    "source": "a.md",
+                    "project": "x",
+                    "invalidated_at": "2026-01-15T00:00:00+00:00",
+                    "valid_from": "2026-01-01T00:00:00+00:00",
+                    "valid_until": "2026-01-15T00:00:00+00:00",
+                },
+            )
+        ],
+    )
+    f = {"source": "a.md", "project": "x"}
+    assert s.any_matching_point(f) is True  # neutral view sees it
+    assert s.any_matching_point(f, include_invalidated=False) is False  # stale hidden
+    # Point-in-time: valid inside the window, not after it.
+    assert s.any_matching_point(f, as_of="2026-01-10") is True
+    assert s.any_matching_point(f, as_of="2026-02-01") is False

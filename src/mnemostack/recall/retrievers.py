@@ -39,7 +39,7 @@ try:
 except ImportError:  # pragma: no cover - qdrant-client is a runtime dependency
     DatetimeRange = FieldCondition = Filter = Range = None  # type: ignore[assignment,misc]
 from .bm25 import BM25, BM25Doc, Tokenizer, tokenize
-from .filters import payload_matches
+from .filters import ATTRIBUTED_FILTERS_KEY, payload_matches
 from .recaller import RecallResult
 from .validity import (
     graph_as_of_predicate,
@@ -1153,19 +1153,46 @@ def graph_result_id(node_id: str, tenant: str | None) -> str:
 
 def chunk_filter_probe_via(
     store: Any,
-) -> Callable[[dict[str, Any], str | None], bool] | None:
+    *,
+    timestamp_key: str = "timestamp",
+    timestamp_format: str = "iso",
+) -> Callable[[dict[str, Any], str | None, bool, str | None], bool] | None:
     """The standard chunk-existence probe for :class:`MemgraphRetriever`.
 
-    Returns None for a missing store or one without ``any_matching_point``
-    (duck/legacy implementations) — the retriever then keeps its historical
-    fail-closed behavior under payload filters.
+    Called as ``probe(filters, tenant, include_invalidated, as_of)``. The
+    caller's timestamp bounds are converted into the collection's own domain
+    (``convert_timestamp_filter``, same as the vector arms — an ISO range
+    against an epoch field would silently match nothing), and the parent
+    recall's validity view is forwarded so a stale or out-of-window chunk
+    can never serve as proof. Returns None for a missing store or one
+    without ``any_matching_point`` (duck/legacy implementations) — the
+    retriever then keeps its historical fail-closed behavior under payload
+    filters.
     """
     if store is None or not hasattr(store, "any_matching_point"):
         return None
 
-    def probe(filters: dict[str, Any], tenant: str | None) -> bool:
+    def probe(
+        filters: dict[str, Any],
+        tenant: str | None,
+        include_invalidated: bool,
+        as_of: str | None,
+    ) -> bool:
+        converted = (
+            convert_timestamp_filter(
+                filters, timestamp_key=timestamp_key, timestamp_format=timestamp_format
+            )
+            or {}
+        )
         kwargs: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
-        return bool(store.any_matching_point(filters, **kwargs))
+        return bool(
+            store.any_matching_point(
+                converted,
+                include_invalidated=include_invalidated,
+                as_of=as_of,
+                **kwargs,
+            )
+        )
 
     return probe
 
@@ -1204,14 +1231,18 @@ class MemgraphRetriever(Retriever):
         # database appended at the tail to preserve positional back-compat for
         # existing callers (a mid-signature insert would shift min_word etc.).
         database: str | None = None,
-        # Filter attribution (tail-appended): called as probe(filters, tenant)
-        # -> bool, answering "does at least one vector chunk match these
-        # filters?" (VectorStore.any_matching_point behind a closure). With a
-        # probe, a payload-filtered recall no longer drops every graph hit:
-        # a hit is kept when its own payload proves the filter keys it
-        # carries AND its chunks prove the rest. None = the historical
-        # fail-closed behavior (filters => no graph contribution).
-        chunk_filter_probe: Callable[[dict[str, Any], str | None], bool] | None = None,
+        # Filter attribution (tail-appended): called as probe(filters, tenant,
+        # include_invalidated, as_of) -> bool, answering "does at least one
+        # vector chunk match these filters under the parent recall's validity
+        # view?" (chunk_filter_probe_via builds it over
+        # VectorStore.any_matching_point). With a probe, a payload-filtered
+        # recall no longer drops every graph hit: a hit is kept when its own
+        # payload proves the filter keys it carries AND its chunks prove the
+        # rest. None = the historical fail-closed behavior (filters => no
+        # graph contribution).
+        chunk_filter_probe: (
+            Callable[[dict[str, Any], str | None, bool, str | None], bool] | None
+        ) = None,
     ):
         self.uri = uri
         self.user = user
@@ -1253,7 +1284,12 @@ class MemgraphRetriever(Retriever):
     _valid_clause = staticmethod(graph_valid_clause)
 
     def _attributed(
-        self, result: RecallResult, filters: dict[str, Any], tenant: str | None
+        self,
+        result: RecallResult,
+        filters: dict[str, Any],
+        tenant: str | None,
+        include_invalidated: bool,
+        as_of: str | None,
     ) -> bool:
         """Can this graph hit be PROVEN to belong to the filtered scope?
 
@@ -1279,13 +1315,26 @@ class MemgraphRetriever(Retriever):
         if own and not payload_matches(payload, own):
             return False
         if "source" in filters:
-            if not name or not payload_matches({"source": name}, {"source": filters["source"]}):
+            # Only a :File node's name IS a document source — an entity named
+            # like a document must not pass a source-isolation boundary.
+            if (
+                payload.get("type") != "File"
+                or not name
+                or not payload_matches({"source": name}, {"source": filters["source"]})
+            ):
                 return False
         residual = {
             k: v for k, v in filters.items() if k != "source" and k not in payload
         }
         if not residual:
             return True
+        if "tenant_id" in residual:
+            # Tenant identity is the isolation key itself — a chunk can never
+            # prove which tenant a graph NODE belongs to (an unscoped query
+            # returns every tenant's nodes without stamping them). Scoped
+            # recall stamps tenant_id into the payload, which the own-key
+            # tier above already checked.
+            return False
         root = payload.get("index_root")
         if (
             not name
@@ -1298,7 +1347,9 @@ class MemgraphRetriever(Retriever):
         probe_filters["source"] = name
         probe_filters["index_root"] = root
         try:
-            return bool(self.chunk_filter_probe(probe_filters, tenant))
+            return bool(
+                self.chunk_filter_probe(probe_filters, tenant, include_invalidated, as_of)
+            )
         except Exception:  # noqa: BLE001 — fail CLOSED: unattributable, not leaked
             logger.warning("graph filter attribution probe failed", exc_info=True)
             return False
@@ -1505,10 +1556,19 @@ class MemgraphRetriever(Retriever):
                 if filters:
                     # Attribute each hit to the filtered scope, or drop it —
                     # the isolation contract is unchanged, only the PROOF got
-                    # richer than "graph hits are never provable".
-                    results = [
-                        r for r in results if self._attributed(r, filters, tenant)
-                    ]
+                    # richer than "graph hits are never provable". Survivors
+                    # are stamped with the proof marker so the post-pipeline
+                    # filter backstop (result_passes_filters) doesn't re-drop
+                    # a hit whose payload legitimately lacks the filtered
+                    # fields.
+                    attributed_results: list[RecallResult] = []
+                    for r in results:
+                        if self._attributed(
+                            r, filters, tenant, include_invalidated, as_of
+                        ):
+                            r.payload[ATTRIBUTED_FILTERS_KEY] = dict(filters)
+                            attributed_results.append(r)
+                    results = attributed_results
                 return results[:limit]
         except Exception:
             # Fail open (graph is optional), but log — a bad query or a malformed

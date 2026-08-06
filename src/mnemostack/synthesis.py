@@ -302,7 +302,11 @@ def _build_recaller_from_kwargs(
                 database=kwargs.get("memgraph_database"),
                 driver=kwargs.get("graph_driver"),
                 timeout=float(kwargs.get("graph_timeout", 5.0)),
-                chunk_filter_probe=chunk_filter_probe_via(vector_store),
+                chunk_filter_probe=chunk_filter_probe_via(
+                    vector_store,
+                    timestamp_key=timestamp_key,
+                    timestamp_format=timestamp_format,
+                ),
             )
         )
     if (

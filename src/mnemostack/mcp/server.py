@@ -315,7 +315,11 @@ def build_server(
                 password=graph_password,
                 database=graph_database,
                 timeout=graph_timeout,
-                chunk_filter_probe=chunk_filter_probe_via(vec),
+                chunk_filter_probe=chunk_filter_probe_via(
+                    vec,
+                    timestamp_key=timestamp_key,
+                    timestamp_format=timestamp_format,
+                ),
             )
             if memgraph_uri
             else None,

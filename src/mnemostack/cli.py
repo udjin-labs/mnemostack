@@ -2411,7 +2411,11 @@ def _build_recaller(
             MemgraphRetriever(
                 uri=memgraph_uri,
                 **_graph_auth(args),
-                chunk_filter_probe=chunk_filter_probe_via(store),
+                chunk_filter_probe=chunk_filter_probe_via(
+                    store,
+                    timestamp_key=schema_kw["timestamp_key"],
+                    timestamp_format=schema_kw["timestamp_format"],
+                ),
             )
         )
     if (
