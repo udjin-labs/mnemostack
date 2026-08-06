@@ -121,16 +121,39 @@ def test_own_payload_keys_short_circuit_without_a_probe_call():
 
 def test_source_filter_is_evaluated_against_the_node_name():
     """The graph payload's `source` key is the arm marker ("memgraph"), not a
-    document — a caller's source condition must check the node NAME."""
+    document — a caller's source condition checks the node NAME, and a
+    satisfied name still needs CHUNK proof (a dangling link target has a
+    :File node but no document)."""
+    calls: list[dict] = []
 
-    def probe(*_a):  # pragma: no cover - must not run
-        raise AssertionError("source is provable from the name — no probe")
+    def probe(filters, tenant, include_invalidated, as_of):
+        calls.append(dict(filters))
+        return True  # the document has chunks
 
     retr = _retriever(FILES, probe)
     out = retr.search("note.md", filters={"source": "note.md"}, include_invalidated=True)
     assert [r.payload["name"] for r in out] == ["note.md"]
+    assert calls and calls[0]["source"] == "note.md"  # chunk-existence proof ran
     assert (
         retr.search("note.md", filters={"source": "other.md"}, include_invalidated=True)
+        == []
+    )
+
+
+def test_dangling_link_targets_never_pass_a_source_filter():
+    """Round-7 pin: sync creates :File nodes for DANGLING link targets — a
+    node whose document has no chunks must not surface under
+    filters={"source": ...}, and without a probe it fails closed."""
+    retr = _retriever(FILES, lambda f, t, inv, ao: False)  # no chunks exist
+    assert (
+        retr.search("note.md", filters={"source": "note.md"}, include_invalidated=True)
+        == []
+    )
+    probeless = _retriever(FILES)
+    assert (
+        probeless.search(
+            "note.md", filters={"source": "note.md"}, include_invalidated=True
+        )
         == []
     )
 

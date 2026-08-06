@@ -1376,7 +1376,13 @@ class MemgraphRetriever(Retriever):
         residual = {
             k: v for k, v in filters.items() if k != "source" and k not in own
         }
-        if not residual:
+        # A satisfied `source` condition still needs CHUNK proof: the sync
+        # creates :File nodes for every link target including DANGLING ones
+        # (no such document, no chunks), so name equality alone would
+        # surface a node for a document that does not exist. Own-metadata
+        # keys (index_root/name/type/...) narrow honestly without a probe —
+        # they are write-side-stamped properties of the node itself.
+        if not residual and "source" not in filters:
             return True
         if "tenant_id" in residual:
             # Tenant identity is the isolation key itself — a chunk can never
