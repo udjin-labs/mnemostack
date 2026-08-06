@@ -254,7 +254,12 @@ def test_new_knobs_stay_at_the_positional_tail():
     from mnemostack.mcp import build_server
 
     params = list(inspect.signature(build_server).parameters)
-    assert params[-2:] == ["ollama_host", "embedding_timeout"]
+    assert params[-4:] == [
+        "ollama_host",
+        "embedding_timeout",
+        "reranker",
+        "recall_middleware",
+    ]
 
 
 def test_config_sdk_helper_carries_provider_knobs(monkeypatch):

@@ -333,6 +333,108 @@ def test_mcp_search_trace_opt_in(monkeypatch):
     assert "fused" in payload["trace"]
 
 
+def test_build_server_uses_injected_reranker_without_resolving_an_llm(monkeypatch):
+    """A ready reranker instance wins over internal construction — and no
+    answer LLM is resolved for reranking, so a scoring reranker works with no
+    generative LLM configured (previously this took a get_llm monkeypatch)."""
+    import mnemostack.mcp.server as srv
+
+    class _Reversing:
+        def rerank(self, query, results):
+            return list(reversed(results))
+
+    class _TwoHitRecaller:
+        def __init__(self, **_):
+            pass
+
+        def recall(self, query, limit=10, **kwargs):
+            return [
+                SimpleNamespace(id=i, text=i, score=s, sources=["vector"], payload={})
+                for i, s in (("a", 0.9), ("b", 0.8))
+            ]
+
+    _patch_minimal(monkeypatch, srv, _TwoHitRecaller)
+
+    def _no_llm(*_a, **_k):
+        raise AssertionError("an injected reranker must not resolve an LLM")
+
+    monkeypatch.setattr(srv, "get_llm", _no_llm)
+    mcp = build_server(
+        collection="test", embedding_provider="ollama", reranker=_Reversing()
+    )
+
+    result = asyncio.run(mcp.call_tool("mnemostack_search", {"query": "q"}))
+    payload = result.structured_content
+
+    assert payload["ok"] is True
+    assert payload["degraded"] == []  # injected reranker ran, no fallback
+    assert [r["id"] for r in payload["results"]] == ["b", "a"]
+
+
+def test_build_server_recall_middleware_wraps_the_flow(monkeypatch):
+    """The middleware receives the REAL recall_flow first, so it can widen /
+    merge / re-rank around it and forward **kwargs verbatim — no need to
+    reproduce the flow's keyword contract. Two hits truncated to one prove
+    the middleware's RETURN VALUE is what the tool answers with."""
+    import mnemostack.mcp.server as srv
+
+    class _TwoHits:
+        def __init__(self, **_):
+            pass
+
+        def recall(self, query, limit=10, **kwargs):
+            return [
+                SimpleNamespace(id=i, text=i, score=s, sources=["vector"], payload={})
+                for i, s in (("a", 0.9), ("b", 0.8))
+            ]
+
+    seen: dict = {}
+
+    def middleware(flow, recaller, query, limit, **kwargs):
+        seen["flow_is_module_flow"] = flow is srv.recall_flow
+        seen["kwargs"] = set(kwargs)
+        results = flow(recaller, query, limit, **kwargs)
+        assert len(results) == 2  # the wrapped flow really ran
+        return results[:1]  # a policy decision only visible if consumed
+
+    _patch_minimal(monkeypatch, srv, _TwoHits)
+    mcp = build_server(
+        collection="test", embedding_provider="ollama", recall_middleware=middleware
+    )
+
+    result = asyncio.run(mcp.call_tool("mnemostack_search", {"query": "q"}))
+    payload = result.structured_content
+
+    assert payload["ok"] is True
+    assert payload["count"] == 1  # 2 recalled — only the middleware's cut survives
+    assert [r["id"] for r in payload["results"]] == ["a"]
+    assert seen["flow_is_module_flow"]
+    assert {"pipeline", "reranker", "filters", "trace", "token_budget",
+            "include_invalidated", "as_of", "tenant"} <= seen["kwargs"]
+
+
+def test_broken_injected_reranker_still_degrades_fail_open(monkeypatch):
+    """An injected instance that raises at rerank time takes the same
+    fail-open path as the built-in one: results served, reranker:fallback."""
+    import mnemostack.mcp.server as srv
+
+    class _Boom:
+        def rerank(self, query, results):
+            raise RuntimeError("cross-encoder down")
+
+    _patch_minimal(monkeypatch, srv, _OneHitRecaller)
+    mcp = build_server(
+        collection="test", embedding_provider="ollama", reranker=_Boom()
+    )
+
+    result = asyncio.run(mcp.call_tool("mnemostack_search", {"query": "q"}))
+    payload = result.structured_content
+
+    assert payload["ok"] is True
+    assert payload["results"]
+    assert payload["degraded"] == ["reranker:fallback"]
+
+
 def test_mcp_search_reports_no_parse_as_note_not_degradation(monkeypatch):
     """The regression this change exists for: a query without a parseable
     date is ROUTINE — the client payload must show a healthy call with a

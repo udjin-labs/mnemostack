@@ -93,6 +93,23 @@ mnemostack mcp-serve --auth --api-key "$MNEMOSTACK_API_KEY" --collection my-memo
 
 The key (`--api-key` or `MNEMOSTACK_API_KEY`) resolves the tenant + scopes for the whole process — the natural fit for how an MCP client passes secrets in its server config. It is **re-verified on every tool call**, so revoking it stops the session immediately (fail closed). Tools are scope-gated — `mnemostack_search` / `mnemostack_answer` need `read`, `mnemostack_invalidate` / `mnemostack_feedback` need `write` — and every data/graph tool call is confined to the key's tenant. (`mnemostack_health` stays **public** — a liveness check, not gated by the key, so it still responds after a key is revoked.) Issue keys with `mnemostack keys add --tenant <id> --scopes read,write` (and set per-tenant quotas with `mnemostack quota set`). Auth is **off by default** — an unauthenticated `mcp-serve` behaves exactly as before.
 
+### Library extension hooks (`build_server`)
+
+Embedding the server from Python (`from mnemostack.mcp import build_server`) exposes two tail-appended hooks, so a downstream deployment never has to monkeypatch module internals:
+
+```python
+mcp = build_server(
+    collection="my-memory",
+    reranker=my_reranker,                # any object with rerank(query, results)
+    recall_middleware=my_middleware,     # policy wrapper around the recall flow
+)
+```
+
+- `reranker=` — a ready instance used as-is. The server then does **not** resolve an answer LLM for reranking purposes, so a scoring reranker (e.g. an HTTP cross-encoder behind `ScoringReranker`) works with no generative LLM configured.
+- `recall_middleware=` — called as `middleware(recall_flow, recaller, query, limit, **kwargs)` for both `mnemostack_search` and the top-level recall inside `mnemostack_answer` (the answer generator's internal retry sub-recalls are not wrapped); it must return the result list. The real `recall_flow` arrives as the first argument, so the middleware forwards `**kwargs` unchanged (never reproducing the flow's keyword contract) and can implement policies like widened multi-pool retrieval with a single re-rank pass. It runs inside the caller's request: keep it thread-safe and fail-open, like the flow it wraps.
+
+Both hooks are **build-time, operator-supplied code — a trust boundary**, not request-derived input. In particular, under `--auth` the tenant confinement holds only for a middleware that forwards `tenant` and `trace` unchanged into the passed `recall_flow` (as documented above): one that drops them, or queries `recaller` directly instead of calling the flow it was given, bypasses the tenant backstops and the trace scrub. Treat a middleware with the same review rigor as the server configuration itself.
+
 ## Client configuration
 
 ### Claude Desktop
