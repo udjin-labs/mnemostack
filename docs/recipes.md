@@ -380,3 +380,31 @@ filesystem it is pointed at.
 The check never runs inside recall (latency untouched), and under `--auth`
 it is tenant-scoped: a foreign tenant's id is indistinguishable from an
 absent one.
+
+## Indexing a codebase (code-RAG)
+
+`mnemostack index --code` turns a source tree into a searchable corpus — useful as "semantic grep" over a large, unfamiliar or historical codebase, especially plugged into an agent via [the MCP server](mcp.md). Three pieces work together:
+
+**1. Syntax-aware chunking.** With `--code`, common source-file extensions are indexed alongside `.md`/`.txt`, split at top-level definition boundaries instead of fixed character windows — a chunk is usually one function or class with its doc comment. Detection is a deliberate heuristic (no AST): a missed boundary degrades to plain character chunking, never worse. Code chunks carry `language`, `chunk_kind: "code"`, a best-effort `symbol` (the definition's name) and `code_tokens` (see below); vendored trees (`node_modules`, `__pycache__`, `vendor`, build outputs, …) are skipped.
+
+```bash
+mnemostack index ./my-repo --code --prune --collection my-code
+```
+
+Re-runs are cheap: unchanged files are skipped by content-derived ids, unchanged payloads cost zero writes, and `--prune` removes chunks that edits no longer produce.
+
+**2. An identifier-aware lexical arm.** Dense vectors alone miss exact-identifier queries, and a plain full-text index can't see inside `parseHttpRequest`. Every code chunk therefore carries `code_tokens` — its identifiers split on `camelCase`/`snake_case` boundaries (full identifiers kept too, so exact-name queries still gate). Wire it as an extra lexical arm with the existing multi-field mechanism:
+
+```yaml
+recall:
+  text_search: lexical
+  text_search_fields:
+    text: 1.0
+    code_tokens: 1.5
+```
+
+then create the server-side indexes once: `mnemostack text-index` (it indexes every configured gate field). Gating is **exact-subtoken** matching, deliberately: a query containing "http" or "request" gate-matches `parseHttpRequest` because those exact parts are in `code_tokens` — but there is no stemming or morphology, so "parsing" does not match `parse`, and "timestamps" does not match `timestamp`. The lexical arm is a precision complement for identifier-shaped queries; the dense arm remains responsible for natural-language phrasing.
+
+**3. A code-capable embedding model.** General-text embedding models are noticeably weaker on source code — prefer a model trained on code for the dense arm (any provider works; the [role-aware profile system](../docs/api-stability.md) applies the model's query/document transforms automatically). The stack is model-agnostic: pick the best code embedder available to you and set it with `--embedding-model` / `MNEMOSTACK_EMBEDDING_MODEL`.
+
+Notes: `--code` affects which files are walked and how code files are chunked — prose files keep the classic chunker, and the `index` command's existing machinery (`--prune`, `--refresh-payloads`, provenance `resolve`) applies to code chunks unchanged. Like all generic `index` runs, code chunks are unscoped: `index` has no `--tenant`, so in a shared authenticated collection they will not be returned by tenant-filtered recall — index code into its own collection (as above) or ingest through a tenant-scoped path if isolation is needed. Window chunking (`--window-size`) is a prose feature and does not apply to code files.
