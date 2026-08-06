@@ -527,3 +527,22 @@ def test_as_of_probe_scans_past_the_first_pages():
     # The only chunk valid at 2026-02-01 sits beyond the first pages.
     assert s.any_matching_point(f, as_of="2026-02-01") is True
     assert s.any_matching_point(f, as_of="2025-12-01") is False
+
+
+def test_deep_candidate_pools_are_traversed_until_attribution():
+    """Round-3 pin: the traversal draws from the probes' FULL candidate pool
+    — a deep run of unattributable same-named files (other roots) must not
+    starve an attributable candidate far beyond the old 3x window."""
+    files = {("note.md", f"/corpus/{i:03d}"): [f"n{i}.md"] for i in range(40)}
+
+    def probe(filters, tenant, include_invalidated, as_of):
+        return filters.get("index_root") == "/corpus/037"  # deep in the pool
+
+    retr = MemgraphRetriever(
+        uri="bolt://x",
+        driver=_Driver(files),
+        max_nodes=1,
+        chunk_filter_probe=probe,
+    )
+    out = retr.search("note.md", filters={"project": "x"}, include_invalidated=True)
+    assert [r.payload["index_root"] for r in out] == ["/corpus/037"]

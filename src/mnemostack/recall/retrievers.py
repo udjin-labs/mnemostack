@@ -1151,6 +1151,15 @@ def graph_result_id(node_id: str, tenant: str | None) -> str:
     return f"graph:{quote(tenant, safe='')}:{node_id}"
 
 
+#: Candidate-discovery bound for a payload-FILTERED graph search: attribution
+#: may reject many candidates (same-named files across roots, out-of-scope
+#: projects), so the per-word node probes fetch up to this many rows and the
+#: ranked traversal draws from ALL of them until ``max_nodes`` hits are
+#: attributed. Beyond this bound the arm fails closed (misses, never leaks) —
+#: the deliberate bounded-work contract this retriever applies everywhere.
+_FILTERED_CANDIDATE_BUDGET = 500
+
+
 def chunk_filter_probe_via(
     store: Any,
     *,
@@ -1397,10 +1406,18 @@ class MemgraphRetriever(Retriever):
         # Over-fetch candidates whenever a later per-result filter (validity
         # or payload-filter attribution) may reject some — otherwise the
         # rejected ones would consume the whole candidate budget and starve
-        # filtered recall of attributable lower-ranked hits.
-        node_budget = (
-            self.max_nodes * 3 if (validity_active or filters) else self.max_nodes
-        )
+        # filtered recall of attributable lower-ranked hits. Under payload
+        # filters the traversal below draws candidates until max_nodes hits
+        # are ATTRIBUTED or the probes' candidates are exhausted — so the
+        # per-word probe LIMIT (rows are tiny: name/type/root) becomes the
+        # arm's deliberate outer work bound, the same bounded-cost contract
+        # max_nodes / max_rels already are.
+        if filters:
+            node_budget = max(self.max_nodes * 3, _FILTERED_CANDIDATE_BUDGET)
+        elif validity_active:
+            node_budget = self.max_nodes * 3
+        else:
+            node_budget = self.max_nodes
         extra: dict[str, Any] = {"probe_lim": node_budget}
         if as_of is not None:
             extra["as_of"] = as_of
