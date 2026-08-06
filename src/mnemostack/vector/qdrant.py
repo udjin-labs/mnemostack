@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 from uuid import UUID
 
 from qdrant_client import QdrantClient
@@ -94,6 +94,28 @@ def _hide_invalidated_condition() -> IsEmptyCondition:
 
 class DimensionMismatchError(ValueError):
     """Existing collection stores vectors of a different size than the provider produces."""
+
+
+def payload_index_type_name(field_info: Any) -> str:
+    """Normalized type name of a payload-schema entry.
+
+    Client versions expose the entry as an object with a ``data_type`` enum,
+    a bare enum, or a bare string — one normalization shared by
+    :meth:`VectorStore.payload_indexes` and doctor's listing, so the two can
+    never disagree about the same collection.
+    """
+    data_type = getattr(field_info, "data_type", field_info)
+    return str(getattr(data_type, "value", data_type)).rsplit(".", 1)[-1].lower()
+
+
+class PayloadIndexConflictError(ValueError):
+    """The field is already indexed with a DIFFERENT type.
+
+    Deliberately distinct from a backend failure: a real server silently
+    replaces an index re-created with another type, so the operator surface
+    refuses before mutating — and its caller must be able to tell this
+    refusal (a usage error) from an unreachable/failing backend.
+    """
 
 
 class TenantConflictError(ValueError):
@@ -356,6 +378,65 @@ class VectorStore:
             )
         except Exception:  # noqa: BLE001
             pass  # already indexed or collection not ready
+
+    #: Schema names accepted by :meth:`ensure_payload_index`. `text` is
+    #: deliberately absent — full-text indexes have their own command and
+    #: semantics (`ensure_text_index` / `mnemostack text-index`).
+    PAYLOAD_INDEX_SCHEMAS: ClassVar[dict[str, PayloadSchemaType]] = {
+        "keyword": PayloadSchemaType.KEYWORD,
+        "integer": PayloadSchemaType.INTEGER,
+        "float": PayloadSchemaType.FLOAT,
+        "bool": PayloadSchemaType.BOOL,
+        "datetime": PayloadSchemaType.DATETIME,
+    }
+
+    def payload_indexes(self) -> dict[str, str]:
+        """Existing payload indexes as ``{field: schema-type-name}``.
+
+        Read-only. The local in-memory client never records indexes (they
+        have no effect there), so this returns ``{}`` for it — a real server
+        reports the collection's actual index schema.
+        """
+        info = self.client.get_collection(self.collection)
+        schema = getattr(info, "payload_schema", None) or {}
+        return {name: payload_index_type_name(fi) for name, fi in schema.items()}
+
+    def ensure_payload_index(self, field: str, schema: str) -> str:
+        """Create a payload index for filtered recall; returns the type name.
+
+        LOUD on purpose — this backs the operator command (`mnemostack
+        payload-index`), unlike the fail-open :meth:`index_payload_field`
+        used opportunistically on write paths: a real server evaluates a
+        filter on an unindexed field by scanning candidate payloads, and the
+        operator asking for the index needs the failure, not a shrug.
+        Idempotent for an existing index of the same type (no server call).
+        A CONFLICTING type is refused before any mutation: a real server
+        silently REPLACES the index on re-create (verified live on v1.18.3),
+        which would swap the field's filtering semantics behind the
+        operator's back.
+        """
+        try:
+            schema_type = self.PAYLOAD_INDEX_SCHEMAS[schema]
+        except KeyError:
+            allowed = ", ".join(sorted(self.PAYLOAD_INDEX_SCHEMAS))
+            raise ValueError(
+                f"unknown payload index schema '{schema}' (one of: {allowed})"
+            ) from None
+        existing = self.payload_indexes().get(field)
+        if existing is not None:
+            if existing == schema:
+                return existing  # already indexed as requested — nothing to do
+            raise PayloadIndexConflictError(
+                f"field '{field}' is already indexed as '{existing}' — the "
+                f"server would silently replace it with '{schema}'; drop the "
+                "existing index first if the type change is intended"
+            )
+        self.client.create_payload_index(
+            collection_name=self.collection, field_name=field, field_schema=schema_type
+        )
+        # Report the type the collection actually records; local mode keeps
+        # no record, so fall back to the requested name.
+        return self.payload_indexes().get(field, schema)
 
     def count(self, tenant: str | None = None) -> int:
         if tenant is not None:

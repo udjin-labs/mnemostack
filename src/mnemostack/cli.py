@@ -61,6 +61,7 @@ from .vector.patch import (
     carry_snapshot_capture_time,
     diff_payload,
 )
+from .vector.qdrant import PayloadIndexConflictError, payload_index_type_name
 
 # -- Progressive tiers --------------------------------------------------------
 # Tiered output budgets let agents pay only for the detail they need.
@@ -396,7 +397,25 @@ def _doctor_qdrant(
                 "re-index under text_search=sparse (new collection) or run "
                 "`mnemostack sparse-backfill` after the space is added",
             )
-    elif text_search == "lexical":
+    # Payload indexes (informational): a real server evaluates a filtered
+    # recall on an unindexed field by scanning candidate payloads — a cost
+    # invisible locally, where the in-memory client matches without indexes.
+    payload_schema = getattr(info, "payload_schema", None) or {}
+    if payload_schema:
+        listed_indexes = ", ".join(
+            f"{name} ({payload_index_type_name(fi)})"
+            for name, fi in sorted(payload_schema.items())
+        )
+        add("qdrant.payload_indexes", "ok", listed_indexes)
+    else:
+        add(
+            "qdrant.payload_indexes",
+            "warn",
+            "none recorded — filters on any payload field scan payloads on a real server",
+            "create indexes for the fields recall filters on: "
+            "`mnemostack payload-index <field> --schema keyword|datetime|...`",
+        )
+    if text_search == "lexical":
         schema = getattr(info, "payload_schema", None) or {}
         # Every configured gate field needs its own full-text index — a
         # multi-field layout with only the body field indexed would leave
@@ -1494,6 +1513,63 @@ def cmd_text_index(args: argparse.Namespace) -> int:
     print(
         f"full-text index ensured on payload field(s) {listed} of "
         f"'{args.collection}' — `recall.text_search: lexical` is ready"
+    )
+    return 0
+
+
+def cmd_payload_index(args: argparse.Namespace) -> int:
+    """Create (or list) payload indexes for the fields recall filters on.
+
+    A real Qdrant server evaluates a `filters={...}` condition on an
+    unindexed field by scanning candidate payloads — a full-collection
+    penalty invisible locally, where the in-memory client matches without
+    indexes (the same trap `text-index` documents for MatchText).
+    Idempotent and non-destructive: safe on a pre-existing/mounted
+    collection.
+    """
+    store = VectorStore(collection=args.collection, dimension=1, host=args.qdrant)
+    try:
+        if not store.collection_exists():
+            print(f"error: collection '{args.collection}' does not exist", file=sys.stderr)
+            return 1
+        if args.field is None:
+            indexes = store.payload_indexes()
+            if indexes:
+                for name in sorted(indexes):
+                    print(f"{name}: {indexes[name]}")
+            else:
+                print(
+                    "no payload indexes recorded (note: the local in-memory "
+                    "backend never records them; on a real server, filtered "
+                    "recall without an index scans payloads)"
+                )
+            return 0
+        if args.schema is None:
+            print("error: --schema is required to create an index", file=sys.stderr)
+            return 2
+        if args.schema == "text":
+            print(
+                "error: full-text indexes have their own command — run "
+                "`mnemostack text-index` (it indexes every configured "
+                "lexical gate field)",
+                file=sys.stderr,
+            )
+            return 2
+        result = store.ensure_payload_index(args.field, args.schema)
+    except PayloadIndexConflictError as e:
+        # The deliberate refusal (usage error) — NOT a backend failure: any
+        # other ValueError here can be a genuine server error (auth,
+        # reachability) and must exit 1 like text-index's, or an ops script
+        # would misroute an outage as "fix your flags".
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    except Exception as e:  # noqa: BLE001
+        print(f"error: cannot create payload index: {e}", file=sys.stderr)
+        return 1
+    print(
+        f"payload index ensured on '{args.field}' ({result}) of "
+        f"'{args.collection}' — filters on this field now use the index on a "
+        "real server"
     )
     return 0
 
@@ -3333,6 +3409,30 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         "requires on a real Qdrant server (idempotent, non-destructive)",
     )
     p_text_index.set_defaults(func=cmd_text_index)
+
+    p_payload_index = sub.add_parser(
+        "payload-index",
+        parents=[common],
+        help="Create or list payload indexes for the fields recall filters on "
+        "(a real server scans payloads for filters on unindexed fields; "
+        "idempotent, non-destructive)",
+    )
+    p_payload_index.add_argument(
+        "field",
+        nargs="?",
+        default=None,
+        help="Payload field to index; omit to list the collection's existing indexes",
+    )
+    p_payload_index.add_argument(
+        "--schema",
+        choices=["keyword", "integer", "float", "bool", "datetime", "text"],
+        default=None,
+        help="Index type for the field's values: keyword for string tags/ids, "
+        "datetime for recall.timestamp_format=iso timestamps, integer/float "
+        "for epoch timestamps and numerics, bool for flags (text redirects "
+        "to `mnemostack text-index`)",
+    )
+    p_payload_index.set_defaults(func=cmd_payload_index)
 
     p_resolve = sub.add_parser(
         "resolve",
