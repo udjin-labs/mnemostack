@@ -434,9 +434,19 @@ class VectorStore:
         self.client.create_payload_index(
             collection_name=self.collection, field_name=field, field_schema=schema_type
         )
-        # Report the type the collection actually records; local mode keeps
-        # no record, so fall back to the requested name.
-        return self.payload_indexes().get(field, schema)
+        # Verify against the type the collection actually recorded (local
+        # mode keeps no record — fall back to the requested name). A
+        # DIFFERENT recorded type means a concurrent creation won the race:
+        # reporting it as "ensured" would claim filtering semantics the
+        # collection doesn't have.
+        recorded = self.payload_indexes().get(field, schema)
+        if recorded != schema:
+            raise PayloadIndexConflictError(
+                f"field '{field}' ended up indexed as '{recorded}' (a "
+                f"concurrent index creation won over '{schema}'); re-check "
+                "the collection and coordinate the intended type"
+            )
+        return recorded
 
     def count(self, tenant: str | None = None) -> int:
         if tenant is not None:

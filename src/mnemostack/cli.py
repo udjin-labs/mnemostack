@@ -1530,6 +1530,11 @@ def cmd_payload_index(args: argparse.Namespace) -> int:
     # Usage validation FIRST, before any backend contact: a malformed
     # invocation must exit 2 whether or not Qdrant is reachable — an ops
     # script distinguishing flag errors from outages depends on it.
+    if args.field is None and args.schema is not None:
+        # Silently ignoring --schema in list mode would let a script that
+        # MEANT to create an index report success with nothing created.
+        print("error: --schema requires a field to index", file=sys.stderr)
+        return 2
     if args.field is not None:
         if args.schema is None:
             print("error: --schema is required to create an index", file=sys.stderr)

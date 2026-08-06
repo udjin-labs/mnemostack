@@ -263,6 +263,34 @@ def test_usage_errors_are_exit_2_even_with_the_backend_down(monkeypatch, capsys)
     assert "text-index" in capsys.readouterr().err
 
 
+def test_schema_without_a_field_is_a_usage_error(monkeypatch, capsys):
+    def _boom(**_kw):
+        raise AssertionError("usage validation must not touch the backend")
+
+    monkeypatch.setattr(cli, "VectorStore", _boom)
+
+    assert cli.cmd_payload_index(_args(schema="keyword")) == 2
+    assert "requires a field" in capsys.readouterr().err
+
+
+def test_lost_creation_race_is_reported_as_conflict():
+    """If a concurrent creation wins with another type, the post-create
+    verification must refuse to report the requested index as ensured."""
+    from mnemostack.vector.qdrant import PayloadIndexConflictError
+
+    client = MagicMock()
+    client.get_collection.side_effect = [
+        _info_with_schema({}),  # pre-check: nothing indexed
+        _info_with_schema(  # post-create: a rival integer index landed
+            {"project": SimpleNamespace(data_type=PayloadSchemaType.INTEGER)}
+        ),
+    ]
+    s = _store_with_client(client)
+
+    with pytest.raises(PayloadIndexConflictError, match="concurrent index creation"):
+        s.ensure_payload_index("project", "keyword")
+
+
 def test_parser_accepts_payload_index_command():
     parser = cli.build_parser()
     args = parser.parse_args(["payload-index", "project", "--schema", "keyword"])
