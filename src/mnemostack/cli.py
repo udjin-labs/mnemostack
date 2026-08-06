@@ -2380,13 +2380,47 @@ def cmd_index(args: argparse.Namespace) -> int:
     if guard_rc is not None:
         return guard_rc
 
-    files = (
-        [target]
-        if target.is_file()
-        else sorted(target.rglob("*.md")) + sorted(target.rglob("*.txt"))
-    )
+    index_code = bool(getattr(args, "code", False))
+    if target.is_file():
+        files = [target]
+    else:
+        files = sorted(target.rglob("*.md")) + sorted(target.rglob("*.txt"))
+        if index_code:
+            from .code import language_for
+
+            # Vendored/generated trees would drown a real repo's own code —
+            # skip the well-known ones. Applies to the code walk only; the
+            # historical .md/.txt walk is unchanged. One extension-agnostic
+            # walk with language_for (which lowercases) so `MAIN.CPP` /
+            # `Component.TSX` are found even on case-sensitive filesystems,
+            # where per-extension globs would silently miss them.
+            skip_dirs = {
+                ".git", "node_modules", "__pycache__", ".venv", "venv",
+                "dist", "build", "target", ".tox", ".mypy_cache",
+                ".ruff_cache", ".pytest_cache", "vendor",
+            }
+            # os.walk with in-place dirnames pruning: a huge node_modules is
+            # never DESCENDED into (rglob would enumerate it fully and only
+            # then filter — the dominant filesystem cost on real repos).
+            code_files: list[Path] = []
+            for dirpath, dirnames, filenames in os.walk(target):
+                dirnames[:] = [d for d in dirnames if d not in skip_dirs]
+                for fn in filenames:
+                    if language_for(fn) is not None:
+                        code_files.append(Path(dirpath) / fn)
+            files += sorted(code_files)
+    if index_code and args.window_size > 1:
+        # Outside the directory branch on purpose: a single-file
+        # `index app.py --code --window-size N` ignores windowing just the
+        # same and must say so.
+        print(
+            "note: --window-size applies to prose files only; code "
+            "files are chunked at definition boundaries",
+            file=sys.stderr,
+        )
     if not files:
-        print(f"error: no .md/.txt files found under {target}", file=sys.stderr)
+        kinds = ".md/.txt/code" if index_code else ".md/.txt"
+        print(f"error: no {kinds} files found under {target}", file=sys.stderr)
         return 2
 
     if args.window_size < 1:
@@ -2415,6 +2449,64 @@ def cmd_index(args: argparse.Namespace) -> int:
         # chunk offsets here are exact character offsets into this text, so
         # non-windowed chunks verify by hash AND position.
         snapshot = source_snapshot(text)
+        code_language = None
+        if index_code:
+            from .code import language_for
+
+            code_language = language_for(f.name)
+        if code_language is not None:
+            # Syntax-aware chunking for code files: offsets still exactly
+            # partition the file, so ids/prune/refresh/resolve are the same
+            # machinery — only WHERE we cut (and the extra metadata) differs.
+            from .code import chunk_code
+
+            for cc in chunk_code(text, code_language, max_chars=args.chunk_size):
+                cid = _stable_chunk_id(source, cc.offset, cc.text)
+                payload: dict[str, Any] = {
+                    "text": cc.text,
+                    "source": source,
+                    "offset": cc.offset,
+                    "index_root": index_root,
+                }
+                if enricher is not None:
+                    apply_enrichment(
+                        enricher,
+                        IngestItem(
+                            text=cc.text,
+                            source=source,
+                            offset=cc.offset,
+                            metadata={"language": cc.language, "chunk_kind": "code"},
+                        ),
+                        payload,
+                    )
+                # Code metadata is AUTHORITATIVE like the snapshot below —
+                # applied after enrichment so an enricher key collision can't
+                # clobber the language, the lexical-gate token field, or
+                # fabricate a symbol on a chunk the chunker left unnamed.
+                payload["language"] = cc.language
+                payload["chunk_kind"] = "code"
+                # Identifier subtokens for a lexical arm
+                # (text_search_fields={"code_tokens": ...}) — one
+                # space-joined string, matching MatchText gating.
+                payload["code_tokens"] = " ".join(cc.tokens)
+                if cc.symbol is not None:
+                    payload["symbol"] = cc.symbol
+                else:
+                    payload.pop("symbol", None)
+                # Ownership record (mirrors _enrich_keys/_md_keys): names
+                # exactly what the code path wrote, so a later refresh
+                # WITHOUT --code deletes the stale code metadata instead of
+                # leaving the point falsely code-marked and lexically
+                # searchable through code_tokens.
+                from .code import CODE_OWNED_KEYS
+
+                payload["_code_keys"] = sorted(
+                    k for k in CODE_OWNED_KEYS if k in payload
+                )
+                payload.update(snapshot)
+                payload["_id_scheme"] = "stable_chunk_id"
+                chunks.append((cid, cc.text, payload))
+            continue  # windowing below is a prose feature, not a code one
         file_chunks: list[tuple[int, str]] = []
         for i in range(0, len(text), args.chunk_size):
             chunk = text[i : i + args.chunk_size]
@@ -2422,7 +2514,7 @@ def cmd_index(args: argparse.Namespace) -> int:
                 continue
             file_chunks.append((i, chunk))
             cid = _stable_chunk_id(source, i, chunk)
-            payload: dict[str, Any] = {
+            payload = {
                 "text": chunk,
                 "source": source,
                 "offset": i,
@@ -2633,6 +2725,24 @@ def cmd_index(args: argparse.Namespace) -> int:
             stale_keys = [k for k in old_enrich if k not in payload]
             if old_enrich and "_enrich_keys" not in payload:
                 stale_keys.append("_enrich_keys")
+            # Same ownership rule for code metadata: a refresh whose current
+            # chunk is prose (--code dropped, or the file left the code set)
+            # must delete the keys the code path owned last run. The stored
+            # record is validated against the CLOSED owned set — a malformed
+            # or planted value (legacy tamper; the key predates its
+            # reservation from enrichers) must neither crash the refresh nor
+            # mark any UNRELATED payload field for deletion.
+            from .code import CODE_OWNED_KEYS
+
+            old_code_raw = old_payload.get("_code_keys")
+            old_code = (
+                [k for k in old_code_raw if isinstance(k, str) and k in CODE_OWNED_KEYS]
+                if isinstance(old_code_raw, list)
+                else []
+            )
+            stale_keys += [k for k in old_code if k not in payload]
+            if old_code_raw is not None and "_code_keys" not in payload:
+                stale_keys.append("_code_keys")  # incl. clearing a malformed record
             compared += 1
             # Write-or-skip (same contract as the markdown sync): an
             # unchanged point costs zero backend requests; a changed one is
@@ -3715,6 +3825,20 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         type=int,
         default=cfg.vector.window_size,
         help="Adjacent chunks to concatenate into overlapping context chunks (1 disables)",
+    )
+    p_index.add_argument(
+        "--code",
+        action="store_true",
+        help=(
+            "Also index source-code files (common languages by extension), "
+            "chunked at top-level definition boundaries instead of fixed "
+            "character windows. Code chunks carry language/symbol metadata "
+            "and a code_tokens payload field with identifier subtokens "
+            "(camelCase/snake_case split) for lexical search via "
+            "recall.text_search_fields. Boundary detection is heuristic: a "
+            "missed boundary degrades to plain character chunking, never "
+            "worse. Prose files (.md/.txt) keep the classic chunker."
+        ),
     )
     p_index.add_argument("--recreate", action="store_true", help="Drop existing collection")
     p_index.add_argument(

@@ -160,6 +160,10 @@ _PROTECTED_PAYLOAD_KEYS = frozenset(
         "chunk_start_offset",
         "chunk_end_offset",
         "synthetic_prefix_len",
+        # Code-metadata ownership record: names the keys a --code refresh
+        # deletes when the chunk stops being code — a planted list would
+        # mark unrelated payload fields for deletion.
+        "_code_keys",
     }
 )
 
