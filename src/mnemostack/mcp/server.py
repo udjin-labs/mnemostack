@@ -40,6 +40,7 @@ from ..recall import (
     VectorRetriever,
     build_bm25_docs,
     build_full_pipeline,
+    chunk_filter_probe_via,
     recall_flow,
     sum_tokens,
 )
@@ -314,6 +315,7 @@ def build_server(
                 password=graph_password,
                 database=graph_database,
                 timeout=graph_timeout,
+                chunk_filter_probe=chunk_filter_probe_via(vec),
             )
             if memgraph_uri
             else None,

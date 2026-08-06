@@ -401,6 +401,18 @@ class VectorStore:
         schema = getattr(info, "payload_schema", None) or {}
         return {name: payload_index_type_name(fi) for name, fi in schema.items()}
 
+    def any_matching_point(
+        self, filters: dict[str, Any], *, tenant: str | None = None
+    ) -> bool:
+        """True when at least one point satisfies *filters* (+ tenant scope).
+
+        One scroll page of size 1 — an existence probe, not a count. Backs
+        the graph retriever's filter attribution: a graph file hit is in the
+        filtered scope exactly when at least one of its chunks is.
+        """
+        kwargs: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
+        return next(iter(self.scroll(batch_size=1, filters=filters, **kwargs)), None) is not None
+
     def ensure_payload_index(self, field: str, schema: str) -> str:
         """Create a payload index for filtered recall; returns the type name.
 

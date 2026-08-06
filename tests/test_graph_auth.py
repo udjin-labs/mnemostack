@@ -254,7 +254,7 @@ def test_new_graph_params_are_appended_not_inserted():
 
     assert _last(build_full_pipeline) == "graph_database"
     assert _last(GraphResurrection.__init__) == "database"
-    assert _last(MemgraphRetriever.__init__) == "database"
+    assert _last(MemgraphRetriever.__init__) == "chunk_filter_probe"
     # build_server: the auth trio must sit after the pre-existing token_budget
     bs = list(inspect.signature(build_server).parameters)
     assert bs.index("graph_user") > bs.index("token_budget")

@@ -49,6 +49,7 @@ from .recall import (
     TemporalRetriever,
     VectorRetriever,
     build_bm25_docs,
+    chunk_filter_probe_via,
     recall_flow,
     sum_tokens,
 )
@@ -2406,7 +2407,13 @@ def _build_recaller(
             )
     memgraph_uri = getattr(args, "memgraph_uri", None)
     if _source_enabled_for_cli("memgraph", source_filter) and memgraph_uri:
-        retrievers.append(MemgraphRetriever(uri=memgraph_uri, **_graph_auth(args)))
+        retrievers.append(
+            MemgraphRetriever(
+                uri=memgraph_uri,
+                **_graph_auth(args),
+                chunk_filter_probe=chunk_filter_probe_via(store),
+            )
+        )
     if (
         provider is not None
         and store is not None

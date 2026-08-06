@@ -1151,6 +1151,25 @@ def graph_result_id(node_id: str, tenant: str | None) -> str:
     return f"graph:{quote(tenant, safe='')}:{node_id}"
 
 
+def chunk_filter_probe_via(
+    store: Any,
+) -> Callable[[dict[str, Any], str | None], bool] | None:
+    """The standard chunk-existence probe for :class:`MemgraphRetriever`.
+
+    Returns None for a missing store or one without ``any_matching_point``
+    (duck/legacy implementations) — the retriever then keeps its historical
+    fail-closed behavior under payload filters.
+    """
+    if store is None or not hasattr(store, "any_matching_point"):
+        return None
+
+    def probe(filters: dict[str, Any], tenant: str | None) -> bool:
+        kwargs: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
+        return bool(store.any_matching_point(filters, **kwargs))
+
+    return probe
+
+
 class MemgraphRetriever(Retriever):
     """Knowledge-graph retriever — exact/contains match on node names.
 
@@ -1185,6 +1204,14 @@ class MemgraphRetriever(Retriever):
         # database appended at the tail to preserve positional back-compat for
         # existing callers (a mid-signature insert would shift min_word etc.).
         database: str | None = None,
+        # Filter attribution (tail-appended): called as probe(filters, tenant)
+        # -> bool, answering "does at least one vector chunk match these
+        # filters?" (VectorStore.any_matching_point behind a closure). With a
+        # probe, a payload-filtered recall no longer drops every graph hit:
+        # a hit is kept when its own payload proves the filter keys it
+        # carries AND its chunks prove the rest. None = the historical
+        # fail-closed behavior (filters => no graph contribution).
+        chunk_filter_probe: Callable[[dict[str, Any], str | None], bool] | None = None,
     ):
         self.uri = uri
         self.user = user
@@ -1197,6 +1224,7 @@ class MemgraphRetriever(Retriever):
         self.timeout = timeout
         self._driver = driver
         self._own_driver = driver is None
+        self.chunk_filter_probe = chunk_filter_probe
 
     def _get_driver(self):
         if self._driver is not None:
@@ -1224,15 +1252,68 @@ class MemgraphRetriever(Retriever):
 
     _valid_clause = staticmethod(graph_valid_clause)
 
+    def _attributed(
+        self, result: RecallResult, filters: dict[str, Any], tenant: str | None
+    ) -> bool:
+        """Can this graph hit be PROVEN to belong to the filtered scope?
+
+        Two tiers. Keys the hit's own payload carries are checked in place
+        (``payload_matches``: a mismatch drops the hit with zero probes) —
+        except ``source``, whose graph value is the arm marker "memgraph",
+        not a document; a caller's ``source`` condition is evaluated against
+        the node NAME, which for a :File node IS the corpus-relative source.
+        Remaining keys are proven through the hit's chunks — and ONLY for a
+        :File hit with a real ``index_root``: the probe is pinned to
+        (source=name, index_root=root), so a same-named document in another
+        root can never attribute it. An :Entity node (or a legacy rootless
+        file node) has no pinnable chunks: probing it by bare name would let
+        an unrelated same-named chunk anywhere attribute an entity into the
+        scope — so unprovable residual keys simply drop the hit. Exclusion,
+        never leakage, exactly as before.
+        """
+        payload = result.payload or {}
+        name = payload.get("name")
+        own = {
+            k: v for k, v in filters.items() if k != "source" and k in payload
+        }
+        if own and not payload_matches(payload, own):
+            return False
+        if "source" in filters:
+            if not name or not payload_matches({"source": name}, {"source": filters["source"]}):
+                return False
+        residual = {
+            k: v for k, v in filters.items() if k != "source" and k not in payload
+        }
+        if not residual:
+            return True
+        root = payload.get("index_root")
+        if (
+            not name
+            or self.chunk_filter_probe is None
+            or payload.get("type") != "File"
+            or not root
+        ):
+            return False
+        probe_filters = dict(residual)
+        probe_filters["source"] = name
+        probe_filters["index_root"] = root
+        try:
+            return bool(self.chunk_filter_probe(probe_filters, tenant))
+        except Exception:  # noqa: BLE001 — fail CLOSED: unattributable, not leaked
+            logger.warning("graph filter attribution probe failed", exc_info=True)
+            return False
+
     def search(
         self, query, limit=20, filters=None, as_of=None, include_invalidated=False, tenant=None
     ):
-        if filters:
+        if filters and self.chunk_filter_probe is None:
             # Caller payload `filters` (source, arbitrary keys, time range) can't
             # be proven against graph nodes, which carry no chunk payload — under
             # the isolation contract anything unattributable is excluded, not
             # leaked. The dedicated `tenant` scope below is different: it's a
             # server-owned graph property, so it IS honored (not via `filters`).
+            # With a chunk_filter_probe, hits are attributed per-result AFTER
+            # retrieval (see _attributed) instead of dropped wholesale.
             return []
         driver = self._get_driver()
         if driver is None:
@@ -1421,6 +1502,13 @@ class MemgraphRetriever(Retriever):
                             sources=["memgraph"],
                         )
                     )
+                if filters:
+                    # Attribute each hit to the filtered scope, or drop it —
+                    # the isolation contract is unchanged, only the PROOF got
+                    # richer than "graph hits are never provable".
+                    results = [
+                        r for r in results if self._attributed(r, filters, tenant)
+                    ]
                 return results[:limit]
         except Exception:
             # Fail open (graph is optional), but log — a bad query or a malformed

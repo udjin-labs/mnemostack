@@ -69,6 +69,7 @@ from mnemostack.recall import (
     VectorRetriever,
     build_full_pipeline,
     build_qdrant_text_arms,
+    chunk_filter_probe_via,
     recall_flow,
     sum_tokens,
 )
@@ -777,6 +778,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             password=cfg.graph_password,
             database=cfg.graph_database,
             timeout=cfg.graph_timeout,
+            chunk_filter_probe=chunk_filter_probe_via(store),
         )
         if cfg.graph_uri
         else None,
