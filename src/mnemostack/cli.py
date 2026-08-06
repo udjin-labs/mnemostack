@@ -1527,6 +1527,21 @@ def cmd_payload_index(args: argparse.Namespace) -> int:
     Idempotent and non-destructive: safe on a pre-existing/mounted
     collection.
     """
+    # Usage validation FIRST, before any backend contact: a malformed
+    # invocation must exit 2 whether or not Qdrant is reachable — an ops
+    # script distinguishing flag errors from outages depends on it.
+    if args.field is not None:
+        if args.schema is None:
+            print("error: --schema is required to create an index", file=sys.stderr)
+            return 2
+        if args.schema == "text":
+            print(
+                "error: full-text indexes have their own command — run "
+                "`mnemostack text-index` (it indexes every configured "
+                "lexical gate field)",
+                file=sys.stderr,
+            )
+            return 2
     store = VectorStore(collection=args.collection, dimension=1, host=args.qdrant)
     try:
         if not store.collection_exists():
@@ -1544,17 +1559,6 @@ def cmd_payload_index(args: argparse.Namespace) -> int:
                     "recall without an index scans payloads)"
                 )
             return 0
-        if args.schema is None:
-            print("error: --schema is required to create an index", file=sys.stderr)
-            return 2
-        if args.schema == "text":
-            print(
-                "error: full-text indexes have their own command — run "
-                "`mnemostack text-index` (it indexes every configured "
-                "lexical gate field)",
-                file=sys.stderr,
-            )
-            return 2
         result = store.ensure_payload_index(args.field, args.schema)
     except PayloadIndexConflictError as e:
         # The deliberate refusal (usage error) — NOT a backend failure: any

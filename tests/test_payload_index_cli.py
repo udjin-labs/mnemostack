@@ -248,6 +248,21 @@ def test_cmd_payload_index_conflict_is_exit_2(monkeypatch, capsys):
     assert "already indexed as 'keyword'" in capsys.readouterr().err
 
 
+def test_usage_errors_are_exit_2_even_with_the_backend_down(monkeypatch, capsys):
+    """Argument validation happens BEFORE any backend contact: a malformed
+    invocation exits 2 whether or not Qdrant is reachable."""
+
+    def _boom(**_kw):
+        raise AssertionError("usage validation must not touch the backend")
+
+    monkeypatch.setattr(cli, "VectorStore", _boom)
+
+    assert cli.cmd_payload_index(_args(field="project")) == 2  # no --schema
+    assert "--schema is required" in capsys.readouterr().err
+    assert cli.cmd_payload_index(_args(field="body", schema="text")) == 2
+    assert "text-index" in capsys.readouterr().err
+
+
 def test_parser_accepts_payload_index_command():
     parser = cli.build_parser()
     args = parser.parse_args(["payload-index", "project", "--schema", "keyword"])
