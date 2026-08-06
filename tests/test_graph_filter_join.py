@@ -698,3 +698,22 @@ def test_self_provable_filters_pass_without_any_probe_configured():
     assert [r.payload["name"] for r in out] == ["note.md"]
     # Residual-needing filters keep the historical fail-closed drop.
     assert retr.search("note.md", filters={"project": "x"}, include_invalidated=True) == []
+
+
+def test_chunk_proven_hits_survive_the_validity_gate_without_edges():
+    """Round-8 pin: a file whose links were all removed keeps its node and
+    its current chunks — a validity-aware chunk proof replaces the
+    incident-edge gate. Own-metadata-only attribution still requires it."""
+    linkless = {("note.md", "/corpus/a"): []}  # node present, zero edges
+
+    # Chunk-proven: survives the default current-facts view without edges.
+    retr = _retriever(linkless, lambda f, t, inv, ao: True)
+    out = retr.search("note.md", filters={"project": "x"})  # validity active
+    assert [r.payload["name"] for r in out] == ["note.md"]
+
+    # Own-metadata-only (no probe ran): the edge gate still applies.
+    def must_not_probe(*_a):  # pragma: no cover
+        raise AssertionError("index_root attribution must not probe")
+
+    retr2 = _retriever(linkless, must_not_probe)
+    assert retr2.search("note.md", filters={"index_root": "/corpus/a"}) == []

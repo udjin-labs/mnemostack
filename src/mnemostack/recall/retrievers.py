@@ -1331,8 +1331,14 @@ class MemgraphRetriever(Retriever):
         include_invalidated: bool,
         as_of: str | None,
         probe_budget: _ProbeBudget | None = None,
-    ) -> bool:
+    ) -> tuple[bool, bool]:
         """Can this graph hit be PROVEN to belong to the filtered scope?
+
+        Returns ``(attributed, chunk_proven)``: the second flag is True when
+        the proof came from the validity-aware CHUNK probe — the caller uses
+        it to skip the incident-edge validity gate, which a probe-proven
+        current chunk already covers (a file whose links were all removed
+        keeps its node and its current chunks).
 
         Two tiers. Keys the hit's own payload carries are checked in place
         (``payload_matches``: a mismatch drops the hit with zero probes) —
@@ -1363,7 +1369,7 @@ class MemgraphRetriever(Retriever):
             if k in _GRAPH_OWN_FILTER_KEYS and payload.get(k) not in (None, "")
         }
         if own and not payload_matches(payload, own):
-            return False
+            return (False, False)
         if "source" in filters:
             # Only a :File node's name IS a document source — an entity named
             # like a document must not pass a source-isolation boundary.
@@ -1372,7 +1378,7 @@ class MemgraphRetriever(Retriever):
                 or not name
                 or not payload_matches({"source": name}, {"source": filters["source"]})
             ):
-                return False
+                return (False, False)
         residual = {
             k: v for k, v in filters.items() if k != "source" and k not in own
         }
@@ -1383,14 +1389,14 @@ class MemgraphRetriever(Retriever):
         # keys (index_root/name/type/...) narrow honestly without a probe —
         # they are write-side-stamped properties of the node itself.
         if not residual and "source" not in filters:
-            return True
+            return (True, False)
         if "tenant_id" in residual:
             # Tenant identity is the isolation key itself — a chunk can never
             # prove which tenant a graph NODE belongs to (an unscoped query
             # returns every tenant's nodes without stamping them). Scoped
             # recall stamps tenant_id into the payload, which the own-key
             # tier above already checked.
-            return False
+            return (False, False)
         root = payload.get("index_root")
         if (
             not name
@@ -1398,7 +1404,7 @@ class MemgraphRetriever(Retriever):
             or payload.get("type") != "File"
             or not root
         ):
-            return False
+            return (False, False)
         probe_filters = dict(residual)
         probe_filters["source"] = name
         probe_filters["index_root"] = root
@@ -1406,14 +1412,19 @@ class MemgraphRetriever(Retriever):
             # Probe allowance for this call is spent — remaining candidates
             # fail closed (missed, never leaked): bounded work over an
             # unbounded rejecting corpus.
-            return False
+            return (False, False)
         try:
-            return bool(
-                self.chunk_filter_probe(probe_filters, tenant, include_invalidated, as_of)
+            return (
+                bool(
+                    self.chunk_filter_probe(
+                        probe_filters, tenant, include_invalidated, as_of
+                    )
+                ),
+                True,
             )
         except Exception:  # noqa: BLE001 — fail CLOSED: unattributable, not leaked
             logger.warning("graph filter attribution probe failed", exc_info=True)
-            return False
+            return (False, False)
 
     def search(
         self, query, limit=20, filters=None, as_of=None, include_invalidated=False, tenant=None
@@ -1587,19 +1598,24 @@ class MemgraphRetriever(Retriever):
                             payload=payload,
                             sources=["memgraph"],
                         )
-                        if not self._attributed(
+                        attributed, chunk_proven = self._attributed(
                             candidate,
                             filters,
                             tenant,
                             include_invalidated,
                             as_of,
                             probe_budget,
-                        ):
+                        )
+                        if not attributed:
                             continue
                         candidate.payload[ATTRIBUTED_FILTERS_KEY] = dict(filters)
-                        if validity_active:
-                            # The bare-node validity gate still applies — but
-                            # only attributed candidates pay the round trip.
+                        if validity_active and not chunk_proven:
+                            # The bare-node validity gate still applies for
+                            # own-metadata-only attribution — but a validity-
+                            # aware CHUNK proof already covers it (a file
+                            # whose links were all removed keeps its node and
+                            # its current chunks), and only attributed
+                            # candidates pay the round trip.
                             gate_rows = session.run(
                                 "MATCH (n {name: $name})-[r]-(m) "
                                 f"WHERE coalesce(n.index_root, '') = $root_key "
