@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import threading
+from collections.abc import Callable
 from typing import Annotated, Any
 
 try:
@@ -86,6 +87,11 @@ def build_server(
     # back-compat for existing library callers.
     ollama_host: str | None = None,
     embedding_timeout: int | None = None,
+    # Extension hooks (tail-appended): a downstream deployment previously had
+    # to monkeypatch module attributes to supply its own reranker or wrap the
+    # recall flow — both fragile by construction.
+    reranker: Reranker | None = None,
+    recall_middleware: Callable[..., list[Any]] | None = None,
 ) -> Any:
     """Build and return a configured FastMCP server.
 
@@ -106,6 +112,27 @@ def build_server(
         rerank_mode: LLM reranker mode for service parity
         token_budget: default token budget applied to search/answer recall when
             the tool call does not pass one (None = no budget)
+        reranker: a ready reranker instance used as-is (any object with
+            ``rerank(query, results)``). When provided, the server does NOT
+            resolve an answer LLM for reranking purposes, so a scoring
+            reranker works with no generative LLM configured. None = build
+            the default LLM reranker internally.
+        recall_middleware: optional policy wrapper around the recall flow,
+            called as ``middleware(recall_flow, recaller, query, limit,
+            **kwargs)`` and expected to return the result list. The real
+            ``recall_flow`` arrives as the first argument, so a middleware
+            forwards ``**kwargs`` unchanged instead of reproducing the flow's
+            keyword contract (``pipeline``, ``reranker``, ``filters``,
+            ``trace``, ``token_budget``, ``include_invalidated``, ``as_of``,
+            ``tenant``). Applies to both search and the top-level answer
+            recall (the answer generator's internal retry sub-recalls are
+            not wrapped); runs inside the caller's request, so it must stay
+            thread-safe and fail-open like the flow it wraps. TRUST
+            BOUNDARY: this is build-time operator code — under auth, tenant
+            confinement holds only when the middleware forwards ``tenant``
+            and ``trace`` unchanged into the flow it was given; dropping
+            them (or querying ``recaller`` directly) bypasses the tenant
+            backstops and the trace scrub.
 
     Returns:
         FastMCP instance ready to .run()
@@ -342,6 +369,11 @@ def build_server(
         )
 
     def _get_reranker():
+        if reranker is not None:
+            # A ready instance wins over internal construction — and no
+            # answer LLM is resolved for reranking purposes, so a scoring
+            # reranker works without any generative LLM configured.
+            return reranker
         return _component(
             "reranker",
             lambda: Reranker(
@@ -363,16 +395,13 @@ def build_server(
         trace = RecallTrace()
         recaller = _get_recaller()
         try:
-            reranker = _get_reranker()
+            call_reranker = _get_reranker()
         except Exception:  # noqa: BLE001 — LLM not configured; recall still works
-            reranker = None
+            call_reranker = None
             trace.mark("reranker:unavailable")
-        results = recall_flow(
-            recaller,
-            query,
-            limit,
+        flow_kwargs: dict[str, Any] = dict(
             pipeline=_get_pipeline(),
-            reranker=reranker,
+            reranker=call_reranker,
             filters=filters,
             trace=trace,
             # Per-call budget wins; unset falls back to the server-wide default.
@@ -385,6 +414,14 @@ def build_server(
             as_of=as_of,
             tenant=tenant,
         )
+        if recall_middleware is not None:
+            # The middleware receives the REAL flow as its first argument, so
+            # it can wrap policy around the call (widen pools, merge, re-rank)
+            # and forward **kwargs unchanged — it never has to reproduce
+            # recall_flow's keyword contract.
+            results = recall_middleware(recall_flow, recaller, query, limit, **flow_kwargs)
+        else:
+            results = recall_flow(recaller, query, limit, **flow_kwargs)
         return results, trace
 
     def _get_feedback_pipeline():

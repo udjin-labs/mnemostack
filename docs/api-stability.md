@@ -285,6 +285,14 @@ behave exactly as listed above.
   vocabulary and the space fingerprints) is 🟡 experimental — see below.
 - **LLM**: `LLMProvider` (incl. `health_check`), `LLMResponse`, `get_llm`,
   `list_llms`, `register_llm`.
+- **MCP embedding**: `mnemostack.mcp.build_server` — stable and callable
+  positionally; new parameters are only ever appended at the tail (pinned by a
+  signature test). The extension hooks `reranker=` (ready instance used as-is;
+  no answer LLM resolved for reranking) and `recall_middleware=` (wraps
+  `recall_flow` for search + top-level answer recall) are **build-time
+  operator code — a trust boundary**: under auth, tenant confinement holds
+  only for a middleware that forwards `tenant`/`trace` unchanged into the
+  flow it was given.
 - **Recall (core)**: `Recaller` (`recall` / `recall_async`), `recall_flow`,
   `recall_flow_async`, `RecallResult`, `AnswerGenerator`, `Answer`,
   `Reranker`, `RERANK_MODES`, `BM25`, `BM25Doc`, `reciprocal_rank_fusion`,
