@@ -114,3 +114,41 @@ def _in_range(
         # Incomparable types: cannot be proven inside the range — exclude.
         return False
     return True
+
+
+#: Payload key stamped by the graph retriever on a hit whose scope membership
+#: was PROVEN via chunk attribution (see MemgraphRetriever._attributed). The
+#: post-pipeline filter backstop honors it for graph-sourced results only —
+#: their payloads are retriever-constructed, never user data — and the key is
+#: reserved from enrichers/frontmatter on the vector write path.
+ATTRIBUTED_FILTERS_KEY = "_attributed_filters"
+
+
+def result_passes_filters(
+    result: Any,
+    filters: dict[str, Any] | None,
+    *,
+    timestamp_key: str = "timestamp",
+    numeric_unit: str = "auto",
+) -> bool:
+    """The post-pipeline filter check for a RECALL RESULT.
+
+    ``payload_matches`` semantics, plus one honest exception: a graph hit
+    whose membership in EXACTLY this filter scope was proven through its
+    chunks carries the proof marker — its payload legitimately lacks the
+    filtered fields (graph nodes have no chunk payload), and re-requiring
+    them would silently drop every attributed graph hit right after the
+    retriever proved it. The marker is honored only for results sourced
+    solely from the graph arm, and only when it records the SAME filters
+    this call is enforcing.
+    """
+    payload = getattr(result, "payload", None) or {}
+    if payload_matches(
+        payload, filters, timestamp_key=timestamp_key, numeric_unit=numeric_unit
+    ):
+        return True
+    if not filters:
+        return True
+    attributed = payload.get(ATTRIBUTED_FILTERS_KEY)
+    sources = list(getattr(result, "sources", []) or [])
+    return sources == ["memgraph"] and attributed == filters

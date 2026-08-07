@@ -49,6 +49,7 @@ from .recall import (
     TemporalRetriever,
     VectorRetriever,
     build_bm25_docs,
+    chunk_filter_probe_via,
     recall_flow,
     sum_tokens,
 )
@@ -2039,7 +2040,7 @@ def cmd_search(args: argparse.Namespace) -> int:
                 entry["payload"] = {
                     key: value
                     for key, value in r.payload.items()
-                    if key != "_vector_floor_candidates"
+                    if key not in ("_vector_floor_candidates", "_attributed_filters")
                 }
             elif snippet_chars > 0:
                 entry["text"] = r.text[:snippet_chars]
@@ -2406,7 +2407,17 @@ def _build_recaller(
             )
     memgraph_uri = getattr(args, "memgraph_uri", None)
     if _source_enabled_for_cli("memgraph", source_filter) and memgraph_uri:
-        retrievers.append(MemgraphRetriever(uri=memgraph_uri, **_graph_auth(args)))
+        retrievers.append(
+            MemgraphRetriever(
+                uri=memgraph_uri,
+                **_graph_auth(args),
+                chunk_filter_probe=chunk_filter_probe_via(
+                    store,
+                    timestamp_key=schema_kw["timestamp_key"],
+                    timestamp_format=schema_kw["timestamp_format"],
+                ),
+            )
+        )
     if (
         provider is not None
         and store is not None

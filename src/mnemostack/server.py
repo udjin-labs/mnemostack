@@ -69,6 +69,7 @@ from mnemostack.recall import (
     VectorRetriever,
     build_full_pipeline,
     build_qdrant_text_arms,
+    chunk_filter_probe_via,
     recall_flow,
     sum_tokens,
 )
@@ -515,7 +516,13 @@ def _memory_of(result) -> Memory:
     payload = getattr(result, "payload", None)
     if not payload:
         payload = getattr(result, "metadata", None) or {}
-    payload = {key: value for key, value in payload.items() if key != "_vector_floor_candidates"}
+    # Internal recall mechanics stay internal: the vector-floor working set
+    # and the graph filter-attribution proof marker are not user metadata.
+    payload = {
+        key: value
+        for key, value in payload.items()
+        if key not in ("_vector_floor_candidates", "_attributed_filters")
+    }
     # Common source fields populated by our indexers. Order matters: explicit
     # 'source' wins, then the workspace conventions, finally nothing.
     source = (
@@ -777,6 +784,11 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             password=cfg.graph_password,
             database=cfg.graph_database,
             timeout=cfg.graph_timeout,
+            chunk_filter_probe=chunk_filter_probe_via(
+                store,
+                timestamp_key=cfg.timestamp_key,
+                timestamp_format=cfg.timestamp_format,
+            ),
         )
         if cfg.graph_uri
         else None,
