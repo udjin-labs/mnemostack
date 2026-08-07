@@ -717,3 +717,126 @@ def test_chunk_proven_hits_survive_the_validity_gate_without_edges():
 
     retr2 = _retriever(linkless, must_not_probe)
     assert retr2.search("note.md", filters={"index_root": "/corpus/a"}) == []
+
+
+# ------------------------------------------ query amplification guards
+
+
+class _CountingSession(_Session):
+    """Fake session that records the token of every node probe issued."""
+
+    def __init__(self, files, probed):
+        super().__init__(files)
+        self._probed = probed
+
+    def run(self, cypher, **params):
+        if "labels(n)[0]" in cypher:  # node probe
+            self._probed.append(params.get("w", ""))
+        return super().run(cypher, **params)
+
+
+class _CountingDriver(_Driver):
+    def __init__(self, files):
+        super().__init__(files)
+        self.probed: list[str] = []
+
+    def session(self, **_):
+        return _CountingSession(self._files, self.probed)
+
+
+def test_repeated_query_words_probe_once():
+    """Audit pin: the query string is caller-controlled on HTTP/MCP — the
+    same word repeated (in any case) must cost ONE probe set, not one per
+    occurrence."""
+    driver = _CountingDriver(FILES)
+    retr = MemgraphRetriever(uri="bolt://x", driver=driver)
+
+    out = retr.search("note.md NOTE.MD note.md", include_invalidated=True)
+
+    assert [r.payload["name"] for r in out] == ["note.md"]
+    assert driver.probed == ["note.md"]
+
+
+def test_distinct_query_tokens_are_capped():
+    """Audit pin: a pathological word soup is bounded at _MAX_QUERY_TOKENS
+    distinct tokens (order-preserving) — the rest never reach the backend."""
+    driver = _CountingDriver(FILES)
+    retr = MemgraphRetriever(uri="bolt://x", driver=driver)
+    words = [f"word{i:02d}" for i in range(30)]
+
+    retr.search(" ".join(words), include_invalidated=True)
+
+    # An unmatched token legitimately retries several probe shapes — the
+    # guard bounds DISTINCT tokens reaching the backend, not probe shapes.
+    assert list(dict.fromkeys(driver.probed)) == words[:16]  # _MAX_QUERY_TOKENS
+
+
+def test_probe_circuit_breaker_trips_on_first_store_failure():
+    """Audit pin: a store outage costs ONE failed probe per recall — the
+    breaker fails every remaining candidate closed instead of retrying the
+    dead store serially up to the full probe allowance."""
+    files = {("note.md", "/corpus/a"): [], ("report.md", "/corpus/a"): []}
+    calls: list[dict] = []
+
+    def broken_probe(filters, tenant, include_invalidated, as_of):
+        calls.append(dict(filters))
+        raise RuntimeError("store down")
+
+    retr = _retriever(files, broken_probe)
+    out = retr.search(
+        "note.md report.md", filters={"project": "x"}, include_invalidated=True
+    )
+
+    assert out == []  # fail closed, never leaked
+    assert len(calls) == 1  # second candidate never touched the store
+
+
+def test_probe_breaker_spans_searches_sharing_a_recall_scope():
+    """A tripped breaker in a shared recall scope survives into the next
+    `search` call — under query expansion each variant re-runs the arm, and
+    a store outage must cost one failed probe per PUBLIC recall, not one
+    per variant."""
+    calls: list[dict] = []
+
+    def broken_probe(filters, tenant, include_invalidated, as_of):
+        calls.append(dict(filters))
+        raise RuntimeError("store down")
+
+    retr = _retriever(FILES, broken_probe)
+    scope: dict = {}
+    for variant in ("note.md", "note.md please"):
+        out = retr.search(
+            variant,
+            filters={"project": "x"},
+            include_invalidated=True,
+            recall_scope=scope,
+        )
+        assert out == []
+    assert len(calls) == 1  # the second variant never touched the store
+
+
+def test_query_expansion_shares_the_probe_breaker_across_variants():
+    """End-to-end pin through the recaller: with query_expansion=True the
+    recaller's per-recall scope carries ONE probe budget across variants."""
+    from mnemostack.recall import Recaller
+
+    calls: list[dict] = []
+
+    def broken_probe(filters, tenant, include_invalidated, as_of):
+        calls.append(dict(filters))
+        raise RuntimeError("store down")
+
+    retr = _retriever(FILES, broken_probe)
+    recaller = Recaller(
+        retrievers=[retr], query_expansion=True, expansion_llm=object()
+    )
+    # Pre-seed the expansion cache so no LLM call happens: the public query
+    # plus two variants — three serial runs of the graph arm.
+    recaller._query_expansion_cache["note.md"] = ["note.md doc", "note.md file"]
+
+    out = recaller.recall(
+        "note.md", filters={"project": "x"}, include_invalidated=True
+    )
+
+    assert out == []
+    assert len(calls) == 1  # one failed probe for the whole recall

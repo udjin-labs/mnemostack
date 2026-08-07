@@ -576,10 +576,12 @@ def build_server(
         Read-only, no side effects, no authentication required. Use this when
         you need raw memory matches rather than a synthesized answer. Returns a
         JSON object with ok, query, count, results, tokens_estimate (estimated
-        total text tokens of the results), degraded (components that actually
-        fell back while serving the call; empty when healthy), and notes
-        (routine signals for stages that did not apply to this query — e.g.
-        temporal:no_parse on any query without a date; NOT a fault).
+        total text tokens of the results), notes (the AUTHORITATIVE list of
+        routine signals for stages that did not apply — e.g.
+        temporal:no_parse on any query without a date; NOT a fault), and
+        degraded (components that actually fell back, plus a deprecated
+        back-compat duplicate of the routine tags until the next major; an
+        entry absent from notes is a real fault).
         Results are ranked by reciprocal rank fusion of BM25, semantic, graph,
         and temporal retrievers when configured; each result includes id, text,
         score, sources, and payload. Stale facts (invalidated_at set) are
@@ -665,9 +667,10 @@ def build_server(
         you want a concise factual answer synthesized from memory search results
         instead of the raw matches returned by mnemostack_search. Returns a JSON
         object with ok, query, answer text, confidence (0.0-1.0), sources,
-        degraded (components that actually fell back while serving the call),
-        notes (routine signals for stages that did not apply — e.g.
-        temporal:no_parse on any query without a date; NOT a fault),
+        notes (the AUTHORITATIVE routine signals — e.g. temporal:no_parse on
+        any query without a date; NOT a fault), degraded (components that
+        actually fell back, plus a deprecated back-compat duplicate of the
+        routine tags until the next major),
         fallback_recommended, tokens_estimate (estimated text tokens of the
         context memories), tokens_used (LLM-provider-reported usage for the
         answer call; null when unreported), and error. Stale facts are hidden

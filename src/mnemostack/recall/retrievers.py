@@ -1168,6 +1168,13 @@ _GRAPH_OWN_FILTER_KEYS = frozenset(
     {"index_root", "name", "type", "memory_class", "tenant_id"}
 )
 
+#: Cap on DISTINCT query tokens the graph retriever probes. Tokens drive
+#: per-word Cypher probes (up to four each), so an unbounded or repetitive
+#: query would amplify straight into serial backend requests — an HTTP/MCP
+#: caller controls the query string, making this a request-amplification
+#: guard, not just a tuning knob. Duplicates never probe twice.
+_MAX_QUERY_TOKENS = 16
+
 #: Per-CALL cap on chunk-existence probes (the Qdrant round trips of
 #: attribution). Candidate rows are cheap; probes are not — without a cap a
 #: broad token over a filter-rejecting corpus could turn one recall into
@@ -1177,18 +1184,29 @@ _MAX_ATTRIBUTION_PROBES = 50
 
 
 class _ProbeBudget:
-    """Per-call probe allowance — local to one search, so thread-safe."""
+    """Probe allowance + circuit breaker — local to one public recall.
 
-    __slots__ = ("left",)
+    The breaker trips on the FIRST probe exception: a store outage must
+    cost one failed request per recall, not up to the full allowance in
+    serial timeouts. Tripped or exhausted, every remaining candidate fails
+    closed. Under query expansion the recaller passes a per-recall scope
+    (see ``accepts_recall_scope``) so ONE budget spans every expanded
+    variant — without it each variant would re-probe a failing store."""
+
+    __slots__ = ("left", "tripped")
 
     def __init__(self, allowance: int):
         self.left = allowance
+        self.tripped = False
 
     def take(self) -> bool:
-        if self.left <= 0:
+        if self.tripped or self.left <= 0:
             return False
         self.left -= 1
         return True
+
+    def trip(self) -> None:
+        self.tripped = True
 
 
 def chunk_filter_probe_via(
@@ -1240,9 +1258,11 @@ def chunk_filter_probe_via(
 class MemgraphRetriever(Retriever):
     """Knowledge-graph retriever — exact/contains match on node names.
 
-    Mirrors legacy enhanced-recall.py:fetch_memgraph. Each word >=3 chars in
-    the query becomes a probe; nodes matched by multiple probes get higher
-    counts (used as score).
+    Mirrors legacy enhanced-recall.py:fetch_memgraph. Each DISTINCT word
+    >=3 chars in the query becomes a probe (case-folded, deduplicated,
+    capped at the first ``_MAX_QUERY_TOKENS`` in query order — a
+    request-amplification guard, so terms past the cap are dropped);
+    nodes matched by multiple probes get higher counts (used as score).
     """
 
     name = "memgraph"
@@ -1256,6 +1276,12 @@ class MemgraphRetriever(Retriever):
     #: ``GraphStore``), so the retriever can honor a tenant scope — the recall
     #: path pushes ``tenant`` here instead of skipping the graph under auth.
     accepts_tenant = True
+    #: The recaller hands retrievers advertising this a mutable dict scoped
+    #: to ONE public recall. Query expansion calls `search` once per variant;
+    #: keeping the probe budget in that scope makes its allowance and circuit
+    #: breaker span the whole recall — otherwise each variant would get a
+    #: fresh budget and re-probe a failing store (serial timeouts × variants).
+    accepts_recall_scope = True
 
     def __init__(
         self,
@@ -1424,10 +1450,21 @@ class MemgraphRetriever(Retriever):
             )
         except Exception:  # noqa: BLE001 — fail CLOSED: unattributable, not leaked
             logger.warning("graph filter attribution probe failed", exc_info=True)
+            if probe_budget is not None:
+                # Circuit breaker: one store failure per recall, not up to
+                # the full allowance in serial timeouts.
+                probe_budget.trip()
             return (False, False)
 
     def search(
-        self, query, limit=20, filters=None, as_of=None, include_invalidated=False, tenant=None
+        self,
+        query,
+        limit=20,
+        filters=None,
+        as_of=None,
+        include_invalidated=False,
+        tenant=None,
+        recall_scope=None,
     ):
         # Payload `filters` are enforced per-candidate by _attributed during
         # the traversal below: keys the node's TRUSTED metadata proves pass
@@ -1438,7 +1475,21 @@ class MemgraphRetriever(Retriever):
         driver = self._get_driver()
         if driver is None:
             return []
-        words = [w.lower() for w in query.split() if len(w) >= self.min_word]
+        # Deduplicated, order-preserving, and CAPPED: each token costs up to
+        # four Cypher probes, and the query string is caller-controlled on
+        # HTTP/MCP — "same word × 100" must cost one probe set, and a
+        # pathological word soup must not turn into hundreds of serial
+        # backend round trips (bounded work, like every knob on this arm).
+        words: list[str] = []
+        seen_words: set[str] = set()
+        for raw_word in query.split():
+            token = raw_word.lower()
+            if len(token) < self.min_word or token in seen_words:
+                continue
+            seen_words.add(token)
+            words.append(token)
+            if len(words) >= _MAX_QUERY_TOKENS:
+                break
         if not words:
             return []
         # Tenant scope: confine every probe/relationship match to nodes+edges
@@ -1563,7 +1614,17 @@ class MemgraphRetriever(Retriever):
                 # doesn't hide valid ones below it before the bare-node skip.
                 ranked = sorted(counts.items(), key=lambda kv: -kv[1]["count"])[:node_budget]
                 results: list[RecallResult] = []
-                probe_budget = _ProbeBudget(_MAX_ATTRIBUTION_PROBES)
+                # One budget per PUBLIC recall: under query expansion the
+                # recaller's scope carries it across variants (keyed
+                # per-instance — two graph arms must not share an allowance);
+                # a direct `search` call still gets a fresh one.
+                if recall_scope is not None:
+                    probe_budget = recall_scope.setdefault(
+                        ("memgraph_probe_budget", id(self)),
+                        _ProbeBudget(_MAX_ATTRIBUTION_PROBES),
+                    )
+                else:
+                    probe_budget = _ProbeBudget(_MAX_ATTRIBUTION_PROBES)
                 for (name, root_key), info in ranked:
                     if len(results) >= self.max_nodes:
                         break
