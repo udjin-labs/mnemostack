@@ -789,3 +789,54 @@ def test_probe_circuit_breaker_trips_on_first_store_failure():
 
     assert out == []  # fail closed, never leaked
     assert len(calls) == 1  # second candidate never touched the store
+
+
+def test_probe_breaker_spans_searches_sharing_a_recall_scope():
+    """A tripped breaker in a shared recall scope survives into the next
+    `search` call — under query expansion each variant re-runs the arm, and
+    a store outage must cost one failed probe per PUBLIC recall, not one
+    per variant."""
+    calls: list[dict] = []
+
+    def broken_probe(filters, tenant, include_invalidated, as_of):
+        calls.append(dict(filters))
+        raise RuntimeError("store down")
+
+    retr = _retriever(FILES, broken_probe)
+    scope: dict = {}
+    for variant in ("note.md", "note.md please"):
+        out = retr.search(
+            variant,
+            filters={"project": "x"},
+            include_invalidated=True,
+            recall_scope=scope,
+        )
+        assert out == []
+    assert len(calls) == 1  # the second variant never touched the store
+
+
+def test_query_expansion_shares_the_probe_breaker_across_variants():
+    """End-to-end pin through the recaller: with query_expansion=True the
+    recaller's per-recall scope carries ONE probe budget across variants."""
+    from mnemostack.recall import Recaller
+
+    calls: list[dict] = []
+
+    def broken_probe(filters, tenant, include_invalidated, as_of):
+        calls.append(dict(filters))
+        raise RuntimeError("store down")
+
+    retr = _retriever(FILES, broken_probe)
+    recaller = Recaller(
+        retrievers=[retr], query_expansion=True, expansion_llm=object()
+    )
+    # Pre-seed the expansion cache so no LLM call happens: the public query
+    # plus two variants — three serial runs of the graph arm.
+    recaller._query_expansion_cache["note.md"] = ["note.md doc", "note.md file"]
+
+    out = recaller.recall(
+        "note.md", filters={"project": "x"}, include_invalidated=True
+    )
+
+    assert out == []
+    assert len(calls) == 1  # one failed probe for the whole recall

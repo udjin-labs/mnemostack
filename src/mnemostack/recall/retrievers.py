@@ -1184,13 +1184,14 @@ _MAX_ATTRIBUTION_PROBES = 50
 
 
 class _ProbeBudget:
-    """Per-call probe allowance + circuit breaker — local to one search.
+    """Probe allowance + circuit breaker — local to one public recall.
 
     The breaker trips on the FIRST probe exception: a store outage must
     cost one failed request per recall, not up to the full allowance in
     serial timeouts. Tripped or exhausted, every remaining candidate fails
-    closed.
-    """
+    closed. Under query expansion the recaller passes a per-recall scope
+    (see ``accepts_recall_scope``) so ONE budget spans every expanded
+    variant — without it each variant would re-probe a failing store."""
 
     __slots__ = ("left", "tripped")
 
@@ -1275,6 +1276,12 @@ class MemgraphRetriever(Retriever):
     #: ``GraphStore``), so the retriever can honor a tenant scope — the recall
     #: path pushes ``tenant`` here instead of skipping the graph under auth.
     accepts_tenant = True
+    #: The recaller hands retrievers advertising this a mutable dict scoped
+    #: to ONE public recall. Query expansion calls `search` once per variant;
+    #: keeping the probe budget in that scope makes its allowance and circuit
+    #: breaker span the whole recall — otherwise each variant would get a
+    #: fresh budget and re-probe a failing store (serial timeouts × variants).
+    accepts_recall_scope = True
 
     def __init__(
         self,
@@ -1450,7 +1457,14 @@ class MemgraphRetriever(Retriever):
             return (False, False)
 
     def search(
-        self, query, limit=20, filters=None, as_of=None, include_invalidated=False, tenant=None
+        self,
+        query,
+        limit=20,
+        filters=None,
+        as_of=None,
+        include_invalidated=False,
+        tenant=None,
+        recall_scope=None,
     ):
         # Payload `filters` are enforced per-candidate by _attributed during
         # the traversal below: keys the node's TRUSTED metadata proves pass
@@ -1600,7 +1614,17 @@ class MemgraphRetriever(Retriever):
                 # doesn't hide valid ones below it before the bare-node skip.
                 ranked = sorted(counts.items(), key=lambda kv: -kv[1]["count"])[:node_budget]
                 results: list[RecallResult] = []
-                probe_budget = _ProbeBudget(_MAX_ATTRIBUTION_PROBES)
+                # One budget per PUBLIC recall: under query expansion the
+                # recaller's scope carries it across variants (keyed
+                # per-instance — two graph arms must not share an allowance);
+                # a direct `search` call still gets a fresh one.
+                if recall_scope is not None:
+                    probe_budget = recall_scope.setdefault(
+                        ("memgraph_probe_budget", id(self)),
+                        _ProbeBudget(_MAX_ATTRIBUTION_PROBES),
+                    )
+                else:
+                    probe_budget = _ProbeBudget(_MAX_ATTRIBUTION_PROBES)
                 for (name, root_key), info in ranked:
                     if len(results) >= self.max_nodes:
                         break
