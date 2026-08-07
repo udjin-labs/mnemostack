@@ -210,3 +210,55 @@ def test_coverage_gap_and_backfill_flow(collection_name):
     assert sparse.sparse_coverage_gap() == 0
     sparse.ensure_collection()  # now clean
     assert [h.id for h in sparse.sparse_search("zk-777", limit=5)] == [20]
+
+
+# ---------- payload indexes (mnemostack payload-index, #153) ----------
+
+
+def test_payload_index_lifecycle_against_a_real_server(collection_name):
+    """Create / list / idempotent re-ensure — and the conflict refusal that
+    exists precisely because a REAL server silently REPLACES an index
+    re-created with a different type (verified live during development;
+    this pins it in CI)."""
+    from mnemostack.vector.qdrant import PayloadIndexConflictError
+
+    store = VectorStore(collection=collection_name, dimension=4, host=SERVER_URL)
+    store.ensure_collection()
+    assert store.payload_indexes().get("tenant_id") == "keyword"  # auto-indexed
+
+    assert store.ensure_payload_index("project", "keyword") == "keyword"
+    assert store.ensure_payload_index("project", "keyword") == "keyword"  # no-op
+    with pytest.raises(PayloadIndexConflictError):
+        store.ensure_payload_index("project", "integer")
+    # The refusal happened BEFORE mutation: the recorded type is unchanged.
+    assert store.payload_indexes().get("project") == "keyword"
+
+
+# ---------- chunk-attribution probes (graph filtered recall, #154) ----------
+
+
+def test_any_matching_point_views_against_a_real_server(collection_name):
+    """The attribution probe's three validity views against a real server:
+    neutral, current-facts (server-side pushdown), and as_of (client-side)."""
+    store = VectorStore(collection=collection_name, dimension=4, host=SERVER_URL)
+    store.ensure_collection()
+    store.upsert(
+        str(uuid.uuid4()),
+        _V1,
+        {
+            "text": "chunk",
+            "source": "a.md",
+            "index_root": "/corpus/a",
+            "project": "x",
+            "invalidated_at": "2026-01-15T00:00:00+00:00",
+            "valid_from": "2026-01-01T00:00:00+00:00",
+            "valid_until": "2026-01-15T00:00:00+00:00",
+        },
+    )
+    pins = {"source": "a.md", "index_root": "/corpus/a", "project": "x"}
+    assert store.any_matching_point(pins) is True
+    assert store.any_matching_point(pins, include_invalidated=False) is False
+    assert store.any_matching_point(pins, as_of="2026-01-10") is True
+    assert store.any_matching_point(pins, as_of="2026-02-01") is False
+    # A wrong pin never matches — the exact isolation the graph probe pins on.
+    assert store.any_matching_point({**pins, "index_root": "/corpus/b"}) is False

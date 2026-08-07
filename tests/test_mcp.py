@@ -436,9 +436,10 @@ def test_broken_injected_reranker_still_degrades_fail_open(monkeypatch):
 
 
 def test_mcp_search_reports_no_parse_as_note_not_degradation(monkeypatch):
-    """The regression this change exists for: a query without a parseable
-    date is ROUTINE — the client payload must show a healthy call with a
-    note, not a degradation on essentially every non-temporal query."""
+    """A query without a parseable date is ROUTINE — the client payload
+    surfaces it authoritatively in notes, while degraded keeps a DEPRECATED
+    back-compat duplicate (until the next major) so pre-notes clients
+    matching the stable tag string keep working."""
     import mnemostack.mcp.server as srv
 
     class _NoParseRecaller:
@@ -464,7 +465,7 @@ def test_mcp_search_reports_no_parse_as_note_not_degradation(monkeypatch):
     payload = result.structured_content
 
     assert payload["ok"] is True
-    assert payload["degraded"] == []
+    assert payload["degraded"] == ["temporal:no_parse"]
     assert payload["notes"] == ["temporal:no_parse"]
 
 
