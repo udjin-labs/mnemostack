@@ -39,7 +39,7 @@ try:
 except ImportError:  # pragma: no cover - qdrant-client is a runtime dependency
     DatetimeRange = FieldCondition = Filter = Range = None  # type: ignore[assignment,misc]
 from .bm25 import BM25, BM25Doc, Tokenizer, tokenize
-from .filters import payload_matches
+from .filters import ATTRIBUTED_FILTERS_KEY, payload_matches
 from .recaller import RecallResult
 from .validity import (
     graph_as_of_predicate,
@@ -1151,6 +1151,92 @@ def graph_result_id(node_id: str, tenant: str | None) -> str:
     return f"graph:{quote(tenant, safe='')}:{node_id}"
 
 
+#: Candidate-discovery bound for a payload-FILTERED graph search: attribution
+#: may reject many candidates (same-named files across roots, out-of-scope
+#: projects), so the per-word node probes fetch up to this many rows and the
+#: ranked traversal draws from ALL of them until ``max_nodes`` hits are
+#: attributed. Beyond this bound the arm fails closed (misses, never leaks) —
+#: the deliberate bounded-work contract this retriever applies everywhere.
+_FILTERED_CANDIDATE_BUDGET = 500
+
+#: The CLOSED set of graph-node metadata fields trusted for in-place filter
+#: attribution. Everything else on a graph payload is synthesized locally
+#: (`text` is "File: name", `source` is the arm marker) — letting a filter on
+#: such a field self-attribute would admit hits whose CHUNKS never satisfied
+#: the same condition. Unlisted keys always go through the chunk probe.
+_GRAPH_OWN_FILTER_KEYS = frozenset(
+    {"index_root", "name", "type", "memory_class", "tenant_id"}
+)
+
+#: Per-CALL cap on chunk-existence probes (the Qdrant round trips of
+#: attribution). Candidate rows are cheap; probes are not — without a cap a
+#: broad token over a filter-rejecting corpus could turn one recall into
+#: hundreds of serial store requests. When the budget is exhausted the
+#: remaining candidates fail closed (missed, never leaked).
+_MAX_ATTRIBUTION_PROBES = 50
+
+
+class _ProbeBudget:
+    """Per-call probe allowance — local to one search, so thread-safe."""
+
+    __slots__ = ("left",)
+
+    def __init__(self, allowance: int):
+        self.left = allowance
+
+    def take(self) -> bool:
+        if self.left <= 0:
+            return False
+        self.left -= 1
+        return True
+
+
+def chunk_filter_probe_via(
+    store: Any,
+    *,
+    timestamp_key: str = "timestamp",
+    timestamp_format: str = "iso",
+) -> Callable[[dict[str, Any], str | None, bool, str | None], bool] | None:
+    """The standard chunk-existence probe for :class:`MemgraphRetriever`.
+
+    Called as ``probe(filters, tenant, include_invalidated, as_of)``. The
+    caller's timestamp bounds are converted into the collection's own domain
+    (``convert_timestamp_filter``, same as the vector arms — an ISO range
+    against an epoch field would silently match nothing), and the parent
+    recall's validity view is forwarded so a stale or out-of-window chunk
+    can never serve as proof. Returns None for a missing store or one
+    without ``any_matching_point`` (duck/legacy implementations) — the
+    retriever then keeps its historical fail-closed behavior under payload
+    filters.
+    """
+    if store is None or not hasattr(store, "any_matching_point"):
+        return None
+
+    def probe(
+        filters: dict[str, Any],
+        tenant: str | None,
+        include_invalidated: bool,
+        as_of: str | None,
+    ) -> bool:
+        converted = (
+            convert_timestamp_filter(
+                filters, timestamp_key=timestamp_key, timestamp_format=timestamp_format
+            )
+            or {}
+        )
+        kwargs: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
+        return bool(
+            store.any_matching_point(
+                converted,
+                include_invalidated=include_invalidated,
+                as_of=as_of,
+                **kwargs,
+            )
+        )
+
+    return probe
+
+
 class MemgraphRetriever(Retriever):
     """Knowledge-graph retriever — exact/contains match on node names.
 
@@ -1185,6 +1271,18 @@ class MemgraphRetriever(Retriever):
         # database appended at the tail to preserve positional back-compat for
         # existing callers (a mid-signature insert would shift min_word etc.).
         database: str | None = None,
+        # Filter attribution (tail-appended): called as probe(filters, tenant,
+        # include_invalidated, as_of) -> bool, answering "does at least one
+        # vector chunk match these filters under the parent recall's validity
+        # view?" (chunk_filter_probe_via builds it over
+        # VectorStore.any_matching_point). With a probe, a payload-filtered
+        # recall no longer drops every graph hit: a hit is kept when its own
+        # payload proves the filter keys it carries AND its chunks prove the
+        # rest. None = the historical fail-closed behavior (filters => no
+        # graph contribution).
+        chunk_filter_probe: (
+            Callable[[dict[str, Any], str | None, bool, str | None], bool] | None
+        ) = None,
     ):
         self.uri = uri
         self.user = user
@@ -1197,6 +1295,7 @@ class MemgraphRetriever(Retriever):
         self.timeout = timeout
         self._driver = driver
         self._own_driver = driver is None
+        self.chunk_filter_probe = chunk_filter_probe
 
     def _get_driver(self):
         if self._driver is not None:
@@ -1224,16 +1323,118 @@ class MemgraphRetriever(Retriever):
 
     _valid_clause = staticmethod(graph_valid_clause)
 
+    def _attributed(
+        self,
+        result: RecallResult,
+        filters: dict[str, Any],
+        tenant: str | None,
+        include_invalidated: bool,
+        as_of: str | None,
+        probe_budget: _ProbeBudget | None = None,
+    ) -> tuple[bool, bool]:
+        """Can this graph hit be PROVEN to belong to the filtered scope?
+
+        Returns ``(attributed, chunk_proven)``: the second flag is True when
+        the proof came from the validity-aware CHUNK probe — the caller uses
+        it to skip the incident-edge validity gate, which a probe-proven
+        current chunk already covers (a file whose links were all removed
+        keeps its node and its current chunks).
+
+        Two tiers. Keys the hit's own payload carries are checked in place
+        (``payload_matches``: a mismatch drops the hit with zero probes) —
+        except ``source``, whose graph value is the arm marker "memgraph",
+        not a document; a caller's ``source`` condition is evaluated against
+        the node NAME, which for a :File node IS the corpus-relative source.
+        Remaining keys are proven through the hit's chunks — and ONLY for a
+        :File hit with a real ``index_root``: the probe is pinned to
+        (source=name, index_root=root), so a same-named document in another
+        root can never attribute it. An :Entity node (or a legacy rootless
+        file node) has no pinnable chunks: probing it by bare name would let
+        an unrelated same-named chunk anywhere attribute an entity into the
+        scope — so unprovable residual keys simply drop the hit. Exclusion,
+        never leakage, exactly as before.
+        """
+        payload = result.payload or {}
+        name = payload.get("name")
+        # A key is "own" only when it is TRUSTED graph metadata (closed
+        # allowlist — anything synthesized locally, like the hit's `text`,
+        # must never self-attribute) AND the node carries a REAL value:
+        # sync writes :File nodes without memory_class, and the result
+        # construction placeholders that as "" — treating a placeholder as
+        # authoritative would reject every file for a filter its chunks
+        # actually satisfy. Everything else stays residual (probe-provable).
+        own = {
+            k: v
+            for k, v in filters.items()
+            if k in _GRAPH_OWN_FILTER_KEYS and payload.get(k) not in (None, "")
+        }
+        if own and not payload_matches(payload, own):
+            return (False, False)
+        if "source" in filters:
+            # Only a :File node's name IS a document source — an entity named
+            # like a document must not pass a source-isolation boundary.
+            if (
+                payload.get("type") != "File"
+                or not name
+                or not payload_matches({"source": name}, {"source": filters["source"]})
+            ):
+                return (False, False)
+        residual = {
+            k: v for k, v in filters.items() if k != "source" and k not in own
+        }
+        # A satisfied `source` condition still needs CHUNK proof: the sync
+        # creates :File nodes for every link target including DANGLING ones
+        # (no such document, no chunks), so name equality alone would
+        # surface a node for a document that does not exist. Own-metadata
+        # keys (index_root/name/type/...) narrow honestly without a probe —
+        # they are write-side-stamped properties of the node itself.
+        if not residual and "source" not in filters:
+            return (True, False)
+        if "tenant_id" in residual:
+            # Tenant identity is the isolation key itself — a chunk can never
+            # prove which tenant a graph NODE belongs to (an unscoped query
+            # returns every tenant's nodes without stamping them). Scoped
+            # recall stamps tenant_id into the payload, which the own-key
+            # tier above already checked.
+            return (False, False)
+        root = payload.get("index_root")
+        if (
+            not name
+            or self.chunk_filter_probe is None
+            or payload.get("type") != "File"
+            or not root
+        ):
+            return (False, False)
+        probe_filters = dict(residual)
+        probe_filters["source"] = name
+        probe_filters["index_root"] = root
+        if probe_budget is not None and not probe_budget.take():
+            # Probe allowance for this call is spent — remaining candidates
+            # fail closed (missed, never leaked): bounded work over an
+            # unbounded rejecting corpus.
+            return (False, False)
+        try:
+            return (
+                bool(
+                    self.chunk_filter_probe(
+                        probe_filters, tenant, include_invalidated, as_of
+                    )
+                ),
+                True,
+            )
+        except Exception:  # noqa: BLE001 — fail CLOSED: unattributable, not leaked
+            logger.warning("graph filter attribution probe failed", exc_info=True)
+            return (False, False)
+
     def search(
         self, query, limit=20, filters=None, as_of=None, include_invalidated=False, tenant=None
     ):
-        if filters:
-            # Caller payload `filters` (source, arbitrary keys, time range) can't
-            # be proven against graph nodes, which carry no chunk payload — under
-            # the isolation contract anything unattributable is excluded, not
-            # leaked. The dedicated `tenant` scope below is different: it's a
-            # server-owned graph property, so it IS honored (not via `filters`).
-            return []
+        # Payload `filters` are enforced per-candidate by _attributed during
+        # the traversal below: keys the node's TRUSTED metadata proves pass
+        # with zero extra requests even without a chunk probe; keys needing
+        # chunk proof fail closed when no probe is configured (excluded,
+        # never leaked — the historical contract). The dedicated `tenant`
+        # scope is different: a server-owned graph property, always honored.
         driver = self._get_driver()
         if driver is None:
             return []
@@ -1262,7 +1463,21 @@ class MemgraphRetriever(Retriever):
         # with the (name, index_root) grouping one filename can legitimately
         # match many nodes — one per root — and a hardcoded LIMIT would silently
         # drop roots before the grouping/ranking below could consider them.
-        node_budget = self.max_nodes * 3 if validity_active else self.max_nodes
+        # Over-fetch candidates whenever a later per-result filter (validity
+        # or payload-filter attribution) may reject some — otherwise the
+        # rejected ones would consume the whole candidate budget and starve
+        # filtered recall of attributable lower-ranked hits. Under payload
+        # filters the traversal below draws candidates until max_nodes hits
+        # are ATTRIBUTED or the probes' candidates are exhausted — so the
+        # per-word probe LIMIT (rows are tiny: name/type/root) becomes the
+        # arm's deliberate outer work bound, the same bounded-cost contract
+        # max_nodes / max_rels already are.
+        if filters:
+            node_budget = max(self.max_nodes * 3, _FILTERED_CANDIDATE_BUDGET)
+        elif validity_active:
+            node_budget = self.max_nodes * 3
+        else:
+            node_budget = self.max_nodes
         extra: dict[str, Any] = {"probe_lim": node_budget}
         if as_of is not None:
             extra["as_of"] = as_of
@@ -1348,9 +1563,72 @@ class MemgraphRetriever(Retriever):
                 # doesn't hide valid ones below it before the bare-node skip.
                 ranked = sorted(counts.items(), key=lambda kv: -kv[1]["count"])[:node_budget]
                 results: list[RecallResult] = []
+                probe_budget = _ProbeBudget(_MAX_ATTRIBUTION_PROBES)
                 for (name, root_key), info in ranked:
                     if len(results) >= self.max_nodes:
                         break
+                    if filters:
+                        # FILTERED path: attribute FIRST — before any
+                        # relationship expansion — so a rejected candidate
+                        # costs at most one bounded Qdrant probe and zero
+                        # graph round trips (a broad token could otherwise
+                        # turn the candidate pool into hundreds of serial
+                        # backend requests). The hit's text stays node-only:
+                        # its edges name OTHER files/entities whose scope
+                        # membership was never proven, and serializing
+                        # `a.md-[LINKS_TO]->b.md` into an attributed b.md
+                        # hit would leak a.md's existence across a source/
+                        # project boundary.
+                        content = f"{info['type']}: {name}"
+                        node_id = f"{root_key}:{name}" if root_key else name
+                        payload = {
+                            "text": content,
+                            "source": "memgraph",
+                            "memory_class": info.get("mc", ""),
+                            "name": name,
+                            "type": info["type"],
+                            "index_root": root_key or None,
+                        }
+                        if tenant is not None:
+                            payload["tenant_id"] = tenant
+                        candidate = RecallResult(
+                            id=graph_result_id(node_id, tenant),
+                            text=content,
+                            score=float(info["count"]),
+                            payload=payload,
+                            sources=["memgraph"],
+                        )
+                        attributed, chunk_proven = self._attributed(
+                            candidate,
+                            filters,
+                            tenant,
+                            include_invalidated,
+                            as_of,
+                            probe_budget,
+                        )
+                        if not attributed:
+                            continue
+                        candidate.payload[ATTRIBUTED_FILTERS_KEY] = dict(filters)
+                        if validity_active and not chunk_proven:
+                            # The bare-node validity gate still applies for
+                            # own-metadata-only attribution — but a validity-
+                            # aware CHUNK proof already covers it (a file
+                            # whose links were all removed keeps its node and
+                            # its current chunks), and only attributed
+                            # candidates pay the round trip.
+                            gate_rows = session.run(
+                                "MATCH (n {name: $name})-[r]-(m) "
+                                f"WHERE coalesce(n.index_root, '') = $root_key "
+                                f"AND {node_valid} AND {rel_valid} AND {target_valid}{trel} "
+                                "RETURN startNode(r).name AS from_n LIMIT 1",
+                                name=name,
+                                root_key=root_key,
+                                **extra,
+                            ).data()
+                            if not gate_rows:
+                                continue
+                        results.append(candidate)
+                        continue
                     rel_rows = session.run(
                         # Undirected: a target-only node (e.g. `Team A` in
                         # `Alice -[MEMBER_OF]-> Team A`) has a valid incoming

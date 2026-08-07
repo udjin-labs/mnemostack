@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from .filters import payload_matches
 from .tokens import TokenCounter, apply_token_budget
 from .trace import RecallTrace, apply_rerank_safe
 from .validity import filter_by_tenant
@@ -80,6 +79,7 @@ def recall_flow(
             # with no tenant/timestamp payload). Enforce the caller's scope
             # on the pipeline output too: anything that cannot be attributed
             # to the scope is dropped, not leaked.
+            from .filters import result_passes_filters
             from .validity import numeric_unit_for
 
             _ts_key = getattr(recaller, "timestamp_key", "timestamp")
@@ -87,7 +87,9 @@ def recall_flow(
             results = [
                 r
                 for r in results
-                if payload_matches(r.payload, filters, timestamp_key=_ts_key, numeric_unit=_unit)
+                if result_passes_filters(
+                    r, filters, timestamp_key=_ts_key, numeric_unit=_unit
+                )
             ]
         # Tenant backstop AFTER the pipeline: the graph-resurrection stage can
         # inject graph records that carry no tenant_id and never passed the

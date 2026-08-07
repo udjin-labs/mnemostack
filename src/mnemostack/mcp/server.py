@@ -40,6 +40,7 @@ from ..recall import (
     VectorRetriever,
     build_bm25_docs,
     build_full_pipeline,
+    chunk_filter_probe_via,
     recall_flow,
     sum_tokens,
 )
@@ -50,7 +51,13 @@ from ..vector import VectorStore
 def _public_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
     if not payload:
         return {}
-    return {key: value for key, value in payload.items() if key != "_vector_floor_candidates"}
+    # Internal recall mechanics stay internal: the vector-floor working set
+    # and the graph filter-attribution proof marker are not user metadata.
+    return {
+        key: value
+        for key, value in payload.items()
+        if key not in ("_vector_floor_candidates", "_attributed_filters")
+    }
 
 
 def build_server(
@@ -314,6 +321,11 @@ def build_server(
                 password=graph_password,
                 database=graph_database,
                 timeout=graph_timeout,
+                chunk_filter_probe=chunk_filter_probe_via(
+                    vec,
+                    timestamp_key=timestamp_key,
+                    timestamp_format=timestamp_format,
+                ),
             )
             if memgraph_uri
             else None,

@@ -114,14 +114,15 @@ def test_bm25_no_filters_unchanged():
 # ---------- Memgraph ----------
 
 
-def test_memgraph_excluded_under_filters():
-    """Graph nodes carry no chunk payload — they cannot be attributed to the
-    filtered scope, so under filters the retriever must contribute nothing."""
+def test_memgraph_chunk_proof_filters_fail_closed_without_a_probe():
+    """Filter keys outside the trusted node-metadata set need chunk proof —
+    without a chunk_filter_probe every candidate is dropped (excluded, never
+    leaked). Self-provable keys like index_root DO pass without a probe; see
+    tests/test_graph_filter_join.py."""
     driver = MagicMock()
     retr = MemgraphRetriever(driver=driver)
 
     assert retr.search("some entity name", filters={"tenant": "a"}) == []
-    driver.session.assert_not_called()
 
 
 # ---------- fused isolation ----------

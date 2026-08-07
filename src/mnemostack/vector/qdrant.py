@@ -401,6 +401,54 @@ class VectorStore:
         schema = getattr(info, "payload_schema", None) or {}
         return {name: payload_index_type_name(fi) for name, fi in schema.items()}
 
+    def any_matching_point(
+        self,
+        filters: dict[str, Any],
+        *,
+        tenant: str | None = None,
+        include_invalidated: bool = True,
+        as_of: str | None = None,
+    ) -> bool:
+        """True when at least one point satisfies *filters* (+ tenant scope)
+        under the requested validity view.
+
+        An existence probe, not a count. Backs the graph retriever's filter
+        attribution: a graph file hit is in the filtered scope exactly when
+        at least one of its chunks is — under the SAME validity view as the
+        parent recall, so a stale (invalidated) or out-of-window chunk never
+        serves as proof. The current view (``include_invalidated=False``,
+        no ``as_of``) is pushed down server-side and costs one page of one.
+        An ``as_of`` view is evaluated client-side over EVERY matching point
+        (lazy pages; scroll order guarantees nothing about where a valid
+        historical chunk sits — e.g. a re-ingested document's new chunks can
+        precede the older still-valid ones): cost is proportional to the
+        filter's match count, which the attribution use pins to a single
+        document's chunks.
+        """
+        kwargs: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
+        if as_of is None:
+            hits = self.scroll(
+                batch_size=1,
+                filters=filters,
+                hide_invalidated=not include_invalidated,
+                **kwargs,
+            )
+            return next(iter(hits), None) is not None
+        # Point-in-time: validity bounds are evaluated in-process (server
+        # ranges would mis-order bare-date bounds) with the SAME primitive
+        # the recall path uses (keep_payload). Lazy import — the recall
+        # package imports this module at load time.
+        from mnemostack.recall.validity import keep_payload
+
+        return any(
+            keep_payload(
+                hit.payload or {},
+                include_invalidated=include_invalidated,
+                as_of=as_of,
+            )
+            for hit in self.scroll(batch_size=128, filters=filters, **kwargs)
+        )
+
     def ensure_payload_index(self, field: str, schema: str) -> str:
         """Create a payload index for filtered recall; returns the type name.
 
@@ -522,6 +570,7 @@ class VectorStore:
         with_vectors: bool = False,
         *,
         tenant: str | None = None,
+        hide_invalidated: bool = False,
     ):
         """Iterate over points in the collection lazily.
 
@@ -530,12 +579,17 @@ class VectorStore:
         - Bulk export / migration
         - Aggregation over entire corpus
 
-        With ``tenant`` set, only that tenant's points are yielded. Yields `Hit`
-        objects (score=1.0 since this isn't a similarity query).
+        With ``tenant`` set, only that tenant's points are yielded. With
+        ``hide_invalidated`` set, points carrying an ``invalidated_at``
+        marker are excluded server-side (the same push-down ``search``
+        offers — the current-facts view). Yields `Hit` objects (score=1.0
+        since this isn't a similarity query).
         """
         must: list[Any] = list(self._build_filter(filters).must or []) if filters else []
         if tenant is not None:
             must.append(_tenant_condition(tenant))
+        if hide_invalidated:
+            must.append(_hide_invalidated_condition())
         qfilter = Filter(must=must) if must else None
         next_offset: Any = None
         while True:
