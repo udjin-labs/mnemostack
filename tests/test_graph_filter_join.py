@@ -862,6 +862,18 @@ def test_recall_cypher_calls_bounded_under_expansion():
     assert len(driver.runs) == 96  # _MAX_RECALL_NODE_PROBES, not 192
 
 
+def test_configured_max_nodes_above_pool_cap_is_honored_on_a_single_call():
+    """Round-2 pin: the shared discovery pool guards expansion variants —
+    it must never clamp an explicitly tuned max_nodes below its historical
+    single-call result count."""
+    files = {("doc.md", f"/r{i:03d}"): [] for i in range(600)}
+    retr = MemgraphRetriever(uri="bolt://x", driver=_Driver(files), max_nodes=600)
+
+    out = retr.search("doc.md", limit=600, include_invalidated=True)
+
+    assert len(out) == 600
+
+
 def test_digit_tokens_reach_all_four_probe_shapes():
     """The probe ceiling's worst-case arithmetic (16 tokens x 4 shapes = 64)
     is only reachable via numeric contact-id tokens — pin that a >=6-digit
@@ -906,8 +918,11 @@ def test_candidate_traversal_shares_the_recall_pool(monkeypatch):
         calls.append(dict(filters))
         return False  # nothing attributes — every traversed candidate probes
 
+    # max_nodes=1 keeps this call's node_budget (3) close to the shrunken
+    # pool: the shared allowance is max(pool, node_budget) = 3 traversals
+    # for the WHOLE recall.
     retr = MemgraphRetriever(
-        uri="bolt://x", driver=_Driver(files), chunk_filter_probe=probe
+        uri="bolt://x", driver=_Driver(files), max_nodes=1, chunk_filter_probe=probe
     )
     scope: dict = {}
     query = "doc0.md doc1.md doc2.md doc3.md doc4.md doc5.md"
@@ -919,7 +934,7 @@ def test_candidate_traversal_shares_the_recall_pool(monkeypatch):
             recall_scope=scope,
         )
         assert out == []
-    assert len(calls) == 2  # pool of 2, spent by variant 1; variant 2 adds 0
+    assert len(calls) == 3  # allowance of 3, spent by variant 1; variant 2 adds 0
 
 
 def test_query_expansion_shares_the_probe_breaker_across_variants():

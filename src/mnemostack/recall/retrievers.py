@@ -1549,29 +1549,6 @@ class MemgraphRetriever(Retriever):
                 break
         if not words:
             return []
-        # Per-recall ceilings + probe-result cache. Under query expansion the
-        # recaller's scope makes ONE budget and ONE cache span every variant:
-        # a token any variant already probed is served from the cache (zero
-        # backend calls, identical rows — fusion semantics unchanged), and
-        # genuinely new work drains the shared allowance. Keyed per-instance:
-        # two graph arms must not share ceilings or rows.
-        if recall_scope is not None:
-            graph_budget = recall_scope.setdefault(
-                ("memgraph_graph_budget", id(self)),
-                _RecallGraphBudget(_MAX_RECALL_NODE_PROBES, _FILTERED_CANDIDATE_BUDGET),
-            )
-            probe_cache = recall_scope.setdefault(
-                ("memgraph_probe_cache", id(self)), {}
-            )
-        else:
-            graph_budget = _RecallGraphBudget(
-                _MAX_RECALL_NODE_PROBES, _FILTERED_CANDIDATE_BUDGET
-            )
-            probe_cache = {}
-        if graph_budget.calls_left <= 0 or graph_budget.candidates_left <= 0:
-            # A prior variant drained the recall's graph allowance — this
-            # variant contributes nothing rather than restarting the spend.
-            return []
         # Tenant scope: confine every probe/relationship match to nodes+edges
         # carrying `tenant`. Unscoped (tenant=None) adds nothing, so a legacy
         # single-tenant graph is queried exactly as before.
@@ -1609,6 +1586,39 @@ class MemgraphRetriever(Retriever):
             node_budget = self.max_nodes * 3
         else:
             node_budget = self.max_nodes
+        # Per-recall ceilings + probe-result cache. Under query expansion the
+        # recaller's scope makes ONE budget and ONE cache span every variant:
+        # a token any variant already probed is served from the cache (zero
+        # backend calls, identical rows — fusion semantics unchanged), and
+        # genuinely new work drains the shared allowance. Keyed per-instance:
+        # two graph arms must not share ceilings or rows. The candidate pool
+        # is never smaller than THIS call's node_budget — an explicitly
+        # tuned max_nodes above the default pool keeps its historical single-
+        # call completeness (the shared ceiling guards expansion variants,
+        # it does not override an operator's knob); filters/validity/config
+        # are constant across one recall's variants, so every variant would
+        # compute the same pool.
+        if recall_scope is not None:
+            graph_budget = recall_scope.setdefault(
+                ("memgraph_graph_budget", id(self)),
+                _RecallGraphBudget(
+                    _MAX_RECALL_NODE_PROBES,
+                    max(_FILTERED_CANDIDATE_BUDGET, node_budget),
+                ),
+            )
+            probe_cache = recall_scope.setdefault(
+                ("memgraph_probe_cache", id(self)), {}
+            )
+        else:
+            graph_budget = _RecallGraphBudget(
+                _MAX_RECALL_NODE_PROBES,
+                max(_FILTERED_CANDIDATE_BUDGET, node_budget),
+            )
+            probe_cache = {}
+        if graph_budget.calls_left <= 0 or graph_budget.candidates_left <= 0:
+            # A prior variant drained the recall's graph allowance — this
+            # variant contributes nothing rather than restarting the spend.
+            return []
         # Probe LIMIT never exceeds what the recall's shared candidate
         # allowance can still traverse — a later variant fetches fewer rows
         # instead of shipping candidates it is not allowed to look at.
