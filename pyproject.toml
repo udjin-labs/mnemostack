@@ -60,6 +60,9 @@ dev = [
     "mypy>=1.7",
     "types-PyYAML",
     "fastapi>=0.110,<1",
+    # MCP runtime tests importorskip on fastmcp — without it in the dev
+    # install the whole MCP surface silently drops out of CI.
+    "fastmcp>=0.2",
     "httpx>=0.24,<1",
 ]
 

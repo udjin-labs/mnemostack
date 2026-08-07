@@ -1182,6 +1182,19 @@ _MAX_QUERY_TOKENS = 16
 #: remaining candidates fail closed (missed, never leaked).
 _MAX_ATTRIBUTION_PROBES = 50
 
+#: Hard ceiling on node-probe Cypher round trips for ONE public recall.
+#: Sized to fit a full single-variant sweep (16 tokens x up to 4 probe
+#: shapes = 64) with headroom for genuinely new expansion tokens — NOT for
+#: variants x 64: query expansion re-runs the arm per variant, and without
+#: a shared ceiling a 4-variant recall could issue 256 serial Cypher
+#: requests. Cached probes are free, so a legitimate expansion (variants
+#: rephrase the same terms) fits comfortably. Per-result queries (gate/
+#: relationship, at most one per traversed candidate) are bounded by the
+#: shared discovery-candidate pool instead — so a single call's
+#: completeness never depends on this constant, which keeps `max_nodes`
+#: tuning orthogonal to the probe ceiling.
+_MAX_RECALL_NODE_PROBES = 96
+
 
 class _ProbeBudget:
     """Probe allowance + circuit breaker — local to one public recall.
@@ -1207,6 +1220,42 @@ class _ProbeBudget:
 
     def trip(self) -> None:
         self.tripped = True
+
+
+class _RecallGraphBudget:
+    """Hard ceilings on graph-side work for ONE public recall.
+
+    Node-probe round trips draw from ``calls_left``; discovery-candidate
+    traversal draws from ``candidates_left`` — and because a traversed
+    candidate issues at most ONE per-result query (validity gate or
+    relationship expansion), the candidate allowance transitively bounds
+    those too. Under query expansion the recaller's scope shares ONE
+    instance across every expanded variant — so expansion cannot multiply
+    backend work: cached probes are free, new work drains the same
+    allowances, and exhaustion fails closed (hits are missed, never
+    leaked). A direct ``search`` call gets a fresh instance: the same
+    ceilings applied to a single call, which they never constrain below
+    its historical result completeness (probes were already token-capped;
+    per-result queries were already pool-capped).
+    """
+
+    __slots__ = ("calls_left", "candidates_left")
+
+    def __init__(self, calls: int, candidates: int):
+        self.calls_left = calls
+        self.candidates_left = candidates
+
+    def take_call(self) -> bool:
+        if self.calls_left <= 0:
+            return False
+        self.calls_left -= 1
+        return True
+
+    def take_candidate(self) -> bool:
+        if self.candidates_left <= 0:
+            return False
+        self.candidates_left -= 1
+        return True
 
 
 def chunk_filter_probe_via(
@@ -1263,6 +1312,12 @@ class MemgraphRetriever(Retriever):
     capped at the first ``_MAX_QUERY_TOKENS`` in query order — a
     request-amplification guard, so terms past the cap are dropped);
     nodes matched by multiple probes get higher counts (used as score).
+    Backend work is additionally bounded PER PUBLIC RECALL: node probes
+    draw from ``_MAX_RECALL_NODE_PROBES`` and candidate traversal (which
+    transitively caps per-result gate/relationship queries) from
+    ``_FILTERED_CANDIDATE_BUDGET`` — both shared across query-expansion
+    variants via the recaller's ``recall_scope``, with a cross-variant
+    probe cache so repeated tokens never re-query the store.
     """
 
     name = "memgraph"
@@ -1278,9 +1333,11 @@ class MemgraphRetriever(Retriever):
     accepts_tenant = True
     #: The recaller hands retrievers advertising this a mutable dict scoped
     #: to ONE public recall. Query expansion calls `search` once per variant;
-    #: keeping the probe budget in that scope makes its allowance and circuit
-    #: breaker span the whole recall — otherwise each variant would get a
-    #: fresh budget and re-probe a failing store (serial timeouts × variants).
+    #: this scope is what stops expansion from multiplying backend work: it
+    #: carries the shared node-probe + discovery-candidate budget, the
+    #: cross-variant node-probe cache, and the chunk-probe budget with its
+    #: circuit breaker — otherwise each variant would re-spend fresh
+    #: allowances and re-probe a failing store (serial timeouts x variants).
     accepts_recall_scope = True
 
     def __init__(
@@ -1492,6 +1549,29 @@ class MemgraphRetriever(Retriever):
                 break
         if not words:
             return []
+        # Per-recall ceilings + probe-result cache. Under query expansion the
+        # recaller's scope makes ONE budget and ONE cache span every variant:
+        # a token any variant already probed is served from the cache (zero
+        # backend calls, identical rows — fusion semantics unchanged), and
+        # genuinely new work drains the shared allowance. Keyed per-instance:
+        # two graph arms must not share ceilings or rows.
+        if recall_scope is not None:
+            graph_budget = recall_scope.setdefault(
+                ("memgraph_graph_budget", id(self)),
+                _RecallGraphBudget(_MAX_RECALL_NODE_PROBES, _FILTERED_CANDIDATE_BUDGET),
+            )
+            probe_cache = recall_scope.setdefault(
+                ("memgraph_probe_cache", id(self)), {}
+            )
+        else:
+            graph_budget = _RecallGraphBudget(
+                _MAX_RECALL_NODE_PROBES, _FILTERED_CANDIDATE_BUDGET
+            )
+            probe_cache = {}
+        if graph_budget.calls_left <= 0 or graph_budget.candidates_left <= 0:
+            # A prior variant drained the recall's graph allowance — this
+            # variant contributes nothing rather than restarting the spend.
+            return []
         # Tenant scope: confine every probe/relationship match to nodes+edges
         # carrying `tenant`. Unscoped (tenant=None) adds nothing, so a legacy
         # single-tenant graph is queried exactly as before.
@@ -1529,7 +1609,12 @@ class MemgraphRetriever(Retriever):
             node_budget = self.max_nodes * 3
         else:
             node_budget = self.max_nodes
-        extra: dict[str, Any] = {"probe_lim": node_budget}
+        # Probe LIMIT never exceeds what the recall's shared candidate
+        # allowance can still traverse — a later variant fetches fewer rows
+        # instead of shipping candidates it is not allowed to look at.
+        extra: dict[str, Any] = {
+            "probe_lim": max(1, min(node_budget, graph_budget.candidates_left))
+        }
         if as_of is not None:
             extra["as_of"] = as_of
         if tenant is not None:
@@ -1542,13 +1627,23 @@ class MemgraphRetriever(Retriever):
         session_kwargs = {"database": self.database} if self.database else {}
         try:
             with driver.session(**session_kwargs) as session:
-                for w in words:
+
+                def _node_probe_rows(w: str) -> tuple[list[dict], bool]:
+                    """Run the probe cascade for one token under the budget.
+
+                    Returns ``(rows, complete)`` — ``complete=False`` means
+                    the shared Cypher allowance drained mid-cascade: the
+                    partial rows are still usable this pass but must not be
+                    cached as the token's answer.
+                    """
                     # Probe 1: numeric-looking tokens may be contact IDs
                     # (Telegram, Discord, etc). If a canonical Person node has
                     # a matching contact_id property, surface it directly —
                     # most reliable entity-resolution signal we have.
                     rows: list[dict] = []
                     if w.isdigit() and len(w) >= 6:
+                        if not graph_budget.take_call():
+                            return rows, False
                         rows = session.run(
                             "MATCH (n) WHERE (n.telegram_id = $w OR n.contact_id = $w) "
                             f"AND {node_valid}{tnode} "
@@ -1566,6 +1661,8 @@ class MemgraphRetriever(Retriever):
                     # For graphs that haven't backfilled name_lower yet we fall
                     # back to toLower() so the retriever still works on ASCII.
                     if not rows:
+                        if not graph_budget.take_call():
+                            return rows, False
                         rows = session.run(
                             "MATCH (n) WHERE coalesce(n.name_lower, toLower(n.name)) = $w "
                             f"AND {node_valid}{tnode} "
@@ -1577,6 +1674,8 @@ class MemgraphRetriever(Retriever):
                         ).data()
                     # Probe 3: also match by handle/username (e.g. @alice)
                     if not rows and len(w) >= 3:
+                        if not graph_budget.take_call():
+                            return rows, False
                         rows = session.run(
                             "MATCH (n) WHERE toLower(coalesce(n.telegram_username, '')) = $w "
                             f"AND {node_valid}{tnode} "
@@ -1588,6 +1687,8 @@ class MemgraphRetriever(Retriever):
                         ).data()
                     # Probe 4: substring fallback for longer tokens.
                     if not rows and len(w) >= self.contains_min:
+                        if not graph_budget.take_call():
+                            return rows, False
                         rows = session.run(
                             "MATCH (n) WHERE coalesce(n.name_lower, toLower(n.name)) CONTAINS $w "
                             f"AND {node_valid}{tnode} "
@@ -1597,6 +1698,27 @@ class MemgraphRetriever(Retriever):
                             w=w,
                             **extra,
                         ).data()
+                    return rows, True
+
+                budget_drained = False
+                for w in words:
+                    # Cross-variant cache: a token ANY variant of this recall
+                    # already probed is served for free with identical rows —
+                    # fusion sees the same candidates, the backend sees no
+                    # repeat request. (Within one call `words` is deduped.)
+                    # Rows are cached under the probe_lim active when fetched;
+                    # a later variant's smaller remaining allowance can only
+                    # SHRINK what new probes fetch, never wrongly grow a
+                    # cached set — an accepted monotonic tradeoff.
+                    cached = probe_cache.get(w)
+                    if cached is not None:
+                        rows = cached
+                    else:
+                        rows, complete = _node_probe_rows(w)
+                        if complete:
+                            probe_cache[w] = rows
+                        else:
+                            budget_drained = True
                     for n in rows:
                         name = n.get("name")
                         if not name:
@@ -1610,6 +1732,11 @@ class MemgraphRetriever(Retriever):
                         counts[key]["count"] += 1
                         counts[key]["type"] = n.get("type", "") or ""
                         counts[key]["mc"] = n.get("mc", "") or ""
+                    if budget_drained:
+                        # The recall's Cypher allowance is spent — rank what
+                        # was already discovered instead of probing further
+                        # tokens (missed, never leaked).
+                        break
                 # Over-fetch node candidates so a window of stale-only nodes
                 # doesn't hide valid ones below it before the bare-node skip.
                 ranked = sorted(counts.items(), key=lambda kv: -kv[1]["count"])[:node_budget]
@@ -1627,6 +1754,11 @@ class MemgraphRetriever(Retriever):
                     probe_budget = _ProbeBudget(_MAX_ATTRIBUTION_PROBES)
                 for (name, root_key), info in ranked:
                     if len(results) >= self.max_nodes:
+                        break
+                    if not graph_budget.take_candidate():
+                        # Discovery-candidate allowance for this RECALL is
+                        # spent (shared across expansion variants) — the
+                        # remaining candidates fail closed.
                         break
                     if filters:
                         # FILTERED path: attribute FIRST — before any
@@ -1677,6 +1809,9 @@ class MemgraphRetriever(Retriever):
                             # whose links were all removed keeps its node and
                             # its current chunks), and only attributed
                             # candidates pay the round trip.
+                            # Bounded by the candidate allowance consumed at
+                            # the top of this iteration — one gate query per
+                            # traversed candidate at most.
                             gate_rows = session.run(
                                 "MATCH (n {name: $name})-[r]-(m) "
                                 f"WHERE coalesce(n.index_root, '') = $root_key "
@@ -1690,6 +1825,9 @@ class MemgraphRetriever(Retriever):
                                 continue
                         results.append(candidate)
                         continue
+                    # Bounded by the candidate allowance consumed at the top
+                    # of this iteration — one relationship query per
+                    # traversed candidate at most.
                     rel_rows = session.run(
                         # Undirected: a target-only node (e.g. `Team A` in
                         # `Alice -[MEMBER_OF]-> Team A`) has a valid incoming
