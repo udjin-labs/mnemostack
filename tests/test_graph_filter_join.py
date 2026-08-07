@@ -815,6 +815,128 @@ def test_probe_breaker_spans_searches_sharing_a_recall_scope():
     assert len(calls) == 1  # the second variant never touched the store
 
 
+class _RunCountingSession(_Session):
+    """Fake session that records EVERY Cypher round trip issued."""
+
+    def __init__(self, files, runs):
+        super().__init__(files)
+        self._runs = runs
+
+    def run(self, cypher, **params):
+        self._runs.append(cypher[:40])
+        return super().run(cypher, **params)
+
+
+class _RunCountingDriver(_Driver):
+    def __init__(self, files):
+        super().__init__(files)
+        self.runs: list[str] = []
+
+    def session(self, **_):
+        return _RunCountingSession(self._files, self.runs)
+
+
+def test_recall_cypher_calls_bounded_under_expansion():
+    """Audit regression (re-audit blocker): a 4-variant expansion with fully
+    disjoint 16-token variants used to issue 4 x 16 x 3 = 192 sequential
+    Cypher probes (theoretical max 256 with the digit shape) — the per-call
+    token cap did nothing across variants. One shared per-recall ceiling now
+    bounds the total; variants after the allowance add nothing."""
+    from mnemostack.recall import Recaller
+
+    driver = _RunCountingDriver(FILES)
+    retr = MemgraphRetriever(uri="bolt://x", driver=driver)
+    recaller = Recaller(
+        retrievers=[retr], query_expansion=True, expansion_llm=object()
+    )
+    variants = [
+        " ".join(f"tok{v}x{i:02d}" for i in range(16)) for v in range(4)
+    ]
+    recaller._query_expansion_cache[variants[0]] = variants[1:]
+
+    recaller.recall(variants[0], include_invalidated=True)
+
+    # Deterministic setup: 16 x 3 shapes for variants 1-2 spends the probe
+    # ceiling exactly; variants 3-4 add zero. A looser <= bound would let an
+    # under-spending accounting bug slip through.
+    assert len(driver.runs) == 96  # _MAX_RECALL_NODE_PROBES, not 192
+
+
+def test_configured_max_nodes_above_pool_cap_is_honored_on_a_single_call():
+    """Round-2 pin: the shared discovery pool guards expansion variants —
+    it must never clamp an explicitly tuned max_nodes below its historical
+    single-call result count."""
+    files = {("doc.md", f"/r{i:03d}"): [] for i in range(600)}
+    retr = MemgraphRetriever(uri="bolt://x", driver=_Driver(files), max_nodes=600)
+
+    out = retr.search("doc.md", limit=600, include_invalidated=True)
+
+    assert len(out) == 600
+
+
+def test_digit_tokens_reach_all_four_probe_shapes():
+    """The probe ceiling's worst-case arithmetic (16 tokens x 4 shapes = 64)
+    is only reachable via numeric contact-id tokens — pin that a >=6-digit
+    unmatched token costs exactly 4 probes."""
+    driver = _RunCountingDriver(FILES)
+    retr = MemgraphRetriever(uri="bolt://x", driver=driver)
+
+    retr.search("1234567", include_invalidated=True)
+
+    assert len(driver.runs) == 4  # contact-id, exact, handle, contains
+
+
+def test_expansion_variants_share_the_probe_result_cache():
+    """A token one variant already probed is served from the per-recall
+    cache: identical rows for fusion, zero repeat backend requests."""
+    from mnemostack.recall import Recaller
+
+    driver = _CountingDriver(FILES)
+    retr = MemgraphRetriever(uri="bolt://x", driver=driver)
+    recaller = Recaller(
+        retrievers=[retr], query_expansion=True, expansion_llm=object()
+    )
+    recaller._query_expansion_cache["note.md"] = ["note.md doc"]
+
+    out = recaller.recall("note.md", include_invalidated=True)
+
+    assert [r.payload["name"] for r in out] == ["note.md"]
+    assert driver.probed.count("note.md") == 1  # cached for variant 2
+
+
+def test_candidate_traversal_shares_the_recall_pool(monkeypatch):
+    """The discovery-candidate allowance is one pool for the whole recall:
+    a variant that spent it leaves nothing for later variants to traverse
+    (fail closed) instead of each variant re-drawing a fresh 500."""
+    import mnemostack.recall.retrievers as retrievers_mod
+
+    monkeypatch.setattr(retrievers_mod, "_FILTERED_CANDIDATE_BUDGET", 2)
+    files = {(f"doc{i}.md", "/corpus/a"): [] for i in range(6)}
+    calls: list[dict] = []
+
+    def probe(filters, tenant, include_invalidated, as_of):
+        calls.append(dict(filters))
+        return False  # nothing attributes — every traversed candidate probes
+
+    # max_nodes=1 keeps this call's node_budget (3) close to the shrunken
+    # pool: the shared allowance is max(pool, node_budget) = 3 traversals
+    # for the WHOLE recall.
+    retr = MemgraphRetriever(
+        uri="bolt://x", driver=_Driver(files), max_nodes=1, chunk_filter_probe=probe
+    )
+    scope: dict = {}
+    query = "doc0.md doc1.md doc2.md doc3.md doc4.md doc5.md"
+    for _variant in range(2):
+        out = retr.search(
+            query,
+            filters={"project": "x"},
+            include_invalidated=True,
+            recall_scope=scope,
+        )
+        assert out == []
+    assert len(calls) == 3  # allowance of 3, spent by variant 1; variant 2 adds 0
+
+
 def test_query_expansion_shares_the_probe_breaker_across_variants():
     """End-to-end pin through the recaller: with query_expansion=True the
     recaller's per-recall scope carries ONE probe budget across variants."""
