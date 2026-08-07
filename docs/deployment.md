@@ -676,6 +676,16 @@ arm; pick by collection size and whether you can re-index:
   payload-index` with no field lists the collection's existing indexes, and
   `doctor` reports them (`tenant_id` is indexed automatically at collection
   creation).
+- **Filtered graph recall needs two of them.** The knowledge-graph
+  retriever attributes its file hits through their chunks with existence
+  probes pinned by `source` and `index_root` — on a real server, index BOTH
+  once per collection, or every filtered query reaching the graph arm pays
+  payload scans for its probes:
+
+  ```bash
+  mnemostack payload-index source --schema keyword
+  mnemostack payload-index index_root --schema keyword
+  ```
 - **Multi-field lexical arms** (`recall.text_search_fields`, env
   `MNEMOSTACK_TEXT_SEARCH_FIELDS="title:2.0,text:1.0"`): title/heading
   fields are usually far more precise lexical signals than chunk bodies —

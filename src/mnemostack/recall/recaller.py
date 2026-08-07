@@ -486,6 +486,12 @@ class Recaller:
         3x candidate pool absorbs this in practice.
         """
         counter("mnemostack.recall.calls", 1)
+        # Mutable state scoped to THIS public recall, handed to retrievers
+        # advertising `accepts_recall_scope`. Query expansion re-runs every
+        # retriever once per variant — state that must span the whole recall
+        # (the graph arm's probe budget/circuit breaker: one store failure
+        # per recall, not per variant) lives here instead of per-search.
+        recall_scope: dict[Any, Any] = {}
         if self.query_expansion:
             results = self._recall_with_query_expansion(
                 query=query,
@@ -497,6 +503,7 @@ class Recaller:
                 include_invalidated=include_invalidated,
                 as_of=as_of,
                 tenant=tenant,
+                recall_scope=recall_scope,
             )
         else:
             results = self._recall_once(
@@ -509,6 +516,7 @@ class Recaller:
                 include_invalidated=include_invalidated,
                 as_of=as_of,
                 tenant=tenant,
+                recall_scope=recall_scope,
             )
         # Retriever hits are already validity-filtered before fusion (so stale
         # facts can't crowd out current ones in the top-K, and vector-floor
@@ -545,6 +553,7 @@ class Recaller:
         include_invalidated: bool = False,
         as_of: str | None = None,
         tenant: str | None = None,
+        recall_scope: dict[Any, Any] | None = None,
     ) -> list[RecallResult]:
         # Legacy-pair guard only when the legacy path will actually run —
         # in retrievers mode the arms guard themselves at their boundaries.
@@ -563,6 +572,7 @@ class Recaller:
                 include_invalidated=include_invalidated,
                 as_of=as_of,
                 tenant=tenant,
+                recall_scope=recall_scope,
             )
         if self.embedding is None or self.vector is None:
             raise ValueError(
@@ -827,6 +837,7 @@ class Recaller:
         include_invalidated: bool = False,
         as_of: str | None = None,
         tenant: str | None = None,
+        recall_scope: dict[Any, Any] | None = None,
     ) -> list[RecallResult]:
         ranked_lists: list[list[tuple[Any, float]]] = []
         id_to_result: dict[Any, RecallResult] = {}
@@ -845,6 +856,7 @@ class Recaller:
                 include_invalidated=include_invalidated,
                 as_of=as_of,
                 tenant=tenant,
+                recall_scope=recall_scope,
             )
             if trace is not None:
                 # Disambiguate which expanded query produced these entries.
@@ -916,6 +928,7 @@ class Recaller:
         include_invalidated: bool = False,
         as_of: str | None = None,
         tenant: str | None = None,
+        recall_scope: dict[Any, Any] | None = None,
     ) -> list[RecallResult]:
         """Fuse N retrievers' ranked lists via RRF. Preserves source tags.
 
@@ -958,6 +971,13 @@ class Recaller:
                     search_kwargs["include_invalidated"] = include_invalidated
                 if tenant is not None and getattr(retr, "accepts_tenant", False):
                     search_kwargs["tenant"] = tenant
+                if recall_scope is not None and getattr(
+                    retr, "accepts_recall_scope", False
+                ):
+                    # Per-recall shared state (e.g. the graph arm's probe
+                    # budget must span expanded-query variants, not reset
+                    # per variant).
+                    search_kwargs["recall_scope"] = recall_scope
                 hits = retr.search(query, limit=fetch_limit, **search_kwargs)
                 # Drop stale hits before fusion/floor so invalidated facts
                 # neither crowd out current ones nor get re-appended by the

@@ -81,12 +81,16 @@ class RecallTrace:
     `fused` is the order recall returned (post-fusion, post-vector-floor);
     `post_rerank` is the reranker's order when a reranker ran. The final
     response list may still differ if vector-floor re-appends items after
-    rerank. Tags are stable strings; `degraded` carries components that
-    actually fell back while serving the call ("retriever:<name>:failed",
-    "reranker:fallback", "reranker:unavailable"), `notes` carries routine
-    stage-did-not-apply signals ("temporal:no_parse" — any query without a
-    parseable date; "<arm>:no_tokens" — a lexical arm whose gate found no
-    usable tokens in the query).
+    rerank. Tags are stable strings. `notes` is the AUTHORITATIVE list of
+    routine stage-did-not-apply signals ("temporal:no_parse" — any query
+    without a parseable date; "<arm>:no_tokens" — a lexical arm whose gate
+    found no usable tokens). `degraded` carries components that actually
+    fell back ("retriever:<name>:failed", "reranker:fallback",
+    "reranker:unavailable") — plus, DEPRECATED until the next major, a
+    back-compat duplicate of the routine tags, because its stable-strings
+    contract predates the split and existing matchers must survive a minor
+    upgrade. New consumers: read `notes` for routine signals; a `degraded`
+    entry absent from `notes` is a real fault.
     """
 
     retrievers: list[RetrieverTrace] = field(default_factory=list)
@@ -113,12 +117,18 @@ class RecallTrace:
             self.post_rerank = [(rid, s) for rid, s in self.post_rerank if str(rid) in allow]
 
     def mark(self, tag: str) -> None:
-        # One classification, one surface story: a routine signal never
-        # reaches the per-call degraded list nor the process-wide counter,
-        # so a client can treat a non-empty `degraded` as a real fault.
+        # One classification: `notes` is AUTHORITATIVE for routine signals
+        # and they never reach the process-wide counter. DEPRECATED
+        # back-compat: the same tags are still duplicated into `degraded` —
+        # its stable-strings contract predates the split, and clients or
+        # alerts matching e.g. `temporal:no_parse` there must not change
+        # behavior on a MINOR upgrade. The duplication is removed at the
+        # next MAJOR; new consumers should read `notes`.
         if _is_routine(tag):
             if tag not in self.notes:
                 self.notes.append(tag)
+            if tag not in self.degraded:
+                self.degraded.append(tag)
             return
         if tag not in self.degraded:
             self.degraded.append(tag)

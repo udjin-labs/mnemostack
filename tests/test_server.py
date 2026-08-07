@@ -665,7 +665,8 @@ def test_recall_response_degraded_default_empty(monkeypatch):
 
 def test_recall_no_parse_surfaces_as_note_not_degradation(monkeypatch):
     """HTTP mirror of the MCP regression: a date-less query is routine —
-    the response reports a healthy call with a note, never a degradation."""
+    authoritative in notes, with a DEPRECATED back-compat duplicate kept in
+    degraded until the next major."""
     app, recaller = _patched_app(monkeypatch)
     real_recall = recaller.recall
 
@@ -679,7 +680,7 @@ def test_recall_no_parse_surfaces_as_note_not_degradation(monkeypatch):
     resp = client.post("/recall", json={"query": "hello"})
     assert resp.status_code == 200
     data = resp.json()
-    assert data["degraded"] == []
+    assert data["degraded"] == ["temporal:no_parse"]
     assert data["notes"] == ["temporal:no_parse"]
 
 

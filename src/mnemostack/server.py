@@ -193,15 +193,19 @@ class RecallResponse(BaseModel):
         default_factory=list,
         description=(
             "Components that actually fell back while serving this call "
-            "(e.g. retriever:bm25:failed, reranker:fallback). Empty when healthy."
+            "(e.g. retriever:bm25:failed, reranker:fallback) — plus, "
+            "DEPRECATED until the next major, a back-compat duplicate of the "
+            "routine tags from `notes`. An entry absent from `notes` is a "
+            "real fault."
         ),
     )
     notes: list[str] = Field(
         default_factory=list,
         description=(
-            "Routine signals: stages that did not apply to this query "
-            "(e.g. temporal:no_parse on any query without a parseable date). "
-            "Not a fault — see degraded for real fallbacks."
+            "AUTHORITATIVE list of routine signals: stages that did not "
+            "apply to this query (e.g. temporal:no_parse on any query "
+            "without a parseable date). Not a fault; these tags also appear "
+            "in `degraded` for back-compat until the next major."
         ),
     )
     trace: dict[str, Any] | None = Field(

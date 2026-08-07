@@ -106,10 +106,11 @@ def test_empty_retriever_with_reason_marks_note():
     trace = RecallTrace()
     recaller.recall("q", limit=5, trace=trace)
 
-    # Routine stage-did-not-apply signal: surfaces in notes, never as a
-    # degradation — an MCP client must not read a healthy call as degraded.
+    # Routine stage-did-not-apply signal: authoritative in notes, and kept as
+    # a DEPRECATED duplicate in degraded until the next major so clients
+    # matching the stable tag strings keep working across minor upgrades.
     assert "temporal:no_parse" in trace.notes
-    assert "temporal:no_parse" not in trace.degraded
+    assert "temporal:no_parse" in trace.degraded
 
 
 def test_recall_without_trace_unchanged():
@@ -306,8 +307,9 @@ def test_trace_legacy_path_records_vector_and_fused():
 
 
 def test_mark_routes_routine_tags_to_notes_and_skips_the_counter(monkeypatch):
-    """A stage that did not apply is a note, never a degradation: it must not
-    reach the per-call degraded list nor the process-wide counter."""
+    """A stage that did not apply is a note: notes is authoritative, the
+    degraded list keeps a DEPRECATED back-compat duplicate (until the next
+    major), and the process-wide counter must never fire for it."""
     import mnemostack.recall.trace as trace_mod
 
     calls: list[tuple] = []
@@ -317,7 +319,7 @@ def test_mark_routes_routine_tags_to_notes_and_skips_the_counter(monkeypatch):
     trace.mark("temporal:no_parse")  # deduped
 
     assert trace.notes == ["temporal:no_parse"]
-    assert trace.degraded == []
+    assert trace.degraded == ["temporal:no_parse"]
     assert calls == []
 
 
@@ -348,7 +350,7 @@ def test_mark_routes_dynamic_no_tokens_tags_to_notes(monkeypatch):
     trace.mark("qdrant_text:no_tokens")
 
     assert trace.notes == ["qdrant_text:title:no_tokens", "qdrant_text:no_tokens"]
-    assert trace.degraded == []
+    assert trace.degraded == ["qdrant_text:title:no_tokens", "qdrant_text:no_tokens"]
     assert calls == []
 
 
@@ -361,4 +363,7 @@ def test_to_dict_emits_both_lists():
     trace.mark("reranker:fallback")
     d = trace.to_dict()
     assert d["notes"] == ["temporal:no_parse"]
-    assert d["degraded"] == ["reranker:fallback"]
+    # Routine tags are duplicated into degraded (DEPRECATED, until next major)
+    # so pre-notes clients matching the stable strings keep working; real
+    # degradations are exactly the degraded entries absent from notes.
+    assert d["degraded"] == ["temporal:no_parse", "reranker:fallback"]
