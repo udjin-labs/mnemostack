@@ -262,14 +262,23 @@ def build_server(
         )
 
     def _get_vector():
-        return _component(
-            "vector",
-            lambda: VectorStore(
+        def _make():
+            from mnemostack.config import resolve_text_search_mode
+
+            # The remember tool WRITES through this store: under
+            # text_search=sparse it must maintain the named sparse vector on
+            # every point, or remembered memories silently drop out of the
+            # sparse lexical arm (and demand a backfill later).
+            mode = resolve_text_search_mode(text_search, bm25_paths)
+            return VectorStore(
                 collection=collection,
                 dimension=_get_embedding().dimension,
                 host=qdrant_host,
-            ),
-        )
+                sparse_text=mode == "sparse",
+                text_key=text_key,
+            )
+
+        return _component("vector", _make)
 
     def _get_vector_payload_only():
         # Invalidation is a payload write (retrieve + set_payload) that never

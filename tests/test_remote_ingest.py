@@ -707,3 +707,77 @@ def test_memories_caps_the_item_count(monkeypatch, tmp_path):
         headers={"X-API-Key": keys["write"]},
     )
     assert r.status_code == 422  # pydantic max_length on the batch
+
+
+# ------------------------------------------------- round-3 review batch pins
+
+
+def test_epoch_conversion_applies_to_the_default_timestamp_key():
+    """Codex-R3 P1: format drives conversion, not the key name — a numeric
+    collection with the DEFAULT `timestamp` key must store epoch, not ISO."""
+    emb, store = _CountingEmbedding(), _mem_store()
+    (res,) = ingest_remote_items(
+        emb,
+        store,
+        [IngestItem(text="t", source="s", timestamp="2026-08-20T10:00:00+00:00")],
+        tenant="a",
+        timestamp_format="epoch",
+    )
+    point = store.client.retrieve(store.collection, ids=[res.id], with_payload=True)[0]
+    assert isinstance(point.payload["timestamp"], float)
+
+
+def test_naive_timestamps_convert_as_utc():
+    """Codex/agent R3: a naive ISO input is UTC by stack convention — the
+    stored epoch must not depend on the server's local timezone."""
+    from datetime import datetime, timezone
+
+    emb, store = _CountingEmbedding(), _mem_store()
+    (res,) = ingest_remote_items(
+        emb,
+        store,
+        [IngestItem(text="t", source="s", timestamp="2026-08-20T10:00:00")],
+        tenant="a",
+        timestamp_format="epoch",
+    )
+    point = store.client.retrieve(store.collection, ids=[res.id], with_payload=True)[0]
+    expected = datetime(2026, 8, 20, 10, 0, 0, tzinfo=timezone.utc).timestamp()
+    assert point.payload["timestamp"] == expected
+
+
+def test_collection_bootstrap_survives_a_concurrent_create_race():
+    """Agent-R3 P2: ensure_collection is check-then-create; the loser of a
+    concurrent first-write race retries once instead of failing the write."""
+    emb = _CountingEmbedding()
+    real = _mem_store("race")
+
+    class _RacyStore:
+        def __init__(self):
+            self.calls = 0
+
+        def ensure_collection(self):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("already exists")  # lost the create race
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    racy = _RacyStore()
+    (res,) = ingest_remote_items(emb, racy, [IngestItem(text="r", source="s")])
+    assert res.status == "stored"
+    assert racy.calls == 2  # one loss, one confirming retry
+
+
+def test_reserved_extra_matching_is_nfkc_symmetric():
+    """Agent-R3 P3: a configured key stored in decomposed Unicode form must
+    still catch the composed client variant (both sides normalized)."""
+    import unicodedata
+
+    decomposed = unicodedata.normalize("NFD", "café")
+    composed = unicodedata.normalize("NFC", "café")
+    assert decomposed != composed  # premise: genuinely different strings
+    err = validate_remote_item(
+        "t", "s", None, [], {composed: "x"}, reserved_extra={decomposed}
+    )
+    assert err is not None and "reserved" in err

@@ -769,8 +769,9 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         collection=cfg.collection,
         dimension=provider.dimension,
         host=cfg.qdrant_url,
-        # sparse mode: recall queries the sparse space, so the store must know
-        # about it (writes don't happen here — the server is read-only).
+        # sparse mode: recall queries the sparse space AND /memories writes
+        # through this store — the flag keeps every remotely written point
+        # carrying the named sparse vector the lexical arm searches.
         sparse_text=text_mode == "sparse",
         text_key=cfg.text_key,
     )

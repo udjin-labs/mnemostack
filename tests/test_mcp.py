@@ -1208,3 +1208,36 @@ def test_mcp_remember_auth_failures_carry_error_kind(tmp_path, monkeypatch):
         mcp.call_tool("mnemostack_remember", {"text": "x"})
     ).structured_content
     assert r["ok"] is False and r["error_kind"] == "unauthorized"
+
+
+def test_mcp_write_store_carries_sparse_flag_under_sparse_mode(tmp_path, monkeypatch):
+    """Codex-R3 P1: the remember tool writes through _get_vector's store —
+    under text_search=sparse it must be built sparse-aware, or remembered
+    points silently drop out of the sparse lexical arm."""
+    import mnemostack.mcp.server as srv
+
+    captured: dict = {}
+
+    class _RecordingStore:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+        def count(self):
+            return 0
+
+    monkeypatch.setattr(srv, "get_provider", lambda *a, **k: SimpleNamespace(dimension=3))
+    monkeypatch.setattr(srv, "VectorStore", _RecordingStore)
+    monkeypatch.setattr(srv, "VectorRetriever", lambda **_: MagicMock())
+    monkeypatch.setattr(srv, "TemporalRetriever", lambda **_: MagicMock())
+    monkeypatch.setattr(srv, "build_bm25_docs", lambda _paths: [])
+    monkeypatch.setattr(srv, "Recaller", lambda **_: MagicMock())
+    mcp = build_server(
+        collection="sp",
+        embedding_provider="ollama",
+        text_search="sparse",
+        text_key="content",
+    )
+    # Force the lazy vector component: remember touches it on first write.
+    asyncio.run(mcp.call_tool("mnemostack_remember", {"text": "x", "source": "s"}))
+    assert captured.get("sparse_text") is True
+    assert captured.get("text_key") == "content"

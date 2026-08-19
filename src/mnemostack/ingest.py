@@ -363,10 +363,11 @@ def validate_remote_item(
         return "metadata keys must be strings: " + ", ".join(non_string)
     reserved = reserved_metadata_keys(metadata)
     if reserved_extra:
+        # Both sides through the SAME normalization: a configured key stored
+        # in a non-NFKC form must still catch its normalized client variant.
+        normalized_extra = {_normalized_metadata_key(e) for e in reserved_extra}
         extra_hits = sorted(
-            k
-            for k in metadata
-            if _normalized_metadata_key(k) in {e.casefold() for e in reserved_extra}
+            k for k in metadata if _normalized_metadata_key(k) in normalized_extra
         )
         reserved = sorted(set(reserved) | set(extra_hits))
     if reserved:
@@ -483,10 +484,16 @@ def ingest_remote_items(
     """
     # First remote write on a fresh deployment must not require an operator
     # ingest to have created the collection (idempotent when it exists).
+    # ensure_collection is check-then-create: two concurrent FIRST writers
+    # (any tenants — the per-tenant lock below cannot cover this) can both
+    # see "missing" and race the create; the loser retries once and finds
+    # the winner's collection instead of failing the write.
     try:
         store.ensure_collection()
     except AttributeError:
         pass  # duck store without the hook
+    except Exception:  # noqa: BLE001 — lost the concurrent-create race
+        store.ensure_collection()
     with _tenant_write_lock(tenant):
         return _ingest_remote_items_locked(
             embedding,
@@ -501,28 +508,55 @@ def ingest_remote_items(
 
 
 def _remote_schema_enricher(
-    text_key: str, timestamp_key: str, timestamp_format: str
+    text_key: str,
 ) -> Callable[[IngestItem], dict[str, Any]] | None:
-    """Payload enricher mapping items onto a non-default recall schema."""
-    if text_key == "text" and timestamp_key == "timestamp":
+    """Payload enricher mirroring text under a non-default recall text key."""
+    if text_key == "text":
         return None
 
     def _enrich(item: IngestItem) -> dict[str, Any]:
-        extra: dict[str, Any] = {}
-        if text_key != "text":
-            extra[text_key] = item.text
-        if timestamp_key != "timestamp" and item.timestamp:
-            dt = _parse_iso_timestamp(item.timestamp)
-            if dt is not None:
-                if timestamp_format == "epoch":
-                    extra[timestamp_key] = dt.timestamp()
-                elif timestamp_format == "epoch_ms":
-                    extra[timestamp_key] = dt.timestamp() * 1000
-                else:
-                    extra[timestamp_key] = item.timestamp
-        return extra
+        return {text_key: item.text}
 
     return _enrich
+
+
+def _apply_timestamp_domain(
+    items: list[IngestItem], timestamp_key: str, timestamp_format: str
+) -> None:
+    """Map each item's ISO event time onto the collection's schema, in place.
+
+    Conversion is keyed to the FORMAT, not the key name: a deployment with
+    the default ``timestamp`` key but a numeric format still needs its epoch
+    value. The converted value travels via ``metadata`` (the payload merge),
+    and for the default key the explicit field is cleared — the pipeline
+    treats an explicit item timestamp as authoritative, which would shadow
+    the conversion. Naive ISO inputs are treated as UTC (the recall validity
+    convention) — ``datetime.timestamp()`` on a naive value would otherwise
+    use the server's LOCAL zone and silently skew every stored instant.
+    """
+    from datetime import timezone as _tz
+
+    if timestamp_format == "iso":
+        if timestamp_key == "timestamp":
+            return  # default schema: the pipeline's own handling is exact
+        for item in items:
+            if item.timestamp:
+                # Mirror under the configured key; the historical `timestamp`
+                # field keeps the ISO value via the explicit item field.
+                item.metadata[timestamp_key] = item.timestamp
+        return
+    for item in items:
+        if not item.timestamp:
+            continue
+        dt = _parse_iso_timestamp(item.timestamp)
+        if dt is None:
+            continue  # validated surfaces never get here; fail soft for ducks
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_tz.utc)
+        value = dt.timestamp() * (1000 if timestamp_format == "epoch_ms" else 1)
+        item.metadata[timestamp_key] = value
+        if timestamp_key == "timestamp":
+            item.timestamp = None  # would shadow the numeric value otherwise
 
 
 def _ingest_remote_items_locked(
@@ -554,6 +588,10 @@ def _ingest_remote_items_locked(
         to_ingest.append(item)
     stored: set[str] = set()
     if to_ingest:
+        # Map event times onto the collection's schema BEFORE the pipeline:
+        # conversion happens only for items actually being stored (ids are
+        # (source, offset, text)-derived — timestamps are not id material).
+        _apply_timestamp_domain(to_ingest, timestamp_key, timestamp_format)
         # Preflight the tenant's storage quota over the WHOLE deduplicated
         # request BEFORE any embedding: an over-quota request must cost zero
         # provider calls and commit nothing — never a partial write behind a
@@ -580,7 +618,7 @@ def _ingest_remote_items_locked(
             # Non-default recall schema: mirror text/event-time under the
             # deployment's configured keys so remote memories are readable
             # and temporally recallable like operator-indexed ones.
-            enrich=_remote_schema_enricher(text_key, timestamp_key, timestamp_format),
+            enrich=_remote_schema_enricher(text_key),
         )
         stats = ingestor.ingest(to_ingest)
         stored = {str(pid) for pid in stats.ids}
