@@ -208,9 +208,12 @@ class MemoryItemIn(BaseModel):
         False,
         description=(
             "Split this text server-side into fixed character windows "
-            f"({REMOTE_CHUNK_SIZE} chars) — the same split `mnemostack index` "
-            "applies to prose files, so the resulting chunk ids are "
-            "identical. Requires a non-empty `source`."
+            f"({REMOTE_CHUNK_SIZE} chars) — the split `mnemostack index` "
+            "applies to prose files at its default --chunk-size, so with "
+            "default settings the chunk ids are identical across both "
+            "paths (a custom --chunk-size or the section-aware markdown "
+            "indexer produces different boundaries). Requires a non-empty "
+            "`source`."
         ),
     )
     source: str = Field(
@@ -1358,10 +1361,18 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         exceeded), and the shared per-tenant rate limit. Declared as a sync
         route on purpose: FastAPI runs it on the threadpool, so the
         embedding round-trips never block the event loop.
+
+        Mode note: under `text_search=qdrant_bm25` the in-process BM25
+        corpus is a startup snapshot — new memories join the vector arm
+        immediately but that lexical arm only after a restart (the same
+        pre-existing behavior as CLI ingest while the server runs).
         """
         # Pydantic enforces shapes/caps; the reserved-namespace rule and
         # cross-field constraints live in the shared validator so the MCP
-        # tool enforces the identical contract.
+        # tool enforces the identical contract. The deployment's configured
+        # text/timestamp keys are reserved too — metadata must not shadow
+        # what recall actually reads.
+        schema_reserved = {cfg.text_key, cfg.timestamp_key} - {"text", "timestamp"}
         for i, item in enumerate(req.items):
             problem = validate_remote_item(
                 item.text,
@@ -1371,6 +1382,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 item.metadata,
                 offset=item.offset,
                 chunk=item.chunk,
+                reserved_extra=schema_reserved or None,
             )
             if problem:
                 raise HTTPException(status_code=400, detail=f"items[{i}]: {problem}")
@@ -1410,7 +1422,14 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         try:
             results = ingest_remote_items(
-                provider, store, flat_items, tenant=tenant, max_points=max_points
+                provider,
+                store,
+                flat_items,
+                tenant=tenant,
+                max_points=max_points,
+                text_key=cfg.text_key,
+                timestamp_key=cfg.timestamp_key,
+                timestamp_format=cfg.timestamp_format,
             )
         except QuotaExceededError as exc:
             raise HTTPException(status_code=507, detail=str(exc)) from exc
@@ -1446,6 +1465,17 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         another tenant's subgraph. Requires a configured graph; 503 when
         the deployment runs without Memgraph.
         """
+        # Input validation FIRST (a 400 the caller can fix), availability
+        # second (a 503 the operator owns).
+        for i, t in enumerate(req.triples):
+            # min_length=1 admits whitespace-only strings, which would
+            # create/merge a graph node named " " — same rigor as the
+            # sibling /memories text check.
+            if not t.subject.strip() or not t.predicate.strip() or not t.object.strip():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"triples[{i}]: subject/predicate/object must be non-blank",
+                )
         if not cfg.graph_uri:
             raise HTTPException(status_code=503, detail="graph is not configured")
         tenant = _tenant_of(principal)

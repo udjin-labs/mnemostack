@@ -30,7 +30,10 @@ from ..embeddings import get_provider
 from ..embeddings.roles import EmbeddingSpaceError
 from ..feedback import apply_feedback
 from ..ingest import (
+    REMOTE_MAX_DOC_CHARS,
+    REMOTE_MAX_TEXT_CHARS,
     IngestItem,
+    RemoteRequestTooLarge,
     expand_remote_items,
     ingest_remote_items,
     validate_remote_item,
@@ -840,7 +843,15 @@ def build_server(
     def mnemostack_remember(
         text: Annotated[
             str,
-            Field(description="The memory content to store. Embedded server-side."),
+            Field(
+                min_length=1,
+                max_length=REMOTE_MAX_DOC_CHARS,
+                description=(
+                    "The memory content to store. Embedded server-side. Plain "
+                    f"items are capped at {REMOTE_MAX_TEXT_CHARS} characters; "
+                    "longer documents need chunk=true."
+                ),
+            ),
         ],
         source: Annotated[
             str,
@@ -853,7 +864,8 @@ def build_server(
             ),
         ] = "",
         offset: Annotated[
-            int, Field(description="Position within `source` for multi-part documents.")
+            int,
+            Field(ge=0, description="Position within `source` for multi-part documents."),
         ] = 0,
         timestamp: Annotated[
             str | None,
@@ -899,7 +911,13 @@ def build_server(
         mnemostack_invalidate to retract a stored memory.
         """
         try:
-            tenant = _tenant_of(_authorize("write"))
+            try:
+                tenant = _tenant_of(_authorize("write"))
+            except _AuthError as e:
+                return {"ok": False, "error": str(e), "error_kind": "unauthorized"}
+            # The deployment's configured schema keys are reserved too —
+            # metadata must not shadow what recall actually reads.
+            schema_reserved = {text_key, timestamp_key} - {"text", "timestamp"}
             problem = validate_remote_item(
                 text,
                 source,
@@ -908,6 +926,7 @@ def build_server(
                 dict(metadata or {}),
                 offset=offset,
                 chunk=chunk,
+                reserved_extra=schema_reserved or None,
             )
             if problem:
                 # error_kind lets an agent distinguish "fix your input" from
@@ -922,7 +941,12 @@ def build_server(
                 tags=list(tags or []),
                 timestamp=timestamp,
             )
-            flat_items, _origins = expand_remote_items([(item, chunk)])
+            try:
+                flat_items, _origins = expand_remote_items([(item, chunk)])
+            except RemoteRequestTooLarge as e:
+                # Same condition HTTP maps to 400: the caller must split the
+                # document — an agent retrying a generic error would spin.
+                return {"ok": False, "error": str(e), "error_kind": "invalid_argument"}
             max_points = None
             if tenant is not None:
                 try:
@@ -950,6 +974,9 @@ def build_server(
                     flat_items,
                     tenant=tenant,
                     max_points=max_points,
+                    text_key=text_key,
+                    timestamp_key=timestamp_key,
+                    timestamp_format=timestamp_format,
                 )
             except QuotaExceededError as e:
                 return {"ok": False, "error": str(e), "error_kind": "quota_exceeded"}
@@ -966,7 +993,9 @@ def build_server(
                 "failed": sum(r.status == "failed" for r in results),
             }
         except Exception as e:  # noqa: BLE001
-            return {"ok": False, "error": str(e)}
+            # error_kind is present on EVERY failure shape of this tool;
+            # "error" is the generic backend bucket (do not retry blindly).
+            return {"ok": False, "error": str(e), "error_kind": "error"}
 
     @mcp.tool()
     def mnemostack_feedback(

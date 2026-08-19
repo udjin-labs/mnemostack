@@ -35,6 +35,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import threading
 import uuid
 from collections import OrderedDict, deque
 from collections.abc import Callable, Iterable, Iterator, Sequence
@@ -196,13 +197,18 @@ REMOTE_MAX_METADATA_CHARS = 16_384
 
 #: Server-side chunking of long documents (`chunk: true` items): the raw
 #: text may be larger, and it is split into fixed character windows of
-#: ``REMOTE_CHUNK_SIZE`` at offsets 0, size, 2*size... — byte-for-byte the
-#: split `mnemostack index` applies to prose files, so ids, `--prune`,
-#: payload refresh and `resolve` treat remote documents identically. The
-#: TOTAL number of chunks one request may produce stays bounded: embedding
-#: work is the resource a caller-controlled request must not scale.
+#: ``REMOTE_CHUNK_SIZE`` at offsets 0, size, 2*size... — the split
+#: `mnemostack index` applies to prose files at its DEFAULT ``--chunk-size``
+#: (kept equal to ``VectorConfig.chunk_size``, pinned by test), so with
+#: default settings a document POSTed here and the same file indexed on the
+#: box produce identical chunk ids. A deployment indexing with a custom
+#: ``--chunk-size`` (or via the section-aware markdown indexer) produces
+#: different boundaries — cross-path dedup holds only for the matching
+#: split. The TOTAL number of chunks one request may produce stays bounded:
+#: embedding work is the resource a caller-controlled request must not
+#: scale.
 REMOTE_MAX_DOC_CHARS = 262_144
-REMOTE_CHUNK_SIZE = 1_200
+REMOTE_CHUNK_SIZE = 800
 REMOTE_MAX_CHUNKS_PER_REQUEST = 128
 
 #: Metadata keys a remote caller may never supply, beyond the underscore
@@ -219,6 +225,40 @@ _REMOTE_RESERVED_METADATA_KEYS = _PROTECTED_PAYLOAD_KEYS | {
     "tags",
     "timestamp",
 }
+
+
+def _parse_iso_timestamp(value: str):
+    """`datetime` for an ISO-8601 string, or None when it doesn't parse.
+
+    Tolerates a trailing ``Z`` (Python 3.10's ``fromisoformat`` doesn't).
+    """
+    from datetime import datetime as _dt
+
+    try:
+        return _dt.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
+#: Per-tenant write serialization for THIS process. The quota preflight and
+#: the store-backed duplicate check are read-then-write sequences; without
+#: serialization two concurrent same-tenant requests could both pass a
+#: near-cap preflight (exceeding the cap) or both embed the same new item.
+#: One lock per tenant keeps unrelated tenants fully parallel. Cross-PROCESS
+#: writers (multi-worker deployments) remain best-effort — the quota is a
+#: guardrail, not a security boundary (documented since the quota feature
+#: shipped), and duplicate ids still collapse to one stored point.
+_TENANT_WRITE_LOCKS: dict[str | None, threading.Lock] = {}
+_TENANT_WRITE_LOCKS_GUARD = threading.Lock()
+
+
+def _tenant_write_lock(tenant: str | None) -> threading.Lock:
+    with _TENANT_WRITE_LOCKS_GUARD:
+        lock = _TENANT_WRITE_LOCKS.get(tenant)
+        if lock is None:
+            lock = threading.Lock()
+            _TENANT_WRITE_LOCKS[tenant] = lock
+        return lock
 
 
 def _normalized_metadata_key(key: str) -> str:
@@ -261,6 +301,7 @@ def validate_remote_item(
     *,
     offset: int = 0,
     chunk: bool = False,
+    reserved_extra: frozenset[str] | set[str] | None = None,
 ) -> str | None:
     """First violated constraint of one remote item, or None when clean.
 
@@ -269,7 +310,9 @@ def validate_remote_item(
     raises the text ceiling to the document cap (the server splits it) but
     requires a non-empty ``source`` — chunk ids are (source, offset)-keyed,
     and an unnamed multi-chunk document would collide at offset positions
-    with every other unnamed document."""
+    with every other unnamed document. ``reserved_extra`` lets a deployment
+    reserve additional payload keys (its configured text/timestamp keys) so
+    metadata can't shadow what recall actually reads."""
     if not isinstance(text, str) or not text.strip():
         return "text must be a non-empty string"
     if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
@@ -289,10 +332,21 @@ def validate_remote_item(
         return "source must be a string"
     if len(source) > REMOTE_MAX_SOURCE_CHARS:
         return f"source exceeds {REMOTE_MAX_SOURCE_CHARS} characters"
-    if timestamp is not None and (
-        not isinstance(timestamp, str) or len(timestamp) > REMOTE_MAX_TIMESTAMP_CHARS
-    ):
-        return "timestamp must be an ISO-8601 string"
+    if "|" in source or any(ord(ch) < 0x20 for ch in source):
+        # `stable_chunk_id` joins (source, offset, text) with "|" (and the
+        # tenant with NUL): ("a", 0, "0|X") and ("a|0", 0, "X") would hash
+        # identically, letting one memory masquerade as a duplicate of
+        # unrelated content. The provenance verifier already treats
+        # pipe-bearing sources as ambiguous — the untrusted surface rejects
+        # them outright.
+        return "source must not contain '|' or control characters"
+    if timestamp is not None:
+        if not isinstance(timestamp, str) or len(timestamp) > REMOTE_MAX_TIMESTAMP_CHARS:
+            return "timestamp must be an ISO-8601 string"
+        if _parse_iso_timestamp(timestamp) is None:
+            # A stored-but-unparseable event time would silently drop the
+            # memory out of temporal recall while reporting it stored.
+            return "timestamp must be an ISO-8601 string"
     if not isinstance(tags, list) or len(tags) > REMOTE_MAX_TAGS:
         return f"tags must be a list of at most {REMOTE_MAX_TAGS} strings"
     for tag in tags:
@@ -302,7 +356,19 @@ def validate_remote_item(
         return "metadata must be an object"
     if len(metadata) > REMOTE_MAX_METADATA_KEYS:
         return f"metadata exceeds {REMOTE_MAX_METADATA_KEYS} keys"
+    non_string = sorted(str(k) for k in metadata if not isinstance(k, str))
+    if non_string:
+        # Distinct from the reserved-namespace rejection: "reserved" tells a
+        # caller to rename the key; this tells them the key TYPE is wrong.
+        return "metadata keys must be strings: " + ", ".join(non_string)
     reserved = reserved_metadata_keys(metadata)
+    if reserved_extra:
+        extra_hits = sorted(
+            k
+            for k in metadata
+            if _normalized_metadata_key(k) in {e.casefold() for e in reserved_extra}
+        )
+        reserved = sorted(set(reserved) | set(extra_hits))
     if reserved:
         return "metadata uses reserved key(s): " + ", ".join(reserved)
     try:
@@ -386,6 +452,9 @@ def ingest_remote_items(
     *,
     tenant: str | None = None,
     max_points: int | None = None,
+    text_key: str = "text",
+    timestamp_key: str = "timestamp",
+    timestamp_format: str = "iso",
 ) -> list[RemoteMemoryResult]:
     """Ingest client-supplied items with store-backed duplicate detection.
 
@@ -398,9 +467,75 @@ def ingest_remote_items(
     ``EmbeddingSpaceError`` for the caller's surface to map; per-item
     embedding failures are reported as ``failed``, never raised.
 
+    ``text_key``/``timestamp_key``/``timestamp_format`` mirror the
+    deployment's recall schema: on a collection with non-default keys the
+    payload additionally carries the text under ``text_key`` and the event
+    time under ``timestamp_key`` (converted into the collection's own
+    domain — iso/epoch/epoch_ms), so remotely written memories are
+    readable and temporally recallable exactly like operator-indexed ones.
+
+    The read-then-write sequences (quota preflight, duplicate detection)
+    are serialized per tenant within this process; cross-process writers
+    remain best-effort (the quota is a guardrail — see deployment docs).
+
     Validation (`validate_remote_item`) is the CALLER's obligation — this
     function trusts its items are within caps and clean of reserved keys.
     """
+    # First remote write on a fresh deployment must not require an operator
+    # ingest to have created the collection (idempotent when it exists).
+    try:
+        store.ensure_collection()
+    except AttributeError:
+        pass  # duck store without the hook
+    with _tenant_write_lock(tenant):
+        return _ingest_remote_items_locked(
+            embedding,
+            store,
+            items,
+            tenant=tenant,
+            max_points=max_points,
+            text_key=text_key,
+            timestamp_key=timestamp_key,
+            timestamp_format=timestamp_format,
+        )
+
+
+def _remote_schema_enricher(
+    text_key: str, timestamp_key: str, timestamp_format: str
+) -> Callable[[IngestItem], dict[str, Any]] | None:
+    """Payload enricher mapping items onto a non-default recall schema."""
+    if text_key == "text" and timestamp_key == "timestamp":
+        return None
+
+    def _enrich(item: IngestItem) -> dict[str, Any]:
+        extra: dict[str, Any] = {}
+        if text_key != "text":
+            extra[text_key] = item.text
+        if timestamp_key != "timestamp" and item.timestamp:
+            dt = _parse_iso_timestamp(item.timestamp)
+            if dt is not None:
+                if timestamp_format == "epoch":
+                    extra[timestamp_key] = dt.timestamp()
+                elif timestamp_format == "epoch_ms":
+                    extra[timestamp_key] = dt.timestamp() * 1000
+                else:
+                    extra[timestamp_key] = item.timestamp
+        return extra
+
+    return _enrich
+
+
+def _ingest_remote_items_locked(
+    embedding: EmbeddingProvider,
+    store: VectorStore,
+    items: list[IngestItem],
+    *,
+    tenant: str | None,
+    max_points: int | None,
+    text_key: str,
+    timestamp_key: str,
+    timestamp_format: str,
+) -> list[RemoteMemoryResult]:
     ids = [
         stable_chunk_id(item.source, item.offset, item.text, tenant=tenant)
         for item in items
@@ -423,6 +558,10 @@ def ingest_remote_items(
         # request BEFORE any embedding: an over-quota request must cost zero
         # provider calls and commit nothing — never a partial write behind a
         # quota error. (`to_ingest` is exactly the genuinely-new unique ids.)
+        # Deliberately CONSERVATIVE: items that will later fail embedding
+        # still count here (which one will fail is unknowable pre-embed), so
+        # a mixed batch at the cap edge is rejected whole rather than the
+        # invariant weakened to a partial commit.
         if tenant is not None and max_points is not None:
             enforce_points_quota(
                 tenant, store.count(tenant=tenant), len(to_ingest), max_points
@@ -438,6 +577,10 @@ def ingest_remote_items(
             skip_seen=False,  # duplicates were resolved against the STORE above
             tenant=tenant,
             max_points=max_points,
+            # Non-default recall schema: mirror text/event-time under the
+            # deployment's configured keys so remote memories are readable
+            # and temporally recallable like operator-indexed ones.
+            enrich=_remote_schema_enricher(text_key, timestamp_key, timestamp_format),
         )
         stats = ingestor.ingest(to_ingest)
         stored = {str(pid) for pid in stats.ids}

@@ -8,6 +8,7 @@ import pytest
 
 _fastmcp = pytest.importorskip("fastmcp")
 
+from mnemostack.ingest import validate_remote_item  # noqa: E402
 from mnemostack.mcp import build_server  # noqa: E402
 
 
@@ -1129,14 +1130,13 @@ def test_mcp_remember_chunks_documents(tmp_path, monkeypatch):
 
 
 def test_mcp_remember_rejects_negative_offset(tmp_path, monkeypatch):
-    # Codex-review pin: HTTP rejects offset<0 via pydantic ge=0; the MCP
-    # surface must enforce the identical contract through the shared
-    # validator instead of accepting malformed positions.
+    # Codex/agent round-2 pins: the MCP tool SCHEMA mirrors HTTP's ge=0, so
+    # a negative offset is rejected at the protocol layer (introspecting
+    # clients see the cap); the shared validator remains the backstop.
     mcp, _store, _emb = _remember_mcp(tmp_path, monkeypatch)
-    r = asyncio.run(
-        mcp.call_tool("mnemostack_remember", {"text": "x", "offset": -5})
-    ).structured_content
-    assert r["ok"] is False and "non-negative" in r["error"]
+    with pytest.raises(Exception, match="greater than or equal|-5"):
+        asyncio.run(mcp.call_tool("mnemostack_remember", {"text": "x", "offset": -5}))
+    assert "non-negative" in validate_remote_item("x", "s", None, [], {}, offset=-5)
 
 
 def test_mcp_remember_enforces_quota_with_error_kind(tmp_path, monkeypatch):
@@ -1180,6 +1180,31 @@ def test_mcp_remember_enforces_quota_with_error_kind(tmp_path, monkeypatch):
     ).structured_content
     assert over["ok"] is False and over["error_kind"] == "quota_exceeded"
     bad = asyncio.run(
-        mcp.call_tool("mnemostack_remember", {"text": "x", "offset": -1})
+        mcp.call_tool("mnemostack_remember", {"text": "x", "metadata": {"tenant_id": "z"}})
     ).structured_content
     assert bad["error_kind"] == "invalid_argument"
+
+
+def test_mcp_remember_oversized_chunk_expansion_is_invalid_argument(tmp_path, monkeypatch):
+    """Round-2 pin: a document expanding past the per-call chunk budget maps
+    to error_kind=invalid_argument (split it), not a generic backend error
+    an agent would blindly retry."""
+    from mnemostack.ingest import REMOTE_CHUNK_SIZE, REMOTE_MAX_CHUNKS_PER_REQUEST
+
+    mcp, _store, _emb = _remember_mcp(tmp_path, monkeypatch)
+    text = "z" * (REMOTE_CHUNK_SIZE * (REMOTE_MAX_CHUNKS_PER_REQUEST + 1))
+    r = asyncio.run(
+        mcp.call_tool(
+            "mnemostack_remember", {"text": text, "source": "doc.md", "chunk": True}
+        )
+    ).structured_content
+    assert r["ok"] is False and r["error_kind"] == "invalid_argument"
+    assert "split" in r["error"]
+
+
+def test_mcp_remember_auth_failures_carry_error_kind(tmp_path, monkeypatch):
+    mcp, _store, _emb = _remember_mcp(tmp_path, monkeypatch, scopes="read")
+    r = asyncio.run(
+        mcp.call_tool("mnemostack_remember", {"text": "x"})
+    ).structured_content
+    assert r["ok"] is False and r["error_kind"] == "unauthorized"

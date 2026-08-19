@@ -525,3 +525,185 @@ def test_triples_stamps_the_key_tenant_and_isolates_failures(monkeypatch, tmp_pa
     assert [x["status"] for x in data["results"]] == ["added", "failed"]
     assert calls[0]["tenant"] == "alpha"  # graph-side tenant stamp from the KEY
     assert data["results"][1]["error"] == "RuntimeError"  # type only, no backend text
+
+
+# ------------------------------------------------- round-2 review batch pins
+
+
+def test_remote_chunk_size_matches_the_index_default():
+    """The cross-path id claim holds only while the remote split equals the
+    CLI's default --chunk-size — pin the coupling so either side moving
+    breaks loudly."""
+    from mnemostack.config import VectorConfig
+
+    assert REMOTE_CHUNK_SIZE == VectorConfig().chunk_size
+
+
+def test_remote_ingest_creates_the_collection_on_first_write():
+    """A fresh deployment's FIRST write must not 500 on a missing
+    collection — no operator pre-ingest required."""
+    emb = _CountingEmbedding()
+    store = VectorStore(collection="fresh", dimension=3)
+    store.client = QdrantClient(":memory:")  # deliberately NO ensure_collection
+    (res,) = ingest_remote_items(emb, store, [IngestItem(text="first", source="s")])
+    assert res.status == "stored"
+
+
+def test_remote_ingest_honors_configured_schema_keys():
+    """A deployment with non-default recall.text_key/timestamp_key must see
+    remote memories: the payload mirrors text and the domain-converted
+    event time under the configured keys."""
+    emb, store = _CountingEmbedding(), _mem_store()
+    (res,) = ingest_remote_items(
+        emb,
+        store,
+        [IngestItem(text="hello", source="s", timestamp="2026-08-20T10:00:00+00:00")],
+        tenant="a",
+        text_key="content",
+        timestamp_key="ts",
+        timestamp_format="epoch",
+    )
+    point = store.client.retrieve(store.collection, ids=[res.id], with_payload=True)[0]
+    assert point.payload["content"] == "hello"
+    assert point.payload["text"] == "hello"  # historical key stays
+    assert isinstance(point.payload["ts"], float)  # epoch domain, not ISO
+    assert point.payload["timestamp"] == "2026-08-20T10:00:00+00:00"
+
+
+def test_validator_rejects_pipe_and_control_chars_in_source():
+    assert "source" in validate_remote_item("t", "a|b", None, [], {})
+    assert "source" in validate_remote_item("t", "a\x00b", None, [], {})
+    assert validate_remote_item("t", "chat/2026-08-20.md", None, [], {}) is None
+
+
+def test_validator_rejects_non_iso_timestamps():
+    assert "ISO-8601" in validate_remote_item("t", "s", "not-a-date", [], {})
+    assert validate_remote_item("t", "s", "2026-08-20T10:00:00Z", [], {}) is None
+
+
+def test_validator_reserves_configured_schema_keys():
+    err = validate_remote_item(
+        "t", "s", None, [], {"content": "shadow"}, reserved_extra={"content"}
+    )
+    assert "content" in err
+    assert (
+        validate_remote_item("t", "s", None, [], {"other": 1}, reserved_extra={"content"})
+        is None
+    )
+
+
+def test_validator_distinguishes_non_string_keys_from_reserved():
+    assert "must be strings" in validate_remote_item("t", "s", None, [], {1: "x"})
+
+
+def test_expand_exactly_at_the_chunk_budget_succeeds():
+    text = "c" * (REMOTE_CHUNK_SIZE * REMOTE_MAX_CHUNKS_PER_REQUEST)
+    flat, _ = expand_remote_items([(IngestItem(text=text, source="d.md"), True)])
+    assert len(flat) == REMOTE_MAX_CHUNKS_PER_REQUEST
+
+
+def test_memories_rejects_configured_schema_key_in_metadata(monkeypatch, tmp_path):
+    """HTTP surface reserves the deployment's text/timestamp keys too."""
+    import mnemostack.server as srv
+
+    emb = _CountingEmbedding()
+    store = _mem_store("schema")
+    monkeypatch.setattr(srv, "VectorStore", lambda **_: store)
+    monkeypatch.setattr(srv, "get_provider", lambda _n, **_k: emb)
+
+    class _Probe:
+        def get_collections(self):
+            return object()
+
+    monkeypatch.setattr(srv, "_make_probe_client", lambda *_a, **_k: _Probe())
+    monkeypatch.setattr(srv, "Recaller", lambda **_: object())
+    monkeypatch.setattr(srv, "VectorRetriever", lambda **_: object())
+    monkeypatch.setattr(srv, "BM25Retriever", lambda **_: object())
+    monkeypatch.setattr(srv, "MemgraphRetriever", lambda **_: object())
+    monkeypatch.setattr(srv, "TemporalRetriever", lambda **_: object())
+    monkeypatch.setattr(srv, "build_full_pipeline", lambda **_: object())
+    monkeypatch.setattr(srv, "FileStateStore", lambda path: object())
+
+    def _no_llm(*_a, **_k):
+        raise RuntimeError("no llm")
+
+    monkeypatch.setattr(srv, "get_llm", _no_llm)
+    app = build_app(
+        ServerConfig(
+            provider_name="fake", llm_name="fake", graph_uri=None, text_key="content"
+        )
+    )
+    client = TestClient(app)
+    r = client.post(
+        "/memories", json={"items": [{"text": "x", "metadata": {"content": "shadow"}}]}
+    )
+    assert r.status_code == 400 and "content" in r.json()["detail"]
+
+
+def test_triples_rejects_blank_components(monkeypatch, tmp_path):
+    app, _store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
+    # Validation precedes the graph-availability check: a blank component is
+    # a caller-fixable 400 even on a graphless deployment.
+    r = TestClient(app).post(
+        "/triples",
+        json={"triples": [{"subject": " ", "predicate": "p", "object": "o"}]},
+        headers={"X-API-Key": keys["write"]},
+    )
+    assert r.status_code == 400 and "non-blank" in r.json()["detail"]
+
+
+def test_remote_ingest_same_tenant_writes_are_serialized():
+    """The per-tenant lock makes preflight+ingest atomic in-process: two
+    threads racing one remaining quota slot store exactly one point."""
+    import threading as _threading
+
+    from mnemostack.quotas import QuotaExceededError
+
+    emb, store = _CountingEmbedding(), _mem_store()
+    outcomes: list[str] = []
+
+    def _write(text: str) -> None:
+        try:
+            ingest_remote_items(
+                emb, store, [IngestItem(text=text, source="s")], tenant="a", max_points=1
+            )
+            outcomes.append("stored")
+        except QuotaExceededError:
+            outcomes.append("quota")
+
+    t1 = _threading.Thread(target=_write, args=("one",))
+    t2 = _threading.Thread(target=_write, args=("two",))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+    assert sorted(outcomes) == ["quota", "stored"]
+    assert store.count(tenant="a") == 1  # never over the cap in-process
+
+
+def test_validator_enforces_tag_and_metadata_caps():
+    from mnemostack.ingest import (
+        REMOTE_MAX_METADATA_CHARS,
+        REMOTE_MAX_METADATA_KEYS,
+        REMOTE_MAX_TAG_CHARS,
+        REMOTE_MAX_TAGS,
+    )
+
+    assert "tags" in validate_remote_item("t", "s", None, ["x"] * (REMOTE_MAX_TAGS + 1), {})
+    assert "tag" in validate_remote_item("t", "s", None, ["y" * (REMOTE_MAX_TAG_CHARS + 1)], {})
+    many_keys = {f"k{i}": 1 for i in range(REMOTE_MAX_METADATA_KEYS + 1)}
+    assert "keys" in validate_remote_item("t", "s", None, [], many_keys)
+    fat = {"blob": "v" * (REMOTE_MAX_METADATA_CHARS + 1)}
+    assert "serialized" in validate_remote_item("t", "s", None, [], fat)
+
+
+def test_memories_caps_the_item_count(monkeypatch, tmp_path):
+    from mnemostack.ingest import REMOTE_MAX_ITEMS
+
+    app, _store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
+    r = TestClient(app).post(
+        "/memories",
+        json={"items": [{"text": f"m{i}"} for i in range(REMOTE_MAX_ITEMS + 1)]},
+        headers={"X-API-Key": keys["write"]},
+    )
+    assert r.status_code == 422  # pydantic max_length on the batch

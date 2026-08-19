@@ -433,7 +433,7 @@ Validation failures return structured errors:
 | `timestamp` | `string` | `null` | Event time of the content (ISO-8601); drives temporal recall. |
 | `tags` | `array<string>` | `[]` | Optional tags stored in the payload. |
 | `metadata` | `object` | `{}` | Free payload fields, filterable at recall. Server-reserved keys (underscore-prefixed, structural ones like `tenant_id`/`source`, and `tags`/`timestamp` — use their dedicated parameters) are rejected. |
-| `chunk` | `boolean` | `false` | Split a long document server-side into the same fixed windows `mnemostack index` uses (identical chunk ids); the expansion is capped per call. |
+| `chunk` | `boolean` | `false` | Split a long document server-side into the fixed windows `mnemostack index` uses at its default `--chunk-size` (identical chunk ids under default settings; a custom chunk size or the markdown indexer differ); the expansion is capped per call. |
 
 **Return shape:**
 
@@ -447,7 +447,7 @@ Validation failures return structured errors:
 }
 ```
 
-Each result's `status` is `stored`, `duplicate` (content already present — nothing embedded), or `failed` (embedding failure for that item). On failure the tool returns `{"ok": false, "error": …, "error_kind": …}` where `error_kind` distinguishes `invalid_argument` (fix the input), `quota_exceeded` (the tenant's storage cap; back off or raise the quota), and `embedding_space` (deployment misconfiguration — an operator issue).
+Each result's `status` is `stored`, `duplicate` (content already present — nothing embedded), or `failed` (embedding failure for that item). Every failure returns `{"ok": false, "error": …, "error_kind": …}`; `error_kind` is one of `invalid_argument` (fix the input — includes a document expanding past the per-call chunk budget: split it), `unauthorized` (missing/revoked key or missing `write` scope), `quota_exceeded` (the tenant's storage cap; back off or raise the quota), `embedding_space` (deployment misconfiguration — an operator issue), or `error` (any other backend failure — do not retry blindly).
 
 The tenant's storage quota is enforced before any write — the tool reads the quota store configured via `mcp-serve --quotas-file` / `MNEMOSTACK_QUOTAS_FILE` / `build_server(quotas_file=…)`. **Point it at the same file `serve --quotas-file` uses**: a deployment with quotas at a non-default path that starts `mcp-serve` without this setting gets HTTP writes capped but MCP writes unbounded.
 
