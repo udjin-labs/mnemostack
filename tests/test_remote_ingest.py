@@ -746,27 +746,74 @@ def test_naive_timestamps_convert_as_utc():
 
 
 def test_collection_bootstrap_survives_a_concurrent_create_race():
-    """Agent-R3/R4: ensure_collection is check-then-create; the loser of a
-    concurrent first-write race confirms the winner's collection EXISTS and
-    proceeds — discriminated recovery, not a blind second create."""
+    """R3-R5 evolution: the race has exactly one shape — absent BEFORE,
+    present AFTER. The loser then re-runs ensure so the winner's collection
+    still passes validation (dimension/sparse), raising honestly if not."""
     emb = _CountingEmbedding()
     real = _mem_store("race")
 
     class _RacyStore:
         def __init__(self):
-            self.calls = 0
+            self.ensure_calls = 0
+            self.exists_calls = 0
+
+        def collection_exists(self):
+            self.exists_calls += 1
+            # Absent at the pre-check, present after the winner's create.
+            return self.exists_calls > 1
 
         def ensure_collection(self):
-            self.calls += 1
-            raise RuntimeError("already exists")  # lost the create race
+            self.ensure_calls += 1
+            if self.ensure_calls == 1:
+                raise RuntimeError("already exists")  # lost the create race
+            # revalidation pass on the winner's collection succeeds
 
         def __getattr__(self, name):
-            return getattr(real, name)  # collection_exists -> True (winner won)
+            return getattr(real, name)
 
     racy = _RacyStore()
     (res,) = ingest_remote_items(emb, racy, [IngestItem(text="r", source="s")])
     assert res.status == "stored"
-    assert racy.calls == 1  # one loss, existence-confirmed, no second create
+    assert racy.ensure_calls == 2  # loss + honest revalidation of the winner
+
+
+def test_bootstrap_never_masks_pre_existing_collection_validation():
+    """Codex-R5 P1: an ensure failure on a collection that EXISTED BEFORE is
+    validation (dimension mismatch, sparse space) — it must propagate, not
+    be swallowed as a supposed create race."""
+    emb = _CountingEmbedding()
+
+    class _MismatchedStore:
+        def __init__(self):
+            self.ensure_calls = 0
+
+        def collection_exists(self):
+            return True  # pre-existing collection
+
+        def ensure_collection(self):
+            self.ensure_calls += 1
+            raise ValueError("dimension mismatch: expected 3, found 768")
+
+    bad = _MismatchedStore()
+    with pytest.raises(ValueError, match="dimension mismatch"):
+        ingest_remote_items(emb, bad, [IngestItem(text="x", source="s")])
+    assert bad.ensure_calls == 1  # no second attempt against a broken schema
+    assert emb.embedded == []  # nothing embedded before the loud failure
+
+
+def test_bootstrap_duck_store_surfaces_the_original_error():
+    """Agent-R5 P2: a duck store without collection_exists must surface the
+    ORIGINAL ensure failure, not an AttributeError about the missing hook."""
+    emb = _CountingEmbedding()
+
+    class _DuckStore:
+        def ensure_collection(self):
+            raise RuntimeError("qdrant unreachable")
+
+        # no collection_exists at all
+
+    with pytest.raises(RuntimeError, match="unreachable"):
+        ingest_remote_items(emb, _DuckStore(), [IngestItem(text="x", source="s")])
 
 
 def test_reserved_extra_matching_is_nfkc_symmetric():

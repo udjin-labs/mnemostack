@@ -498,17 +498,32 @@ def ingest_remote_items(
     # a genuine failure (store down, dimension mismatch) re-raises without
     # doubling load.
     if not getattr(store, "_remote_bootstrap_done", False):
+        # Existence is sampled BEFORE ensure: the create race has exactly one
+        # shape — absent before, present after. An ensure failure on a
+        # PRE-EXISTING collection is validation (dimension mismatch, missing
+        # sparse space) and must propagate untouched; treating "exists now"
+        # alone as proof of a race would swallow exactly those guards.
+        try:
+            existed_before: bool | None = store.collection_exists()
+        except AttributeError:
+            existed_before = None  # duck store: cannot discriminate a race
         try:
             store.ensure_collection()
         except AttributeError:
             pass  # duck store without the hook
         except Exception:
-            try:
-                exists = store.collection_exists()
-            except AttributeError:
-                raise  # duck store: no way to discriminate — surface the error
-            if not exists:
-                raise  # not a create race: genuinely broken, fail loud
+            appeared = False
+            if existed_before is False:
+                try:
+                    appeared = bool(store.collection_exists())
+                except Exception:  # noqa: BLE001 — keep the ORIGINAL error
+                    appeared = False
+            if not appeared:
+                raise  # genuine failure (or undiscriminable duck): loud
+            # Lost the concurrent create race — the winner's collection is
+            # up, but it still has to pass OUR validation (dimension,
+            # sparse space): re-run ensure and let it raise honestly.
+            store.ensure_collection()
         try:
             # Instance-level marker, deliberately not part of the store
             # protocol (a slotted/frozen duck store just re-runs bootstrap).
@@ -557,23 +572,19 @@ def _apply_timestamp_domain(
     """
     from datetime import timezone as _tz
 
-    if timestamp_format == "iso":
-        if timestamp_key == "timestamp":
-            return  # default schema: the pipeline's own handling is exact
-        for item in items:
-            if item.timestamp:
-                # Mirror under the configured key; the historical `timestamp`
-                # field keeps the ISO value via the explicit item field.
-                item.metadata[timestamp_key] = item.timestamp
-        return
     if timestamp_format not in ("epoch", "epoch_ms"):
-        # Unrecognized format: the SAFE default is ISO passthrough — the
-        # codebase-wide convention (_emit_epoch_bound, validity utils).
-        # Converting on an unvalidated string would let a typo'd config
-        # silently replace every ISO event time with bogus numbers.
+        # "iso" — and, deliberately, ANY unrecognized format: the safe
+        # default is ISO passthrough (the codebase-wide convention —
+        # _emit_epoch_bound, validity utils). Converting on an unvalidated
+        # format string would let a typo'd config silently replace every
+        # ISO event time with bogus numbers. The service surfaces validate
+        # the format at boot, so this branch is their "iso" path and the
+        # library caller's safety net.
         if timestamp_key != "timestamp":
             for item in items:
                 if item.timestamp:
+                    # Mirror under the configured key; the historical
+                    # `timestamp` field keeps ISO via the explicit field.
                     item.metadata[timestamp_key] = item.timestamp
         return
     for item in items:

@@ -432,7 +432,7 @@ Validation failures return structured errors:
 | `offset` | `integer` | `0` | Position within `source` for multi-part documents. |
 | `timestamp` | `string` | `null` | Event time of the content (ISO-8601); drives temporal recall. |
 | `tags` | `array<string>` | `[]` | Optional tags stored in the payload. |
-| `metadata` | `object` | `{}` | Free payload fields, filterable at recall. Server-reserved keys (underscore-prefixed, structural ones like `tenant_id`/`source`, and `tags`/`timestamp` — use their dedicated parameters) are rejected. |
+| `metadata` | `object` | `{}` | Free payload fields, filterable at recall. Server-reserved keys (underscore-prefixed, structural ones like `tenant_id`/`source`, `tags`/`timestamp` — use their dedicated parameters — and the lifecycle marker `invalidated_at`, settable only through `mnemostack_invalidate`) are rejected. |
 | `chunk` | `boolean` | `false` | Split a long document server-side into the fixed windows `mnemostack index` uses at its default `--chunk-size` (identical chunk ids under default settings; a custom chunk size or the markdown indexer differ); the expansion is capped per call. |
 
 **Return shape:**

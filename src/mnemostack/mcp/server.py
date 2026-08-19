@@ -901,8 +901,10 @@ def build_server(
             Field(
                 description=(
                     "Free payload fields, filterable at recall. Server-reserved "
-                    "keys (underscore-prefixed and structural ones like "
-                    "tenant_id/source) are rejected."
+                    "keys (underscore-prefixed, structural ones like "
+                    "tenant_id/source, tags/timestamp — use their dedicated "
+                    "parameters — and the lifecycle marker invalidated_at, "
+                    "settable only via mnemostack_invalidate) are rejected."
                 )
             ),
         ] = None,
