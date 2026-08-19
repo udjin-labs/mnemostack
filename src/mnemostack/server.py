@@ -644,7 +644,7 @@ def _memory_of(result) -> Memory:
     payload = {
         key: value
         for key, value in payload.items()
-        if key not in ("_vector_floor_candidates", "_attributed_filters")
+        if key not in ("_vector_floor_candidates", "_attributed_filters", "_enrich_keys")
     }
     # Common source fields populated by our indexers. Order matters: explicit
     # 'source' wins, then the workspace conventions, finally nothing.

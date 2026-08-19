@@ -1241,3 +1241,17 @@ def test_mcp_write_store_carries_sparse_flag_under_sparse_mode(tmp_path, monkeyp
     asyncio.run(mcp.call_tool("mnemostack_remember", {"text": "x", "source": "s"}))
     assert captured.get("sparse_text") is True
     assert captured.get("text_key") == "content"
+
+
+def test_mcp_build_server_rejects_bad_timestamp_format(tmp_path, monkeypatch):
+    """Agent-R4 P1: MCP builds retrievers lazily, so the format must be
+    validated at BOOT (like HTTP's eager TemporalRetriever) — otherwise a
+    typo'd config reaches the remember tool's domain conversion first."""
+    import mnemostack.mcp.server as srv
+
+    monkeypatch.setattr(srv, "get_provider", lambda *a, **k: SimpleNamespace(dimension=3))
+    monkeypatch.setattr(srv, "VectorStore", lambda **_: MagicMock())
+    with pytest.raises(ValueError, match="timestamp_format"):
+        build_server(
+            collection="t", embedding_provider="ollama", timestamp_format="epoc_typo"
+        )

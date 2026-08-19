@@ -746,8 +746,9 @@ def test_naive_timestamps_convert_as_utc():
 
 
 def test_collection_bootstrap_survives_a_concurrent_create_race():
-    """Agent-R3 P2: ensure_collection is check-then-create; the loser of a
-    concurrent first-write race retries once instead of failing the write."""
+    """Agent-R3/R4: ensure_collection is check-then-create; the loser of a
+    concurrent first-write race confirms the winner's collection EXISTS and
+    proceeds — discriminated recovery, not a blind second create."""
     emb = _CountingEmbedding()
     real = _mem_store("race")
 
@@ -757,16 +758,15 @@ def test_collection_bootstrap_survives_a_concurrent_create_race():
 
         def ensure_collection(self):
             self.calls += 1
-            if self.calls == 1:
-                raise RuntimeError("already exists")  # lost the create race
+            raise RuntimeError("already exists")  # lost the create race
 
         def __getattr__(self, name):
-            return getattr(real, name)
+            return getattr(real, name)  # collection_exists -> True (winner won)
 
     racy = _RacyStore()
     (res,) = ingest_remote_items(emb, racy, [IngestItem(text="r", source="s")])
     assert res.status == "stored"
-    assert racy.calls == 2  # one loss, one confirming retry
+    assert racy.calls == 1  # one loss, existence-confirmed, no second create
 
 
 def test_reserved_extra_matching_is_nfkc_symmetric():
@@ -781,3 +781,86 @@ def test_reserved_extra_matching_is_nfkc_symmetric():
         "t", "s", None, [], {composed: "x"}, reserved_extra={decomposed}
     )
     assert err is not None and "reserved" in err
+
+
+# ------------------------------------------------- round-4 review batch pins
+
+
+def test_invalidated_at_is_reserved_metadata():
+    """Codex-R4: the server-owned stale marker cannot be planted at ingest —
+    a client would store memories that default recall silently hides."""
+    assert reserved_metadata_keys({"invalidated_at": "2026-01-01"}) == ["invalidated_at"]
+    assert "invalidated_at" in validate_remote_item(
+        "t", "s", None, [], {"invalidated_at": "2026-01-01"}
+    )
+
+
+def test_unknown_timestamp_format_passes_iso_through():
+    """Agent-R4 P1: an unrecognized format must NOT convert (the safe
+    default is ISO passthrough, the codebase-wide convention) — a typo'd
+    config cannot silently replace event times with bogus numbers."""
+    from mnemostack.ingest import _apply_timestamp_domain
+
+    item = IngestItem(text="t", source="s", timestamp="2026-08-20T10:00:00+00:00")
+    _apply_timestamp_domain([item], "timestamp", "epoc_typo")
+    assert item.timestamp == "2026-08-20T10:00:00+00:00"  # untouched
+    assert "timestamp" not in item.metadata  # no bogus numeric landed
+
+
+def test_bootstrap_does_not_mask_genuine_store_failures():
+    """Agent-R4 P2: the create-race recovery is discriminated — when the
+    collection does NOT exist after a failure, the original error surfaces
+    (store down / dimension mismatch), never a blind second create."""
+    emb = _CountingEmbedding()
+
+    class _BrokenStore:
+        def __init__(self):
+            self.ensure_calls = 0
+
+        def ensure_collection(self):
+            self.ensure_calls += 1
+            raise RuntimeError("qdrant unreachable")
+
+        def collection_exists(self):
+            return False  # genuinely absent: not a lost race
+
+    broken = _BrokenStore()
+    with pytest.raises(RuntimeError, match="unreachable"):
+        ingest_remote_items(emb, broken, [IngestItem(text="x", source="s")])
+    assert broken.ensure_calls == 1  # no blind retry doubling load
+    assert emb.embedded == []
+
+
+def test_bootstrap_runs_once_per_store_instance():
+    """Codex-R4 P2: sparse-aware ensure_collection re-verifies coverage with
+    collection-wide counts — that cost is paid once per store, not per
+    write."""
+    emb = _CountingEmbedding()
+    real = _mem_store("once")
+    calls = {"n": 0}
+    orig = real.ensure_collection
+
+    def _counting_ensure():
+        calls["n"] += 1
+        return orig()
+
+    real.ensure_collection = _counting_ensure  # type: ignore[method-assign]
+    ingest_remote_items(emb, real, [IngestItem(text="one", source="s")])
+    ingest_remote_items(emb, real, [IngestItem(text="two", source="s")])
+    assert calls["n"] == 1  # second write skipped bootstrap
+
+
+def test_enrich_keys_never_reach_public_payloads():
+    """Agent-R4 P3: the enrichment ownership record is structural — both
+    public serializers strip it."""
+    from types import SimpleNamespace
+
+    from mnemostack.mcp.server import _public_payload
+    from mnemostack.server import _memory_of
+
+    payload = {"text": "x", "_enrich_keys": ["content"], "content": "x"}
+    assert "_enrich_keys" not in _public_payload(payload)
+    mem = _memory_of(
+        SimpleNamespace(id="1", text="x", score=1.0, payload=dict(payload), sources=["vector"])
+    )
+    assert "_enrich_keys" not in mem.metadata

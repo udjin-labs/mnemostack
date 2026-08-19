@@ -224,6 +224,11 @@ _REMOTE_RESERVED_METADATA_KEYS = _PROTECTED_PAYLOAD_KEYS | {
     "indexed_at",
     "tags",
     "timestamp",
+    # Server-owned lifecycle marker: recall treats any payload carrying it
+    # as stale, so a remote caller planting it would store memories that
+    # default recall immediately hides ("stored" with a lie inside).
+    # Retraction goes through the invalidate API, never through ingest.
+    "invalidated_at",
 }
 
 
@@ -483,17 +488,33 @@ def ingest_remote_items(
     function trusts its items are within caps and clean of reserved keys.
     """
     # First remote write on a fresh deployment must not require an operator
-    # ingest to have created the collection (idempotent when it exists).
-    # ensure_collection is check-then-create: two concurrent FIRST writers
-    # (any tenants — the per-tenant lock below cannot cover this) can both
-    # see "missing" and race the create; the loser retries once and finds
-    # the winner's collection instead of failing the write.
-    try:
-        store.ensure_collection()
-    except AttributeError:
-        pass  # duck store without the hook
-    except Exception:  # noqa: BLE001 — lost the concurrent-create race
-        store.ensure_collection()
+    # ingest to have created the collection. Bootstrap runs ONCE per store
+    # instance: on a sparse-aware store ensure_collection re-verifies sparse
+    # coverage with collection-wide counts, which must not be paid on every
+    # small write. ensure_collection is check-then-create: two concurrent
+    # FIRST writers (any tenants — the per-tenant lock below cannot cover
+    # this) can both see "missing" and race the create; the loser checks
+    # whether the winner's collection now exists instead of retrying blind —
+    # a genuine failure (store down, dimension mismatch) re-raises without
+    # doubling load.
+    if not getattr(store, "_remote_bootstrap_done", False):
+        try:
+            store.ensure_collection()
+        except AttributeError:
+            pass  # duck store without the hook
+        except Exception:
+            try:
+                exists = store.collection_exists()
+            except AttributeError:
+                raise  # duck store: no way to discriminate — surface the error
+            if not exists:
+                raise  # not a create race: genuinely broken, fail loud
+        try:
+            # Instance-level marker, deliberately not part of the store
+            # protocol (a slotted/frozen duck store just re-runs bootstrap).
+            store._remote_bootstrap_done = True  # type: ignore[attr-defined]
+        except AttributeError:
+            pass
     with _tenant_write_lock(tenant):
         return _ingest_remote_items_locked(
             embedding,
@@ -544,6 +565,16 @@ def _apply_timestamp_domain(
                 # Mirror under the configured key; the historical `timestamp`
                 # field keeps the ISO value via the explicit item field.
                 item.metadata[timestamp_key] = item.timestamp
+        return
+    if timestamp_format not in ("epoch", "epoch_ms"):
+        # Unrecognized format: the SAFE default is ISO passthrough — the
+        # codebase-wide convention (_emit_epoch_bound, validity utils).
+        # Converting on an unvalidated string would let a typo'd config
+        # silently replace every ISO event time with bogus numbers.
+        if timestamp_key != "timestamp":
+            for item in items:
+                if item.timestamp:
+                    item.metadata[timestamp_key] = item.timestamp
         return
     for item in items:
         if not item.timestamp:

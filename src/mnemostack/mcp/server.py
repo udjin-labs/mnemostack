@@ -65,12 +65,13 @@ log = logging.getLogger(__name__)
 def _public_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
     if not payload:
         return {}
-    # Internal recall mechanics stay internal: the vector-floor working set
-    # and the graph filter-attribution proof marker are not user metadata.
+    # Internal recall mechanics stay internal: the vector-floor working set,
+    # the graph filter-attribution proof marker, and the enrichment
+    # ownership record are not user metadata.
     return {
         key: value
         for key, value in payload.items()
-        if key not in ("_vector_floor_candidates", "_attributed_filters")
+        if key not in ("_vector_floor_candidates", "_attributed_filters", "_enrich_keys")
     }
 
 
@@ -169,6 +170,14 @@ def build_server(
     """
     if not _FASTMCP_AVAILABLE:
         raise ImportError("fastmcp not installed. Install with: pip install 'mnemostack[mcp]'")
+    if timestamp_format not in ("iso", "epoch", "epoch_ms"):
+        # HTTP fails a typo'd format loud at boot (eager TemporalRetriever);
+        # MCP builds retrievers lazily, so an unvalidated format could reach
+        # the remember tool's domain conversion first — same eager check.
+        raise ValueError(
+            "timestamp_format must be one of ('iso', 'epoch', 'epoch_ms'), "
+            f"got {timestamp_format!r}"
+        )
     if rerank_mode not in RERANK_MODES:
         allowed = ", ".join(sorted(RERANK_MODES))
         raise ValueError(f"rerank_mode must be one of: {allowed}")
