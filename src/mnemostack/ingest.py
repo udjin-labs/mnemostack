@@ -41,7 +41,7 @@ from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from mnemostack.embeddings.base import EmbeddingProvider
 from mnemostack.embeddings.roles import (
@@ -171,6 +171,296 @@ _PROTECTED_PAYLOAD_KEYS = frozenset(
         "_attributed_filters",
     }
 )
+
+
+# ---------------------------------------------------------------- remote ingest
+#
+# The write surface for REMOTE clients (HTTP `POST /memories`, MCP
+# `mnemostack_remember`). Distinct from the operator paths (CLI / library):
+# the caller is untrusted, so its metadata is validated against the reserved
+# namespace, its work is bounded by explicit caps, and duplicates are
+# detected against the STORE (not a per-process cache) so retries and
+# repeated content never re-embed — cost discipline, not just idempotency.
+
+#: Hard caps on one remote ingest call. Bounds embedding cost and payload
+#: size for a caller-controlled request; an operator who needs more runs the
+#: CLI next to the stores.
+REMOTE_MAX_ITEMS = 64
+REMOTE_MAX_TEXT_CHARS = 32_768
+REMOTE_MAX_SOURCE_CHARS = 1_024
+REMOTE_MAX_TIMESTAMP_CHARS = 64
+REMOTE_MAX_TAGS = 32
+REMOTE_MAX_TAG_CHARS = 128
+REMOTE_MAX_METADATA_KEYS = 32
+REMOTE_MAX_METADATA_CHARS = 16_384
+
+#: Server-side chunking of long documents (`chunk: true` items): the raw
+#: text may be larger, and it is split into fixed character windows of
+#: ``REMOTE_CHUNK_SIZE`` at offsets 0, size, 2*size... — byte-for-byte the
+#: split `mnemostack index` applies to prose files, so ids, `--prune`,
+#: payload refresh and `resolve` treat remote documents identically. The
+#: TOTAL number of chunks one request may produce stays bounded: embedding
+#: work is the resource a caller-controlled request must not scale.
+REMOTE_MAX_DOC_CHARS = 262_144
+REMOTE_CHUNK_SIZE = 1_200
+REMOTE_MAX_CHUNKS_PER_REQUEST = 128
+
+#: Metadata keys a remote caller may never supply, beyond the underscore
+#: namespace (every "_"-prefixed key is server-structural by convention).
+#: `indexed_at` is server-stamped write time; the protected set covers the
+#: id-material trio, isolation and provenance keys. `timestamp` and `tags`
+#: are ALSO reserved here: they have dedicated request fields with their own
+#: caps and type checks, and the ingest pipeline reads them from metadata as
+#: a library-era fallback — a remote value smuggled through metadata would
+#: bypass every one of those caps. (Library/CLI callers are unaffected:
+#: this reservation applies only to the remote validator.)
+_REMOTE_RESERVED_METADATA_KEYS = _PROTECTED_PAYLOAD_KEYS | {
+    "indexed_at",
+    "tags",
+    "timestamp",
+}
+
+
+def _normalized_metadata_key(key: str) -> str:
+    """NFKC-fold a metadata key for reserved-namespace matching.
+
+    Exact-string matching alone would let `Tenant_Id` or a full-width
+    underscore variant sail through and sit in the stored payload visually
+    impersonating a structural field. Normalization is for MATCHING only —
+    the original key is what gets stored when it is clean.
+    """
+    import unicodedata
+
+    return unicodedata.normalize("NFKC", key).casefold()
+
+
+def reserved_metadata_keys(metadata: dict[str, Any]) -> list[str]:
+    """Names in *metadata* a remote caller is not allowed to set.
+
+    Returns a sorted list (empty = clean). Rejection is loud by design:
+    silently stripping would let a client believe a forged `tenant_id` or
+    `_id_scheme` was stored.
+    """
+    bad = set()
+    for key in metadata:
+        if not isinstance(key, str):
+            bad.add(str(key))
+            continue
+        normalized = _normalized_metadata_key(key)
+        if normalized.startswith("_") or normalized in _REMOTE_RESERVED_METADATA_KEYS:
+            bad.add(key)
+    return sorted(bad)
+
+
+def validate_remote_item(
+    text: str,
+    source: str,
+    timestamp: str | None,
+    tags: list[str],
+    metadata: dict[str, Any],
+    *,
+    offset: int = 0,
+    chunk: bool = False,
+) -> str | None:
+    """First violated constraint of one remote item, or None when clean.
+
+    Shared by the HTTP endpoint and the MCP tool so both surfaces enforce
+    the identical contract (caps + reserved namespace). ``chunk=True``
+    raises the text ceiling to the document cap (the server splits it) but
+    requires a non-empty ``source`` — chunk ids are (source, offset)-keyed,
+    and an unnamed multi-chunk document would collide at offset positions
+    with every other unnamed document."""
+    if not isinstance(text, str) or not text.strip():
+        return "text must be a non-empty string"
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+        return "offset must be a non-negative integer"
+    if chunk:
+        if len(text) > REMOTE_MAX_DOC_CHARS:
+            return f"text exceeds {REMOTE_MAX_DOC_CHARS} characters (chunked cap)"
+        if not isinstance(source, str) or not source.strip():
+            return "chunked items require a non-empty source"
+        if offset != 0:
+            # The server assigns window offsets for chunked documents; a
+            # caller-supplied base would silently shift ids/positions.
+            return "chunked items must leave offset at 0"
+    elif len(text) > REMOTE_MAX_TEXT_CHARS:
+        return f"text exceeds {REMOTE_MAX_TEXT_CHARS} characters (set chunk=true for documents)"
+    if not isinstance(source, str):
+        return "source must be a string"
+    if len(source) > REMOTE_MAX_SOURCE_CHARS:
+        return f"source exceeds {REMOTE_MAX_SOURCE_CHARS} characters"
+    if timestamp is not None and (
+        not isinstance(timestamp, str) or len(timestamp) > REMOTE_MAX_TIMESTAMP_CHARS
+    ):
+        return "timestamp must be an ISO-8601 string"
+    if not isinstance(tags, list) or len(tags) > REMOTE_MAX_TAGS:
+        return f"tags must be a list of at most {REMOTE_MAX_TAGS} strings"
+    for tag in tags:
+        if not isinstance(tag, str) or len(tag) > REMOTE_MAX_TAG_CHARS:
+            return f"each tag must be a string of at most {REMOTE_MAX_TAG_CHARS} characters"
+    if not isinstance(metadata, dict):
+        return "metadata must be an object"
+    if len(metadata) > REMOTE_MAX_METADATA_KEYS:
+        return f"metadata exceeds {REMOTE_MAX_METADATA_KEYS} keys"
+    reserved = reserved_metadata_keys(metadata)
+    if reserved:
+        return "metadata uses reserved key(s): " + ", ".join(reserved)
+    try:
+        import json
+
+        encoded = json.dumps(metadata, ensure_ascii=False, default=None)
+    except (TypeError, ValueError):
+        return "metadata must be JSON-serializable"
+    if len(encoded) > REMOTE_MAX_METADATA_CHARS:
+        return f"metadata exceeds {REMOTE_MAX_METADATA_CHARS} serialized characters"
+    return None
+
+
+@dataclass
+class RemoteMemoryResult:
+    """Per-item outcome of a remote ingest, in input order."""
+
+    id: str
+    status: Literal["stored", "duplicate", "failed"]
+
+
+class RemoteRequestTooLarge(ValueError):
+    """A remote request expands past the per-request chunk budget."""
+
+
+def expand_remote_items(
+    entries: list[tuple[IngestItem, bool]],
+    *,
+    chunk_size: int = REMOTE_CHUNK_SIZE,
+) -> tuple[list[IngestItem], list[int]]:
+    """Expand ``(item, chunk?)`` pairs into flat ingest items.
+
+    Chunked items are split into fixed character windows at offsets
+    0, chunk_size, 2*chunk_size... — the exact split the CLI's prose
+    indexer applies, so a document POSTed here and the same file indexed
+    on the box produce identical chunk ids. Non-chunked items pass through
+    with their caller-supplied offset. Returns the flat items plus, for
+    each, the index of the request item it came from. Raises
+    :class:`RemoteRequestTooLarge` when the expansion exceeds
+    ``REMOTE_MAX_CHUNKS_PER_REQUEST`` — embedding work per request is
+    bounded; the caller splits the request instead.
+    """
+    flat: list[IngestItem] = []
+    origins: list[int] = []
+    for idx, (item, do_chunk) in enumerate(entries):
+        if do_chunk:
+            pieces = [
+                (start, item.text[start : start + chunk_size])
+                for start in range(0, len(item.text), chunk_size)
+            ]
+        else:
+            pieces = [(item.offset, item.text)]
+        for start, piece in pieces:
+            if not piece.strip():
+                continue  # whitespace-only window: nothing to embed
+            if len(flat) >= REMOTE_MAX_CHUNKS_PER_REQUEST:
+                # Checked per PIECE so the budget is a hard boundary, not a
+                # per-item overshoot window that widens with cap tuning.
+                raise RemoteRequestTooLarge(
+                    f"request expands to more than {REMOTE_MAX_CHUNKS_PER_REQUEST} "
+                    "chunks — split it into smaller requests"
+                )
+            flat.append(
+                IngestItem(
+                    text=piece,
+                    source=item.source,
+                    offset=start,
+                    metadata=dict(item.metadata),
+                    tags=list(item.tags),
+                    timestamp=item.timestamp,
+                )
+            )
+            origins.append(idx)
+    return flat, origins
+
+
+def ingest_remote_items(
+    embedding: EmbeddingProvider,
+    store: VectorStore,
+    items: list[IngestItem],
+    *,
+    tenant: str | None = None,
+    max_points: int | None = None,
+) -> list[RemoteMemoryResult]:
+    """Ingest client-supplied items with store-backed duplicate detection.
+
+    The deterministic id of every item is computed up front; ids already in
+    the store (tenant-scoped when scoped) — and repeats within the request —
+    are reported as ``duplicate`` WITHOUT embedding, so a client retry or a
+    re-sent conversation costs zero provider calls. The rest go through a
+    fresh :class:`Ingestor` (space guard, quota check before upsert,
+    resilient batch embedding). Raises ``QuotaExceededError`` /
+    ``EmbeddingSpaceError`` for the caller's surface to map; per-item
+    embedding failures are reported as ``failed``, never raised.
+
+    Validation (`validate_remote_item`) is the CALLER's obligation — this
+    function trusts its items are within caps and clean of reserved keys.
+    """
+    ids = [
+        stable_chunk_id(item.source, item.offset, item.text, tenant=tenant)
+        for item in items
+    ]
+    tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
+    try:
+        existing = store.retrieve_existing_ids(list(ids), **tkw)
+    except AttributeError:
+        existing = set()  # duck store without the hook: everything embeds
+    to_ingest: list[IngestItem] = []
+    seen_now: set[str] = set()
+    for pid, item in zip(ids, items, strict=True):
+        if pid in existing or pid in seen_now:
+            continue
+        seen_now.add(pid)
+        to_ingest.append(item)
+    stored: set[str] = set()
+    if to_ingest:
+        # Preflight the tenant's storage quota over the WHOLE deduplicated
+        # request BEFORE any embedding: an over-quota request must cost zero
+        # provider calls and commit nothing — never a partial write behind a
+        # quota error. (`to_ingest` is exactly the genuinely-new unique ids.)
+        if tenant is not None and max_points is not None:
+            enforce_points_quota(
+                tenant, store.count(tenant=tenant), len(to_ingest), max_points
+            )
+        ingestor = Ingestor(
+            embedding,
+            store,
+            # One flush for the whole request (expansion is capped below this),
+            # so the Ingestor's own per-flush quota re-check — kept as
+            # defense-in-depth against concurrent writers — can never split
+            # the request into a committed half and a rejected half.
+            batch_size=REMOTE_MAX_CHUNKS_PER_REQUEST,
+            skip_seen=False,  # duplicates were resolved against the STORE above
+            tenant=tenant,
+            max_points=max_points,
+        )
+        stats = ingestor.ingest(to_ingest)
+        stored = {str(pid) for pid in stats.ids}
+    results: list[RemoteMemoryResult] = []
+    first_seen: set[str] = set()
+    for pid in ids:
+        status: Literal["stored", "duplicate", "failed"]
+        if pid in first_seen:
+            # An in-request repeat mirrors its first occurrence: duplicate
+            # only when the content actually exists — a repeat of a FAILED
+            # item must not read as stored-elsewhere.
+            status = "duplicate" if (pid in stored or pid in existing) else "failed"
+        elif pid in stored:
+            status = "stored"
+        elif pid in existing:
+            status = "duplicate"
+        else:
+            status = "failed"
+        first_seen.add(pid)
+        results.append(RemoteMemoryResult(id=pid, status=status))
+    counter("mnemostack.ingest.remote_items", len(items))
+    counter("mnemostack.ingest.remote_stored", sum(r.status == "stored" for r in results))
+    return results
 
 
 def apply_enrichment(

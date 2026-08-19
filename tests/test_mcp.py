@@ -1021,3 +1021,165 @@ def test_mcp_auth_recall_pipeline_keeps_scoped_graph(tmp_path, monkeypatch):
     mcp = _auth_mcp(tmp_path, monkeypatch, memgraph="bolt://x")
     asyncio.run(mcp.call_tool("mnemostack_search", {"query": "q", "limit": 1}))
     assert captured["graph_uri"] == "bolt://x"
+
+
+# ----------------------------------------------------- mnemostack_remember
+
+
+class _RememberEmbedding:
+    dimension = 3
+
+    def __init__(self):
+        self.embedded: list[str] = []
+
+    def embed(self, text):
+        self.embedded.append(text)
+        return [0.1, 0.2, 0.3]
+
+    def embed_batch(self, texts):
+        return [self.embed(t) for t in texts]
+
+
+def _remember_mcp(tmp_path, monkeypatch, *, scopes="read,write", tenant="alpha"):
+    """MCP server with a REAL in-memory vector store behind the remember tool."""
+    from qdrant_client import QdrantClient
+
+    import mnemostack.mcp.server as srv
+    from mnemostack.auth import FileKeyStore
+    from mnemostack.vector import VectorStore
+
+    emb = _RememberEmbedding()
+    store = VectorStore(collection="rem", dimension=3)
+    store.client = QdrantClient(":memory:")
+    store.ensure_collection()
+    monkeypatch.setattr(srv, "get_provider", lambda *a, **k: emb)
+    monkeypatch.setattr(srv, "VectorStore", lambda **_: store)
+    monkeypatch.setattr(srv, "VectorRetriever", lambda **_: MagicMock())
+    monkeypatch.setattr(srv, "TemporalRetriever", lambda **_: MagicMock())
+    monkeypatch.setattr(srv, "build_bm25_docs", lambda _paths: [])
+    monkeypatch.setattr(srv, "Recaller", lambda **_: MagicMock())
+    ks = tmp_path / "keys.json"
+    _kid, key = FileKeyStore(ks).issue(tenant, scopes)
+    mcp = build_server(
+        collection="rem",
+        embedding_provider="ollama",
+        auth_enabled=True,
+        api_key=key,
+        keys_file=str(ks),
+    )
+    return mcp, store, emb
+
+
+def test_mcp_remember_stores_under_the_key_tenant(tmp_path, monkeypatch):
+    mcp, store, _emb = _remember_mcp(tmp_path, monkeypatch)
+    r = asyncio.run(
+        mcp.call_tool(
+            "mnemostack_remember",
+            {"text": "the sky was green", "source": "chat", "metadata": {"k": "v"}},
+        )
+    )
+    payload = r.structured_content
+    assert payload["ok"] is True and payload["stored"] == 1
+    pid = payload["results"][0]["id"]
+    point = store.client.retrieve(store.collection, ids=[pid], with_payload=True)[0]
+    assert point.payload["tenant_id"] == "alpha"  # tenant from the process KEY
+    assert point.payload["k"] == "v"
+
+
+def test_mcp_remember_duplicates_cost_no_embedding(tmp_path, monkeypatch):
+    mcp, _store, emb = _remember_mcp(tmp_path, monkeypatch)
+    args = {"text": "same fact", "source": "chat"}
+    first = asyncio.run(mcp.call_tool("mnemostack_remember", args)).structured_content
+    n = len(emb.embedded)
+    second = asyncio.run(mcp.call_tool("mnemostack_remember", args)).structured_content
+    assert first["stored"] == 1 and second["duplicates"] == 1
+    assert len(emb.embedded) == n  # retry embedded nothing
+
+
+def test_mcp_remember_rejects_reserved_metadata(tmp_path, monkeypatch):
+    mcp, _store, _emb = _remember_mcp(tmp_path, monkeypatch)
+    r = asyncio.run(
+        mcp.call_tool(
+            "mnemostack_remember", {"text": "x", "metadata": {"tenant_id": "evil"}}
+        )
+    ).structured_content
+    assert r["ok"] is False and "tenant_id" in r["error"]
+
+
+def test_mcp_remember_needs_write_scope(tmp_path, monkeypatch):
+    mcp, _store, _emb = _remember_mcp(tmp_path, monkeypatch, scopes="read")
+    r = asyncio.run(
+        mcp.call_tool("mnemostack_remember", {"text": "x"})
+    ).structured_content
+    assert r["ok"] is False and "scope" in r["error"]
+
+
+def test_mcp_remember_chunks_documents(tmp_path, monkeypatch):
+    from mnemostack.ingest import REMOTE_CHUNK_SIZE
+
+    mcp, _store, _emb = _remember_mcp(tmp_path, monkeypatch)
+    r = asyncio.run(
+        mcp.call_tool(
+            "mnemostack_remember",
+            {"text": "z" * (REMOTE_CHUNK_SIZE + 5), "source": "doc.md", "chunk": True},
+        )
+    ).structured_content
+    assert r["ok"] is True and r["stored"] == 2
+    assert [x["offset"] for x in r["results"]] == [0, REMOTE_CHUNK_SIZE]
+
+
+def test_mcp_remember_rejects_negative_offset(tmp_path, monkeypatch):
+    # Codex-review pin: HTTP rejects offset<0 via pydantic ge=0; the MCP
+    # surface must enforce the identical contract through the shared
+    # validator instead of accepting malformed positions.
+    mcp, _store, _emb = _remember_mcp(tmp_path, monkeypatch)
+    r = asyncio.run(
+        mcp.call_tool("mnemostack_remember", {"text": "x", "offset": -5})
+    ).structured_content
+    assert r["ok"] is False and "non-negative" in r["error"]
+
+
+def test_mcp_remember_enforces_quota_with_error_kind(tmp_path, monkeypatch):
+    """Review pins: build_server(quotas_file=) reaches the remember tool,
+    and quota failure is distinguishable from a validation error."""
+    from qdrant_client import QdrantClient
+
+    import mnemostack.mcp.server as srv
+    from mnemostack.auth import FileKeyStore
+    from mnemostack.quotas import FileQuotaStore
+    from mnemostack.vector import VectorStore
+
+    emb = _RememberEmbedding()
+    store = VectorStore(collection="rq", dimension=3)
+    store.client = QdrantClient(":memory:")
+    store.ensure_collection()
+    monkeypatch.setattr(srv, "get_provider", lambda *a, **k: emb)
+    monkeypatch.setattr(srv, "VectorStore", lambda **_: store)
+    monkeypatch.setattr(srv, "VectorRetriever", lambda **_: MagicMock())
+    monkeypatch.setattr(srv, "TemporalRetriever", lambda **_: MagicMock())
+    monkeypatch.setattr(srv, "build_bm25_docs", lambda _paths: [])
+    monkeypatch.setattr(srv, "Recaller", lambda **_: MagicMock())
+    ks = tmp_path / "keys.json"
+    _kid, key = FileKeyStore(ks).issue("alpha", "read,write")
+    qf = tmp_path / "quotas.json"
+    FileQuotaStore(qf).set("alpha", max_points=1)
+    mcp = build_server(
+        collection="rq",
+        embedding_provider="ollama",
+        auth_enabled=True,
+        api_key=key,
+        keys_file=str(ks),
+        quotas_file=str(qf),
+    )
+    ok = asyncio.run(
+        mcp.call_tool("mnemostack_remember", {"text": "first", "source": "s"})
+    ).structured_content
+    assert ok["ok"] is True and ok["stored"] == 1
+    over = asyncio.run(
+        mcp.call_tool("mnemostack_remember", {"text": "second", "source": "s"})
+    ).structured_content
+    assert over["ok"] is False and over["error_kind"] == "quota_exceeded"
+    bad = asyncio.run(
+        mcp.call_tool("mnemostack_remember", {"text": "x", "offset": -1})
+    ).structured_content
+    assert bad["error_kind"] == "invalid_argument"

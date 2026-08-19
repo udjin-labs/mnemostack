@@ -9,6 +9,7 @@ Design notes:
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from collections.abc import Callable
@@ -26,8 +27,16 @@ except ImportError:  # pragma: no cover
 
 from ..config import Config, model_kwargs, provider_kwargs
 from ..embeddings import get_provider
+from ..embeddings.roles import EmbeddingSpaceError
 from ..feedback import apply_feedback
+from ..ingest import (
+    IngestItem,
+    expand_remote_items,
+    ingest_remote_items,
+    validate_remote_item,
+)
 from ..llm import get_llm
+from ..quotas import QuotaExceededError
 from ..recall import (
     RERANK_MODES,
     AnswerGenerator,
@@ -46,6 +55,8 @@ from ..recall import (
 )
 from ..recall.pipeline import FileStateStore, default_state_path
 from ..vector import VectorStore
+
+log = logging.getLogger(__name__)
 
 
 def _public_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -99,6 +110,12 @@ def build_server(
     # recall flow — both fragile by construction.
     reranker: Reranker | None = None,
     recall_middleware: Callable[..., list[Any]] | None = None,
+    # Quota store for the remember tool's per-tenant storage cap — the same
+    # file `serve --quotas-file` reads. Tail-appended; None falls back to
+    # MNEMOSTACK_QUOTAS_FILE, then the default path, so a deployment that
+    # configures quotas anywhere non-default MUST pass this (or the env var)
+    # to keep MCP writes under the same caps as HTTP writes.
+    quotas_file: str | None = None,
 ) -> Any:
     """Build and return a configured FastMCP server.
 
@@ -818,6 +835,138 @@ def build_server(
             }
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": str(e), "requested": len(ids)}
+
+    @mcp.tool()
+    def mnemostack_remember(
+        text: Annotated[
+            str,
+            Field(description="The memory content to store. Embedded server-side."),
+        ],
+        source: Annotated[
+            str,
+            Field(
+                description=(
+                    "Logical origin (e.g. 'chat/2026-08-19'). With `offset` it "
+                    "forms the deterministic id: re-sending the same content "
+                    "is a no-cost duplicate, never a second copy."
+                )
+            ),
+        ] = "",
+        offset: Annotated[
+            int, Field(description="Position within `source` for multi-part documents.")
+        ] = 0,
+        timestamp: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Event time of the content (ISO-8601); drives temporal recall."
+                )
+            ),
+        ] = None,
+        tags: Annotated[
+            list[str] | None, Field(description="Optional tags stored in the payload.")
+        ] = None,
+        metadata: Annotated[
+            dict[str, Any] | None,
+            Field(
+                description=(
+                    "Free payload fields, filterable at recall. Server-reserved "
+                    "keys (underscore-prefixed and structural ones like "
+                    "tenant_id/source) are rejected."
+                )
+            ),
+        ] = None,
+        chunk: Annotated[
+            bool,
+            Field(
+                description=(
+                    "Split a long document server-side into the same fixed "
+                    "character windows `mnemostack index` uses (identical "
+                    "chunk ids). Requires a non-empty source."
+                )
+            ),
+        ] = False,
+    ) -> dict:
+        """Store a memory for the caller's tenant (the write counterpart of
+        mnemostack_search).
+
+        A write tool: requires the `write` scope, embeds server-side, and
+        stamps the process key's tenant so the memory lands in — and is
+        recallable from — exactly this tenant's scope. Ids are deterministic
+        from (source, offset, text): retries and repeated content return
+        `duplicate` without a second embedding call. Long documents pass
+        `chunk=true` and yield one result per chunk. Use
+        mnemostack_invalidate to retract a stored memory.
+        """
+        try:
+            tenant = _tenant_of(_authorize("write"))
+            problem = validate_remote_item(
+                text,
+                source,
+                timestamp,
+                list(tags or []),
+                dict(metadata or {}),
+                offset=offset,
+                chunk=chunk,
+            )
+            if problem:
+                # error_kind lets an agent distinguish "fix your input" from
+                # backend conditions — MCP has no HTTP status codes to carry
+                # the 400/507/503 split the HTTP surface uses.
+                return {"ok": False, "error": problem, "error_kind": "invalid_argument"}
+            item = IngestItem(
+                text=text,
+                source=source,
+                offset=offset,
+                metadata=dict(metadata or {}),
+                tags=list(tags or []),
+                timestamp=timestamp,
+            )
+            flat_items, _origins = expand_remote_items([(item, chunk)])
+            max_points = None
+            if tenant is not None:
+                try:
+                    from mnemostack.quotas import FileQuotaStore
+
+                    resolved_quotas = (
+                        quotas_file or os.environ.get("MNEMOSTACK_QUOTAS_FILE") or None
+                    )
+                    q = FileQuotaStore(resolved_quotas).get(tenant)
+                    max_points = q.max_points if q is not None else None
+                except Exception:  # noqa: BLE001 — quota store is fail-open by contract
+                    # Fail-open is the quota contract (a guardrail, not a
+                    # security boundary) — but never silently: this is the
+                    # only signal that per-tenant caps stopped applying.
+                    log.warning(
+                        "quota store lookup failed; storage quota not enforced "
+                        "for this remember call",
+                        exc_info=True,
+                    )
+                    max_points = None
+            try:
+                results = ingest_remote_items(
+                    _get_embedding(),
+                    _get_vector(),
+                    flat_items,
+                    tenant=tenant,
+                    max_points=max_points,
+                )
+            except QuotaExceededError as e:
+                return {"ok": False, "error": str(e), "error_kind": "quota_exceeded"}
+            except EmbeddingSpaceError as e:
+                return {"ok": False, "error": str(e), "error_kind": "embedding_space"}
+            return {
+                "ok": True,
+                "results": [
+                    {"id": r.id, "status": r.status, "offset": it.offset}
+                    for r, it in zip(results, flat_items, strict=True)
+                ],
+                "stored": sum(r.status == "stored" for r in results),
+                "duplicates": sum(r.status == "duplicate" for r in results),
+                "failed": sum(r.status == "failed" for r in results),
+            }
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e)}
 
     @mcp.tool()
     def mnemostack_feedback(
