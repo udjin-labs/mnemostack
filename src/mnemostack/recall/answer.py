@@ -363,6 +363,13 @@ class Answer:
     #: answer. The retry paths can swap in a freshly recalled pool, so this
     #: may differ from an estimate over the memories the caller passed in.
     context_tokens_estimate: int | None = None
+    #: The memory pool that actually produced the answer — the same pool the
+    #: estimate above measures. After an accepted retry it is the merged
+    #: retry pool, which can contain points the CALLER never saw: a caller
+    #: that accounts for what its memories were used for (access recording)
+    #: needs the pool, not just the estimate. Appended at the tail; Answer
+    #: may be constructed positionally.
+    context_memories: list[RecallResult] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -646,6 +653,9 @@ class AnswerGenerator:
             answer.context_tokens_estimate = sum_tokens(
                 specificity_memories[: self.max_memories], token_counter
             )
+        # Same pool the estimate describes — reported, not just measured.
+        if not answer.context_memories:
+            answer.context_memories = list(specificity_memories)
         return answer
 
     async def generate_async(

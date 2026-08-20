@@ -1616,7 +1616,16 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             # with no memories, and an access the caller never received must
             # not be counted. Off the event loop, and fail-open like the
             # /recall path.
-            await asyncio.to_thread(record_access, store, results, tenant=tenant)
+            #
+            # The pool is `results` PLUS whatever actually produced the
+            # answer: an accepted inference/expansion retry answers from a
+            # freshly recalled pool, and those points informed the delivered
+            # answer even though they are not in `memories`. Recording only
+            # the originals would leave reinforcement blind to exactly the
+            # memories a low-confidence question had to dig for.
+            # record_access deduplicates by id.
+            touched = list(results) + list(getattr(ans, "context_memories", None) or [])
+            await asyncio.to_thread(record_access, store, touched, tenant=tenant)
         # Prefer the generator's own estimate: its retry paths can swap in a
         # freshly recalled context pool, and the primary recall results would
         # then misreport what the answer prompt actually contained.

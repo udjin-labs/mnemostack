@@ -26,6 +26,19 @@ week, 0.56 after a month, and floors at 0.10 after roughly half a year,
 against a flat 1.0 for a memory nothing ever found. The factor multiplies the
 whole blended score, so ``freshness_weight`` does not scale it down.
 
+**Where it does not take effect.** Under ``text_search=qdrant_bm25`` the
+lexical arm serves each point's payload from the corpus snapshot taken at
+startup. Recording writes the store correctly — the counter accumulates,
+and the values are right for anything the vector arm returns — but a point
+returned ONLY by that arm keeps presenting its startup payload to the
+freshness stage, so its own reinforcement does not reach ranking until the
+service restarts. This is the same startup-snapshot property already
+documented for invalidation and deletion on that arm, not a new one, and
+refreshing the in-process corpus per recall is deliberately not attempted:
+the snapshot is what makes that arm cheap. A deployment that wants
+reinforcement to steer a purely lexical recall has to restart to pick it
+up.
+
 That is the deliberate trade of an Ebbinghaus model — recency of USE is the
 signal, and a memory nobody has retrieved has no use to be recent — but it
 is a real change in what the ranking means, and an operator should turn the

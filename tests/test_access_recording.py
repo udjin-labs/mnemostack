@@ -330,3 +330,50 @@ def test_fail_open_covers_the_whole_body_not_just_the_write(monkeypatch, tmp_pat
 
     monkeypatch.setattr(acc, "_recordable_ids", _boom)
     assert record_access(store, [_Hit(1)], tenant="alpha") == 0
+
+
+def test_answer_records_the_pool_that_produced_it(monkeypatch, tmp_path):
+    """Bot round-1 (P2): an accepted inference/expansion retry answers from
+    a freshly recalled pool, so points that informed the delivered answer
+    are not in `memories`. Recording only the originals leaves
+    reinforcement blind to exactly the memories a hard question dug for."""
+    import mnemostack.server as srv
+    from mnemostack.recall.answer import Answer
+
+    retry_only = _Hit(2)
+
+    class _RetryingGen:
+        def generate(self, _query, memories, **_k):
+            # What a retry path produces: the answer came from a pool the
+            # caller never sees.
+            return Answer(
+                text="an answer",
+                confidence=0.9,
+                context_memories=[*memories, retry_only],
+            )
+
+    app, store, _emb, keys = _answer_app(monkeypatch, tmp_path, _RetryingGen())
+    _seed(store, 1)
+    _seed(store, 2)
+    monkeypatch.setattr(srv, "recall_flow", lambda *_a, **_k: [_Hit(1)])
+    client = TestClient(app)
+    r = client.post(
+        "/answer", json={"query": "anything"}, headers={"X-API-Key": keys["read"]}
+    )
+    assert r.status_code == 200, r.text
+    assert [m["id"] for m in r.json()["memories"]] == ["1"]  # unchanged response
+    assert _payload(store, 1)[ACCESS_COUNT_KEY] == 1
+    assert _payload(store, 2)[ACCESS_COUNT_KEY] == 1  # the retry-only point too
+
+
+def test_the_answer_pool_field_stays_at_the_tail():
+    """Answer may be constructed positionally, like ServerConfig."""
+    import dataclasses
+
+    from mnemostack.recall.answer import Answer
+
+    names = [f.name for f in dataclasses.fields(Answer)]
+    assert names == [
+        "text", "confidence", "sources", "raw", "error", "tokens_used",
+        "context_tokens_estimate", "context_memories",
+    ]
