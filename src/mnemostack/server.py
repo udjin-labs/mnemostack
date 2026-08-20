@@ -1626,28 +1626,9 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         except Exception as exc:
             log.exception("memories endpoint failed")
             raise HTTPException(status_code=500, detail="ingest failed") from exc
-        if tenant is not None:
-            # Embedding cost attribution from what the provider actually
-            # saw — NOT from statuses: duplicates cost zero, and so do
-            # REACTIVATIONS (re-remember of an invalidated point reuses the
-            # stored vector yet reports "stored"). Chars are the
-            # provider-agnostic token proxy.
-            embedded = sum(r.embed_attempted for r in results)
-            if embedded:
-                counter(
-                    "mnemostack.tenant.embedded_chunks",
-                    embedded,
-                    labels={"tenant": tenant},
-                )
-                counter(
-                    "mnemostack.tenant.embedded_chars",
-                    sum(
-                        len(flat.text)
-                        for flat, r in zip(flat_items, results, strict=True)
-                        if r.embed_attempted
-                    ),
-                    labels={"tenant": tenant},
-                )
+        # (Per-tenant embedding-spend meters are emitted inside
+        # ingest_remote_items at submission time, so spend is attributed
+        # even when a later ingest step fails the request.)
         failed_n = sum(r.status == "failed" for r in results)
         if results and failed_n == len(results):
             # Same honesty rule as /triples: per-item isolation is for

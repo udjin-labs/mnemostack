@@ -1037,6 +1037,27 @@ def _ingest_remote_items_locked(
         # will later fail embedding still count, since which one fails is
         # unknowable pre-embed — a mixed batch at the cap edge is rejected
         # whole rather than the commit-nothing invariant weakened.)
+        if tenant is not None:
+            # Per-tenant embedding-spend attribution, emitted at SUBMISSION
+            # time — not from result statuses: the provider round trip is
+            # paid even when a later upsert/space-check fails the request,
+            # so counting after the fact would lose exactly the spend that
+            # needs watching. Duplicates and reactivations never reach this
+            # branch (zero cost). Per-item retries inside the resilience
+            # ladder count once — retry amplification is provider health,
+            # not tenant behavior. Chars are the provider-agnostic token
+            # proxy. Emitted here (the shared layer), so the MCP remember
+            # tool attributes identically into its process recorder.
+            counter(
+                "mnemostack.tenant.embedded_chunks",
+                len(to_ingest),
+                labels={"tenant": tenant},
+            )
+            counter(
+                "mnemostack.tenant.embedded_chars",
+                sum(len(item.text) for item in to_ingest),
+                labels={"tenant": tenant},
+            )
         ingestor = Ingestor(
             embedding,
             store,

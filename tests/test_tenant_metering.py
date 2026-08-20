@@ -145,6 +145,59 @@ def test_rate_limited_requests_still_count_as_requests(monkeypatch, tmp_path):
     ) == 1
 
 
+def test_embedding_spend_counted_even_when_ingest_fails(monkeypatch, tmp_path):
+    """R2 (codex): the provider round trip is paid even when a later
+    upsert/space-check fails the request — meters emit at SUBMISSION, so a
+    5xx response still attributes the spend."""
+    import mnemostack.ingest as ingest_mod
+
+    app, _store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
+    client = TestClient(app)
+    rec = _rec()
+
+    def _boom(self, items):
+        raise RuntimeError("upsert exploded after embedding")
+
+    monkeypatch.setattr(ingest_mod.Ingestor, "ingest", _boom)
+    text = "spent but not stored"
+    r = client.post(
+        "/memories",
+        json={"items": [{"text": text, "source": "s"}]},
+        headers={"X-API-Key": keys["write"]},
+    )
+    assert r.status_code == 500
+    assert rec.counter_value(
+        "mnemostack.tenant.embedded_chunks", labels={"tenant": "alpha"}
+    ) == 1
+    assert rec.counter_value(
+        "mnemostack.tenant.embedded_chars", labels={"tenant": "alpha"}
+    ) == len(text)
+
+
+def test_embed_attempted_field_attribution(monkeypatch, tmp_path):
+    """The additive RemoteMemoryResult.embed_attempted field carries the
+    same per-item attribution for API consumers: True only for items the
+    provider actually saw."""
+    from test_remote_ingest import _CountingEmbedding, _mem_store
+
+    from mnemostack.ingest import IngestItem, ingest_remote_items
+
+    emb, store = _CountingEmbedding(), _mem_store("attr")
+    (fresh,) = ingest_remote_items(
+        emb, store, [IngestItem(text="f", source="s")], tenant="a"
+    )
+    assert fresh.embed_attempted is True
+    (dup,) = ingest_remote_items(
+        emb, store, [IngestItem(text="f", source="s")], tenant="a"
+    )
+    assert dup.status == "duplicate" and dup.embed_attempted is False
+    store.invalidate([fresh.id], tenant="a")
+    (react,) = ingest_remote_items(
+        emb, store, [IngestItem(text="f", source="s")], tenant="a"
+    )
+    assert react.status == "stored" and react.embed_attempted is False
+
+
 def test_tenant_quota_rejection_is_counted(monkeypatch, tmp_path):
     app, _store, _emb, keys = _ingest_app(
         monkeypatch, tmp_path, quotas={"alpha": 1}
