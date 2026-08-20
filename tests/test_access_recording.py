@@ -171,3 +171,79 @@ def test_recall_records_when_enabled(monkeypatch, tmp_path):
     assert r.status_code == 200
     # The key's tenant, not one the client asserted.
     assert _payload(store, 1)[ACCESS_COUNT_KEY] == 1
+
+
+def test_the_config_flag_stays_at_the_tail_of_ServerConfig():
+    """R1 (codex P2): ServerConfig is documented stable and may be built
+    POSITIONALLY. Inserted mid-signature this flag would have taken
+    `graph_user`'s slot — silently ENABLING writes on a deployment that
+    passed graph credentials positionally and never asked for recording."""
+    import dataclasses
+
+    from mnemostack.server import ServerConfig
+
+    names = [f.name for f in dataclasses.fields(ServerConfig)]
+    assert names[-1] == "record_access"
+
+
+def _answer_app(monkeypatch, tmp_path, generator):
+    """The ingest app, but with an answer generator wired in.
+
+    `_ingest_app` deliberately has no LLM, and `answer_gen` is resolved ONCE
+    at build time — so /answer there is a 503 and a later patch cannot
+    change that. Rather than patch around the helper, build on top of it and
+    replace the generator before the app is constructed.
+    """
+    import mnemostack.server as srv
+
+    monkeypatch.setattr(srv, "AnswerGenerator", lambda *_a, **_k: generator)
+    app, store, emb, keys = _ingest_app(
+        monkeypatch,
+        tmp_path,
+        cfg_extra={"record_access": True},
+        llm=object(),  # any truthy LLM: AnswerGenerator is stubbed above
+    )
+    return app, store, emb, keys
+
+
+def test_answer_does_not_record_when_generation_fails(monkeypatch, tmp_path):
+    """R1 (codex P2): /answer's recall can succeed and its generation fail —
+    the caller gets a 500 and no memories, so those points must not be
+    counted as accessed. The claim was in the commit message before it was
+    in the code."""
+    import mnemostack.server as srv
+
+    class _Boom:
+        def generate(self, *_a, **_k):
+            raise RuntimeError("llm exploded")
+
+    app, store, _emb, keys = _answer_app(monkeypatch, tmp_path, _Boom())
+    _seed(store, 1)
+    monkeypatch.setattr(srv, "recall_flow", lambda *_a, **_k: [_Hit(1)])
+    client = TestClient(app)
+    r = client.post(
+        "/answer", json={"query": "anything"}, headers={"X-API-Key": keys["read"]}
+    )
+    assert r.status_code == 500, r.text
+    assert ACCESS_COUNT_KEY not in _payload(store, 1)
+
+
+def test_answer_records_when_generation_succeeds(monkeypatch, tmp_path):
+    """The mirror image: a delivered answer DID hand those memories over."""
+    import mnemostack.server as srv
+
+    class _Ok:
+        def generate(self, *_a, **_k):
+            return type(
+                "Ans", (), {"text": "an answer", "confidence": 0.9, "sources": []}
+            )()
+
+    app, store, _emb, keys = _answer_app(monkeypatch, tmp_path, _Ok())
+    _seed(store, 1)
+    monkeypatch.setattr(srv, "recall_flow", lambda *_a, **_k: [_Hit(1)])
+    client = TestClient(app)
+    r = client.post(
+        "/answer", json={"query": "anything"}, headers={"X-API-Key": keys["read"]}
+    )
+    assert r.status_code == 200, r.text
+    assert _payload(store, 1)[ACCESS_COUNT_KEY] == 1

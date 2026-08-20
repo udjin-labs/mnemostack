@@ -690,9 +690,6 @@ class ServerConfig:
     token_budget: int | None = None  # default recall token budget; requests may override
     state_path: str = field(default_factory=default_state_path)
     auto_record_ior: bool = False
-    #: Record `access_count`/`last_accessed` on every point a recall
-    #: returns. Off by default: it turns reads into writes.
-    record_access: bool = False
     # graph auth appended at the tail to preserve positional back-compat.
     graph_user: str = ""
     graph_password: str = ""
@@ -733,6 +730,12 @@ class ServerConfig:
     # every later argument.
     ollama_host: str | None = None
     embedding_timeout: int | None = None
+    #: Record `access_count`/`last_accessed` on every point a recall
+    #: returns. Off by default: it turns reads into writes. At the TAIL for
+    #: the reason stated above — inserted mid-signature it would have
+    #: shifted `graph_user` into this flag for any positional caller, which
+    #: silently ENABLES writes on a deployment that never asked for them.
+    record_access: bool = False
 
     def __post_init__(self) -> None:
         if self.rerank_mode not in RERANK_MODES:
@@ -1344,6 +1347,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         include_invalidated: bool = False,
         as_of: str | None = None,
         tenant: str | None = None,
+        record: bool = True,
     ):
         trace = RecallTrace()
         # Reranking is part of the full pipeline; if it was requested but the
@@ -1369,11 +1373,16 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         if cfg.auto_record_ior:
             # Record into the caller's tenant partition so auto-IoR is per-tenant.
             record_recall_events(pipeline, results, tenant)
-        if cfg.record_access:
+        if cfg.record_access and record:
             # Reinforcement bookkeeping for the freshness stage. Runs HERE,
             # inside the worker thread and after the results are final, so
             # it neither blocks the event loop nor stamps a hit the caller
             # never received. Fail-open inside record_access.
+            #
+            # `record=False` is /answer's: a recall that succeeds before
+            # generation FAILS returns 500 with no memories, and stamping
+            # those points would count an access the caller never got.
+            # /answer records after its generation instead.
             record_access(store, results, tenant=tenant)
         return results, trace
 
@@ -1386,6 +1395,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         include_invalidated: bool = False,
         as_of: str | None = None,
         tenant: str | None = None,
+        record: bool = True,
     ):
         """Offload the blocking recall stack to a worker thread.
 
@@ -1403,6 +1413,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             include_invalidated,
             as_of,
             tenant,
+            record,
         )
 
     @app.get("/", include_in_schema=False)
@@ -1578,6 +1589,8 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 req.include_invalidated,
                 req.as_of,
                 tenant,
+                # Recorded after generation succeeds, not here — see below.
+                False,
             )
             # recall_filters keeps the answer generator's retry sub-recalls
             # inside the same filtered scope; the validity view AND the tenant
@@ -1598,6 +1611,12 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         except Exception as exc:
             log.exception("answer endpoint failed")
             raise HTTPException(status_code=500, detail="answer failed") from exc
+        if cfg.record_access:
+            # HERE, not next to the recall: a generation failure returns 500
+            # with no memories, and an access the caller never received must
+            # not be counted. Off the event loop, and fail-open like the
+            # /recall path.
+            await asyncio.to_thread(record_access, store, results, tenant=tenant)
         # Prefer the generator's own estimate: its retry paths can swap in a
         # freshly recalled context pool, and the primary recall results would
         # then misreport what the answer prompt actually contained.

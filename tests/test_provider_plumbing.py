@@ -248,7 +248,23 @@ def test_new_knobs_stay_at_the_positional_tail():
     from mnemostack.server import ServerConfig
 
     field_names = [f.name for f in dataclasses.fields(ServerConfig)]
-    assert field_names[-2:] == ["ollama_host", "embedding_timeout"]
+    # The invariant is the PREFIX, not the tail: every field that already
+    # existed must keep its position, and anything new may only be appended
+    # after them. Asserting the last N names instead let a mid-signature
+    # insertion pass as long as the newest knob was re-appended — and a
+    # mid-insert is exactly the failure this guards (a positional caller's
+    # graph_user landing in someone else's field).
+    settled_prefix = ["provider_name", "embedding_model", "llm_name", "llm_model",
+        "collection", "qdrant_url", "graph_uri", "graph_health_timeout", "graph_timeout",
+        "bm25_paths", "vector_floor", "rerank_mode", "token_budget", "state_path",
+        "auto_record_ior", "graph_user", "graph_password", "graph_database",
+        "qdrant_health_timeout", "auth_enabled", "keys_file", "quotas_file", "text_key",
+        "timestamp_key", "timestamp_format", "text_search", "text_search_fields",
+        "resolve_roots", "ollama_host", "embedding_timeout",
+    ]
+    assert field_names[: len(settled_prefix)] == settled_prefix, (
+        "a field was inserted or reordered inside the settled prefix; append instead"
+    )
 
     pytest.importorskip("fastmcp")
     from mnemostack.mcp import build_server
