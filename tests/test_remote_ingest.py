@@ -1290,12 +1290,19 @@ def test_schema_key_misconfiguration_fails_at_boot(monkeypatch, tmp_path):
     surfaces, not 500 every write with an opaque error."""
     import mnemostack.server as srv
 
-    monkeypatch.setattr(srv, "get_provider", lambda _n, **_k: _CountingEmbedding())
+    provider_calls: list = []
+
+    def _counting_provider(_n, **_k):
+        provider_calls.append(_n)
+        return _CountingEmbedding()
+
+    monkeypatch.setattr(srv, "get_provider", _counting_provider)
     with pytest.raises(ValueError, match="pipeline"):
         build_app(
             ServerConfig(provider_name="fake", llm_name="fake", graph_uri=None,
                          text_key="source")
         )
+    assert provider_calls == []  # fail-fast: no provider round trip paid
 
 
 # -------------------------------------------------- round-12 review batch pins
@@ -1338,3 +1345,19 @@ def test_lone_surrogates_are_rejected_not_500(monkeypatch, tmp_path):
     # layer (422) — the shared validator remains the guard for library and
     # duck-typed callers that bypass pydantic.
     assert r.status_code == 422
+
+
+def test_underscore_schema_keys_are_reserved():
+    """Codex-R13: ownership markers (_enrich_keys/_md_keys) — and the whole
+    underscore namespace — are server-structural; a schema key there would
+    make refresh iterate garbage or delete unrelated fields."""
+    emb, store = _CountingEmbedding(), _mem_store()
+    for bad in ("_enrich_keys", "_md_keys", "_anything"):
+        with pytest.raises(ValueError, match="underscore"):
+            ingest_remote_items(
+                emb, store, [IngestItem(text="x", source="s")], text_key=bad
+            )
+        with pytest.raises(ValueError, match="underscore"):
+            ingest_remote_items(
+                emb, store, [IngestItem(text="x", source="s")], timestamp_key=bad
+            )

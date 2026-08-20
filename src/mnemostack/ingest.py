@@ -574,6 +574,16 @@ def ensure_remote_schema_keys(text_key: str, timestamp_key: str) -> None:
     must not start and then 500 on every write) and defensively at the
     ingest boundary for library callers.
     """
+    if text_key != "text" and text_key.startswith("_"):
+        # The whole underscore namespace is server-structural by convention
+        # (ownership markers like _enrich_keys/_md_keys included — a text
+        # mirror there would make refresh iterate garbage or delete
+        # unrelated fields). Same rule client metadata already obeys.
+        raise ValueError(f"text_key {text_key!r} is in the reserved underscore namespace")
+    if timestamp_key != "timestamp" and timestamp_key.startswith("_"):
+        raise ValueError(
+            f"timestamp_key {timestamp_key!r} is in the reserved underscore namespace"
+        )
     if text_key != "text" and text_key in _PIPELINE_PAYLOAD_KEYS:
         raise ValueError(
             f"text_key {text_key!r} collides with a payload field the ingest "
