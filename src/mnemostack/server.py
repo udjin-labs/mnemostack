@@ -60,6 +60,7 @@ from mnemostack.ingest import (
     REMOTE_MAX_TIMESTAMP_CHARS,
     IngestItem,
     RemoteRequestTooLarge,
+    _parse_iso_timestamp,
     expand_remote_items,
     ingest_remote_items,
     validate_remote_item,
@@ -1495,8 +1496,6 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         """
         # Input validation FIRST (a 400 the caller can fix), availability
         # second (a 503 the operator owns).
-        from mnemostack.ingest import _parse_iso_timestamp
-
         for i, t in enumerate(req.triples):
             # min_length=1 admits whitespace-only strings, which would
             # create/merge a graph node named " " — same rigor as the
