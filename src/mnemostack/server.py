@@ -31,7 +31,7 @@ from typing import Any, Literal
 
 try:
     from fastapi import Depends, FastAPI, Header, HTTPException
-    from pydantic import BaseModel, Field
+    from pydantic import BaseModel, Field, StrictInt
 except ImportError as e:  # pragma: no cover - import guard
     raise ImportError(
         "FastAPI is not installed. Install the optional server extra: "
@@ -52,6 +52,8 @@ from mnemostack.feedback import apply_feedback, record_recall_events
 from mnemostack.ingest import (
     REMOTE_CHUNK_SIZE,
     REMOTE_MAX_DOC_CHARS,
+    REMOTE_MAX_IDS,
+    REMOTE_MAX_INDEX_ROOT_CHARS,
     REMOTE_MAX_ITEMS,
     REMOTE_MAX_OFFSET,
     REMOTE_MAX_SOURCE_CHARS,
@@ -60,9 +62,11 @@ from mnemostack.ingest import (
     REMOTE_MAX_TIMESTAMP_CHARS,
     IngestItem,
     RemoteRequestTooLarge,
+    coerce_point_ids,
     ensure_remote_schema_keys,
     expand_remote_items,
     ingest_remote_items,
+    validate_remote_invalidate,
     validate_remote_item,
     validate_remote_triple,
 )
@@ -298,6 +302,71 @@ class TriplesResponse(BaseModel):
     results: list[TripleResultOut]
     added: int
     failed: int
+
+
+class InvalidateRequest(BaseModel):
+    # StrictInt, not int: the lax union coerces JSON true/false to 1/0,
+    # which would silently target numeric point ids 1/0 instead of a 422.
+    ids: list[str | StrictInt] = Field(..., min_length=1, max_length=REMOTE_MAX_IDS)
+    invalidated_at: str | None = Field(
+        None,
+        max_length=64,
+        description="System-time stamp (ISO-8601); default: now (UTC).",
+    )
+    valid_until: str | None = Field(
+        None,
+        max_length=64,
+        description=(
+            "World-time the fact stopped being true (ISO-8601); optional, "
+            "separate from the system-time invalidation stamp."
+        ),
+    )
+    index_root: str | None = Field(
+        None,
+        max_length=REMOTE_MAX_INDEX_ROOT_CHARS,
+        description=(
+            "Owner guard: when set, points owned by a different index_root "
+            "are skipped, so one root cannot invalidate another's chunks in "
+            "a shared collection."
+        ),
+    )
+
+
+class InvalidateResponse(BaseModel):
+    requested: int
+    invalidated: int = Field(
+        description=(
+            "Points actually updated. Ids that do not exist, belong to "
+            "another tenant, or fail the index_root owner guard are skipped "
+            "— indistinguishably, so the count is not an oracle for foreign "
+            "ids."
+        )
+    )
+
+
+class DeleteMemoriesRequest(BaseModel):
+    # StrictInt: see InvalidateRequest.
+    ids: list[str | StrictInt] = Field(..., min_length=1, max_length=REMOTE_MAX_IDS)
+    index_root: str | None = Field(
+        None,
+        max_length=REMOTE_MAX_INDEX_ROOT_CHARS,
+        description=(
+            "Owner guard, matching /invalidate: when set, points owned by a "
+            "different index_root are skipped. Points carrying no index_root "
+            "tag are NOT protected by the guard."
+        ),
+    )
+
+
+class DeleteMemoriesResponse(BaseModel):
+    requested: int
+    deleted: int = Field(
+        description=(
+            "Points actually deleted. Ids that do not exist or belong to "
+            "another tenant are skipped — indistinguishably, so the count "
+            "is not an oracle for foreign ids."
+        )
+    )
 
 
 class Memory(BaseModel):
@@ -1618,5 +1687,113 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 status_code=502, detail=f"all {failed} triple write(s) failed"
             )
         return TriplesResponse(results=results, added=added, failed=failed)
+
+    @app.post("/invalidate", response_model=InvalidateResponse)
+    def invalidate_endpoint(req: InvalidateRequest, principal=Depends(_require("write"))):  # noqa: B008 — FastAPI DI pattern
+        """Mark memories stale by id, non-destructively (HTTP parity with
+        the MCP `mnemostack_invalidate` tool).
+
+        Sets `invalidated_at` (and optionally `valid_until`) on each
+        point's payload without deleting or re-embedding it; invalidated
+        facts drop out of default recall but stay reachable via
+        `include_invalidated` / point-in-time `as_of`. Under `--auth` only
+        the key's tenant's points are touched — foreign or unknown ids are
+        skipped, indistinguishably from missing ones (the response count
+        is not an existence oracle). Re-sending the same content to
+        `/memories` reactivates an invalidated memory.
+
+        Scope note: vector and temporal recall honor the marker
+        immediately; an in-process BM25 corpus built from Qdrant payloads
+        (`text_search=qdrant_bm25`) reflects it only after a restart.
+        """
+        problem = validate_remote_invalidate(
+            req.ids, req.invalidated_at, req.valid_until, req.index_root
+        )
+        if problem:
+            raise HTTPException(status_code=400, detail=problem)
+        tenant = _tenant_of(principal)
+        tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
+        # Dedup AFTER coercion ("7" and 7 are the same point): the store
+        # counts per requested id, so duplicates would inflate `invalidated`
+        # past the number of points actually touched.
+        ids = list(dict.fromkeys(coerce_point_ids(req.ids)))
+        try:
+            if not store.collection_exists():
+                # Fresh deployment before the first write: the collection is
+                # created lazily by /memories. Nothing exists — the same
+                # "unknown ids are skipped" semantics, not a 500.
+                return InvalidateResponse(requested=len(req.ids), invalidated=0)
+            updated = store.invalidate(
+                ids,
+                invalidated_at=req.invalidated_at,
+                valid_until=req.valid_until,
+                index_root=req.index_root,
+                **tkw,
+            )
+        except Exception as exc:
+            log.exception("invalidate endpoint failed")
+            raise HTTPException(status_code=500, detail="invalidate failed") from exc
+        counter("mnemostack.server.invalidate", updated)
+        return InvalidateResponse(requested=len(req.ids), invalidated=updated)
+
+    @app.delete("/memories", response_model=DeleteMemoriesResponse)
+    def delete_memories_endpoint(req: DeleteMemoriesRequest, principal=Depends(_require("write"))):  # noqa: B008 — FastAPI DI pattern
+        """Hard-delete memories by id (right-to-erasure).
+
+        Unlike `/invalidate`, this REMOVES the points — vector, payload,
+        and text — irreversibly; re-sending the same content to
+        `/memories` afterwards stores a fresh copy. Under `--auth` the
+        ownership check runs server-side: only points stamped with the
+        key's tenant are deleted, and foreign or unknown ids are skipped
+        indistinguishably (the count is not an existence oracle). Without
+        auth every requested existing id is deleted (single-tenant
+        legacy). `index_root` narrows the operation to one indexing
+        root's points, matching `/invalidate` — points carrying no
+        `index_root` tag are not protected by the guard.
+
+        Erasure scope: the deletion is immediate for vector and temporal
+        recall (they read Qdrant live). An in-process BM25 corpus built
+        from Qdrant payloads (`text_search=qdrant_bm25`) is a startup
+        snapshot and can keep serving the deleted text until the server
+        restarts — for erasure requests on such deployments, restart (or
+        rebuild the corpus) to complete the erasure. Graph facts written
+        via `/triples` are separate records and are not deleted by this
+        endpoint.
+        """
+        problem = validate_remote_invalidate(req.ids, None, None, req.index_root)
+        if problem:
+            raise HTTPException(status_code=400, detail=problem)
+        tenant = _tenant_of(principal)
+        tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
+        # Dedup AFTER coercion — duplicates would inflate `deleted`.
+        ids = list(dict.fromkeys(coerce_point_ids(req.ids)))
+        try:
+            if not store.collection_exists():
+                # See /invalidate: pre-bootstrap there is nothing to erase.
+                return DeleteMemoriesResponse(requested=len(req.ids), deleted=0)
+            if req.index_root is not None or tenant is None:
+                # One retrieve serves two jobs. (1) The index_root owner
+                # guard, matching /invalidate: points owned by a DIFFERENT
+                # root are skipped; untagged points pass (documented). (2)
+                # In unscoped mode delete_points performs no existence
+                # check — without this precheck `deleted` would echo the
+                # request instead of counting actual removals.
+                found = store.client.retrieve(
+                    store.collection, ids=ids, with_payload=["index_root"]
+                )
+                keep = {
+                    str(p.id)
+                    for p in found
+                    if req.index_root is None
+                    or (getattr(p, "payload", None) or {}).get("index_root")
+                    in (None, req.index_root)
+                }
+                ids = [pid for pid in ids if str(pid) in keep]
+            deleted = store.delete_points(ids, **tkw) if ids else 0
+        except Exception as exc:
+            log.exception("delete memories endpoint failed")
+            raise HTTPException(status_code=500, detail="delete failed") from exc
+        counter("mnemostack.server.deleted", deleted)
+        return DeleteMemoriesResponse(requested=len(req.ids), deleted=deleted)
 
     return app

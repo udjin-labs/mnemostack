@@ -17,12 +17,13 @@ from typing import Annotated, Any
 
 try:
     from fastmcp import FastMCP
-    from pydantic import Field
+    from pydantic import Field, StrictInt
 
     _FASTMCP_AVAILABLE = True
 except ImportError:  # pragma: no cover
     FastMCP = None  # type: ignore[assignment, misc]
     Field = None  # type: ignore[assignment]
+    StrictInt = int  # type: ignore[assignment, misc]
     _FASTMCP_AVAILABLE = False
 
 from ..config import Config, model_kwargs, provider_kwargs
@@ -35,9 +36,11 @@ from ..ingest import (
     REMOTE_MAX_TEXT_CHARS,
     IngestItem,
     RemoteRequestTooLarge,
+    coerce_point_ids,
     ensure_remote_schema_keys,
     expand_remote_items,
     ingest_remote_items,
+    validate_remote_invalidate,
     validate_remote_item,
     validate_remote_triple,
 )
@@ -803,7 +806,12 @@ def build_server(
     @mcp.tool()
     def mnemostack_invalidate(
         ids: Annotated[
-            list[str | int],
+            # StrictInt: the lax union coerces JSON true/false to point ids
+            # 1/0. No schema-level list caps — the shared validator enforces
+            # them INSIDE the handler so violations return the documented
+            # {ok: false, error_kind: "invalid_argument"} shape instead of a
+            # protocol-level rejection.
+            list[str | StrictInt],
             Field(description="Point id(s) to mark stale (string or integer)"),
         ],
         valid_until: Annotated[
@@ -841,15 +849,42 @@ def build_server(
         requested, and invalidated (the number of points actually updated).
         """
         try:
-            tenant = _tenant_of(_authorize("write"))
-            # Coerce digit-only ids to int so numeric-id Qdrant collections can
-            # be invalidated (UUID strings contain hyphens, so stay strings).
-            coerced = [int(x) if isinstance(x, str) and x.isdigit() else x for x in ids]
+            try:
+                tenant = _tenant_of(_authorize("write"))
+            except _AuthError as e:
+                return {
+                    "ok": False,
+                    "error": str(e),
+                    "error_kind": "unauthorized",
+                    "requested": len(ids),
+                }
+            # Shared with POST /invalidate so both surfaces enforce the
+            # identical contract (ISO timestamps, id shapes, caps).
+            problem = validate_remote_invalidate(
+                ids, invalidated_at, valid_until, index_root
+            )
+            if problem:
+                return {
+                    "ok": False,
+                    "error": problem,
+                    "error_kind": "invalid_argument",
+                    "requested": len(ids),
+                }
             # tenant owner-guard: only pass it when set so a custom store without
             # the parameter (and the single-tenant path) is unaffected.
             tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
-            updated = _get_vector_payload_only().invalidate(
-                coerced,
+            payload_store = _get_vector_payload_only()
+            # HTTP-parity pre-bootstrap short-circuit: before the first
+            # write the collection doesn't exist (lazy bootstrap) — report
+            # zero effect like unknown ids, not an opaque backend error.
+            # getattr probe, not except: duck stores without the hook
+            # proceed as before.
+            exists_fn = getattr(payload_store, "collection_exists", None)
+            if callable(exists_fn) and not exists_fn():
+                return {"ok": True, "requested": len(ids), "invalidated": 0}
+            # Dedup after coercion — duplicates would inflate `invalidated`.
+            updated = payload_store.invalidate(
+                list(dict.fromkeys(coerce_point_ids(ids))),
                 invalidated_at=invalidated_at,
                 valid_until=valid_until,
                 index_root=index_root,
@@ -861,7 +896,13 @@ def build_server(
                 "invalidated": updated,
             }
         except Exception as e:  # noqa: BLE001
-            return {"ok": False, "error": str(e), "requested": len(ids)}
+            # error_kind on every failure shape, mirroring mnemostack_remember.
+            return {
+                "ok": False,
+                "error": str(e),
+                "error_kind": "error",
+                "requested": len(ids),
+            }
 
     @mcp.tool()
     def mnemostack_remember(
