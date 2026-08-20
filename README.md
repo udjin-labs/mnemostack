@@ -770,7 +770,7 @@ Pass `"filters": {...}` to scope recall by payload fields — exact match (`{"te
 
 The `/answer` endpoint adds `{ answer, confidence, sources }` alongside the memories and carries the same `degraded` / `notes` / opt-in `trace` fields, plus `tokens_used` — the LLM provider's reported token usage for the generation call that produced the answer (provider-specific semantics; `null` when the provider reports nothing). If the LLM isn't configured, `/answer` returns `503` and `/recall` still works — graceful degradation applies at the HTTP layer too.
 
-Stateful learning is explicit. Start the server with `--auto-record-ior` if you want `/recall` and `/answer` responses to update inhibition-of-return state. Send user actions to `/feedback` to update Q-learning:
+Stateful learning is explicit. Start the server with `--auto-record-ior` if you want `/recall` and `/answer` responses to update inhibition-of-return state, and with `--record-access` (or `MNEMOSTACK_RECORD_ACCESS`) if you want them to stamp `access_count`/`last_accessed` on every point they return — the reinforcement the freshness stage reads, recorded where the retrieval actually happens instead of in each client. Both are **off by default**: they turn reads into writes. Access recording is fail-open (a failed write is logged and counted, never raised), best-effort on the count (no atomic increment exists; concurrent recalls of one point can record one increment, and the reader clamps reinforcement at 10 anyway), and scoped to the caller's tenant. Send user actions to `/feedback` to update Q-learning:
 
 ```bash
 curl -s http://localhost:8000/feedback \

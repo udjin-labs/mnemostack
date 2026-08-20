@@ -39,6 +39,7 @@ except ImportError as e:  # pragma: no cover - import guard
     ) from e
 
 from mnemostack import __version__
+from mnemostack.access import record_access
 from mnemostack.config import (
     Config,
     ensure_text_fields_mode,
@@ -689,6 +690,9 @@ class ServerConfig:
     token_budget: int | None = None  # default recall token budget; requests may override
     state_path: str = field(default_factory=default_state_path)
     auto_record_ior: bool = False
+    #: Record `access_count`/`last_accessed` on every point a recall
+    #: returns. Off by default: it turns reads into writes.
+    record_access: bool = False
     # graph auth appended at the tail to preserve positional back-compat.
     graph_user: str = ""
     graph_password: str = ""
@@ -763,6 +767,7 @@ class ServerConfig:
             rerank_mode=cfg.recall.rerank_mode,
             token_budget=cfg.recall.token_budget,
             auto_record_ior=_env_bool("MNEMOSTACK_AUTO_RECORD_IOR"),
+            record_access=_env_bool("MNEMOSTACK_RECORD_ACCESS"),
             auth_enabled=_env_bool("MNEMOSTACK_AUTH_ENABLED"),
             keys_file=os.environ.get("MNEMOSTACK_KEYS_FILE") or None,
             quotas_file=os.environ.get("MNEMOSTACK_QUOTAS_FILE") or None,
@@ -1364,6 +1369,12 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         if cfg.auto_record_ior:
             # Record into the caller's tenant partition so auto-IoR is per-tenant.
             record_recall_events(pipeline, results, tenant)
+        if cfg.record_access:
+            # Reinforcement bookkeeping for the freshness stage. Runs HERE,
+            # inside the worker thread and after the results are final, so
+            # it neither blocks the event loop nor stamps a hit the caller
+            # never received. Fail-open inside record_access.
+            record_access(store, results, tenant=tenant)
         return results, trace
 
     async def _run_recall(
