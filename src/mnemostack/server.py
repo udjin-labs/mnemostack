@@ -53,6 +53,7 @@ from mnemostack.ingest import (
     REMOTE_CHUNK_SIZE,
     REMOTE_MAX_DOC_CHARS,
     REMOTE_MAX_ITEMS,
+    REMOTE_MAX_OFFSET,
     REMOTE_MAX_SOURCE_CHARS,
     REMOTE_MAX_TAGS,
     REMOTE_MAX_TEXT_CHARS,
@@ -209,11 +210,12 @@ class MemoryItemIn(BaseModel):
         description=(
             "Split this text server-side into fixed character windows "
             f"({REMOTE_CHUNK_SIZE} chars) — the split `mnemostack index` "
-            "applies to prose files at its default --chunk-size, so with "
-            "default settings the chunk ids are identical across both "
-            "paths (a custom --chunk-size or the section-aware markdown "
-            "indexer produces different boundaries). Requires a non-empty "
-            "`source`."
+            "applies to prose files at its default --chunk-size. In "
+            "unscoped (single-tenant) deployments with default settings "
+            "the chunk ids are identical across both paths; tenant-scoped "
+            "writes use tenant-prefixed ids, and a custom --chunk-size or "
+            "the markdown indexer produce different boundaries. Requires "
+            "a non-empty `source`."
         ),
     )
     source: str = Field(
@@ -226,7 +228,10 @@ class MemoryItemIn(BaseModel):
         ),
     )
     offset: int = Field(
-        0, ge=0, description="Position within `source` for multi-chunk documents."
+        0,
+        ge=0,
+        le=REMOTE_MAX_OFFSET,
+        description="Position within `source` for multi-chunk documents.",
     )
     timestamp: str | None = Field(
         None,
@@ -865,15 +870,28 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     elif text_mode == "qdrant_bm25":
         # In-process BM25 whose corpus scrolls straight out of the collection's
         # payloads — fine to ~100K chunks (the in-process ceiling), no files.
-        lexical_arms.append(
-            BM25Retriever.from_qdrant(
-                store.client,
-                cfg.collection,
-                text_key=cfg.text_key,
-                timestamp_key=cfg.timestamp_key,
-                timestamp_format=cfg.timestamp_format,
+        # On a FRESH deployment the collection may not exist yet (the write
+        # surface bootstraps it lazily): skip the arm instead of crashing the
+        # boot — the corpus is a startup snapshot anyway, so the arm joins on
+        # the restart after first ingest. Qdrant-down at boot keeps its
+        # historical behavior (this mode always required a reachable server).
+        if store.collection_exists():
+            lexical_arms.append(
+                BM25Retriever.from_qdrant(
+                    store.client,
+                    cfg.collection,
+                    text_key=cfg.text_key,
+                    timestamp_key=cfg.timestamp_key,
+                    timestamp_format=cfg.timestamp_format,
+                )
             )
-        )
+        else:
+            log.info(
+                "text_search=qdrant_bm25: collection %r does not exist yet — "
+                "starting without the BM25 arm (it loads on the next restart "
+                "after first ingest)",
+                cfg.collection,
+            )
     elif text_mode == "lexical":
         arms, lexical_weights = build_qdrant_text_arms(
             embedding=provider,
@@ -1442,6 +1460,15 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         except Exception as exc:
             log.exception("memories endpoint failed")
             raise HTTPException(status_code=500, detail="ingest failed") from exc
+        failed_n = sum(r.status == "failed" for r in results)
+        if results and failed_n == len(results):
+            # Same honesty rule as /triples: per-item isolation is for
+            # PARTIAL failure — when EVERY item failed to embed, the write
+            # path is down and a 200 would hide it from status-code checks.
+            raise HTTPException(
+                status_code=502,
+                detail=f"embedding failed for all {failed_n} item(s)",
+            )
         return MemoriesResponse(
             results=[
                 MemoryResultOut(
@@ -1451,7 +1478,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             ],
             stored=sum(r.status == "stored" for r in results),
             duplicates=sum(r.status == "duplicate" for r in results),
-            failed=sum(r.status == "failed" for r in results),
+            failed=failed_n,
         )
 
     @app.post("/triples", response_model=TriplesResponse)
@@ -1468,6 +1495,8 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         """
         # Input validation FIRST (a 400 the caller can fix), availability
         # second (a 503 the operator owns).
+        from mnemostack.ingest import _parse_iso_timestamp
+
         for i, t in enumerate(req.triples):
             # min_length=1 admits whitespace-only strings, which would
             # create/merge a graph node named " " — same rigor as the
@@ -1477,6 +1506,21 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                     status_code=400,
                     detail=f"triples[{i}]: subject/predicate/object must be non-blank",
                 )
+            # Validity bounds must parse: a stored "tomorrow" degrades
+            # point-in-time queries to lexicographic comparison — the fact
+            # silently joins/leaves history at unrelated instants. The
+            # graph's own "current" marker stays valid for valid_until.
+            if t.valid_from is not None and _parse_iso_timestamp(t.valid_from) is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"triples[{i}]: valid_from must be ISO-8601",
+                )
+            if t.valid_until is not None and t.valid_until != "current":
+                if _parse_iso_timestamp(t.valid_until) is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"triples[{i}]: valid_until must be ISO-8601 or 'current'",
+                    )
         if not cfg.graph_uri:
             raise HTTPException(status_code=503, detail="graph is not configured")
         tenant = _tenant_of(principal)

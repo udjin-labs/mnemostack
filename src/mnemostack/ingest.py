@@ -211,6 +211,12 @@ REMOTE_MAX_DOC_CHARS = 262_144
 REMOTE_CHUNK_SIZE = 800
 REMOTE_MAX_CHUNKS_PER_REQUEST = 128
 
+#: Ceiling on a caller-supplied offset: 2^53-1 — exactly representable in
+#: an IEEE double (JSON/JS interop) and well inside Qdrant's int64 payload
+#: domain. An unbounded Python int (2**100) would pay for embedding first
+#: and only then be rejected — or silently lose precision — at the store.
+REMOTE_MAX_OFFSET = 2**53 - 1
+
 #: Metadata keys a remote caller may never supply, beyond the underscore
 #: namespace (every "_"-prefixed key is server-structural by convention).
 #: `indexed_at` is server-stamped write time; the protected set covers the
@@ -322,6 +328,8 @@ def validate_remote_item(
         return "text must be a non-empty string"
     if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
         return "offset must be a non-negative integer"
+    if offset > REMOTE_MAX_OFFSET:
+        return f"offset exceeds {REMOTE_MAX_OFFSET} (must fit the store's integer domain)"
     if chunk:
         if len(text) > REMOTE_MAX_DOC_CHARS:
             return f"text exceeds {REMOTE_MAX_DOC_CHARS} characters (chunked cap)"

@@ -911,3 +911,157 @@ def test_enrich_keys_never_reach_public_payloads():
         SimpleNamespace(id="1", text="x", score=1.0, payload=dict(payload), sources=["vector"])
     )
     assert "_enrich_keys" not in mem.metadata
+
+
+# --------------------------------------------------- bot round-2 batch pins
+
+
+def test_memories_all_embedding_failures_map_to_502(monkeypatch, tmp_path):
+    """Bot-R2: per-item isolation is for PARTIAL failure — when EVERY item
+    failed to embed, 200 would hide a dead write path from status checks."""
+    app, _store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
+    client = TestClient(app)
+    r = client.post(
+        "/memories",
+        json={"items": [{"text": "bad |POISON| one"}, {"text": "bad |POISON| two"}]},
+        headers={"X-API-Key": keys["write"]},
+    )
+    assert r.status_code == 502
+    # Partial failure keeps 200 with per-item statuses.
+    r2 = client.post(
+        "/memories",
+        json={"items": [{"text": "bad |POISON| three"}, {"text": "good"}]},
+        headers={"X-API-Key": keys["write"]},
+    )
+    assert r2.status_code == 200
+    assert r2.json()["failed"] == 1 and r2.json()["stored"] == 1
+
+
+def test_offset_is_bounded_to_the_store_integer_domain():
+    from mnemostack.ingest import REMOTE_MAX_OFFSET
+
+    assert validate_remote_item("t", "s", None, [], {}, offset=REMOTE_MAX_OFFSET) is None
+    assert "exceeds" in validate_remote_item(
+        "t", "s", None, [], {}, offset=REMOTE_MAX_OFFSET + 1
+    )
+    assert "exceeds" in validate_remote_item("t", "s", None, [], {}, offset=2**100)
+
+
+def test_memories_offset_cap_enforced_at_the_schema(monkeypatch, tmp_path):
+    app, _store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
+    r = TestClient(app).post(
+        "/memories",
+        json={"items": [{"text": "x", "offset": 2**100}]},
+        headers={"X-API-Key": keys["write"]},
+    )
+    assert r.status_code == 422  # pydantic le — before any embedding cost
+
+
+def test_triples_validity_bounds_must_parse(monkeypatch, tmp_path):
+    """Bot-R2: an unparseable bound degrades point-in-time queries to
+    lexicographic comparison — reject at the API; 'current' stays valid."""
+    import mnemostack.graph.factory as graph_factory
+    import mnemostack.server as srv  # noqa: F401
+
+    added: list[dict] = []
+
+    class _G:
+        def add_triple(self, **kw):
+            added.append(kw)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(graph_factory, "make_graph_store", lambda *a, **k: _G())
+    emb = _CountingEmbedding()
+    store = _mem_store("tv")
+    import mnemostack.server as srv2
+
+    monkeypatch.setattr(srv2, "VectorStore", lambda **_: store)
+    monkeypatch.setattr(srv2, "get_provider", lambda _n, **_k: emb)
+
+    class _Probe:
+        def get_collections(self):
+            return object()
+
+    monkeypatch.setattr(srv2, "_make_probe_client", lambda *_a, **_k: _Probe())
+    for name in ("Recaller", "VectorRetriever", "BM25Retriever", "MemgraphRetriever",
+                 "TemporalRetriever"):
+        monkeypatch.setattr(srv2, name, lambda **_: object())
+    monkeypatch.setattr(srv2, "build_full_pipeline", lambda **_: object())
+    monkeypatch.setattr(srv2, "FileStateStore", lambda path: object())
+
+    def _no_llm(*_a, **_k):
+        raise RuntimeError("no llm")
+
+    monkeypatch.setattr(srv2, "get_llm", _no_llm)
+    from mnemostack.auth import FileKeyStore
+
+    ks = FileKeyStore(tmp_path / "k.json")
+    _, wk = ks.issue("alpha", ["write"])
+    app = build_app(
+        ServerConfig(
+            provider_name="fake", llm_name="fake",
+            graph_uri="bolt://graph.invalid:7687",
+            auth_enabled=True, keys_file=str(tmp_path / "k.json"),
+        )
+    )
+    client = TestClient(app)
+    hdr = {"X-API-Key": wk}
+    bad = client.post(
+        "/triples",
+        json={"triples": [{"subject": "a", "predicate": "p", "object": "b",
+                            "valid_from": "tomorrow"}]},
+        headers=hdr,
+    )
+    assert bad.status_code == 400 and "valid_from" in bad.json()["detail"]
+    ok = client.post(
+        "/triples",
+        json={"triples": [{"subject": "a", "predicate": "p", "object": "b",
+                            "valid_from": "2026-01-01", "valid_until": "current"}]},
+        headers=hdr,
+    )
+    assert ok.status_code == 200 and added[0]["valid_until"] == "current"
+
+
+def test_qdrant_bm25_mode_boots_without_a_collection(monkeypatch, tmp_path):
+    """Bot-R2 P1: a fresh deployment must be able to START in qdrant_bm25
+    mode — the arm is skipped (startup-snapshot semantics) instead of the
+    boot crashing on the missing collection."""
+    import mnemostack.server as srv
+
+    emb = _CountingEmbedding()
+    store = VectorStore(collection="freshb", dimension=3)
+    store.client = QdrantClient(":memory:")  # no ensure_collection: fresh
+    monkeypatch.setattr(srv, "VectorStore", lambda **_: store)
+    monkeypatch.setattr(srv, "get_provider", lambda _n, **_k: emb)
+
+    class _Probe:
+        def get_collections(self):
+            return object()
+
+    monkeypatch.setattr(srv, "_make_probe_client", lambda *_a, **_k: _Probe())
+    for name in ("Recaller", "VectorRetriever", "MemgraphRetriever", "TemporalRetriever"):
+        monkeypatch.setattr(srv, name, lambda **_: object())
+
+    def _must_not_build(*_a, **_k):  # pragma: no cover
+        raise AssertionError("BM25 corpus must not load from a missing collection")
+
+    monkeypatch.setattr(srv.BM25Retriever, "from_qdrant", _must_not_build)
+    monkeypatch.setattr(srv, "build_full_pipeline", lambda **_: object())
+    monkeypatch.setattr(srv, "FileStateStore", lambda path: object())
+
+    def _no_llm(*_a, **_k):
+        raise RuntimeError("no llm")
+
+    monkeypatch.setattr(srv, "get_llm", _no_llm)
+    app = build_app(
+        ServerConfig(
+            provider_name="fake", llm_name="fake", graph_uri=None,
+            text_search="qdrant_bm25",
+        )
+    )
+    # Boot succeeded; the first write then bootstraps the collection.
+    client = TestClient(app)
+    r = client.post("/memories", json={"items": [{"text": "first"}]})
+    assert r.status_code == 200 and r.json()["stored"] == 1

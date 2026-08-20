@@ -1255,3 +1255,17 @@ def test_mcp_build_server_rejects_bad_timestamp_format(tmp_path, monkeypatch):
         build_server(
             collection="t", embedding_provider="ollama", timestamp_format="epoc_typo"
         )
+
+
+def test_mcp_remember_all_failed_reports_embedding_failed(tmp_path, monkeypatch):
+    mcp, _store, emb = _remember_mcp(tmp_path, monkeypatch)
+
+    def _broken_embed(text):
+        emb.embedded.append(text)
+        return []
+
+    monkeypatch.setattr(emb, "embed", _broken_embed)
+    r = asyncio.run(
+        mcp.call_tool("mnemostack_remember", {"text": "will not embed", "source": "s"})
+    ).structured_content
+    assert r["ok"] is False and r["error_kind"] == "embedding_failed"

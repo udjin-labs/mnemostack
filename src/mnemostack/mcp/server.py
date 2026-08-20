@@ -31,6 +31,7 @@ from ..embeddings.roles import EmbeddingSpaceError
 from ..feedback import apply_feedback
 from ..ingest import (
     REMOTE_MAX_DOC_CHARS,
+    REMOTE_MAX_OFFSET,
     REMOTE_MAX_TEXT_CHARS,
     IngestItem,
     RemoteRequestTooLarge,
@@ -883,7 +884,11 @@ def build_server(
         ] = "",
         offset: Annotated[
             int,
-            Field(ge=0, description="Position within `source` for multi-part documents."),
+            Field(
+                ge=0,
+                le=REMOTE_MAX_OFFSET,
+                description="Position within `source` for multi-part documents.",
+            ),
         ] = 0,
         timestamp: Annotated[
             str | None,
@@ -1002,6 +1007,15 @@ def build_server(
                 return {"ok": False, "error": str(e), "error_kind": "quota_exceeded"}
             except EmbeddingSpaceError as e:
                 return {"ok": False, "error": str(e), "error_kind": "embedding_space"}
+            failed_n = sum(r.status == "failed" for r in results)
+            if results and failed_n == len(results):
+                # Same honesty rule as the HTTP 502: when EVERY item failed
+                # to embed the write path is down — ok:true would hide it.
+                return {
+                    "ok": False,
+                    "error": f"embedding failed for all {failed_n} item(s)",
+                    "error_kind": "embedding_failed",
+                }
             return {
                 "ok": True,
                 "results": [
@@ -1010,7 +1024,7 @@ def build_server(
                 ],
                 "stored": sum(r.status == "stored" for r in results),
                 "duplicates": sum(r.status == "duplicate" for r in results),
-                "failed": sum(r.status == "failed" for r in results),
+                "failed": failed_n,
             }
         except Exception as e:  # noqa: BLE001
             # error_kind is present on EVERY failure shape of this tool;
