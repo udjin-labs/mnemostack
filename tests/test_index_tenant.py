@@ -160,3 +160,48 @@ def test_empty_tenant_is_rejected(indexer, tmp_path):
     _run, _store, _emb = indexer
     doc = _doc(tmp_path, "x.txt", "content")
     assert cli.cmd_index(_index_args(doc, tenant=True, _tenant_value="   ")) == 2
+
+
+def test_recreate_is_refused_under_a_tenant(indexer, tmp_path):
+    """R1 (codex P1): --recreate drops the WHOLE collection, so under a
+    tenant it would delete every other tenant's points. Refused, as
+    index-markdown has refused since the graph-tenancy work."""
+    _run, store, _emb = indexer
+    doc = _doc(tmp_path, "keep.txt", "another tenant's content lives here")
+    args = _index_args(doc, tenant=True, _tenant_value="globex")
+    assert cli.cmd_index(args) == 0
+    before = {str(pid) for pid in store.iter_ids()}
+    args = _index_args(doc, tenant=True, _tenant_value="acme")
+    args.recreate = True
+    assert cli.cmd_index(args) == 2  # refused, not executed
+    assert {str(pid) for pid in store.iter_ids()} == before  # nothing dropped
+
+
+def test_refresh_payload_writes_are_tenant_scoped(indexer, tmp_path):
+    """R1 (codex P1): the refresh path scoped its snapshot READ but wrote
+    patches unscoped — a point recreated under another owner mid-run could
+    be patched, and tenant-aware stores got an unscoped operation."""
+    run, store, _emb = indexer
+    doc = _doc(tmp_path, "refresh.txt", "content whose payload gets refreshed")
+    run(doc, tenant=True, _tenant_value="acme")
+    seen: list[dict] = []
+    orig = store.apply_payload_patches
+
+    def _recording(patches, **kwargs):
+        seen.append(kwargs)
+        return orig(patches, **kwargs)
+
+    store.apply_payload_patches = _recording  # type: ignore[method-assign]
+    # A stale ownership marker in the STORED payload guarantees the refresh
+    # diff produces a patch (the indexer must clear keys it used to own).
+    pid = next(iter(store.iter_ids()))
+    store.client.set_payload(
+        collection_name=store.collection,
+        payload={"_enrich_keys": ["ghost_field"], "ghost_field": "left over"},
+        points=[pid],
+    )
+    args = _index_args(doc, tenant=True, _tenant_value="acme")
+    args.refresh_payloads = True
+    assert cli.cmd_index(args) == 0
+    assert seen, "no payload patch was issued"
+    assert all(kw.get("tenant") == "acme" for kw in seen), seen

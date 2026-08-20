@@ -2462,8 +2462,27 @@ def _build_recaller(
 
 def cmd_index(args: argparse.Namespace) -> int:
     tenant = getattr(args, "tenant", None)
-    if tenant is not None and not tenant.strip():
-        print("error: --tenant must not be empty", file=sys.stderr)
+    if tenant is not None and not str(tenant).strip():
+        # An explicitly empty --tenant (e.g. `--tenant "$UNSET_VAR"`) fails
+        # closed rather than silently running unscoped — otherwise
+        # `--tenant "" --recreate` slips past the guard below and drops the
+        # whole shared collection.
+        print(
+            "error: --tenant was given an empty value; omit --tenant for an "
+            "unscoped index, or pass a non-empty tenant id",
+            file=sys.stderr,
+        )
+        return 2
+    if tenant is not None and args.recreate:
+        # --recreate drops and rebuilds the WHOLE collection, which in a
+        # shared multi-tenant collection deletes every other tenant's
+        # points. Same refusal index-markdown has carried since #114.
+        print(
+            "error: --recreate drops the entire collection (all tenants); it "
+            "can't be scoped to --tenant. Re-index the tenant with --prune, "
+            "or recreate without --tenant.",
+            file=sys.stderr,
+        )
         return 2
     tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
     target = Path(args.path)
@@ -2875,9 +2894,9 @@ def cmd_index(args: argparse.Namespace) -> int:
             # matching accounting for the exact contract.
             pending_patches.append(patch)
             if len(pending_patches) >= PAYLOAD_PATCH_BATCH:
-                refreshed += apply_patches_via(store, pending_patches)
+                refreshed += apply_patches_via(store, pending_patches, **tkw)
                 pending_patches = []
-        refreshed += apply_patches_via(store, pending_patches)
+        refreshed += apply_patches_via(store, pending_patches, **tkw)
         if foreign_skipped:
             print(
                 f"warning: {foreign_skipped} chunk(s) skipped by --refresh-payloads: "
