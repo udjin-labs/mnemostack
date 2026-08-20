@@ -1529,3 +1529,22 @@ def test_422_echo_keeps_distinct_surrogate_keys(monkeypatch, tmp_path):
     body = r.text
     for echoed in ("a\\\\ud800", "a\\\\ud801", "a\\\\ud802"):
         assert echoed in body, echoed
+
+
+def test_422_echo_never_drops_colliding_sanitized_keys(monkeypatch, tmp_path):
+    """Round-19 (agent P2): a key holding the LITERAL text 'a\\ud800'
+    (backslash + letters) and a key holding the real lone surrogate
+    sanitize to the same string — the echo dict must disambiguate, not
+    silently overwrite one entry with the other."""
+    app, _store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
+    # JSON: first key = escaped backslash + text; second = real surrogate.
+    raw = b'{"probe": {"a\\\\ud800": "1", "a\\ud800": "2"}}'
+    r = TestClient(app).post(
+        "/memories",
+        content=raw,
+        headers={"X-API-Key": keys["write"], "Content-Type": "application/json"},
+    )
+    assert r.status_code == 422
+    echoed = r.json()["detail"][0]["input"]["probe"]
+    assert sorted(echoed.values()) == ["1", "2"]
+    assert len(echoed) == 2

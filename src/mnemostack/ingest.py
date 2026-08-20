@@ -599,9 +599,12 @@ def _valid_remote_predicate(predicate: str) -> bool:
     number-but-not-digit characters (superscripts ², Roman numerals Ⅳ,
     circled digits ① — categories No/Nl) that a regex ``\\w`` admits but
     that either get silently underscore-mangled by the store's sanitizer
-    (leading position) or blow up Cypher's unescaped-identifier grammar
-    (anywhere). ``isalpha``/``isdecimal`` match exactly the characters
-    the sanitizer passes through unchanged apart from uppercasing.
+    (leading position, both categories) or are rejected by Cypher's
+    unescaped-identifier grammar (category No, any position). Accepted
+    characters pass the sanitizer without substitution; uppercasing is
+    the only transformation (a handful of letters uppercase into
+    decomposed forms — ``ǰ`` → ``J̌`` — which the store and Cypher both
+    accept).
     """
     return predicate[0].isalpha() and all(
         c.isalpha() or c.isdecimal() or c == "_" for c in predicate

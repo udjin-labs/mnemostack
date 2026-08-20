@@ -1036,10 +1036,17 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             return value.encode("utf-8", "backslashreplace").decode("utf-8")
         if isinstance(value, dict):
             # KEYS too: a surrogate metadata key echoed into the error body
-            # would crash the response encoder exactly like a value.
-            return {
-                _strip_surrogates(k): _strip_surrogates(v) for k, v in value.items()
-            }
+            # would crash the response encoder exactly like a value. Keys
+            # can still collide post-sanitization (a literal backslash-u
+            # sequence vs a real surrogate produce the same text) — suffix
+            # U+FFFD until unique so no entry is ever silently dropped.
+            out: dict[Any, Any] = {}
+            for k, v in value.items():
+                sk = _strip_surrogates(k)
+                while isinstance(sk, str) and sk in out:
+                    sk += "�"
+                out[sk] = _strip_surrogates(v)
+            return out
         if isinstance(value, list):
             return [_strip_surrogates(v) for v in value]
         return value
