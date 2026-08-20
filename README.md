@@ -732,6 +732,7 @@ Endpoints:
 | `GET`  | `/status`  | Operator snapshot — config, live dependency reachability, headline counters |
 | `POST` | `/recall`  | Hybrid recall with optional 8-stage pipeline |
 | `POST` | `/answer`  | Recall + LLM answer synthesis with citations |
+| `GET`  | `/resolve/{chunk_id}` | Verify a citation — resolve a chunk id back to its source document — `read` |
 | `POST` | `/feedback` | Explicit click/usefulness feedback for stateful learning |
 | `POST` | `/memories` | Create memories (server-side embedding, store-backed dedup) — `write` |
 | `GET`  | `/memories` | List what the tenant holds from one `source` (ids + integrity metadata, no text) — `read` |
