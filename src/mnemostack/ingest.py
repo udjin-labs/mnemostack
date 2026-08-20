@@ -586,6 +586,56 @@ _PIPELINE_PAYLOAD_KEYS = _PROTECTED_PAYLOAD_KEYS | {
 }
 
 
+#: Predicate contract for remote graph writes: starts with a letter,
+#: then letters/digits/underscores. The store uppercases relationship
+#: types, so case variants of one predicate intentionally merge; what the
+#: regex EXCLUDES are the punctuation/space variants ("works-at",
+#: "works at") that would silently collapse into one edge type while both
+#: writes report success — and the leading-digit forms whose sanitized
+#: shape a caller can never legally submit.
+_REMOTE_PREDICATE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+
+
+def validate_remote_triple(
+    subject: str,
+    predicate: str,
+    obj: str,
+    valid_from: str | None,
+    valid_until: str | None,
+) -> str | None:
+    """First violated constraint of one remote graph triple, or None.
+
+    Shared by POST /triples and the MCP graph_add_triple tool so both
+    surfaces enforce the identical contract.
+    """
+    for field_name, value in (("subject", subject), ("predicate", predicate), ("object", obj)):
+        if not isinstance(value, str) or not value.strip():
+            return f"{field_name} must be a non-blank string"
+        if not _utf8_encodable(value):
+            return f"{field_name} must be valid UTF-8"
+    if not _REMOTE_PREDICATE_RE.fullmatch(predicate):
+        return (
+            "predicate must be a relation identifier (letters, digits, "
+            "underscores; starting with a letter) — the store uppercases it"
+        )
+    vf_dt = None
+    if valid_from is not None:
+        if not isinstance(valid_from, str):
+            return "valid_from must be ISO-8601"
+        vf_dt = _parse_iso_timestamp(valid_from)
+        if vf_dt is None:
+            return "valid_from must be ISO-8601"
+    if valid_until is not None and valid_until != "current":
+        if not isinstance(valid_until, str):
+            return "valid_until must be ISO-8601 or 'current'"
+        vu_dt = _parse_iso_timestamp(valid_until)
+        if vu_dt is None:
+            return "valid_until must be ISO-8601 or 'current'"
+        if vf_dt is not None and _instants_not_increasing(vf_dt, vu_dt):
+            return "valid_from must precede valid_until"
+    return None
+
+
 def ensure_remote_schema_keys(text_key: str, timestamp_key: str) -> None:
     """Fail loud on a schema-key configuration the write path cannot honor.
 

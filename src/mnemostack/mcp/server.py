@@ -39,6 +39,7 @@ from ..ingest import (
     expand_remote_items,
     ingest_remote_items,
     validate_remote_item,
+    validate_remote_triple,
 )
 from ..llm import get_llm
 from ..quotas import QuotaExceededError
@@ -1160,6 +1161,14 @@ def build_server(
                 # in that tenant's isolated subgraph (its nodes/edges carry
                 # `tenant`), never a shared namespace. Unscoped when auth is off.
                 tenant = _tenant_of(_authorize("write"))
+                # Same contract as POST /triples (shared validator): predicate
+                # shape (punctuation variants would silently collapse into one
+                # relationship type), UTF-8 entities, ordered validity bounds.
+                problem = validate_remote_triple(
+                    subject, predicate, obj, valid_from, valid_until
+                )
+                if problem:
+                    return {"ok": False, "error": problem, "error_kind": "invalid_argument"}
                 from ..graph.factory import make_graph_store
 
                 gs = make_graph_store(

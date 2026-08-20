@@ -1278,3 +1278,44 @@ def test_mcp_build_server_rejects_colliding_schema_keys(tmp_path, monkeypatch):
     monkeypatch.setattr(srv, "VectorStore", lambda **_: MagicMock())
     with pytest.raises(ValueError, match="pipeline"):
         build_server(collection="t", embedding_provider="ollama", timestamp_key="tags")
+
+
+def test_mcp_graph_add_triple_shares_the_remote_contract(tmp_path, monkeypatch):
+    """Agent-R16 P2: MCP graph writes enforce the SAME contract as
+    POST /triples — punctuation predicates that would silently collapse
+    into one relationship type are invalid_argument, not ok:true."""
+    import mnemostack.graph.factory as gf
+
+    added: list = []
+
+    class _G:
+        def add_triple(self, **kw):
+            added.append(kw)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(gf, "make_graph_store", lambda *a, **k: _G())
+    mcp = _auth_mcp(tmp_path, monkeypatch, tenant="acme", scopes="admin", memgraph="bolt://x")
+    bad = asyncio.run(
+        mcp.call_tool(
+            "mnemostack_graph_add_triple",
+            {"subject": "a", "predicate": "works at", "obj": "b"},
+        )
+    ).structured_content
+    assert bad["ok"] is False and bad["error_kind"] == "invalid_argument"
+    inv = asyncio.run(
+        mcp.call_tool(
+            "mnemostack_graph_add_triple",
+            {"subject": "a", "predicate": "works_on", "obj": "b",
+             "valid_from": "2026-02-01", "valid_until": "2026-01-01"},
+        )
+    ).structured_content
+    assert inv["ok"] is False and "precede" in inv["error"]
+    ok = asyncio.run(
+        mcp.call_tool(
+            "mnemostack_graph_add_triple",
+            {"subject": "a", "predicate": "works_on", "obj": "b"},
+        )
+    ).structured_content
+    assert ok["ok"] is True and added[-1]["predicate"] == "works_on"

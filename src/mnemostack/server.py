@@ -60,12 +60,11 @@ from mnemostack.ingest import (
     REMOTE_MAX_TIMESTAMP_CHARS,
     IngestItem,
     RemoteRequestTooLarge,
-    _instants_not_increasing,
-    _parse_iso_timestamp,
     ensure_remote_schema_keys,
     expand_remote_items,
     ingest_remote_items,
     validate_remote_item,
+    validate_remote_triple,
 )
 from mnemostack.llm import get_llm
 from mnemostack.observability.recorder import (
@@ -1520,75 +1519,15 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         another tenant's subgraph. Requires a configured graph; 503 when
         the deployment runs without Memgraph.
         """
-        from mnemostack.graph.store import GraphStore
-
         # Input validation FIRST (a 400 the caller can fix), availability
-        # second (a 503 the operator owns).
+        # second (a 503 the operator owns). Contract shared with the MCP
+        # graph tool via validate_remote_triple.
         for i, t in enumerate(req.triples):
-            # min_length=1 admits whitespace-only strings, which would
-            # create/merge a graph node named " " — same rigor as the
-            # sibling /memories text check.
-            if not t.subject.strip() or not t.predicate.strip() or not t.object.strip():
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"triples[{i}]: subject/predicate/object must be non-blank",
-                )
-            # Lone surrogates (valid JSON escapes) cannot be UTF-8 encoded
-            # by the bolt driver — caller-fixable input, not a 502.
-            for field_name, value in (
-                ("subject", t.subject),
-                ("predicate", t.predicate),
-                ("object", t.object),
-            ):
-                try:
-                    value.encode("utf-8")
-                except UnicodeEncodeError:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"triples[{i}]: {field_name} must be valid UTF-8",
-                    ) from None
-            # The store normalizes predicates into Cypher relationship types
-            # (non-alphanumerics -> "_", uppercased): "works-at" and
-            # "works at" would silently MERGE into one WORKS_AT edge, the
-            # second overwriting the first's validity while both report
-            # added. Reject anything normalization would change — the
-            # caller states the canonical type explicitly.
-            normalized = GraphStore._safe_rel(t.predicate)
-            if normalized != t.predicate:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"triples[{i}]: predicate must be a canonical relation "
-                        f"identifier (did you mean {normalized!r}?)"
-                    ),
-                )
-            # Validity bounds must parse: a stored "tomorrow" degrades
-            # point-in-time queries to lexicographic comparison — the fact
-            # silently joins/leaves history at unrelated instants. The
-            # graph's own "current" marker stays valid for valid_until.
-            vf_dt = None
-            if t.valid_from is not None:
-                vf_dt = _parse_iso_timestamp(t.valid_from)
-                if vf_dt is None:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"triples[{i}]: valid_from must be ISO-8601",
-                    )
-            if t.valid_until is not None and t.valid_until != "current":
-                vu_dt = _parse_iso_timestamp(t.valid_until)
-                if vu_dt is None:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"triples[{i}]: valid_until must be ISO-8601 or 'current'",
-                    )
-                if vf_dt is not None and _instants_not_increasing(vf_dt, vu_dt):
-                    # valid_from <= as_of < valid_until can never hold: the
-                    # reported "added" fact would be invisible to every
-                    # point-in-time query.
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"triples[{i}]: valid_from must precede valid_until",
-                    )
+            problem = validate_remote_triple(
+                t.subject, t.predicate, t.object, t.valid_from, t.valid_until
+            )
+            if problem:
+                raise HTTPException(status_code=400, detail=f"triples[{i}]: {problem}")
         if not cfg.graph_uri:
             raise HTTPException(status_code=503, detail="graph is not configured")
         tenant = _tenant_of(principal)

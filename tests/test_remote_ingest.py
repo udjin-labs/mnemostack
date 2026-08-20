@@ -1465,13 +1465,22 @@ def test_triples_reject_surrogates_and_noncanonical_predicates(monkeypatch, tmp_
         json={"triples": [{"subject": "a", "predicate": "works-at", "object": "b"}]},
         headers=hdr,
     )
-    assert r2.status_code == 400 and "WORKS_AT" in r2.json()["detail"]
+    assert r2.status_code == 400 and "relation identifier" in r2.json()["detail"]
+    # Documented snake_case predicates (works_on/owns/...) stay VALID — the
+    # round-16 canonical-form contract wrongly rejected them (and its
+    # non-idempotent suggestion looped forever on digit-leading input).
     r3 = client.post(
         "/triples",
-        json={"triples": [{"subject": "a", "predicate": "WORKS_AT", "object": "b"}]},
+        json={"triples": [{"subject": "a", "predicate": "works_on", "object": "b"}]},
         headers=hdr,
     )
-    assert r3.status_code == 200 and calls[-1]["predicate"] == "WORKS_AT"
+    assert r3.status_code == 200 and calls[-1]["predicate"] == "works_on"
+    r4 = client.post(
+        "/triples",
+        json={"triples": [{"subject": "a", "predicate": "1X", "object": "b"}]},
+        headers=hdr,
+    )
+    assert r4.status_code == 400  # rejected outright — no unreachable suggestion
 
 
 def test_triples_reject_inverted_intervals(monkeypatch, tmp_path):
