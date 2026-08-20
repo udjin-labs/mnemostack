@@ -298,16 +298,24 @@ def test_a_store_without_the_batch_reader_still_records(monkeypatch, tmp_path):
     assert _payload(store, 1)[ACCESS_COUNT_KEY] == 4
 
 
-def test_a_failing_counter_read_does_not_stop_recording(monkeypatch, tmp_path):
+def test_a_failing_counter_read_stamps_the_time_but_not_the_count(monkeypatch, tmp_path):
+    """R3 (codex P2): falling back to the hit's payload when the READ fails
+    reintroduces the very defect the read was added to prevent — a stale
+    lexical snapshot overwriting a stored 7 with 1. A failed read stamps
+    the timestamp (the decay stage still gets its input) and leaves the
+    counter exactly where it was."""
     _app, store, _emb, _keys = _ingest_app(monkeypatch, tmp_path)
-    _seed(store, 1)
+    _seed(store, 1, {ACCESS_COUNT_KEY: 7})
 
     def _boom(*_a, **_k):
         raise RuntimeError("read failed")
 
     monkeypatch.setattr(store, "retrieve_payload_fields", _boom)
-    assert record_access(store, [_Hit(1)], tenant="alpha") == 1
-    assert _payload(store, 1)[ACCESS_COUNT_KEY] == 1
+    stale = _Hit(1, {ACCESS_COUNT_KEY: 0})
+    assert record_access(store, [stale], tenant="alpha") == 1
+    payload = _payload(store, 1)
+    assert payload[ACCESS_COUNT_KEY] == 7  # untouched, not decreased
+    assert payload[LAST_ACCESSED_KEY]  # and the time IS recorded
 
 
 def test_the_counter_read_is_tenant_scoped(monkeypatch, tmp_path):

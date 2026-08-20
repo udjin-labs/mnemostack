@@ -84,22 +84,32 @@ LAST_ACCESSED_KEY = "last_accessed"
 MAX_STORED_ACCESS_COUNT = 1_000_000
 
 
-def _stored_counts(store: Any, ids: list[Any], tenant: str | None) -> dict[str, int]:
+def _stored_counts(store: Any, ids: list[Any], tenant: str | None) -> dict[str, int] | None:
     """Authoritative access counts for these ids, in one round-trip.
 
-    Empty when the store has no batch reader or the read fails — the caller
-    then falls back to the hit's own payload, which is right for a vector
-    hit and merely stale for a lexical one. Never raises: this is
-    bookkeeping.
+    Three outcomes, and they are NOT interchangeable:
+
+    - a mapping — the authoritative values (a point absent from it is
+      absent from the store or owned by another tenant);
+    - ``{}`` from a store with no batch reader — the caller may fall back
+      to the hit's own payload, since nothing better exists;
+    - ``None`` — the read FAILED. The caller must not fall back here: a
+      lexical hit's payload is a startup snapshot, so treating a transient
+      read failure as "count 0" would overwrite a stored 7 with 1 and walk
+      the counter backwards, which is exactly what reading the store was
+      introduced to prevent.
+
+    Never raises: this is bookkeeping.
     """
     reader = getattr(store, "retrieve_payload_fields", None)
     if not callable(reader):
         return {}
     try:
         rows = reader(ids, [ACCESS_COUNT_KEY], tenant=tenant)
-    except Exception:  # noqa: BLE001 — fall back to the hit payloads
+    except Exception:  # noqa: BLE001 — reported through the return value
         log.warning("access counter read failed for %d point(s)", len(ids), exc_info=True)
-        return {}
+        counter("mnemostack.access.count_read_failed", 1)
+        return None
     return {key: _current_count(value) for key, value in rows.items()}
 
 
@@ -158,16 +168,25 @@ def record_access(
     patches = [
         PayloadPatch(
             id=pid,
-            set_values={
-                # max(): the stored value is authoritative, the hit's payload
-                # is the fallback — and taking the larger means a stale
-                # lexical snapshot can never walk a counter backwards.
-                ACCESS_COUNT_KEY: min(
-                    max(stored.get(str(pid), 0), _current_count(payload)) + 1,
-                    MAX_STORED_ACCESS_COUNT,
-                ),
-                LAST_ACCESSED_KEY: stamp,
-            },
+            set_values=(
+                # The read failed: stamp the TIME and leave the counter
+                # alone. Half the bookkeeping beats a wrong number — the
+                # decay stage still gets its input, and a stale lexical
+                # snapshot cannot decrease a count that was never touched.
+                {LAST_ACCESSED_KEY: stamp}
+                if stored is None
+                else {
+                    # max(): the stored value is authoritative, the hit's
+                    # payload is the fallback for a store that cannot be
+                    # read — the larger of the two means a stale lexical
+                    # snapshot can never walk a counter backwards.
+                    ACCESS_COUNT_KEY: min(
+                        max(stored.get(str(pid), 0), _current_count(payload)) + 1,
+                        MAX_STORED_ACCESS_COUNT,
+                    ),
+                    LAST_ACCESSED_KEY: stamp,
+                }
+            ),
         )
         for pid, payload in entries
     ]
