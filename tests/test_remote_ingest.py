@@ -1145,3 +1145,43 @@ def test_int64_bounds_are_asymmetric():
     assert validate_remote_item("t", "s", None, [], {"n": 2**63 - 1}) is None
     assert "64-bit" in validate_remote_item("t", "s", None, [], {"n": -(2**63) - 1})
     assert "64-bit" in validate_remote_item("t", "s", None, [], {"n": 2**63})
+
+
+def test_re_remembering_an_invalidated_memory_reactivates_it():
+    """Codex-R9: invalidate -> remember of the same fact must make it
+    recallable again (marker cleared, no re-embedding), reported stored —
+    a hidden 'duplicate' would claim success while recall stays empty."""
+    emb, store = _CountingEmbedding(), _mem_store()
+    (first,) = ingest_remote_items(
+        emb, store, [IngestItem(text="the sky is green", source="chat")], tenant="a"
+    )
+    assert first.status == "stored"
+    store.invalidate([first.id], tenant="a")
+    point = store.client.retrieve(store.collection, ids=[first.id], with_payload=True)[0]
+    assert point.payload.get("invalidated_at")  # retracted
+    embedded_before = len(emb.embedded)
+
+    (again,) = ingest_remote_items(
+        emb, store, [IngestItem(text="the sky is green", source="chat")], tenant="a"
+    )
+    assert again.status == "stored"  # reactivated, not a hidden duplicate
+    assert len(emb.embedded) == embedded_before  # zero re-embedding
+    point = store.client.retrieve(store.collection, ids=[first.id], with_payload=True)[0]
+    assert "invalidated_at" not in (point.payload or {})  # recallable again
+
+
+def test_current_duplicates_still_skip_the_reactivation_patch():
+    """A LIVE duplicate must not pay a payload patch round trip."""
+    emb, store = _CountingEmbedding(), _mem_store()
+    ingest_remote_items(emb, store, [IngestItem(text="live", source="s")], tenant="a")
+    patches: list = []
+    orig = store.apply_payload_patches
+
+    def _counting(patch_list, **kw):
+        patches.append(patch_list)
+        return orig(patch_list, **kw)
+
+    store.apply_payload_patches = _counting  # type: ignore[method-assign]
+    (res,) = ingest_remote_items(emb, store, [IngestItem(text="live", source="s")], tenant="a")
+    assert res.status == "duplicate"
+    assert patches == []  # no patch issued for a current point

@@ -683,6 +683,36 @@ def _ingest_remote_items_locked(
         existing = store.retrieve_existing_ids(list(ids), **tkw)
     except AttributeError:
         existing = set()  # duck store without the hook: everything embeds
+    # Lifecycle: an existing id may be a RETRACTED memory (invalidated_at
+    # set). Re-remembering the same fact must make it recallable again —
+    # reporting a hidden point as "duplicate" would claim success while
+    # default recall stays empty. Reactivate via a payload patch: content
+    # is byte-identical, so the stored vector is still valid — no
+    # re-embedding. Duck stores without the hooks keep the historical
+    # duplicate semantics; a failing patch propagates (an unrecallable
+    # "success" must not be reported).
+    reactivated: set[str] = set()
+    if existing:
+        try:
+            points = store.client.retrieve(
+                store.collection, ids=list(existing), with_payload=True
+            )
+        except AttributeError:
+            points = []
+        stale_ids = [
+            str(pt.id) for pt in points if (pt.payload or {}).get("invalidated_at")
+        ]
+        if stale_ids:
+            from mnemostack.vector.patch import PayloadPatch
+
+            store.apply_payload_patches(
+                [
+                    PayloadPatch(id=pid, delete_keys=("invalidated_at",))
+                    for pid in stale_ids
+                ],
+                **tkw,
+            )
+            reactivated = set(stale_ids)
     to_ingest: list[IngestItem] = []
     seen_now: set[str] = set()
     for pid, item in zip(ids, items, strict=True):
@@ -743,7 +773,9 @@ def _ingest_remote_items_locked(
             # only when the content actually exists — a repeat of a FAILED
             # item must not read as stored-elsewhere.
             status = "duplicate" if (pid in stored or pid in existing) else "failed"
-        elif pid in stored:
+        elif pid in stored or pid in reactivated:
+            # Reactivated = the memory became recallable again: the caller's
+            # intent succeeded, and "duplicate" would undersell the change.
             status = "stored"
         elif pid in existing:
             status = "duplicate"
