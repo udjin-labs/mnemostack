@@ -686,17 +686,25 @@ def coerce_point_ids(ids: Sequence[str | int]) -> list[str | int]:
     """Digit-only string ids become ints so numeric-id collections match.
 
     Qdrant stores integer ids as integers; a JSON caller often sends them
-    as strings. UUID ids contain hyphens, so they stay strings. Shared by
+    as strings. UUID ids contain hyphens, so they stay strings but are
+    LOWERCASED: the store canonicalizes UUIDs to lowercase, and the
+    ownership/existence checks compare ids as case-sensitive strings — an
+    uppercase spelling of an existing id would silently no-op. Shared by
     the HTTP lifecycle endpoints and the MCP invalidate tool. The length
     gate mirrors validate_remote_ids: past CPython's int-from-str digit
     limit int() RAISES, and a library caller may not have validated first.
     """
-    return [
-        int(x)
-        if isinstance(x, str) and _is_numeric_id_string(x) and len(x) <= 20
-        else x
-        for x in ids
-    ]
+    out: list[str | int] = []
+    for x in ids:
+        if isinstance(x, str):
+            if _is_numeric_id_string(x) and len(x) <= 20:
+                out.append(int(x))
+                continue
+            if _REMOTE_UUID_RE.fullmatch(x):
+                out.append(x.lower())
+                continue
+        out.append(x)
+    return out
 
 
 def validate_remote_ids(ids: Sequence[Any]) -> str | None:

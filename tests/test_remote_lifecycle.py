@@ -46,6 +46,27 @@ def test_validate_remote_ids_contract():
     assert coerce_point_ids(["9" * 5000]) == ["9" * 5000]  # no int() crash
     # Exact len==20 boundary still coerces (u64 max is 20 digits).
     assert coerce_point_ids([str(2**64 - 1)]) == [2**64 - 1]
+    # UUIDs canonicalize to lowercase — the store compares ids as
+    # case-sensitive strings, so an uppercase spelling would no-op.
+    assert coerce_point_ids(["D9428888-122B-11E1-B85C-61CD3CBB3210"]) == [
+        "d9428888-122b-11e1-b85c-61cd3cbb3210"
+    ]
+
+
+def test_invalidate_accepts_uppercase_uuid_spelling(monkeypatch, tmp_path):
+    """Codex-R3: uppercase UUID of an existing lowercase id must hit the
+    point, not silently report invalidated=0."""
+    app, store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
+    client = TestClient(app)
+    pid = _stored_id(client, keys["write"])
+    r = client.post(
+        "/invalidate",
+        json={"ids": [pid.upper()]},
+        headers={"X-API-Key": keys["write"]},
+    )
+    assert r.status_code == 200 and r.json()["invalidated"] == 1
+    point = store.client.retrieve(store.collection, ids=[pid], with_payload=True)[0]
+    assert point.payload.get("invalidated_at")
     assert validate_remote_ids(["²"]) is not None  # isdigit() but int() crashes
     assert validate_remote_ids(["٧"]) is not None  # non-ASCII decimal
     assert validate_remote_ids(
