@@ -1120,11 +1120,16 @@ def test_schema_mirror_is_structural_not_enrichment():
 
 
 def test_metadata_nesting_depth_is_bounded(monkeypatch, tmp_path):
-    """Agent-R8 P1: a few KB of pathologically nested lists must be a clean
-    400, never a RecursionError-turned-500 inside the validator itself."""
+    """Agent-R8 P1: pathologically nested metadata must be a clean 400,
+    never a RecursionError-turned-500 inside the validator itself.
+
+    Depth 100: parseable by every supported interpreter (3.10/3.11's
+    C json coder is recursion-limited around 1000 — deeper structures die
+    in the TRANSPORT parser on those versions, before any mnemostack
+    code), and far past the 32-level cap the validator enforces."""
     deep: list = []
     cursor = deep
-    for _ in range(3000):
+    for _ in range(100):
         nxt: list = []
         cursor.append(nxt)
         cursor = nxt
