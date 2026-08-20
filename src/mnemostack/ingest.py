@@ -772,6 +772,25 @@ def validate_remote_source(source: Any) -> str | None:
     return None
 
 
+def _scroll_keywords(scroll: Any) -> set[str] | None:
+    """Keyword names a store's ``scroll`` accepts, or None for "anything".
+
+    None covers both a ``**kwargs`` signature and a callable whose
+    signature cannot be read — in either case passing our keywords is the
+    right bet, and a genuine TypeError from the callee's own body still
+    surfaces instead of being mistaken for an unsupported keyword.
+    """
+    import inspect
+
+    try:
+        sig = inspect.signature(scroll)
+    except (TypeError, ValueError):
+        return None
+    if any(p.kind is p.VAR_KEYWORD for p in sig.parameters.values()):
+        return None
+    return set(sig.parameters)
+
+
 def validate_remote_cursor(after: Any) -> str | None:
     """First violated constraint of a pagination cursor, or None.
 
@@ -836,21 +855,43 @@ def find_source_points(
         # collection-scale request this whole surface exists to avoid.
         # A store without the parameter still gets the Python check.
         kwargs["index_root_guard"] = index_root
+    # A custom store may implement an older `scroll` signature. Which
+    # keywords it takes decides what we can push down — but NOT what the
+    # operation means: silently dropping `hide_invalidated` would resurrect
+    # the non-terminating retraction (an invalidated point keeps its
+    # source), and silently dropping `start_after` would make every
+    # paginated call return the SAME page forever. So each keyword the
+    # store lacks is either emulated here with identical semantics or, for
+    # `tenant`, refused outright — a scope keyword must never be dropped.
+    supported = _scroll_keywords(scroll)
+    emulate_cursor: Any = None
+    emulate_invalidated = False
+    if supported is not None:
+        if "index_root_guard" not in supported:
+            # Pure optimization — the Python check below is the semantics.
+            kwargs.pop("index_root_guard", None)
+        if "hide_invalidated" not in supported and kwargs.pop("hide_invalidated", None):
+            emulate_invalidated = True
+        if "start_after" not in supported and kwargs.get("start_after") is not None:
+            emulate_cursor = kwargs.pop("start_after")
     ids: list[Any] = []
     payloads: list[dict[str, Any]] = []
     more = False
-    try:
-        hits = scroll(filters={"source": source}, **kwargs)
-    except TypeError:
-        # A custom store without the newer keywords. Binding happens before
-        # any of the callee's body runs, so this cannot swallow a TypeError
-        # raised BY the scroll — only refuse the keyword it doesn't take.
-        kwargs.pop("index_root_guard", None)
-        hits = scroll(filters={"source": source}, **kwargs)
-    for hit in hits:
+    skipping = emulate_cursor is not None
+    for hit in scroll(filters={"source": source}, **kwargs):
+        if skipping:
+            # Emulated cursor: the store yields in its own stable order, so
+            # resume right after the id the previous page ended on. Costs a
+            # re-walk (that is exactly what start_after exists to avoid),
+            # but a re-walk is correct and a dropped cursor is not.
+            if str(hit.id) == str(emulate_cursor):
+                skipping = False
+            continue
         payload = dict(getattr(hit, "payload", None) or {})
         if payload.get("source") != source:
             continue  # array/partial match — not this source
+        if emulate_invalidated and payload.get("invalidated_at"):
+            continue  # the store could not push it down; same exclusion
         if index_root is not None and payload.get("index_root") not in (
             None,
             index_root,
@@ -861,6 +902,15 @@ def find_source_points(
             break
         ids.append(hit.id)
         payloads.append(payload)
+    if skipping:
+        # The cursor's point is gone and the store cannot resume by id, so
+        # we cannot tell "the tail is empty" from "we never reached it".
+        # Returning an empty page would report the listing COMPLETE while
+        # points remain — the exact lie this surface must not tell.
+        raise ValueError(
+            "cursor point is no longer present and this store cannot resume "
+            "by id — restart the listing from the beginning"
+        )
     return ids, payloads, more
 
 

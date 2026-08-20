@@ -549,3 +549,55 @@ def test_the_index_root_guard_is_pushed_down_to_the_store(monkeypatch, tmp_path)
     assert [row["id"] for row in body["items"]] == ["99"]
     # The backend handed us only the guard's own points — not all 51.
     assert scanned == 1, scanned
+
+
+class _LegacyStore:
+    """A custom store on the historical `scroll(filters=, tenant=)`
+    signature — no hide_invalidated, no start_after, no index_root_guard."""
+
+    def __init__(self, points):
+        self.points = points  # [(id, payload)]
+        self.calls = 0
+
+    def scroll(self, batch_size=256, filters=None, with_vectors=False, *, tenant=None):
+        self.calls += 1
+        for pid, payload in self.points:
+            if filters and payload.get("source") != filters.get("source"):
+                continue
+            yield type("Hit", (), {"id": pid, "payload": dict(payload)})()
+
+
+def test_legacy_store_gets_the_semantics_not_just_the_call(monkeypatch, tmp_path):
+    """R4 (codex P2): a store on the older scroll signature used to raise
+    TypeError. Retrying with the keyword merely DROPPED would be worse than
+    the crash — dropping hide_invalidated resurrects the non-terminating
+    retraction, and dropping start_after makes every page return the same
+    points forever. Each is emulated here with identical semantics."""
+    points = [
+        (1, {"source": "a.md"}),
+        (2, {"source": "a.md", "invalidated_at": "2020-01-01T00:00:00+00:00"}),
+        (3, {"source": "a.md", "index_root": "/other"}),
+        (4, {"source": "b.md"}),
+    ]
+    store = _LegacyStore(points)
+    # hide_invalidated emulated: the stale point is excluded, so a batched
+    # retraction makes progress instead of re-selecting it forever.
+    ids, _p, more = find_source_points(store, "a.md", skip_invalidated=True)
+    assert ids == [1, 3] and more is False
+    # start_after emulated: resume after id 1, do not restart the page.
+    ids, _p, _more = find_source_points(store, "a.md", start_after=1)
+    assert ids == [2, 3]
+    # index_root guard still applies (in Python — it is an optimization).
+    ids, _p, _more = find_source_points(store, "a.md", index_root="/other")
+    assert ids == [1, 2, 3]  # untagged points are not protected by a guard
+    ids, _p, _more = find_source_points(store, "a.md", index_root="/nowhere")
+    assert ids == [1, 2]
+
+
+def test_legacy_store_refuses_a_vanished_cursor_instead_of_lying(monkeypatch, tmp_path):
+    """Emulated resume cannot tell "the tail is empty" from "the cursor is
+    gone", and an empty page would report the listing COMPLETE while points
+    remain — the exact lie this surface exists to prevent."""
+    store = _LegacyStore([(1, {"source": "a.md"}), (2, {"source": "a.md"})])
+    with pytest.raises(ValueError, match="no longer present"):
+        find_source_points(store, "a.md", start_after=999)
