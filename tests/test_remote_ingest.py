@@ -410,7 +410,7 @@ def test_triples_503_without_a_graph(monkeypatch, tmp_path):
     client = TestClient(app)
     r = client.post(
         "/triples",
-        json={"triples": [{"subject": "a", "predicate": "knows", "object": "b"}]},
+        json={"triples": [{"subject": "a", "predicate": "KNOWS", "object": "b"}]},
         headers={"X-API-Key": keys["write"]},
     )
     assert r.status_code == 503
@@ -450,7 +450,7 @@ def test_triples_all_failed_is_a_502_not_a_quiet_200(monkeypatch, tmp_path):
     client = TestClient(app2)
     r = client.post(
         "/triples",
-        json={"triples": [{"subject": "a", "predicate": "p", "object": "b"}]},
+        json={"triples": [{"subject": "a", "predicate": "P", "object": "b"}]},
         headers={"X-API-Key": write_key},
     )
     assert r.status_code == 502
@@ -513,8 +513,8 @@ def test_triples_stamps_the_key_tenant_and_isolates_failures(monkeypatch, tmp_pa
         "/triples",
         json={
             "triples": [
-                {"subject": "alice", "predicate": "knows", "object": "bob"},
-                {"subject": "boom", "predicate": "x", "object": "y"},
+                {"subject": "alice", "predicate": "KNOWS", "object": "bob"},
+                {"subject": "boom", "predicate": "X", "object": "y"},
             ]
         },
         headers={"X-API-Key": write_key},
@@ -1010,14 +1010,14 @@ def test_triples_validity_bounds_must_parse(monkeypatch, tmp_path):
     hdr = {"X-API-Key": wk}
     bad = client.post(
         "/triples",
-        json={"triples": [{"subject": "a", "predicate": "p", "object": "b",
+        json={"triples": [{"subject": "a", "predicate": "P", "object": "b",
                             "valid_from": "tomorrow"}]},
         headers=hdr,
     )
     assert bad.status_code == 400 and "valid_from" in bad.json()["detail"]
     ok = client.post(
         "/triples",
-        json={"triples": [{"subject": "a", "predicate": "p", "object": "b",
+        json={"triples": [{"subject": "a", "predicate": "P", "object": "b",
                             "valid_from": "2026-01-01", "valid_until": "current"}]},
         headers=hdr,
     )
@@ -1381,3 +1381,105 @@ def test_blank_schema_keys_are_rejected():
             ingest_remote_items(
                 emb, store, [IngestItem(text="x", source="s")], timestamp_key=bad
             )
+
+
+# --------------------------------------------------- bot round-4 batch pins
+
+
+def test_metadata_validity_interval_must_be_increasing():
+    """Bot-R4: valid_from >= valid_until is an empty [from, until) window —
+    the memory would be stored but invisible to every as_of query."""
+    assert "precede" in validate_remote_item(
+        "t", "s", None, [],
+        {"valid_from": "2026-02-01", "valid_until": "2026-01-01"},
+    )
+    assert "precede" in validate_remote_item(
+        "t", "s", None, [],
+        {"valid_from": "2026-01-01", "valid_until": "2026-01-01"},
+    )
+    assert validate_remote_item(
+        "t", "s", None, [],
+        {"valid_from": "2026-01-01", "valid_until": "2026-02-01"},
+    ) is None
+
+
+def _triples_app(monkeypatch, tmp_path):
+    import mnemostack.graph.factory as graph_factory
+    import mnemostack.server as srv
+
+    calls: list[dict] = []
+
+    class _G:
+        def add_triple(self, **kw):
+            calls.append(kw)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(graph_factory, "make_graph_store", lambda *a, **k: _G())
+    emb = _CountingEmbedding()
+    store = _mem_store("tr4")
+    monkeypatch.setattr(srv, "VectorStore", lambda **_: store)
+    monkeypatch.setattr(srv, "get_provider", lambda _n, **_k: emb)
+
+    class _Probe:
+        def get_collections(self):
+            return object()
+
+    monkeypatch.setattr(srv, "_make_probe_client", lambda *_a, **_k: _Probe())
+    for name in ("Recaller", "VectorRetriever", "BM25Retriever", "MemgraphRetriever",
+                 "TemporalRetriever"):
+        monkeypatch.setattr(srv, name, lambda **_: object())
+    monkeypatch.setattr(srv, "build_full_pipeline", lambda **_: object())
+    monkeypatch.setattr(srv, "FileStateStore", lambda path: object())
+
+    def _no_llm(*_a, **_k):
+        raise RuntimeError("no llm")
+
+    monkeypatch.setattr(srv, "get_llm", _no_llm)
+    from mnemostack.auth import FileKeyStore
+
+    ks = FileKeyStore(tmp_path / "k4.json")
+    _, wk = ks.issue("alpha", ["write"])
+    app = build_app(
+        ServerConfig(
+            provider_name="fake", llm_name="fake",
+            graph_uri="bolt://graph.invalid:7687",
+            auth_enabled=True, keys_file=str(tmp_path / "k4.json"),
+        )
+    )
+    return TestClient(app), {"X-API-Key": wk}, calls
+
+
+def test_triples_reject_surrogates_and_noncanonical_predicates(monkeypatch, tmp_path):
+    """Bot-R4: surrogate entities die in the bolt driver (400, not 502);
+    predicates the store would NORMALIZE collide silently ('works-at' and
+    'works at' -> one WORKS_AT edge) — only canonical identifiers pass."""
+    client, hdr, calls = _triples_app(monkeypatch, tmp_path)
+    raw = b'{"triples": [{"subject": "a\\ud800", "predicate": "KNOWS", "object": "b"}]}'
+    r = client.post("/triples", content=raw,
+                    headers={**hdr, "Content-Type": "application/json"})
+    assert r.status_code in (400, 422)  # schema or endpoint layer, never 502
+    r2 = client.post(
+        "/triples",
+        json={"triples": [{"subject": "a", "predicate": "works-at", "object": "b"}]},
+        headers=hdr,
+    )
+    assert r2.status_code == 400 and "WORKS_AT" in r2.json()["detail"]
+    r3 = client.post(
+        "/triples",
+        json={"triples": [{"subject": "a", "predicate": "WORKS_AT", "object": "b"}]},
+        headers=hdr,
+    )
+    assert r3.status_code == 200 and calls[-1]["predicate"] == "WORKS_AT"
+
+
+def test_triples_reject_inverted_intervals(monkeypatch, tmp_path):
+    client, hdr, _calls = _triples_app(monkeypatch, tmp_path)
+    r = client.post(
+        "/triples",
+        json={"triples": [{"subject": "a", "predicate": "KNOWS", "object": "b",
+                            "valid_from": "2026-02-01", "valid_until": "2026-01-01"}]},
+        headers=hdr,
+    )
+    assert r.status_code == 400 and "precede" in r.json()["detail"]

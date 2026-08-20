@@ -285,6 +285,19 @@ def _normalized_metadata_key(key: str) -> str:
     return unicodedata.normalize("NFKC", key).casefold()
 
 
+def _instants_not_increasing(start, end) -> bool:
+    """True when [start, end) is empty — the validity predicate is
+    ``valid_from <= as_of < valid_until``, so start >= end can never match.
+    Naive datetimes are compared as UTC (the stack convention)."""
+    from datetime import timezone as _tz
+
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=_tz.utc)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=_tz.utc)
+    return start >= end
+
+
 def _utf8_encodable(value: str) -> bool:
     """Whether the string survives UTF-8 encoding (JSON permits lone
     surrogates like "\\ud800"; deterministic ids and the store transport
@@ -466,6 +479,12 @@ def validate_remote_item(
     if vu is not None and vu != "current":
         if not isinstance(vu, str) or _parse_iso_timestamp(vu) is None:
             return "metadata.valid_until must be ISO-8601 or 'current'"
+        if vf is not None:
+            vf_dt, vu_dt = _parse_iso_timestamp(vf), _parse_iso_timestamp(vu)
+            if vf_dt is not None and vu_dt is not None and _instants_not_increasing(vf_dt, vu_dt):
+                # An empty [from, until) window: the memory would be stored
+                # but invisible to every point-in-time query.
+                return "metadata.valid_from must precede metadata.valid_until"
     bad_number = _find_unrepresentable_number(metadata)
     if bad_number is not None:
         return bad_number

@@ -50,6 +50,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e '.[dev]'
       - name: Pytest
+        env:
+          # coverage's C tracer has no fast path on the newest interpreter
+          # yet — without this the 3.14 job crawls at ~7min of pure-python
+          # tracing vs ~1min elsewhere. sys.monitoring (PEP 669) is the
+          # supported fast core on 3.12+ and a no-op selection elsewhere.
+          COVERAGE_CORE: sysmon
         run: pytest -q --cov=mnemostack --cov-report=term-missing
 
   test-min-deps:
