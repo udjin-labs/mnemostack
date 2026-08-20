@@ -1905,8 +1905,14 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             MemoryListItem(
                 id=str(pid),
                 content_hash=_list_text(payload.get(SOURCE_HASH_KEY)),
+                # `is None`, not `or`: under `timestamp_format: epoch` the
+                # Unix epoch itself is a VALID timestamp stored as numeric
+                # 0, and a falsy test would silently substitute the legacy
+                # mirror for it.
                 timestamp=_list_timestamp(
-                    payload.get(cfg.timestamp_key) or payload.get("timestamp")
+                    payload[cfg.timestamp_key]
+                    if payload.get(cfg.timestamp_key) is not None
+                    else payload.get("timestamp")
                 ),
                 indexed_at=_list_text(payload.get("indexed_at")),
             )
@@ -1939,6 +1945,12 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         Scope note: vector and temporal recall honor the marker
         immediately; an in-process BM25 corpus built from Qdrant payloads
         (`text_search=qdrant_bm25`) reflects it only after a restart.
+
+        Source scope is FIRST-RETRACTION-WINS: a point this source already
+        had invalidated is not restamped by a later source-scoped call
+        (and is not counted in `requested`), because `invalidated_at`
+        records when the memory was actually retracted. Retract by id to
+        change an existing retraction's bounds.
         """
         problem = _selector_problem(req.ids, req.source)
         if problem is None:
@@ -1976,6 +1988,15 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                     limit=REMOTE_SOURCE_BATCH,
                     # Without this the next call re-selects the same first
                     # batch forever: an invalidated point keeps its source.
+                    # Consequence, documented rather than papered over:
+                    # source retraction is FIRST-RETRACTION-WINS. A point
+                    # already invalidated keeps the `invalidated_at` and
+                    # `valid_until` of the call that retracted it — a later
+                    # source-scoped call does not restamp it, because
+                    # `invalidated_at` records WHEN the memory was actually
+                    # retracted and rewriting it would falsify that. To
+                    # change an existing retraction's world-time bound, name
+                    # the point by id.
                     skip_invalidated=True,
                 )
                 complete = not more

@@ -829,10 +829,25 @@ def find_source_points(
         kwargs["hide_invalidated"] = True
     if start_after is not None:
         kwargs["start_after"] = start_after
+    if index_root is not None:
+        # Pushed down, not merely re-checked below: the limit counts KEPT
+        # points, so a guard applied only in Python lets a bounded batch
+        # scroll every point of the other roots to fill itself — the
+        # collection-scale request this whole surface exists to avoid.
+        # A store without the parameter still gets the Python check.
+        kwargs["index_root_guard"] = index_root
     ids: list[Any] = []
     payloads: list[dict[str, Any]] = []
     more = False
-    for hit in scroll(filters={"source": source}, **kwargs):
+    try:
+        hits = scroll(filters={"source": source}, **kwargs)
+    except TypeError:
+        # A custom store without the newer keywords. Binding happens before
+        # any of the callee's body runs, so this cannot swallow a TypeError
+        # raised BY the scroll — only refuse the keyword it doesn't take.
+        kwargs.pop("index_root_guard", None)
+        hits = scroll(filters={"source": source}, **kwargs)
+    for hit in hits:
         payload = dict(getattr(hit, "payload", None) or {})
         if payload.get("source") != source:
             continue  # array/partial match — not this source

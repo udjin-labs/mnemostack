@@ -450,3 +450,102 @@ def test_listing_takes_the_index_root_owner_guard(monkeypatch, tmp_path):
         "/memories", params={"source": "shared.md", "index_root": "  "}, headers=hdr
     )
     assert r.status_code == 400  # a blank guard matches no owner
+
+
+def test_the_unix_epoch_is_a_timestamp_not_an_absence(monkeypatch, tmp_path):
+    """R3 (codex P2): under `timestamp_format: epoch` the Unix epoch is a
+    VALID timestamp stored as numeric 0, and a falsy test silently
+    substituted the legacy mirror for it."""
+    app, store, _emb, keys = _ingest_app(
+        monkeypatch, tmp_path, cfg_extra={"timestamp_key": "event_time"}
+    )
+    client = TestClient(app)
+    # The CONFIGURED key holds the epoch; the legacy mirror holds something
+    # else entirely, so a falsy test is visible instead of coincidental.
+    store.upsert(
+        1,
+        [0.1, 0.2, 0.3],
+        {"source": "epoch0.md", "event_time": 0, "timestamp": "1999-01-01T00:00:00+00:00"},
+        tenant="alpha",
+    )
+    r = client.get(
+        "/memories", params={"source": "epoch0.md"}, headers={"X-API-Key": keys["read"]}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["items"][0]["timestamp"] == 0
+
+
+def test_source_retraction_is_first_retraction_wins(monkeypatch, tmp_path):
+    """R3 (codex P2): a point already invalidated is skipped by the source
+    path — that is what makes batching terminate. The contract is
+    documented as first-retraction-wins: `invalidated_at` records WHEN a
+    memory was retracted, so a later source call must not falsify it."""
+    app, store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
+    client = TestClient(app)
+    hdr = {"X-API-Key": keys["write"]}
+    ids = _store_items(
+        client,
+        keys["write"],
+        [
+            {"text": "first chunk of the doc", "source": "d.md", "offset": 0},
+            {"text": "second chunk of the doc", "source": "d.md", "offset": 1},
+        ],
+    )
+    r = client.post(
+        "/invalidate",
+        json={"ids": [ids[0]], "invalidated_at": "2020-01-01T00:00:00+00:00"},
+        headers=hdr,
+    )
+    assert r.json()["invalidated"] == 1
+    # Now retract the whole document with a world-time bound.
+    r = client.post(
+        "/invalidate",
+        json={"source": "d.md", "valid_until": "2026-01-01T00:00:00+00:00"},
+        headers=hdr,
+    )
+    # Only the still-active point is requested and touched; the response
+    # does not claim to have restamped the one already retracted.
+    assert r.json() == {"requested": 1, "invalidated": 1, "complete": True}
+    first = store.client.retrieve(store.collection, ids=[ids[0]], with_payload=True)[0]
+    second = store.client.retrieve(store.collection, ids=[ids[1]], with_payload=True)[0]
+    assert first.payload["invalidated_at"] == "2020-01-01T00:00:00+00:00"
+    assert "valid_until" not in first.payload  # the earlier retraction stands
+    assert second.payload["valid_until"] == "2026-01-01T00:00:00+00:00"
+
+
+def test_the_index_root_guard_is_pushed_down_to_the_store(monkeypatch, tmp_path):
+    """R3 (codex P2): the limit counts KEPT points, so a guard applied only
+    in Python lets a bounded page scroll every point of the OTHER roots to
+    fill itself — the collection-scale request this surface exists to
+    avoid. The guard must reach the backend filter."""
+    app, store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
+    client = TestClient(app)
+    # One sparse root among many points of another root.
+    for pid in range(1, 51):
+        store.upsert(
+            pid,
+            [0.1, 0.2, 0.3],
+            {"source": "multi.md", "index_root": "/bulk"},
+            tenant="alpha",
+        )
+    store.upsert(
+        99, [0.1, 0.2, 0.3], {"source": "multi.md", "index_root": "/sparse"}, tenant="alpha"
+    )
+    scanned = 0
+    real_scroll = store.scroll
+
+    def _counting(*args, **kwargs):
+        nonlocal scanned
+        for hit in real_scroll(*args, **kwargs):
+            scanned += 1
+            yield hit
+
+    monkeypatch.setattr(store, "scroll", _counting)
+    body = client.get(
+        "/memories",
+        params={"source": "multi.md", "index_root": "/sparse", "limit": 5},
+        headers={"X-API-Key": keys["read"]},
+    ).json()
+    assert [row["id"] for row in body["items"]] == ["99"]
+    # The backend handed us only the guard's own points — not all 51.
+    assert scanned == 1, scanned

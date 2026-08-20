@@ -20,6 +20,7 @@ from qdrant_client.models import (
     FilterSelector,
     HasVectorCondition,
     IsEmptyCondition,
+    IsNullCondition,
     MatchText,
     MatchValue,
     Modifier,
@@ -578,6 +579,7 @@ class VectorStore:
         tenant: str | None = None,
         hide_invalidated: bool = False,
         start_after: Any = None,
+        index_root_guard: str | None = None,
     ):
         """Iterate over points in the collection lazily.
 
@@ -591,12 +593,36 @@ class VectorStore:
         marker are excluded server-side (the same push-down ``search``
         offers — the current-facts view). Yields `Hit` objects (score=1.0
         since this isn't a similarity query).
+
+        ``index_root_guard`` pushes the LIFECYCLE owner guard down to the
+        backend: match that root, or carry no root at all. It is a
+        disjunction, so it cannot ride the plain equality ``filters`` dict —
+        and it must be pushed down rather than filtered in the caller,
+        because a guard applied only in Python means a bounded page can
+        still scroll every point of the OTHER roots to fill itself. Callers
+        re-validate the payload anyway (a value match also matches an array
+        payload containing the value).
         """
         must: list[Any] = list(self._build_filter(filters).must or []) if filters else []
         if tenant is not None:
             must.append(_tenant_condition(tenant))
         if hide_invalidated:
             must.append(_hide_invalidated_condition())
+        if index_root_guard is not None:
+            must.append(
+                Filter(
+                    should=[
+                        FieldCondition(
+                            key="index_root", match=MatchValue(value=index_root_guard)
+                        ),
+                        # Missing/empty and explicitly-null are distinct
+                        # conditions in Qdrant; the guard's contract counts
+                        # both as "carries no root".
+                        IsEmptyCondition(is_empty=PayloadField(key="index_root")),
+                        IsNullCondition(is_null=PayloadField(key="index_root")),
+                    ]
+                )
+            )
         qfilter = Filter(must=must) if must else None
         # start_after resumes the store's own iteration order from a point
         # id, so a paginated reader pays for its page instead of re-walking
