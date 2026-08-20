@@ -39,6 +39,7 @@ except ImportError as e:  # pragma: no cover - import guard
     ) from e
 
 from mnemostack import __version__
+from mnemostack.access import record_access
 from mnemostack.config import (
     Config,
     ensure_text_fields_mode,
@@ -729,6 +730,12 @@ class ServerConfig:
     # every later argument.
     ollama_host: str | None = None
     embedding_timeout: int | None = None
+    #: Record `access_count`/`last_accessed` on every point a recall
+    #: returns. Off by default: it turns reads into writes. At the TAIL for
+    #: the reason stated above — inserted mid-signature it would have
+    #: shifted `graph_user` into this flag for any positional caller, which
+    #: silently ENABLES writes on a deployment that never asked for them.
+    record_access: bool = False
 
     def __post_init__(self) -> None:
         if self.rerank_mode not in RERANK_MODES:
@@ -763,6 +770,7 @@ class ServerConfig:
             rerank_mode=cfg.recall.rerank_mode,
             token_budget=cfg.recall.token_budget,
             auto_record_ior=_env_bool("MNEMOSTACK_AUTO_RECORD_IOR"),
+            record_access=_env_bool("MNEMOSTACK_RECORD_ACCESS"),
             auth_enabled=_env_bool("MNEMOSTACK_AUTH_ENABLED"),
             keys_file=os.environ.get("MNEMOSTACK_KEYS_FILE") or None,
             quotas_file=os.environ.get("MNEMOSTACK_QUOTAS_FILE") or None,
@@ -1339,6 +1347,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         include_invalidated: bool = False,
         as_of: str | None = None,
         tenant: str | None = None,
+        record: bool = True,
     ):
         trace = RecallTrace()
         # Reranking is part of the full pipeline; if it was requested but the
@@ -1364,6 +1373,17 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         if cfg.auto_record_ior:
             # Record into the caller's tenant partition so auto-IoR is per-tenant.
             record_recall_events(pipeline, results, tenant)
+        if cfg.record_access and record:
+            # Reinforcement bookkeeping for the freshness stage. Runs HERE,
+            # inside the worker thread and after the results are final, so
+            # it neither blocks the event loop nor stamps a hit the caller
+            # never received. Fail-open inside record_access.
+            #
+            # `record=False` is /answer's: a recall that succeeds before
+            # generation FAILS returns 500 with no memories, and stamping
+            # those points would count an access the caller never got.
+            # /answer records after its generation instead.
+            record_access(store, results, tenant=tenant)
         return results, trace
 
     async def _run_recall(
@@ -1375,6 +1395,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         include_invalidated: bool = False,
         as_of: str | None = None,
         tenant: str | None = None,
+        record: bool = True,
     ):
         """Offload the blocking recall stack to a worker thread.
 
@@ -1392,6 +1413,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             include_invalidated,
             as_of,
             tenant,
+            record,
         )
 
     @app.get("/", include_in_schema=False)
@@ -1567,6 +1589,8 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 req.include_invalidated,
                 req.as_of,
                 tenant,
+                # Recorded after generation succeeds, not here — see below.
+                False,
             )
             # recall_filters keeps the answer generator's retry sub-recalls
             # inside the same filtered scope; the validity view AND the tenant
@@ -1587,6 +1611,21 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         except Exception as exc:
             log.exception("answer endpoint failed")
             raise HTTPException(status_code=500, detail="answer failed") from exc
+        if cfg.record_access:
+            # HERE, not next to the recall: a generation failure returns 500
+            # with no memories, and an access the caller never received must
+            # not be counted. Off the event loop, and fail-open like the
+            # /recall path.
+            #
+            # The pool is `results` PLUS whatever actually produced the
+            # answer: an accepted inference/expansion retry answers from a
+            # freshly recalled pool, and those points informed the delivered
+            # answer even though they are not in `memories`. Recording only
+            # the originals would leave reinforcement blind to exactly the
+            # memories a low-confidence question had to dig for.
+            # record_access deduplicates by id.
+            touched = list(results) + list(getattr(ans, "context_memories", None) or [])
+            await asyncio.to_thread(record_access, store, touched, tenant=tenant)
         # Prefer the generator's own estimate: its retry paths can swap in a
         # freshly recalled context pool, and the primary recall results would
         # then misreport what the answer prompt actually contained.
