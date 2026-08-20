@@ -14,6 +14,25 @@ access where the retrieval happens. It is opt-in (`serve --record-access`):
 it turns reads into writes, which is a cost and a data change an operator
 must choose.
 
+**What turning it on changes about RANKING.** Not just a counter: because
+``compute_decay`` returns 1.0 when ``last_accessed`` is missing, and nothing
+in the stack wrote that key before, confidence decay has been inert on every
+deployment that did not stamp the keys itself. Recording it makes the stage
+live, and the effect is asymmetric in a way the "reinforcement" framing
+hides — a point recalled ONCE and then left cold starts decaying from that
+moment, while a point NEVER recalled keeps the undecayed ceiling forever. At
+the preset 30-day half-life, one access and then silence scores 0.87 after a
+week, 0.56 after a month, and floors at 0.10 after roughly half a year,
+against a flat 1.0 for a memory nothing ever found. The factor multiplies the
+whole blended score, so ``freshness_weight`` does not scale it down.
+
+That is the deliberate trade of an Ebbinghaus model — recency of USE is the
+signal, and a memory nobody has retrieved has no use to be recent — but it
+is a real change in what the ranking means, and an operator should turn the
+flag on knowing it. It only bites recalls that run the pipeline
+(``full_pipeline``, the default on `/recall` and `/answer`); raw RRF output
+is unaffected.
+
 Contract:
 
 - **Fail-open, always.** Bookkeeping must never fail a recall the caller
