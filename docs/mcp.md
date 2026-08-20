@@ -91,7 +91,7 @@ For a multi-tenant deployment, run the server as one authenticated tenant with `
 mnemostack mcp-serve --auth --api-key "$MNEMOSTACK_API_KEY" --collection my-memory
 ```
 
-The key (`--api-key` or `MNEMOSTACK_API_KEY`) resolves the tenant + scopes for the whole process — the natural fit for how an MCP client passes secrets in its server config. It is **re-verified on every tool call**, so revoking it stops the session immediately (fail closed). Tools are scope-gated — `mnemostack_search` / `mnemostack_answer` need `read`, `mnemostack_invalidate` / `mnemostack_feedback` need `write` — and every data/graph tool call is confined to the key's tenant. (`mnemostack_health` stays **public** — a liveness check, not gated by the key, so it still responds after a key is revoked.) Issue keys with `mnemostack keys add --tenant <id> --scopes read,write` (and set per-tenant quotas with `mnemostack quota set`). Auth is **off by default** — an unauthenticated `mcp-serve` behaves exactly as before.
+The key (`--api-key` or `MNEMOSTACK_API_KEY`) resolves the tenant + scopes for the whole process — the natural fit for how an MCP client passes secrets in its server config. It is **re-verified on every tool call**, so revoking it stops the session immediately (fail closed). Tools are scope-gated — `mnemostack_search` / `mnemostack_answer` need `read`; `mnemostack_remember` / `mnemostack_invalidate` / `mnemostack_feedback` / `mnemostack_graph_add_triple` need `write` — and every data/graph tool call is confined to the key's tenant. (`mnemostack_health` stays **public** — a liveness check, not gated by the key, so it still responds after a key is revoked.) Issue keys with `mnemostack keys add --tenant <id> --scopes read,write` (and set per-tenant quotas with `mnemostack quota set`). Auth is **off by default** — an unauthenticated `mcp-serve` behaves exactly as before.
 
 ### Library extension hooks (`build_server`)
 
@@ -419,6 +419,40 @@ Validation failures return structured errors:
 
 **Example usage scenario:** When the agent learns a stored fact is superseded (a preference changed, a project moved), call `mnemostack_invalidate` with the stale result's id; later searches stop returning it, but an `as_of` query can still reconstruct what was believed before.
 
+### `mnemostack_remember`
+
+**Purpose:** Store a memory — the write counterpart of `mnemostack_search`. The text is embedded server-side and lands stamped with the process key's tenant, immediately recallable in the same scope. Ids are deterministic from `(source, offset, text)`: retrying or re-sending the same content returns `duplicate` (checked against the store) at zero embedding cost. Requires the `write` scope under auth.
+
+**Input parameters:**
+
+| Name | Type | Default | Description |
+| --- | --- | --- | --- |
+| `text` | `string` | Required | The memory content. Plain items are capped at 32,768 characters; longer documents need `chunk`. |
+| `source` | `string` | `""` | Logical origin (e.g. `chat/2026-08-19`); part of the deterministic id. Required when `chunk` is true. |
+| `offset` | `integer` | `0` | Position within `source` for multi-part documents. |
+| `timestamp` | `string` | `null` | Event time of the content (ISO-8601); drives temporal recall. |
+| `tags` | `array<string>` | `[]` | Optional tags stored in the payload. |
+| `metadata` | `object` | `{}` | Free payload fields, filterable at recall. Server-reserved keys (underscore-prefixed, structural ones like `tenant_id`/`source`, `tags`/`timestamp` — use their dedicated parameters — and the lifecycle marker `invalidated_at`, settable only through `mnemostack_invalidate`) are rejected. `valid_from`/`valid_until` are allowed but must be ISO-8601 (`current` allowed for `valid_until`); numbers must fit signed 64-bit integers and be finite; nesting depth is capped. |
+| `chunk` | `boolean` | `false` | Split a long document server-side into the fixed windows `mnemostack index` uses at its default `--chunk-size` (identical chunk ids under default settings in unscoped deployments; tenant-scoped ids are tenant-prefixed — a tenant-aware `index` is tracked as udjin-labs/mnemostack#160 — and a custom chunk size or the markdown indexer differ); the expansion is capped per call. |
+
+**Return shape:**
+
+```json
+{
+  "ok": true,
+  "results": [{"id": "…", "status": "stored", "offset": 0}],
+  "stored": 1,
+  "duplicates": 0,
+  "failed": 0
+}
+```
+
+Each result's `status` is `stored`, `duplicate` (content already present — nothing embedded), or `failed` (embedding failure for that item). Re-remembering a memory that was retracted via invalidate REACTIVATES it (the `invalidated_at` marker is cleared, no re-embedding) and reports `stored` — the fact is recallable again in default recall. A `valid_until` on the point is PRESERVED (it may be legitimate ingest-declared expiry, indistinguishable from one set by the invalidate call) — if the retraction set it, clear or re-state it via `mnemostack_invalidate`; until then `as_of` queries past that instant still exclude the point. Reactivation does not merge the new call's metadata. Every failure the tool BODY reports returns `{"ok": false, "error": …, "error_kind": …}`; `error_kind` is one of `invalid_argument` (fix the input — includes a document expanding past the per-call chunk budget: split it), `unauthorized` (missing/revoked key or missing `write` scope), `quota_exceeded` (the tenant's storage cap; back off or raise the quota), `embedding_space` (deployment misconfiguration — an operator issue), `embedding_failed` (the provider failed for every item in the call — retriable once the provider recovers), or `error` (any other backend failure — do not retry blindly). One caveat: arguments that violate the tool's declared JSON schema (empty text, negative offset, text beyond the document cap) are rejected by the MCP protocol layer BEFORE the tool runs and surface as protocol-level validation errors without an `error_kind` — schema errors are also input errors, fix and re-send.
+
+The tenant's storage quota is enforced before any write — the tool reads the quota store configured via `mcp-serve --quotas-file` / `MNEMOSTACK_QUOTAS_FILE` / `build_server(quotas_file=…)`. **Point it at the same file `serve --quotas-file` uses**: a deployment with quotas at a non-default path that starts `mcp-serve` without this setting gets HTTP writes capped but MCP writes unbounded.
+
+**Example usage scenario:** The user states a durable fact ("we deploy Fridays at 15:00") — call `mnemostack_remember` with the fact and a `source` like `chat/<date>`; a later `mnemostack_search` for "deploy schedule" returns it. To retract, use `mnemostack_invalidate` with the stored id.
+
 ### `mnemostack_graph_query`
 
 **Availability:** Only registered when Memgraph is configured with `--memgraph-uri`, `MNEMOSTACK_MEMGRAPH_URI`, or `MNEMOSTACK_GRAPH_URI`.
@@ -475,7 +509,7 @@ On failure:
 | Name | Type | Default | Description |
 | --- | --- | --- | --- |
 | `subject` | `string` | Required | Subject node, such as a person, project, or service. |
-| `predicate` | `string` | Required | Relationship name, such as `works_on`, `owns`, `depends_on`, or `prefers`. |
+| `predicate` | `string` | Required | Relationship identifier: a letter (any script) followed by letters, decimal digits, or underscores, max 512 chars. The store uppercases relationship types, so case variants merge into one relation; punctuation/space variants (`works-at`, `works at`), leading digits, and number-like characters that are not decimal digits (`²`, `Ⅳ`, `①`) are rejected. Examples: `works_on`, `owns`, `depends_on`, `prefers`. |
 | `obj` | `string` | Required | Object node or value. |
 | `valid_from` | nullable `string` | `null` | Optional ISO date when the fact starts being valid. |
 | `valid_until` | nullable `string` | `null` | Optional ISO date when the fact stops being valid. |
@@ -496,9 +530,12 @@ On failure:
 ```json
 {
   "ok": false,
-  "error": "..."
+  "error": "...",
+  "error_kind": "invalid_argument"
 }
 ```
+
+Every failure carries `error_kind` (`invalid_argument` for contract violations — including the predicate shape and inverted validity intervals — `unauthorized` for key/scope failures, `error` otherwise), matching `mnemostack_remember`.
 
 **Example usage scenario:** When a project handoff happens, write `subject: "alice", predicate: "owns", obj: "billing-api", valid_from: "2026-05-11"` so future temporal graph queries can recover ownership.
 

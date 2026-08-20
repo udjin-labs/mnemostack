@@ -1,8 +1,9 @@
 """FastAPI service wrapper for mnemostack.
 
-Exposes `/recall`, `/answer`, `/feedback`, `/health`, and `/metrics` over HTTP
-so callers in any language (Node, Go, Rust, curl) can use mnemostack without a
-Python SDK.
+Exposes `/recall`, `/answer`, `/memories`, `/triples`, `/feedback`, `/health`,
+and `/metrics` over HTTP so callers in any language (Node, Go, Rust, curl) can
+use mnemostack without a Python SDK — reads AND writes: `/memories` embeds
+server-side and stores under the caller's tenant.
 
 Start from the CLI:
 
@@ -46,7 +47,25 @@ from mnemostack.config import (
     resolve_text_search_mode,
 )
 from mnemostack.embeddings import get_provider
+from mnemostack.embeddings.roles import EmbeddingSpaceError
 from mnemostack.feedback import apply_feedback, record_recall_events
+from mnemostack.ingest import (
+    REMOTE_CHUNK_SIZE,
+    REMOTE_MAX_DOC_CHARS,
+    REMOTE_MAX_ITEMS,
+    REMOTE_MAX_OFFSET,
+    REMOTE_MAX_SOURCE_CHARS,
+    REMOTE_MAX_TAGS,
+    REMOTE_MAX_TEXT_CHARS,
+    REMOTE_MAX_TIMESTAMP_CHARS,
+    IngestItem,
+    RemoteRequestTooLarge,
+    ensure_remote_schema_keys,
+    expand_remote_items,
+    ingest_remote_items,
+    validate_remote_item,
+    validate_remote_triple,
+)
 from mnemostack.llm import get_llm
 from mnemostack.observability.recorder import (
     InMemoryRecorder,
@@ -54,6 +73,7 @@ from mnemostack.observability.recorder import (
     get_recorder,
     set_recorder,
 )
+from mnemostack.quotas import QuotaExceededError
 from mnemostack.recall import (
     DEGRADED_COUNTER,
     RERANK_MODES,
@@ -172,6 +192,112 @@ class FeedbackRequest(BaseModel):
         le=1.0,
         description="Optional reward override in [0, 1].",
     )
+
+
+class MemoryItemIn(BaseModel):
+    """One memory a remote client asks the service to store."""
+
+    text: str = Field(
+        ...,
+        min_length=1,
+        max_length=REMOTE_MAX_DOC_CHARS,
+        description=(
+            "The memory content. Embedded server-side. Plain items are "
+            f"capped at {REMOTE_MAX_TEXT_CHARS} characters; longer documents "
+            "must set `chunk: true`."
+        ),
+    )
+    chunk: bool = Field(
+        False,
+        description=(
+            "Split this text server-side into fixed character windows "
+            f"({REMOTE_CHUNK_SIZE} chars) — the split `mnemostack index` "
+            "applies to prose files at its default --chunk-size. In "
+            "unscoped (single-tenant) deployments with default settings "
+            "the chunk ids are identical across both paths; tenant-scoped "
+            "writes use tenant-prefixed ids, and a custom --chunk-size or "
+            "the markdown indexer produce different boundaries. Requires "
+            "a non-empty `source`."
+        ),
+    )
+    source: str = Field(
+        "",
+        max_length=REMOTE_MAX_SOURCE_CHARS,
+        description=(
+            "Logical origin (e.g. 'chat/2026-08-19'). With `offset` it forms "
+            "the deterministic id, so re-sending the same (source, offset, "
+            "text) is a no-cost duplicate, not a second copy."
+        ),
+    )
+    offset: int = Field(
+        0,
+        ge=0,
+        le=REMOTE_MAX_OFFSET,
+        description="Position within `source` for multi-chunk documents.",
+    )
+    timestamp: str | None = Field(
+        None,
+        max_length=REMOTE_MAX_TIMESTAMP_CHARS,
+        description="Event time of the content (ISO-8601); drives temporal recall.",
+    )
+    tags: list[str] = Field(default_factory=list, max_length=REMOTE_MAX_TAGS)
+    metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Free payload fields, filterable at recall. Server-reserved keys "
+            "(underscore-prefixed and structural ones like tenant_id/source, "
+            "plus tags/timestamp — use their dedicated fields) are rejected "
+            "with 400."
+        ),
+    )
+
+
+class MemoriesRequest(BaseModel):
+    items: list[MemoryItemIn] = Field(..., min_length=1, max_length=REMOTE_MAX_ITEMS)
+
+
+class MemoryResultOut(BaseModel):
+    id: str = Field(description="Deterministic chunk id (also the /resolve handle).")
+    status: Literal["stored", "duplicate", "failed"]
+    item: int = Field(
+        description=(
+            "Index of the request item this result came from — a `chunk: "
+            "true` document yields one result per chunk."
+        )
+    )
+    offset: int = Field(0, description="Character offset within the item's source.")
+
+
+class MemoriesResponse(BaseModel):
+    results: list[MemoryResultOut] = Field(
+        description="Per-chunk outcome, in request order."
+    )
+    stored: int
+    duplicates: int
+    failed: int
+
+
+class TripleIn(BaseModel):
+    subject: str = Field(..., min_length=1, max_length=512)
+    predicate: str = Field(..., min_length=1, max_length=512)
+    object: str = Field(..., min_length=1, max_length=512)
+    valid_from: str | None = Field(None, max_length=64)
+    valid_until: str | None = Field(None, max_length=64)
+
+
+class TriplesRequest(BaseModel):
+    triples: list[TripleIn] = Field(..., min_length=1, max_length=REMOTE_MAX_ITEMS)
+
+
+class TripleResultOut(BaseModel):
+    status: Literal["added", "failed"]
+    error: str | None = None
+
+
+class TriplesResponse(BaseModel):
+    results: list[TripleResultOut]
+    added: int
+    failed: int
 
 
 class Memory(BaseModel):
@@ -525,7 +651,7 @@ def _memory_of(result) -> Memory:
     payload = {
         key: value
         for key, value in payload.items()
-        if key not in ("_vector_floor_candidates", "_attributed_filters")
+        if key not in ("_vector_floor_candidates", "_attributed_filters", "_enrich_keys")
     }
     # Common source fields populated by our indexers. Order matters: explicit
     # 'source' wins, then the workspace conventions, finally nothing.
@@ -635,6 +761,8 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     # handles single-worker fine.
     set_recorder(InMemoryRecorder())
 
+    # Fail a schema-key misconfiguration at BOOT, before any provider cost.
+    ensure_remote_schema_keys(cfg.text_key, cfg.timestamp_key)
     provider = get_provider(
         cfg.provider_name,
         **provider_kwargs(
@@ -650,8 +778,9 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         collection=cfg.collection,
         dimension=provider.dimension,
         host=cfg.qdrant_url,
-        # sparse mode: recall queries the sparse space, so the store must know
-        # about it (writes don't happen here — the server is read-only).
+        # sparse mode: recall queries the sparse space AND /memories writes
+        # through this store — the flag keeps every remotely written point
+        # carrying the named sparse vector the lexical arm searches.
         sparse_text=text_mode == "sparse",
         text_key=cfg.text_key,
     )
@@ -745,15 +874,28 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     elif text_mode == "qdrant_bm25":
         # In-process BM25 whose corpus scrolls straight out of the collection's
         # payloads — fine to ~100K chunks (the in-process ceiling), no files.
-        lexical_arms.append(
-            BM25Retriever.from_qdrant(
-                store.client,
-                cfg.collection,
-                text_key=cfg.text_key,
-                timestamp_key=cfg.timestamp_key,
-                timestamp_format=cfg.timestamp_format,
+        # On a FRESH deployment the collection may not exist yet (the write
+        # surface bootstraps it lazily): skip the arm instead of crashing the
+        # boot — the corpus is a startup snapshot anyway, so the arm joins on
+        # the restart after first ingest. Qdrant-down at boot keeps its
+        # historical behavior (this mode always required a reachable server).
+        if store.collection_exists():
+            lexical_arms.append(
+                BM25Retriever.from_qdrant(
+                    store.client,
+                    cfg.collection,
+                    text_key=cfg.text_key,
+                    timestamp_key=cfg.timestamp_key,
+                    timestamp_format=cfg.timestamp_format,
+                )
             )
-        )
+        else:
+            log.info(
+                "text_search=qdrant_bm25: collection %r does not exist yet — "
+                "starting without the BM25 arm (it loads on the next restart "
+                "after first ingest)",
+                cfg.collection,
+            )
     elif text_mode == "lexical":
         arms, lexical_weights = build_qdrant_text_arms(
             embedding=provider,
@@ -870,7 +1012,10 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         # Per-tenant request rate limiting reads each tenant's max_rps from the
         # quota store (shared with the storage quota). Only tenants with a rate
         # quota are throttled; a live `quota set` is picked up within the cache TTL.
-        rate_limiter = RateLimiter(FileQuotaStore(cfg.quotas_file))
+        quota_store = FileQuotaStore(cfg.quotas_file)
+        rate_limiter = RateLimiter(quota_store)
+    else:
+        quota_store = None
 
     def _extract_key(authorization: str | None, x_api_key: str | None) -> str | None:
         if x_api_key:
@@ -878,6 +1023,68 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         if authorization and authorization.lower().startswith("bearer "):
             return authorization[7:].strip()
         return None
+
+    from fastapi.encoders import jsonable_encoder
+    from fastapi.exceptions import RequestValidationError
+    from fastapi.responses import JSONResponse
+
+    # The 422 echo is a DIAGNOSTIC, not a mirror: it runs synchronously on
+    # the event loop for bodies that failed schema validation — i.e. before
+    # any business-rule cap — so both its total size and the collision
+    # loop's work below must be bounded here, not trusted to upstream caps.
+    _ECHO_MAX_ITEMS = 64
+    _ECHO_MAX_CHARS = 2048
+
+    def _strip_surrogates(value: Any) -> Any:
+        if isinstance(value, str):
+            # backslashreplace, not "replace": U+FFFD would collapse keys
+            # that differ only in their surrogate, silently dropping
+            # entries from the echoed input. Truncate AFTER the escape
+            # expansion (each surrogate becomes 6 chars) — truncating the
+            # raw string first would let an all-surrogate string overshoot
+            # the cap ~6x.
+            value = value.encode("utf-8", "backslashreplace").decode("utf-8")
+            if len(value) > _ECHO_MAX_CHARS:
+                value = value[:_ECHO_MAX_CHARS] + "…[truncated]"
+            return value
+        if isinstance(value, dict):
+            # KEYS too: a surrogate metadata key echoed into the error body
+            # would crash the response encoder exactly like a value. Keys
+            # can still collide post-sanitization (a literal backslash-u
+            # sequence vs a real surrogate produce the same text) — suffix
+            # U+FFFD until unique so no entry is ever silently dropped.
+            # The item cap bounds the disambiguation loop: unbounded, a
+            # batch of crafted all-colliding keys is quadratic on the
+            # event loop.
+            out: dict[Any, Any] = {}
+
+            def _put(key: Any, val: Any) -> None:
+                while isinstance(key, str) and key in out:
+                    key += "�"
+                out[key] = val
+
+            for i, (k, v) in enumerate(value.items()):
+                if i >= _ECHO_MAX_ITEMS:
+                    _put("…", f"{len(value) - _ECHO_MAX_ITEMS} more entries omitted")
+                    break
+                _put(_strip_surrogates(k), _strip_surrogates(v))
+            return out
+        if isinstance(value, list):
+            if len(value) > _ECHO_MAX_ITEMS:
+                return [_strip_surrogates(v) for v in value[:_ECHO_MAX_ITEMS]] + [
+                    f"…{len(value) - _ECHO_MAX_ITEMS} more items omitted"
+                ]
+            return [_strip_surrogates(v) for v in value]
+        return value
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error_handler(request, exc):  # noqa: ANN001 — FastAPI signature
+        # The default 422 renderer echoes the raw offending input into the
+        # response body; a lone surrogate in it (valid JSON escape) crashes
+        # the UTF-8 response encoder — the client would see a bare 500 for
+        # caller-fixable input. Sanitize before serializing.
+        detail = _strip_surrogates(jsonable_encoder(exc.errors()))
+        return JSONResponse(status_code=422, content={"detail": detail})
 
     def _require(scope: str):
         """FastAPI dependency: enforce a valid key with `scope` and return the
@@ -1225,5 +1432,191 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             log.exception("feedback endpoint failed")
             raise HTTPException(status_code=500, detail="feedback failed") from exc
         return FeedbackResponse(**outcome.to_dict())
+
+    @app.post("/memories", response_model=MemoriesResponse)
+    def memories_endpoint(req: MemoriesRequest, principal=Depends(_require("write"))):  # noqa: B008 — FastAPI DI pattern
+        """Store memories for the caller's tenant (the remote write surface).
+
+        Texts are embedded SERVER-side (clients need no provider key), ids
+        are deterministic from (source, offset, text) so retries and re-sent
+        content come back `duplicate` at zero embedding cost, and under
+        `--auth` everything lands stamped with the key's tenant — a client
+        cannot write into another tenant. Work is bounded: request caps
+        (items/text/metadata), the tenant's storage quota (507 when
+        exceeded), and the shared per-tenant rate limit. Declared as a sync
+        route on purpose: FastAPI runs it on the threadpool, so the
+        embedding round-trips never block the event loop.
+
+        Mode note: under `text_search=qdrant_bm25` the in-process BM25
+        corpus is a startup snapshot — new memories join the vector arm
+        immediately but that lexical arm only after a restart (the same
+        pre-existing behavior as CLI ingest while the server runs).
+        """
+        # Pydantic enforces shapes/caps; the reserved-namespace rule and
+        # cross-field constraints live in the shared validator so the MCP
+        # tool enforces the identical contract. The deployment's configured
+        # text/timestamp keys are reserved too — metadata must not shadow
+        # what recall actually reads.
+        schema_reserved = {cfg.text_key, cfg.timestamp_key} - {"text", "timestamp"}
+        for i, item in enumerate(req.items):
+            problem = validate_remote_item(
+                item.text,
+                item.source,
+                item.timestamp,
+                item.tags,
+                item.metadata,
+                offset=item.offset,
+                chunk=item.chunk,
+                reserved_extra=schema_reserved or None,
+            )
+            if problem:
+                raise HTTPException(status_code=400, detail=f"items[{i}]: {problem}")
+        tenant = _tenant_of(principal)
+        max_points = None
+        if tenant is not None and quota_store is not None:
+            try:
+                q = quota_store.get(tenant)
+                max_points = q.max_points if q is not None else None
+            except Exception:  # noqa: BLE001 — quota store is fail-open by contract
+                # Fail-open is the quota contract (guardrail, not a security
+                # boundary) — but never silently: this warning is the only
+                # signal that per-tenant caps stopped applying.
+                log.warning(
+                    "quota store lookup failed; storage quota not enforced "
+                    "for this /memories request",
+                    exc_info=True,
+                )
+                max_points = None
+        entries = [
+            (
+                IngestItem(
+                    text=it.text,
+                    source=it.source,
+                    offset=it.offset,
+                    metadata=dict(it.metadata),
+                    tags=list(it.tags),
+                    timestamp=it.timestamp,
+                ),
+                it.chunk,
+            )
+            for it in req.items
+        ]
+        try:
+            flat_items, origins = expand_remote_items(entries)
+        except RemoteRequestTooLarge as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        try:
+            results = ingest_remote_items(
+                provider,
+                store,
+                flat_items,
+                tenant=tenant,
+                max_points=max_points,
+                text_key=cfg.text_key,
+                timestamp_key=cfg.timestamp_key,
+                timestamp_format=cfg.timestamp_format,
+            )
+        except QuotaExceededError as exc:
+            raise HTTPException(status_code=507, detail=str(exc)) from exc
+        except EmbeddingSpaceError as exc:
+            # Server-side configuration fault (repointed model tag / mixed
+            # space), not a client error — loud and retriable after the
+            # operator fixes the deployment.
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            log.exception("memories endpoint failed")
+            raise HTTPException(status_code=500, detail="ingest failed") from exc
+        failed_n = sum(r.status == "failed" for r in results)
+        if results and failed_n == len(results):
+            # Same honesty rule as /triples: per-item isolation is for
+            # PARTIAL failure — when EVERY item failed to embed, the write
+            # path is down and a 200 would hide it from status-code checks.
+            raise HTTPException(
+                status_code=502,
+                detail=f"embedding failed for all {failed_n} item(s)",
+            )
+        return MemoriesResponse(
+            results=[
+                MemoryResultOut(
+                    id=r.id, status=r.status, item=origin, offset=flat.offset
+                )
+                for r, origin, flat in zip(results, origins, flat_items, strict=True)
+            ],
+            stored=sum(r.status == "stored" for r in results),
+            duplicates=sum(r.status == "duplicate" for r in results),
+            failed=failed_n,
+        )
+
+    @app.post("/triples", response_model=TriplesResponse)
+    def triples_endpoint(req: TriplesRequest, principal=Depends(_require("write"))):  # noqa: B008 — FastAPI DI pattern
+        """Add temporal facts to the knowledge graph (HTTP parity with the
+        MCP `mnemostack_graph_add_triple` tool).
+
+        Structured writes only — subject/predicate/object with optional
+        validity bounds; nodes are created on demand. Under `--auth` every
+        node and edge is stamped with the key's tenant (the graph-side
+        mirror of the vector `tenant_id`), so a client cannot write into
+        another tenant's subgraph. Requires a configured graph; 503 when
+        the deployment runs without Memgraph.
+        """
+        # Input validation FIRST (a 400 the caller can fix), availability
+        # second (a 503 the operator owns). Contract shared with the MCP
+        # graph tool via validate_remote_triple.
+        for i, t in enumerate(req.triples):
+            problem = validate_remote_triple(
+                t.subject, t.predicate, t.object, t.valid_from, t.valid_until
+            )
+            if problem:
+                raise HTTPException(status_code=400, detail=f"triples[{i}]: {problem}")
+        if not cfg.graph_uri:
+            raise HTTPException(status_code=503, detail="graph is not configured")
+        tenant = _tenant_of(principal)
+        from mnemostack.graph.factory import make_graph_store
+
+        try:
+            gs = make_graph_store(
+                cfg.graph_uri,
+                timeout=cfg.graph_timeout,
+                user=cfg.graph_user,
+                password=cfg.graph_password,
+                database=cfg.graph_database,
+            )
+        except Exception as exc:
+            log.exception("triples endpoint: graph store unavailable")
+            raise HTTPException(status_code=503, detail="graph unavailable") from exc
+        results: list[TripleResultOut] = []
+        try:
+            for t in req.triples:
+                try:
+                    gs.add_triple(
+                        subject=t.subject,
+                        predicate=t.predicate,
+                        obj=t.object,
+                        valid_from=t.valid_from,
+                        valid_until=t.valid_until,
+                        tenant=tenant,
+                    )
+                    results.append(TripleResultOut(status="added"))
+                except Exception as exc:  # noqa: BLE001 — per-triple isolation
+                    log.warning("triples endpoint: add_triple failed: %s", exc)
+                    results.append(
+                        TripleResultOut(status="failed", error=type(exc).__name__)
+                    )
+        finally:
+            try:
+                gs.close()
+            except Exception:  # noqa: BLE001
+                pass
+        counter("mnemostack.server.triples", len(req.triples))
+        added = sum(r.status == "added" for r in results)
+        failed = sum(r.status == "failed" for r in results)
+        if results and added == 0:
+            # Per-triple isolation is for PARTIAL failure; when every triple
+            # failed the write path itself is broken — a 200 here would hide
+            # a dead graph from any caller that checks only the status code.
+            raise HTTPException(
+                status_code=502, detail=f"all {failed} triple write(s) failed"
+            )
+        return TriplesResponse(results=results, added=added, failed=failed)
 
     return app
