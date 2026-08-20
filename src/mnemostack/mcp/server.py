@@ -17,12 +17,13 @@ from typing import Annotated, Any
 
 try:
     from fastmcp import FastMCP
-    from pydantic import Field
+    from pydantic import Field, StrictInt
 
     _FASTMCP_AVAILABLE = True
 except ImportError:  # pragma: no cover
     FastMCP = None  # type: ignore[assignment, misc]
     Field = None  # type: ignore[assignment]
+    StrictInt = int  # type: ignore[assignment, misc]
     _FASTMCP_AVAILABLE = False
 
 from ..config import Config, model_kwargs, provider_kwargs
@@ -31,7 +32,6 @@ from ..embeddings.roles import EmbeddingSpaceError
 from ..feedback import apply_feedback
 from ..ingest import (
     REMOTE_MAX_DOC_CHARS,
-    REMOTE_MAX_IDS,
     REMOTE_MAX_OFFSET,
     REMOTE_MAX_TEXT_CHARS,
     IngestItem,
@@ -806,12 +806,13 @@ def build_server(
     @mcp.tool()
     def mnemostack_invalidate(
         ids: Annotated[
-            list[str | int],
-            Field(
-                min_length=1,
-                max_length=REMOTE_MAX_IDS,
-                description="Point id(s) to mark stale (string or integer)",
-            ),
+            # StrictInt: the lax union coerces JSON true/false to point ids
+            # 1/0. No schema-level list caps — the shared validator enforces
+            # them INSIDE the handler so violations return the documented
+            # {ok: false, error_kind: "invalid_argument"} shape instead of a
+            # protocol-level rejection.
+            list[str | StrictInt],
+            Field(description="Point id(s) to mark stale (string or integer)"),
         ],
         valid_until: Annotated[
             str | None,
@@ -872,8 +873,9 @@ def build_server(
             # tenant owner-guard: only pass it when set so a custom store without
             # the parameter (and the single-tenant path) is unaffected.
             tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
+            # Dedup after coercion — duplicates would inflate `invalidated`.
             updated = _get_vector_payload_only().invalidate(
-                coerce_point_ids(ids),
+                list(dict.fromkeys(coerce_point_ids(ids))),
                 invalidated_at=invalidated_at,
                 valid_until=valid_until,
                 index_root=index_root,

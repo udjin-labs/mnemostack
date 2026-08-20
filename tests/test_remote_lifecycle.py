@@ -12,13 +12,11 @@ import pytest
 pytest.importorskip("fastapi")
 
 from fastapi.testclient import TestClient
-from test_remote_ingest import _CountingEmbedding, _ingest_app, _mem_store
+from test_remote_ingest import _ingest_app
 
 from mnemostack.ingest import (
     REMOTE_MAX_IDS,
-    IngestItem,
     coerce_point_ids,
-    ingest_remote_items,
     validate_remote_ids,
     validate_remote_invalidate,
 )
@@ -38,11 +36,19 @@ def test_validate_remote_ids_contract():
     assert validate_remote_ids(["x" * 129]) is not None
     assert validate_remote_ids(["a\ud800"]) is not None  # lone surrogate
     assert validate_remote_ids([{"id": 1}]) is not None
-    assert validate_remote_ids(["uuid-like", 7, "123"]) is None
+    # Qdrant id domain: UUIDs or unsigned 64-bit ints only — arbitrary
+    # strings would surface as opaque backend errors instead of a 400.
+    assert "UUID" in validate_remote_ids(["not-a-uuid"])
+    assert validate_remote_ids(["9" * 25]) is not None  # digit string > u64
+    assert validate_remote_ids(["²"]) is not None  # isdigit() but int() crashes
+    assert validate_remote_ids(["٧"]) is not None  # non-ASCII decimal
+    assert validate_remote_ids(
+        ["c7751834-6a7d-0516-5d84-032e6e92d50f", 7, "123", str(2**64 - 1)]
+    ) is None
 
 
 def test_validate_remote_invalidate_contract():
-    ok = ["some-id"]
+    ok = ["7"]
     assert validate_remote_invalidate(ok, None, None) is None
     assert validate_remote_invalidate(ok, "2026-01-01T00:00:00Z", "2026-02-01") is None
     assert "invalidated_at" in validate_remote_invalidate(ok, "not-a-date", None)
@@ -56,6 +62,9 @@ def test_validate_remote_invalidate_contract():
 
 def test_coerce_point_ids():
     assert coerce_point_ids(["123", "a-b", 7, "007"]) == [123, "a-b", 7, 7]
+    # '²'.isdigit() is True but int('²') raises — must pass through, not
+    # crash; non-ASCII decimals ('٧') must not silently become numeric ids.
+    assert coerce_point_ids(["²", "٧"]) == ["²", "٧"]
 
 
 # ------------------------------------------------------------ POST /invalidate
@@ -117,25 +126,34 @@ def test_invalidate_rejects_bad_input(monkeypatch, tmp_path):
     client = TestClient(app)
     hdr = {"X-API-Key": keys["write"]}
     r = client.post(
-        "/invalidate", json={"ids": ["x"], "valid_until": "garbage"}, headers=hdr
+        "/invalidate", json={"ids": ["7"], "valid_until": "garbage"}, headers=hdr
     )
     assert r.status_code == 400 and "valid_until" in r.json()["detail"]
     r = client.post(
-        "/invalidate", json={"ids": ["x"], "invalidated_at": "garbage"}, headers=hdr
+        "/invalidate", json={"ids": ["7"], "invalidated_at": "garbage"}, headers=hdr
     )
     assert r.status_code == 400 and "invalidated_at" in r.json()["detail"]
     r = client.post(
-        "/invalidate", json={"ids": ["x"], "index_root": "  "}, headers=hdr
+        "/invalidate", json={"ids": ["7"], "index_root": "  "}, headers=hdr
     )
     assert r.status_code == 400 and "index_root" in r.json()["detail"]
+    r = client.post("/invalidate", json={"ids": ["not-a-uuid"]}, headers=hdr)
+    assert r.status_code == 400 and "UUID" in r.json()["detail"]
+    r = client.post("/invalidate", json={"ids": ["9" * 25]}, headers=hdr)
+    assert r.status_code == 400  # digit string past the u64 domain
     r = client.post(
         "/invalidate",
-        json={"ids": ["x"] * (REMOTE_MAX_IDS + 1)},
+        json={"ids": ["7"] * (REMOTE_MAX_IDS + 1)},
         headers=hdr,
     )
     assert r.status_code in (400, 422)  # pydantic cap or shared validator
     r = client.post("/invalidate", json={"ids": []}, headers=hdr)
     assert r.status_code in (400, 422)
+    # JSON booleans must not coerce onto numeric point ids 1/0 (StrictInt).
+    r = client.post("/invalidate", json={"ids": [True]}, headers=hdr)
+    assert r.status_code == 422
+    r = client.request("DELETE", "/memories", json={"ids": [False]}, headers=hdr)
+    assert r.status_code == 422
 
 
 def test_invalidate_respects_index_root_guard(monkeypatch, tmp_path):
@@ -263,23 +281,86 @@ def test_invalidated_memory_hidden_from_default_recall_semantics(monkeypatch, tm
     assert not is_current(point.payload)
 
 
-# ------------------------------------------------------------ store-level unit
+# ------------------------------------------- review round-1 batch pins
 
 
-def test_ids_validation_precedes_store_roundtrip():
-    """A 400-class problem must not cost a store call (validated up front)."""
-    emb, store = _CountingEmbedding(), _mem_store("val")
-    (res,) = ingest_remote_items(
-        emb, store, [IngestItem(text="x", source="s")], tenant="a"
+def test_invalid_input_never_reaches_the_store(monkeypatch, tmp_path):
+    """Agent-R1: a 400-class problem must not cost ANY store call — pin it
+    at the endpoint level, not against the pure validator."""
+    app, store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
+    client = TestClient(app)
+    hdr = {"X-API-Key": keys["write"]}
+
+    def _boom(*a, **kw):  # pragma: no cover — must not be reached
+        raise AssertionError("store must not be touched for invalid input")
+
+    monkeypatch.setattr(store, "invalidate", _boom)
+    monkeypatch.setattr(store, "delete_points", _boom)
+    monkeypatch.setattr(store.client, "retrieve", _boom)
+    r = client.post("/invalidate", json={"ids": ["not-a-uuid"]}, headers=hdr)
+    assert r.status_code == 400
+    r = client.request("DELETE", "/memories", json={"ids": [""]}, headers=hdr)
+    assert r.status_code == 400
+
+
+def test_duplicate_ids_count_once(monkeypatch, tmp_path):
+    """Agent-R1 + codex-R1: [x, x] must not report 2 for one touched point
+    — `invalidated`/`deleted` are documented as points actually affected."""
+    app, store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
+    client = TestClient(app)
+    hdr = {"X-API-Key": keys["write"]}
+    pid = _stored_id(client, keys["write"])
+    r = client.post("/invalidate", json={"ids": [pid, pid]}, headers=hdr)
+    assert r.json() == {"requested": 2, "invalidated": 1}
+    r = client.request(
+        "DELETE", "/memories", json={"ids": [pid, pid]}, headers=hdr
     )
-    calls: list = []
-    orig = store.client.retrieve
+    assert r.json() == {"requested": 2, "deleted": 1}
 
-    def _counting(*a, **kw):
-        calls.append(a)
-        return orig(*a, **kw)
 
-    store.client.retrieve = _counting  # type: ignore[method-assign]
-    assert validate_remote_ids([""]) is not None  # rejected without touching store
-    assert calls == []
-    assert res.status == "stored"
+def test_unscoped_delete_counts_actual_removals(monkeypatch, tmp_path):
+    """Codex-R1: without auth delete_points skips the existence check, so
+    unknown ids / retries / duplicates would be reported as deleted."""
+    app, store, _emb, _keys = _ingest_app(monkeypatch, tmp_path, auth=False)
+    client = TestClient(app)
+    r = client.post(
+        "/memories", json={"items": [{"text": "legacy fact", "source": "s"}]}
+    )
+    pid = r.json()["results"][0]["id"]
+    missing = "00000000-0000-0000-0000-000000000000"
+    r = client.request("DELETE", "/memories", json={"ids": [pid, pid, missing]})
+    assert r.status_code == 200
+    assert r.json() == {"requested": 3, "deleted": 1}
+    # Retry: everything already gone.
+    r = client.request("DELETE", "/memories", json={"ids": [pid]})
+    assert r.json()["deleted"] == 0
+
+
+def test_delete_respects_index_root_guard(monkeypatch, tmp_path):
+    """Agent-R1: the irreversible endpoint gets the same defense-in-depth
+    scoping knob as /invalidate; untagged points pass (documented)."""
+    app, store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
+    client = TestClient(app)
+    hdr = {"X-API-Key": keys["write"]}
+    owned = _stored_id(client, keys["write"], text="mine", source="a")
+    untagged = _stored_id(client, keys["write"], text="untagged", source="b")
+    store.client.set_payload(
+        collection_name=store.collection,
+        payload={"index_root": "/srv/other"},
+        points=[owned],
+    )
+    r = client.request(
+        "DELETE",
+        "/memories",
+        json={"ids": [owned, untagged], "index_root": "/srv/mine"},
+        headers=hdr,
+    )
+    assert r.status_code == 200
+    # Foreign-root point survives; the untagged one is NOT protected.
+    assert r.json() == {"requested": 2, "deleted": 1}
+    assert len(store.client.retrieve(store.collection, ids=[owned], with_payload=True)) == 1
+    assert store.client.retrieve(store.collection, ids=[untagged], with_payload=True) == []
+    r = client.request(
+        "DELETE", "/memories", json={"ids": [owned], "index_root": "  "}, headers=hdr
+    )
+    assert r.status_code == 400 and "index_root" in r.json()["detail"]

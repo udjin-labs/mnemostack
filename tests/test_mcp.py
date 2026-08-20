@@ -722,14 +722,17 @@ def test_mcp_invalidate_tool_marks_ids(monkeypatch):
     result = asyncio.run(
         mcp.call_tool(
             "mnemostack_invalidate",
-            {"ids": ["a", "b"], "valid_until": "2026-06-01"},
+            {"ids": ["7", "d9428888-122b-11e1-b85c-61cd3cbb3210"],
+             "valid_until": "2026-06-01"},
         )
     )
     payload = result.structured_content
     assert payload["ok"] is True
     assert payload["requested"] == 2
     assert payload["invalidated"] == 2
-    assert vec.calls == [(["a", "b"], None, "2026-06-01")]
+    assert vec.calls == [
+        ([7, "d9428888-122b-11e1-b85c-61cd3cbb3210"], None, "2026-06-01")
+    ]
 
 
 def test_mcp_invalidate_tool_registered():
@@ -845,7 +848,7 @@ def test_mcp_invalidate_passes_index_root(monkeypatch):
     mcp = build_server(collection="test", embedding_provider="ollama")
 
     asyncio.run(mcp.call_tool(
-        "mnemostack_invalidate", {"ids": ["a"], "index_root": "/root/A"}
+        "mnemostack_invalidate", {"ids": ["7"], "index_root": "/root/A"}
     ))
     assert vec.kwargs["index_root"] == "/root/A"
 
@@ -874,16 +877,28 @@ def test_mcp_invalidate_shared_contract_and_error_kind(monkeypatch):
 
     bad = asyncio.run(
         mcp.call_tool(
-            "mnemostack_invalidate", {"ids": ["a"], "valid_until": "garbage"}
+            "mnemostack_invalidate", {"ids": ["7"], "valid_until": "garbage"}
         )
     ).structured_content
     assert bad["ok"] is False and bad["error_kind"] == "invalid_argument"
     assert vec.called is False  # rejected before any store round-trip
 
     blank = asyncio.run(
-        mcp.call_tool("mnemostack_invalidate", {"ids": ["a"], "index_root": " "})
+        mcp.call_tool("mnemostack_invalidate", {"ids": ["7"], "index_root": " "})
     ).structured_content
     assert blank["ok"] is False and blank["error_kind"] == "invalid_argument"
+    assert vec.called is False
+
+    # List bounds are enforced INSIDE the handler (no schema-level caps), so
+    # violations return the documented structured shape, not a protocol error.
+    over = asyncio.run(
+        mcp.call_tool("mnemostack_invalidate", {"ids": ["7"] * 257})
+    ).structured_content
+    assert over["ok"] is False and over["error_kind"] == "invalid_argument"
+    empty = asyncio.run(
+        mcp.call_tool("mnemostack_invalidate", {"ids": []})
+    ).structured_content
+    assert empty["ok"] is False and empty["error_kind"] == "invalid_argument"
     assert vec.called is False
 
 

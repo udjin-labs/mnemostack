@@ -665,10 +665,21 @@ def validate_remote_triple(
 #: cheap to validate but every one costs a store round-trip in the ownership
 #: check — bounded like every other remote request.
 REMOTE_MAX_IDS = 256
-#: Qdrant point ids are UUIDs or unsigned 64-bit ints; anything longer than
-#: this is not an id from this system.
-_REMOTE_MAX_ID_CHARS = 128
+#: Qdrant's point id domain: an unsigned 64-bit integer or a UUID. Anything
+#: else is not an id this system could have produced (stable_chunk_id emits
+#: UUID-shaped strings) and would surface as an opaque backend error instead
+#: of the promised 400 — reject it up front.
 _QDRANT_ID_MAX = 2**64 - 1
+_REMOTE_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def _is_numeric_id_string(s: str) -> bool:
+    # isascii() matters twice: non-ASCII decimals ('٧') would silently
+    # convert to a different-looking numeric id, and category-No digits
+    # ('²') pass isdigit() but CRASH int(). ASCII digits only.
+    return s.isascii() and s.isdigit()
 
 
 def coerce_point_ids(ids: Sequence[str | int]) -> list[str | int]:
@@ -678,7 +689,7 @@ def coerce_point_ids(ids: Sequence[str | int]) -> list[str | int]:
     as strings. UUID ids contain hyphens, so they stay strings. Shared by
     the HTTP lifecycle endpoints and the MCP invalidate tool.
     """
-    return [int(x) if isinstance(x, str) and x.isdigit() else x for x in ids]
+    return [int(x) if isinstance(x, str) and _is_numeric_id_string(x) else x for x in ids]
 
 
 def validate_remote_ids(ids: Sequence[Any]) -> str | None:
@@ -689,18 +700,20 @@ def validate_remote_ids(ids: Sequence[Any]) -> str | None:
         return f"at most {REMOTE_MAX_IDS} ids per request"
     for i, pid in enumerate(ids):
         # bool is an int subclass — True would silently target point id 1.
+        # (The HTTP/MCP schemas use StrictInt so a JSON boolean never even
+        # coerces this far; this guard covers library callers.)
         if isinstance(pid, bool) or not isinstance(pid, (str, int)):
             return f"ids[{i}] must be a string or integer"
         if isinstance(pid, int):
             if pid < 0 or pid > _QDRANT_ID_MAX:
                 return f"ids[{i}] must fit an unsigned 64-bit point id"
-        else:
-            if not pid.strip():
-                return f"ids[{i}] must be a non-blank string"
-            if len(pid) > _REMOTE_MAX_ID_CHARS:
-                return f"ids[{i}] exceeds {_REMOTE_MAX_ID_CHARS} characters"
-            if not _utf8_encodable(pid):
-                return f"ids[{i}] must be valid UTF-8"
+        elif _is_numeric_id_string(pid):
+            # Same magnitude bound as literal ints — coerce_point_ids will
+            # convert this string, and an over-range int is a backend error.
+            if int(pid) > _QDRANT_ID_MAX:
+                return f"ids[{i}] must fit an unsigned 64-bit point id"
+        elif not _REMOTE_UUID_RE.fullmatch(pid):
+            return f"ids[{i}] must be a UUID or an unsigned 64-bit integer"
     return None
 
 

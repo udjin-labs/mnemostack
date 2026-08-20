@@ -401,10 +401,10 @@ Validation failures return structured errors:
 
 | Name | Type | Default | Description |
 | --- | --- | --- | --- |
-| `ids` | `array<string\|integer>` | Required | Point id(s) to mark stale, max 256 per call; digit-only strings are matched as integer ids. |
+| `ids` | `array<string\|integer>` | Required | Point id(s) to mark stale — UUIDs or unsigned 64-bit integers, max 256 per call; ASCII digit-only strings are matched as integer ids. |
 | `valid_until` | `string` | `null` | World-time the fact stopped being true (ISO-8601); optional, separate from the system-time invalidation stamp. |
 | `invalidated_at` | `string` | `null` | System-time stamp (ISO-8601); default: now (UTC). |
-| `index_root` | `string` | `null` | Owner guard: when set, points owned by a different `index_root` are skipped, so one root cannot invalidate another's chunks in a shared collection. |
+| `index_root` | `string` | `null` | Owner guard: when set, points owned by a different `index_root` are skipped, so one root cannot invalidate another's chunks in a shared collection. Points carrying no `index_root` tag (legacy / library-ingested) are not protected by the guard. |
 
 **Return shape:**
 

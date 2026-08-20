@@ -31,7 +31,7 @@ from typing import Any, Literal
 
 try:
     from fastapi import Depends, FastAPI, Header, HTTPException
-    from pydantic import BaseModel, Field
+    from pydantic import BaseModel, Field, StrictInt
 except ImportError as e:  # pragma: no cover - import guard
     raise ImportError(
         "FastAPI is not installed. Install the optional server extra: "
@@ -65,7 +65,6 @@ from mnemostack.ingest import (
     ensure_remote_schema_keys,
     expand_remote_items,
     ingest_remote_items,
-    validate_remote_ids,
     validate_remote_invalidate,
     validate_remote_item,
     validate_remote_triple,
@@ -305,7 +304,9 @@ class TriplesResponse(BaseModel):
 
 
 class InvalidateRequest(BaseModel):
-    ids: list[str | int] = Field(..., min_length=1, max_length=REMOTE_MAX_IDS)
+    # StrictInt, not int: the lax union coerces JSON true/false to 1/0,
+    # which would silently target numeric point ids 1/0 instead of a 422.
+    ids: list[str | StrictInt] = Field(..., min_length=1, max_length=REMOTE_MAX_IDS)
     invalidated_at: str | None = Field(
         None,
         max_length=64,
@@ -343,7 +344,17 @@ class InvalidateResponse(BaseModel):
 
 
 class DeleteMemoriesRequest(BaseModel):
-    ids: list[str | int] = Field(..., min_length=1, max_length=REMOTE_MAX_IDS)
+    # StrictInt: see InvalidateRequest.
+    ids: list[str | StrictInt] = Field(..., min_length=1, max_length=REMOTE_MAX_IDS)
+    index_root: str | None = Field(
+        None,
+        max_length=4096,
+        description=(
+            "Owner guard, matching /invalidate: when set, points owned by a "
+            "different index_root are skipped. Points carrying no index_root "
+            "tag are NOT protected by the guard."
+        ),
+    )
 
 
 class DeleteMemoriesResponse(BaseModel):
@@ -1701,9 +1712,13 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=problem)
         tenant = _tenant_of(principal)
         tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
+        # Dedup AFTER coercion ("7" and 7 are the same point): the store
+        # counts per requested id, so duplicates would inflate `invalidated`
+        # past the number of points actually touched.
+        ids = list(dict.fromkeys(coerce_point_ids(req.ids)))
         try:
             updated = store.invalidate(
-                coerce_point_ids(req.ids),
+                ids,
                 invalidated_at=req.invalidated_at,
                 valid_until=req.valid_until,
                 index_root=req.index_root,
@@ -1725,7 +1740,10 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         ownership check runs server-side: only points stamped with the
         key's tenant are deleted, and foreign or unknown ids are skipped
         indistinguishably (the count is not an existence oracle). Without
-        auth every requested id is deleted (single-tenant legacy).
+        auth every requested existing id is deleted (single-tenant
+        legacy). `index_root` narrows the operation to one indexing
+        root's points, matching `/invalidate` — points carrying no
+        `index_root` tag are not protected by the guard.
 
         Erasure scope: the deletion is immediate for vector and temporal
         recall (they read Qdrant live). An in-process BM25 corpus built
@@ -1736,13 +1754,33 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         via `/triples` are separate records and are not deleted by this
         endpoint.
         """
-        problem = validate_remote_ids(req.ids)
+        problem = validate_remote_invalidate(req.ids, None, None, req.index_root)
         if problem:
             raise HTTPException(status_code=400, detail=problem)
         tenant = _tenant_of(principal)
         tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
+        # Dedup AFTER coercion — duplicates would inflate `deleted`.
+        ids = list(dict.fromkeys(coerce_point_ids(req.ids)))
         try:
-            deleted = store.delete_points(coerce_point_ids(req.ids), **tkw)
+            if req.index_root is not None or tenant is None:
+                # One retrieve serves two jobs. (1) The index_root owner
+                # guard, matching /invalidate: points owned by a DIFFERENT
+                # root are skipped; untagged points pass (documented). (2)
+                # In unscoped mode delete_points performs no existence
+                # check — without this precheck `deleted` would echo the
+                # request instead of counting actual removals.
+                found = store.client.retrieve(
+                    store.collection, ids=ids, with_payload=["index_root"]
+                )
+                keep = {
+                    str(p.id)
+                    for p in found
+                    if req.index_root is None
+                    or (getattr(p, "payload", None) or {}).get("index_root")
+                    in (None, req.index_root)
+                }
+                ids = [pid for pid in ids if str(pid) in keep]
+            deleted = store.delete_points(ids, **tkw) if ids else 0
         except Exception as exc:
             log.exception("delete memories endpoint failed")
             raise HTTPException(status_code=500, detail="delete failed") from exc
