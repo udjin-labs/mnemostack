@@ -639,12 +639,22 @@ class VectorStore:
                 with_vectors=with_vectors,
                 scroll_filter=qfilter,
             )
+            dropped_cursor = False
             if first and start_after is not None:
                 # Qdrant's offset is inclusive; the caller asked for what
                 # comes AFTER that id.
-                points = [pt for pt in points if str(pt.id) != str(start_after)]
+                kept = [pt for pt in points if str(pt.id) != str(start_after)]
+                dropped_cursor = len(kept) != len(points)
+                points = kept
                 first = False
             if not points:
+                # An empty batch means exhaustion — UNLESS the only thing in
+                # it was the cursor we just dropped and the backend handed
+                # back a continuation. With a small batch_size that batch can
+                # be exactly the cursor, and stopping there would silently
+                # omit every successor.
+                if dropped_cursor and next_offset is not None:
+                    continue
                 break
             for pt in points:
                 pid = str(pt.id) if isinstance(pt.id, UUID) else pt.id
