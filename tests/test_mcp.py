@@ -722,14 +722,17 @@ def test_mcp_invalidate_tool_marks_ids(monkeypatch):
     result = asyncio.run(
         mcp.call_tool(
             "mnemostack_invalidate",
-            {"ids": ["a", "b"], "valid_until": "2026-06-01"},
+            {"ids": ["7", "d9428888-122b-11e1-b85c-61cd3cbb3210"],
+             "valid_until": "2026-06-01"},
         )
     )
     payload = result.structured_content
     assert payload["ok"] is True
     assert payload["requested"] == 2
     assert payload["invalidated"] == 2
-    assert vec.calls == [(["a", "b"], None, "2026-06-01")]
+    assert vec.calls == [
+        ([7, "d9428888-122b-11e1-b85c-61cd3cbb3210"], None, "2026-06-01")
+    ]
 
 
 def test_mcp_invalidate_tool_registered():
@@ -845,9 +848,99 @@ def test_mcp_invalidate_passes_index_root(monkeypatch):
     mcp = build_server(collection="test", embedding_provider="ollama")
 
     asyncio.run(mcp.call_tool(
-        "mnemostack_invalidate", {"ids": ["a"], "index_root": "/root/A"}
+        "mnemostack_invalidate", {"ids": ["7"], "index_root": "/root/A"}
     ))
     assert vec.kwargs["index_root"] == "/root/A"
+
+
+def test_mcp_invalidate_shared_contract_and_error_kind(monkeypatch):
+    """Lifecycle-surface parity: the tool enforces the same validator as
+    POST /invalidate and reports error_kind on every failure shape."""
+    import mnemostack.mcp.server as srv
+
+    class _RecordingVector:
+        def __init__(self, **_):
+            self.called = False
+
+        def invalidate(self, ids, **_):
+            self.called = True
+            return len(ids)
+
+    vec = _RecordingVector()
+
+    class _FakeEmbedding:
+        dimension = 3
+
+    monkeypatch.setattr(srv, "get_provider", lambda *_a, **_k: _FakeEmbedding())
+    monkeypatch.setattr(srv, "VectorStore", lambda **_: vec)
+    mcp = build_server(collection="test", embedding_provider="ollama")
+
+    bad = asyncio.run(
+        mcp.call_tool(
+            "mnemostack_invalidate", {"ids": ["7"], "valid_until": "garbage"}
+        )
+    ).structured_content
+    assert bad["ok"] is False and bad["error_kind"] == "invalid_argument"
+    assert vec.called is False  # rejected before any store round-trip
+
+    blank = asyncio.run(
+        mcp.call_tool("mnemostack_invalidate", {"ids": ["7"], "index_root": " "})
+    ).structured_content
+    assert blank["ok"] is False and blank["error_kind"] == "invalid_argument"
+    assert vec.called is False
+
+    # List bounds are enforced INSIDE the handler (no schema-level caps), so
+    # violations return the documented structured shape, not a protocol error.
+    over = asyncio.run(
+        mcp.call_tool("mnemostack_invalidate", {"ids": ["7"] * 257})
+    ).structured_content
+    assert over["ok"] is False and over["error_kind"] == "invalid_argument"
+    empty = asyncio.run(
+        mcp.call_tool("mnemostack_invalidate", {"ids": []})
+    ).structured_content
+    assert empty["ok"] is False and empty["error_kind"] == "invalid_argument"
+    assert vec.called is False
+
+    # A digit string past CPython's int-from-str limit must be classified
+    # as invalid_argument, not leak a ValueError as error_kind "error".
+    huge = asyncio.run(
+        mcp.call_tool("mnemostack_invalidate", {"ids": ["9" * 5000]})
+    ).structured_content
+    assert huge["ok"] is False and huge["error_kind"] == "invalid_argument"
+    assert vec.called is False
+
+
+def test_mcp_invalidate_pre_bootstrap_is_zero_not_error(monkeypatch):
+    """Agent-R6: before the first write the collection doesn't exist —
+    HTTP /invalidate reports zero effect; the MCP twin must match instead
+    of surfacing an opaque error_kind 'error'."""
+    import mnemostack.mcp.server as srv
+
+    class _FreshVector:
+        def __init__(self, **_):
+            self.invalidate_called = False
+
+        def collection_exists(self):
+            return False
+
+        def invalidate(self, ids, **_):  # pragma: no cover — must not run
+            self.invalidate_called = True
+            raise ValueError("Collection not found")
+
+    vec = _FreshVector()
+
+    class _FakeEmbedding:
+        dimension = 3
+
+    monkeypatch.setattr(srv, "get_provider", lambda *_a, **_k: _FakeEmbedding())
+    monkeypatch.setattr(srv, "VectorStore", lambda **_: vec)
+    mcp = build_server(collection="test", embedding_provider="ollama")
+
+    res = asyncio.run(
+        mcp.call_tool("mnemostack_invalidate", {"ids": ["7"]})
+    ).structured_content
+    assert res == {"ok": True, "requested": 1, "invalidated": 0}
+    assert vec.invalidate_called is False
 
 
 # --- service-key auth (multi-tenant) ---
