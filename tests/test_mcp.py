@@ -8,6 +8,7 @@ import pytest
 
 _fastmcp = pytest.importorskip("fastmcp")
 
+from mnemostack.ingest import validate_remote_item  # noqa: E402
 from mnemostack.mcp import build_server  # noqa: E402
 
 
@@ -1021,3 +1022,344 @@ def test_mcp_auth_recall_pipeline_keeps_scoped_graph(tmp_path, monkeypatch):
     mcp = _auth_mcp(tmp_path, monkeypatch, memgraph="bolt://x")
     asyncio.run(mcp.call_tool("mnemostack_search", {"query": "q", "limit": 1}))
     assert captured["graph_uri"] == "bolt://x"
+
+
+# ----------------------------------------------------- mnemostack_remember
+
+
+class _RememberEmbedding:
+    dimension = 3
+
+    def __init__(self):
+        self.embedded: list[str] = []
+
+    def embed(self, text):
+        self.embedded.append(text)
+        return [0.1, 0.2, 0.3]
+
+    def embed_batch(self, texts):
+        return [self.embed(t) for t in texts]
+
+
+def _remember_mcp(tmp_path, monkeypatch, *, scopes="read,write", tenant="alpha"):
+    """MCP server with a REAL in-memory vector store behind the remember tool."""
+    from qdrant_client import QdrantClient
+
+    import mnemostack.mcp.server as srv
+    from mnemostack.auth import FileKeyStore
+    from mnemostack.vector import VectorStore
+
+    emb = _RememberEmbedding()
+    store = VectorStore(collection="rem", dimension=3)
+    store.client = QdrantClient(":memory:")
+    store.ensure_collection()
+    monkeypatch.setattr(srv, "get_provider", lambda *a, **k: emb)
+    monkeypatch.setattr(srv, "VectorStore", lambda **_: store)
+    monkeypatch.setattr(srv, "VectorRetriever", lambda **_: MagicMock())
+    monkeypatch.setattr(srv, "TemporalRetriever", lambda **_: MagicMock())
+    monkeypatch.setattr(srv, "build_bm25_docs", lambda _paths: [])
+    monkeypatch.setattr(srv, "Recaller", lambda **_: MagicMock())
+    ks = tmp_path / "keys.json"
+    _kid, key = FileKeyStore(ks).issue(tenant, scopes)
+    mcp = build_server(
+        collection="rem",
+        embedding_provider="ollama",
+        auth_enabled=True,
+        api_key=key,
+        keys_file=str(ks),
+    )
+    return mcp, store, emb
+
+
+def test_mcp_remember_stores_under_the_key_tenant(tmp_path, monkeypatch):
+    mcp, store, _emb = _remember_mcp(tmp_path, monkeypatch)
+    r = asyncio.run(
+        mcp.call_tool(
+            "mnemostack_remember",
+            {"text": "the sky was green", "source": "chat", "metadata": {"k": "v"}},
+        )
+    )
+    payload = r.structured_content
+    assert payload["ok"] is True and payload["stored"] == 1
+    pid = payload["results"][0]["id"]
+    point = store.client.retrieve(store.collection, ids=[pid], with_payload=True)[0]
+    assert point.payload["tenant_id"] == "alpha"  # tenant from the process KEY
+    assert point.payload["k"] == "v"
+
+
+def test_mcp_remember_duplicates_cost_no_embedding(tmp_path, monkeypatch):
+    mcp, _store, emb = _remember_mcp(tmp_path, monkeypatch)
+    args = {"text": "same fact", "source": "chat"}
+    first = asyncio.run(mcp.call_tool("mnemostack_remember", args)).structured_content
+    n = len(emb.embedded)
+    second = asyncio.run(mcp.call_tool("mnemostack_remember", args)).structured_content
+    assert first["stored"] == 1 and second["duplicates"] == 1
+    assert len(emb.embedded) == n  # retry embedded nothing
+
+
+def test_mcp_remember_rejects_reserved_metadata(tmp_path, monkeypatch):
+    mcp, _store, _emb = _remember_mcp(tmp_path, monkeypatch)
+    r = asyncio.run(
+        mcp.call_tool(
+            "mnemostack_remember", {"text": "x", "metadata": {"tenant_id": "evil"}}
+        )
+    ).structured_content
+    assert r["ok"] is False and "tenant_id" in r["error"]
+
+
+def test_mcp_remember_needs_write_scope(tmp_path, monkeypatch):
+    mcp, _store, _emb = _remember_mcp(tmp_path, monkeypatch, scopes="read")
+    r = asyncio.run(
+        mcp.call_tool("mnemostack_remember", {"text": "x"})
+    ).structured_content
+    assert r["ok"] is False and "scope" in r["error"]
+
+
+def test_mcp_remember_chunks_documents(tmp_path, monkeypatch):
+    from mnemostack.ingest import REMOTE_CHUNK_SIZE
+
+    mcp, _store, _emb = _remember_mcp(tmp_path, monkeypatch)
+    r = asyncio.run(
+        mcp.call_tool(
+            "mnemostack_remember",
+            {"text": "z" * (REMOTE_CHUNK_SIZE + 5), "source": "doc.md", "chunk": True},
+        )
+    ).structured_content
+    assert r["ok"] is True and r["stored"] == 2
+    assert [x["offset"] for x in r["results"]] == [0, REMOTE_CHUNK_SIZE]
+
+
+def test_mcp_remember_rejects_negative_offset(tmp_path, monkeypatch):
+    # Codex/agent round-2 pins: the MCP tool SCHEMA mirrors HTTP's ge=0, so
+    # a negative offset is rejected at the protocol layer (introspecting
+    # clients see the cap); the shared validator remains the backstop.
+    mcp, _store, _emb = _remember_mcp(tmp_path, monkeypatch)
+    with pytest.raises(Exception, match="greater than or equal|-5"):
+        asyncio.run(mcp.call_tool("mnemostack_remember", {"text": "x", "offset": -5}))
+    assert "non-negative" in validate_remote_item("x", "s", None, [], {}, offset=-5)
+
+
+def test_mcp_remember_enforces_quota_with_error_kind(tmp_path, monkeypatch):
+    """Review pins: build_server(quotas_file=) reaches the remember tool,
+    and quota failure is distinguishable from a validation error."""
+    from qdrant_client import QdrantClient
+
+    import mnemostack.mcp.server as srv
+    from mnemostack.auth import FileKeyStore
+    from mnemostack.quotas import FileQuotaStore
+    from mnemostack.vector import VectorStore
+
+    emb = _RememberEmbedding()
+    store = VectorStore(collection="rq", dimension=3)
+    store.client = QdrantClient(":memory:")
+    store.ensure_collection()
+    monkeypatch.setattr(srv, "get_provider", lambda *a, **k: emb)
+    monkeypatch.setattr(srv, "VectorStore", lambda **_: store)
+    monkeypatch.setattr(srv, "VectorRetriever", lambda **_: MagicMock())
+    monkeypatch.setattr(srv, "TemporalRetriever", lambda **_: MagicMock())
+    monkeypatch.setattr(srv, "build_bm25_docs", lambda _paths: [])
+    monkeypatch.setattr(srv, "Recaller", lambda **_: MagicMock())
+    ks = tmp_path / "keys.json"
+    _kid, key = FileKeyStore(ks).issue("alpha", "read,write")
+    qf = tmp_path / "quotas.json"
+    FileQuotaStore(qf).set("alpha", max_points=1)
+    mcp = build_server(
+        collection="rq",
+        embedding_provider="ollama",
+        auth_enabled=True,
+        api_key=key,
+        keys_file=str(ks),
+        quotas_file=str(qf),
+    )
+    ok = asyncio.run(
+        mcp.call_tool("mnemostack_remember", {"text": "first", "source": "s"})
+    ).structured_content
+    assert ok["ok"] is True and ok["stored"] == 1
+    over = asyncio.run(
+        mcp.call_tool("mnemostack_remember", {"text": "second", "source": "s"})
+    ).structured_content
+    assert over["ok"] is False and over["error_kind"] == "quota_exceeded"
+    bad = asyncio.run(
+        mcp.call_tool("mnemostack_remember", {"text": "x", "metadata": {"tenant_id": "z"}})
+    ).structured_content
+    assert bad["error_kind"] == "invalid_argument"
+
+
+def test_mcp_remember_oversized_chunk_expansion_is_invalid_argument(tmp_path, monkeypatch):
+    """Round-2 pin: a document expanding past the per-call chunk budget maps
+    to error_kind=invalid_argument (split it), not a generic backend error
+    an agent would blindly retry."""
+    from mnemostack.ingest import REMOTE_CHUNK_SIZE, REMOTE_MAX_CHUNKS_PER_REQUEST
+
+    mcp, _store, _emb = _remember_mcp(tmp_path, monkeypatch)
+    text = "z" * (REMOTE_CHUNK_SIZE * (REMOTE_MAX_CHUNKS_PER_REQUEST + 1))
+    r = asyncio.run(
+        mcp.call_tool(
+            "mnemostack_remember", {"text": text, "source": "doc.md", "chunk": True}
+        )
+    ).structured_content
+    assert r["ok"] is False and r["error_kind"] == "invalid_argument"
+    assert "split" in r["error"]
+
+
+def test_mcp_remember_auth_failures_carry_error_kind(tmp_path, monkeypatch):
+    mcp, _store, _emb = _remember_mcp(tmp_path, monkeypatch, scopes="read")
+    r = asyncio.run(
+        mcp.call_tool("mnemostack_remember", {"text": "x"})
+    ).structured_content
+    assert r["ok"] is False and r["error_kind"] == "unauthorized"
+
+
+def test_mcp_write_store_carries_sparse_flag_under_sparse_mode(tmp_path, monkeypatch):
+    """Codex-R3 P1: the remember tool writes through _get_vector's store —
+    under text_search=sparse it must be built sparse-aware, or remembered
+    points silently drop out of the sparse lexical arm."""
+    import mnemostack.mcp.server as srv
+
+    captured: dict = {}
+
+    class _RecordingStore:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+        def count(self):
+            return 0
+
+    monkeypatch.setattr(srv, "get_provider", lambda *a, **k: SimpleNamespace(dimension=3))
+    monkeypatch.setattr(srv, "VectorStore", _RecordingStore)
+    monkeypatch.setattr(srv, "VectorRetriever", lambda **_: MagicMock())
+    monkeypatch.setattr(srv, "TemporalRetriever", lambda **_: MagicMock())
+    monkeypatch.setattr(srv, "build_bm25_docs", lambda _paths: [])
+    monkeypatch.setattr(srv, "Recaller", lambda **_: MagicMock())
+    mcp = build_server(
+        collection="sp",
+        embedding_provider="ollama",
+        text_search="sparse",
+        text_key="content",
+    )
+    # Force the lazy vector component: remember touches it on first write.
+    asyncio.run(mcp.call_tool("mnemostack_remember", {"text": "x", "source": "s"}))
+    assert captured.get("sparse_text") is True
+    assert captured.get("text_key") == "content"
+
+
+def test_mcp_build_server_rejects_bad_timestamp_format(tmp_path, monkeypatch):
+    """Agent-R4 P1: MCP builds retrievers lazily, so the format must be
+    validated at BOOT (like HTTP's eager TemporalRetriever) — otherwise a
+    typo'd config reaches the remember tool's domain conversion first."""
+    import mnemostack.mcp.server as srv
+
+    monkeypatch.setattr(srv, "get_provider", lambda *a, **k: SimpleNamespace(dimension=3))
+    monkeypatch.setattr(srv, "VectorStore", lambda **_: MagicMock())
+    with pytest.raises(ValueError, match="timestamp_format"):
+        build_server(
+            collection="t", embedding_provider="ollama", timestamp_format="epoc_typo"
+        )
+
+
+def test_mcp_remember_all_failed_reports_embedding_failed(tmp_path, monkeypatch):
+    mcp, _store, emb = _remember_mcp(tmp_path, monkeypatch)
+
+    def _broken_embed(text):
+        emb.embedded.append(text)
+        return []
+
+    monkeypatch.setattr(emb, "embed", _broken_embed)
+    r = asyncio.run(
+        mcp.call_tool("mnemostack_remember", {"text": "will not embed", "source": "s"})
+    ).structured_content
+    assert r["ok"] is False and r["error_kind"] == "embedding_failed"
+
+
+def test_mcp_build_server_rejects_colliding_schema_keys(tmp_path, monkeypatch):
+    import mnemostack.mcp.server as srv
+
+    monkeypatch.setattr(srv, "get_provider", lambda *a, **k: SimpleNamespace(dimension=3))
+    monkeypatch.setattr(srv, "VectorStore", lambda **_: MagicMock())
+    with pytest.raises(ValueError, match="pipeline"):
+        build_server(collection="t", embedding_provider="ollama", timestamp_key="tags")
+
+
+def test_mcp_graph_add_triple_shares_the_remote_contract(tmp_path, monkeypatch):
+    """Agent-R16 P2: MCP graph writes enforce the SAME contract as
+    POST /triples — punctuation predicates that would silently collapse
+    into one relationship type are invalid_argument, not ok:true."""
+    import mnemostack.graph.factory as gf
+
+    added: list = []
+
+    class _G:
+        def add_triple(self, **kw):
+            added.append(kw)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(gf, "make_graph_store", lambda *a, **k: _G())
+    mcp = _auth_mcp(tmp_path, monkeypatch, tenant="acme", scopes="admin", memgraph="bolt://x")
+    bad = asyncio.run(
+        mcp.call_tool(
+            "mnemostack_graph_add_triple",
+            {"subject": "a", "predicate": "works at", "obj": "b"},
+        )
+    ).structured_content
+    assert bad["ok"] is False and bad["error_kind"] == "invalid_argument"
+    inv = asyncio.run(
+        mcp.call_tool(
+            "mnemostack_graph_add_triple",
+            {"subject": "a", "predicate": "works_on", "obj": "b",
+             "valid_from": "2026-02-01", "valid_until": "2026-01-01"},
+        )
+    ).structured_content
+    assert inv["ok"] is False and "precede" in inv["error"]
+    ok = asyncio.run(
+        mcp.call_tool(
+            "mnemostack_graph_add_triple",
+            {"subject": "a", "predicate": "works_on", "obj": "b"},
+        )
+    ).structured_content
+    assert ok["ok"] is True and added[-1]["predicate"] == "works_on"
+
+
+def test_mcp_graph_add_triple_caps_and_unicode(tmp_path, monkeypatch):
+    """R17 pins: MCP triple writes are capped like HTTP (512-char entities)
+    via the SHARED validator, and non-ASCII-letter predicates are legal —
+    the store's sanitizer keeps them losslessly."""
+    import mnemostack.graph.factory as gf
+
+    added: list = []
+
+    class _G:
+        def add_triple(self, **kw):
+            added.append(kw)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(gf, "make_graph_store", lambda *a, **k: _G())
+    mcp = _auth_mcp(tmp_path, monkeypatch, tenant="acme", scopes="admin", memgraph="bolt://x")
+    big = asyncio.run(
+        mcp.call_tool(
+            "mnemostack_graph_add_triple",
+            {"subject": "a", "predicate": "P" * 600, "obj": "b"},
+        )
+    ).structured_content
+    assert big["ok"] is False and big["error_kind"] == "invalid_argument"
+    uni = asyncio.run(
+        mcp.call_tool(
+            "mnemostack_graph_add_triple",
+            {"subject": "компания", "predicate": "работает_в", "obj": "офис"},
+        )
+    ).structured_content
+    assert uni["ok"] is True and added[-1]["predicate"] == "работает_в"
+    # R18: Unicode number-but-not-digit characters (No/Nl) are rejected on
+    # the MCP surface too — leading they'd be underscore-mangled by
+    # _safe_rel, embedded they'd crash Cypher's rel-type grammar.
+    for bad in ("²abc", "Ⅳabc", "a①bc"):
+        res = asyncio.run(
+            mcp.call_tool(
+                "mnemostack_graph_add_triple",
+                {"subject": "a", "predicate": bad, "obj": "b"},
+            )
+        ).structured_content
+        assert res["ok"] is False and res["error_kind"] == "invalid_argument", bad

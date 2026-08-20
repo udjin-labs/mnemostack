@@ -35,13 +35,14 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import threading
 import uuid
 from collections import OrderedDict, deque
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from mnemostack.embeddings.base import EmbeddingProvider
 from mnemostack.embeddings.roles import (
@@ -171,6 +172,841 @@ _PROTECTED_PAYLOAD_KEYS = frozenset(
         "_attributed_filters",
     }
 )
+
+
+# ---------------------------------------------------------------- remote ingest
+#
+# The write surface for REMOTE clients (HTTP `POST /memories`, MCP
+# `mnemostack_remember`). Distinct from the operator paths (CLI / library):
+# the caller is untrusted, so its metadata is validated against the reserved
+# namespace, its work is bounded by explicit caps, and duplicates are
+# detected against the STORE (not a per-process cache) so retries and
+# repeated content never re-embed — cost discipline, not just idempotency.
+
+#: Hard caps on one remote ingest call. Bounds embedding cost and payload
+#: size for a caller-controlled request; an operator who needs more runs the
+#: CLI next to the stores.
+REMOTE_MAX_ITEMS = 64
+REMOTE_MAX_TEXT_CHARS = 32_768
+REMOTE_MAX_SOURCE_CHARS = 1_024
+REMOTE_MAX_TIMESTAMP_CHARS = 64
+REMOTE_MAX_TAGS = 32
+REMOTE_MAX_TAG_CHARS = 128
+REMOTE_MAX_METADATA_KEYS = 32
+REMOTE_MAX_METADATA_CHARS = 16_384
+
+#: Server-side chunking of long documents (`chunk: true` items): the raw
+#: text may be larger, and it is split into fixed character windows of
+#: ``REMOTE_CHUNK_SIZE`` at offsets 0, size, 2*size... — the split
+#: `mnemostack index` applies to prose files at its DEFAULT ``--chunk-size``
+#: (kept equal to ``VectorConfig.chunk_size``, pinned by test), so with
+#: default settings a document POSTed here and the same file indexed on the
+#: box produce identical chunk ids. A deployment indexing with a custom
+#: ``--chunk-size`` (or via the section-aware markdown indexer) produces
+#: different boundaries — cross-path dedup holds only for the matching
+#: split. The TOTAL number of chunks one request may produce stays bounded:
+#: embedding work is the resource a caller-controlled request must not
+#: scale.
+REMOTE_MAX_DOC_CHARS = 262_144
+REMOTE_CHUNK_SIZE = 800
+REMOTE_MAX_CHUNKS_PER_REQUEST = 128
+
+#: Ceiling on a caller-supplied offset: 2^53-1 — exactly representable in
+#: an IEEE double (JSON/JS interop) and well inside Qdrant's int64 payload
+#: domain. An unbounded Python int (2**100) would pay for embedding first
+#: and only then be rejected — or silently lose precision — at the store.
+REMOTE_MAX_OFFSET = 2**53 - 1
+
+#: Metadata keys a remote caller may never supply, beyond the underscore
+#: namespace (every "_"-prefixed key is server-structural by convention).
+#: `indexed_at` is server-stamped write time; the protected set covers the
+#: id-material trio, isolation and provenance keys. `timestamp` and `tags`
+#: are ALSO reserved here: they have dedicated request fields with their own
+#: caps and type checks, and the ingest pipeline reads them from metadata as
+#: a library-era fallback — a remote value smuggled through metadata would
+#: bypass every one of those caps. (Library/CLI callers are unaffected:
+#: this reservation applies only to the remote validator.)
+_REMOTE_RESERVED_METADATA_KEYS = _PROTECTED_PAYLOAD_KEYS | {
+    "indexed_at",
+    "tags",
+    "timestamp",
+    # Server-owned lifecycle marker: recall treats any payload carrying it
+    # as stale, so a remote caller planting it would store memories that
+    # default recall immediately hides ("stored" with a lie inside).
+    # Retraction goes through the invalidate API, never through ingest.
+    "invalidated_at",
+}
+
+
+def _parse_iso_timestamp(value: str):
+    """`datetime` for an ISO-8601 string, or None when it doesn't parse.
+
+    Tolerates a trailing ``Z`` (Python 3.10's ``fromisoformat`` doesn't).
+    """
+    from datetime import datetime as _dt
+
+    try:
+        return _dt.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
+#: Per-tenant write serialization for THIS process. The quota preflight and
+#: the store-backed duplicate check are read-then-write sequences; without
+#: serialization two concurrent same-tenant requests could both pass a
+#: near-cap preflight (exceeding the cap) or both embed the same new item.
+#: One lock per tenant keeps unrelated tenants fully parallel. Cross-PROCESS
+#: writers (multi-worker deployments) remain best-effort — the quota is a
+#: guardrail, not a security boundary (documented since the quota feature
+#: shipped), and duplicate ids still collapse to one stored point.
+_TENANT_WRITE_LOCKS: dict[str | None, threading.Lock] = {}
+_TENANT_WRITE_LOCKS_GUARD = threading.Lock()
+
+
+def _tenant_write_lock(tenant: str | None) -> threading.Lock:
+    with _TENANT_WRITE_LOCKS_GUARD:
+        lock = _TENANT_WRITE_LOCKS.get(tenant)
+        if lock is None:
+            lock = threading.Lock()
+            _TENANT_WRITE_LOCKS[tenant] = lock
+        return lock
+
+
+def _normalized_metadata_key(key: str) -> str:
+    """NFKC-fold a metadata key for reserved-namespace matching.
+
+    Exact-string matching alone would let `Tenant_Id` or a full-width
+    underscore variant sail through and sit in the stored payload visually
+    impersonating a structural field. Normalization is for MATCHING only —
+    the original key is what gets stored when it is clean.
+    """
+    import unicodedata
+
+    return unicodedata.normalize("NFKC", key).casefold()
+
+
+def _instants_not_increasing(start, end) -> bool:
+    """True when [start, end) is empty — the validity predicate is
+    ``valid_from <= as_of < valid_until``, so start >= end can never match.
+    Naive datetimes are compared as UTC (the stack convention)."""
+    from datetime import timezone as _tz
+
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=_tz.utc)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=_tz.utc)
+    return start >= end
+
+
+def _utf8_encodable(value: str) -> bool:
+    """Whether the string survives UTF-8 encoding (JSON permits lone
+    surrogates like "\\ud800"; deterministic ids and the store transport
+    do not — they must be a 400, never a 500)."""
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def reserved_metadata_keys(metadata: dict[str, Any]) -> list[str]:
+    """Names in *metadata* a remote caller is not allowed to set.
+
+    Returns a sorted list (empty = clean). Rejection is loud by design:
+    silently stripping would let a client believe a forged `tenant_id` or
+    `_id_scheme` was stored.
+    """
+    bad = set()
+    for key in metadata:
+        if not isinstance(key, str):
+            bad.add(str(key))
+            continue
+        normalized = _normalized_metadata_key(key)
+        if normalized.startswith("_") or normalized in _REMOTE_RESERVED_METADATA_KEYS:
+            bad.add(key)
+    return sorted(bad)
+
+
+#: Qdrant's integer payload domain is signed int64 — an ASYMMETRIC range:
+#: [-2**63, 2**63-1]. Python/JSON integers beyond it would embed first and
+#: only fail (or silently lose precision) at upsert.
+_STORE_INT_MIN = -(2**63)
+_STORE_INT_MAX = 2**63 - 1
+
+#: Nesting ceiling for the metadata walk: a few kilobytes of pathologically
+#: nested lists would otherwise blow Python's recursion limit inside the
+#: VALIDATOR itself — an uncaught 500 instead of a clean rejection. Real
+#: payload metadata is a handful of levels; 32 is generous.
+_METADATA_MAX_DEPTH = 32
+
+
+def _find_unrepresentable_number(
+    value: Any, path: str = "metadata", depth: int = 0
+) -> str | None:
+    """First metadata number the store cannot represent, or None.
+
+    Walks nested dicts/lists with a hard depth ceiling (the walk must never
+    be the thing that crashes on caller-shaped input). Rejects integers
+    outside signed int64 and non-finite floats (json.dumps emits
+    NaN/Infinity by default — invalid JSON for the store and undefined for
+    range filters).
+    """
+    import math
+
+    if depth > _METADATA_MAX_DEPTH:
+        return f"{path} exceeds {_METADATA_MAX_DEPTH} nesting levels"
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        if value < _STORE_INT_MIN or value > _STORE_INT_MAX:
+            return f"{path} integer exceeds the store's 64-bit domain"
+        return None
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return f"{path} must be a finite number"
+        return None
+    if isinstance(value, dict):
+        for k, v in value.items():
+            found = _find_unrepresentable_number(v, f"{path}.{k}", depth + 1)
+            if found:
+                return found
+        return None
+    if isinstance(value, list):
+        for i, v in enumerate(value):
+            found = _find_unrepresentable_number(v, f"{path}[{i}]", depth + 1)
+            if found:
+                return found
+        return None
+    return None
+
+
+def validate_remote_item(
+    text: str,
+    source: str,
+    timestamp: str | None,
+    tags: list[str],
+    metadata: dict[str, Any],
+    *,
+    offset: int = 0,
+    chunk: bool = False,
+    reserved_extra: frozenset[str] | set[str] | None = None,
+) -> str | None:
+    """First violated constraint of one remote item, or None when clean.
+
+    Shared by the HTTP endpoint and the MCP tool so both surfaces enforce
+    the identical contract (caps + reserved namespace). ``chunk=True``
+    raises the text ceiling to the document cap (the server splits it) but
+    requires a non-empty ``source`` — chunk ids are (source, offset)-keyed,
+    and an unnamed multi-chunk document would collide at offset positions
+    with every other unnamed document. ``reserved_extra`` lets a deployment
+    reserve additional payload keys (its configured text/timestamp keys) so
+    metadata can't shadow what recall actually reads."""
+    if not isinstance(text, str) or not text.strip():
+        return "text must be a non-empty string"
+    if not _utf8_encodable(text):
+        return "text must be valid UTF-8 (no lone surrogates)"
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+        return "offset must be a non-negative integer"
+    if offset > REMOTE_MAX_OFFSET:
+        return f"offset exceeds {REMOTE_MAX_OFFSET} (must fit the store's integer domain)"
+    if chunk:
+        if len(text) > REMOTE_MAX_DOC_CHARS:
+            return f"text exceeds {REMOTE_MAX_DOC_CHARS} characters (chunked cap)"
+        if not isinstance(source, str) or not source.strip():
+            return "chunked items require a non-empty source"
+        if offset != 0:
+            # The server assigns window offsets for chunked documents; a
+            # caller-supplied base would silently shift ids/positions.
+            return "chunked items must leave offset at 0"
+    elif len(text) > REMOTE_MAX_TEXT_CHARS:
+        return f"text exceeds {REMOTE_MAX_TEXT_CHARS} characters (set chunk=true for documents)"
+    if not isinstance(source, str):
+        return "source must be a string"
+    if len(source) > REMOTE_MAX_SOURCE_CHARS:
+        return f"source exceeds {REMOTE_MAX_SOURCE_CHARS} characters"
+    if not _utf8_encodable(source):
+        return "source must be valid UTF-8 (no lone surrogates)"
+    if "|" in source or any(ord(ch) < 0x20 for ch in source):
+        # `stable_chunk_id` joins (source, offset, text) with "|" (and the
+        # tenant with NUL): ("a", 0, "0|X") and ("a|0", 0, "X") would hash
+        # identically, letting one memory masquerade as a duplicate of
+        # unrelated content. The provenance verifier already treats
+        # pipe-bearing sources as ambiguous — the untrusted surface rejects
+        # them outright.
+        return "source must not contain '|' or control characters"
+    if timestamp is not None:
+        if not isinstance(timestamp, str) or len(timestamp) > REMOTE_MAX_TIMESTAMP_CHARS:
+            return "timestamp must be an ISO-8601 string"
+        if _parse_iso_timestamp(timestamp) is None:
+            # A stored-but-unparseable event time would silently drop the
+            # memory out of temporal recall while reporting it stored.
+            return "timestamp must be an ISO-8601 string"
+    if not isinstance(tags, list) or len(tags) > REMOTE_MAX_TAGS:
+        return f"tags must be a list of at most {REMOTE_MAX_TAGS} strings"
+    for tag in tags:
+        if not isinstance(tag, str) or len(tag) > REMOTE_MAX_TAG_CHARS:
+            return f"each tag must be a string of at most {REMOTE_MAX_TAG_CHARS} characters"
+        if not _utf8_encodable(tag):
+            return "tags must be valid UTF-8 (no lone surrogates)"
+    if not isinstance(metadata, dict):
+        return "metadata must be an object"
+    if len(metadata) > REMOTE_MAX_METADATA_KEYS:
+        return f"metadata exceeds {REMOTE_MAX_METADATA_KEYS} keys"
+    non_string = sorted(str(k) for k in metadata if not isinstance(k, str))
+    if non_string:
+        # Distinct from the reserved-namespace rejection: "reserved" tells a
+        # caller to rename the key; this tells them the key TYPE is wrong.
+        return "metadata keys must be strings: " + ", ".join(non_string)
+    reserved = reserved_metadata_keys(metadata)
+    if reserved_extra:
+        # Both sides through the SAME normalization: a configured key stored
+        # in a non-NFKC form must still catch its normalized client variant.
+        normalized_extra = {_normalized_metadata_key(e) for e in reserved_extra}
+        extra_hits = sorted(
+            k for k in metadata if _normalized_metadata_key(k) in normalized_extra
+        )
+        reserved = sorted(set(reserved) | set(extra_hits))
+    if reserved:
+        return "metadata uses reserved key(s): " + ", ".join(reserved)
+    # Lifecycle validity bounds are ALLOWED (legitimate world-time content)
+    # but must parse: an unparseable bound degrades point-in-time recall to
+    # lexicographic comparison — the memory joins/leaves history at
+    # unrelated as_of instants (same rule as /triples).
+    vf = metadata.get("valid_from")
+    if vf is not None and (not isinstance(vf, str) or _parse_iso_timestamp(vf) is None):
+        return "metadata.valid_from must be ISO-8601"
+    vu = metadata.get("valid_until")
+    if vu is not None and vu != "current":
+        if not isinstance(vu, str) or _parse_iso_timestamp(vu) is None:
+            return "metadata.valid_until must be ISO-8601 or 'current'"
+        if vf is not None:
+            vf_dt, vu_dt = _parse_iso_timestamp(vf), _parse_iso_timestamp(vu)
+            if vf_dt is not None and vu_dt is not None and _instants_not_increasing(vf_dt, vu_dt):
+                # An empty [from, until) window: the memory would be stored
+                # but invisible to every point-in-time query.
+                return "metadata.valid_from must precede metadata.valid_until"
+    bad_number = _find_unrepresentable_number(metadata)
+    if bad_number is not None:
+        return bad_number
+    try:
+        import json
+
+        encoded = json.dumps(metadata, ensure_ascii=False, default=None)
+    except (TypeError, ValueError):
+        return "metadata must be JSON-serializable"
+    if len(encoded) > REMOTE_MAX_METADATA_CHARS:
+        return f"metadata exceeds {REMOTE_MAX_METADATA_CHARS} serialized characters"
+    if not _utf8_encodable(encoded):
+        # A lone surrogate (valid JSON escape) survives json.dumps with
+        # ensure_ascii=False and would crash UTF-8 encoding downstream —
+        # id generation for text/source, the HTTP layer for metadata.
+        return "metadata strings must be valid UTF-8 (no lone surrogates)"
+    return None
+
+
+@dataclass
+class RemoteMemoryResult:
+    """Per-item outcome of a remote ingest, in input order."""
+
+    id: str
+    status: Literal["stored", "duplicate", "failed"]
+
+
+class RemoteRequestTooLarge(ValueError):
+    """A remote request expands past the per-request chunk budget."""
+
+
+def expand_remote_items(
+    entries: list[tuple[IngestItem, bool]],
+    *,
+    chunk_size: int = REMOTE_CHUNK_SIZE,
+) -> tuple[list[IngestItem], list[int]]:
+    """Expand ``(item, chunk?)`` pairs into flat ingest items.
+
+    Chunked items are split into fixed character windows at offsets
+    0, chunk_size, 2*chunk_size... — the exact split the CLI's prose
+    indexer applies, so a document POSTed here and the same file indexed
+    on the box produce identical chunk ids. Non-chunked items pass through
+    with their caller-supplied offset. Returns the flat items plus, for
+    each, the index of the request item it came from. Raises
+    :class:`RemoteRequestTooLarge` when the expansion exceeds
+    ``REMOTE_MAX_CHUNKS_PER_REQUEST`` — embedding work per request is
+    bounded; the caller splits the request instead.
+    """
+    flat: list[IngestItem] = []
+    origins: list[int] = []
+    for idx, (item, do_chunk) in enumerate(entries):
+        if do_chunk:
+            pieces = [
+                (start, item.text[start : start + chunk_size])
+                for start in range(0, len(item.text), chunk_size)
+            ]
+        else:
+            pieces = [(item.offset, item.text)]
+        for start, piece in pieces:
+            if not piece.strip():
+                continue  # whitespace-only window: nothing to embed
+            if len(flat) >= REMOTE_MAX_CHUNKS_PER_REQUEST:
+                # Checked per PIECE so the budget is a hard boundary, not a
+                # per-item overshoot window that widens with cap tuning.
+                raise RemoteRequestTooLarge(
+                    f"request expands to more than {REMOTE_MAX_CHUNKS_PER_REQUEST} "
+                    "chunks — split it into smaller requests"
+                )
+            flat.append(
+                IngestItem(
+                    text=piece,
+                    source=item.source,
+                    offset=start,
+                    metadata=dict(item.metadata),
+                    tags=list(item.tags),
+                    timestamp=item.timestamp,
+                )
+            )
+            origins.append(idx)
+    return flat, origins
+
+
+#: Every payload key the ingest pipeline itself writes — a configured
+#: schema key colliding with ANY of these corrupts a downstream step
+#: (text_key="source" overwrites provenance; timestamp_key="tags" feeds a
+#: float to the tag materializer and 500s every timestamped write).
+_PIPELINE_PAYLOAD_KEYS = _PROTECTED_PAYLOAD_KEYS | {
+    "tags",
+    "timestamp",
+    "indexed_at",
+    # Lifecycle keys the reactivation/invalidate machinery reads and writes:
+    # text_key="invalidated_at" would stamp every stored point with a truthy
+    # stale marker — writes report "stored" while default recall hides them
+    # ALL, silently and permanently. valid_from/valid_until would corrupt
+    # as_of recall the same way (lexicographic fallback on non-ISO values).
+    "invalidated_at",
+    "valid_from",
+    "valid_until",
+}
+
+
+def _valid_remote_predicate(predicate: str) -> bool:
+    """Predicate contract for remote graph writes: a LETTER (any script —
+    the store's sanitizer is Unicode-aware and keeps non-ASCII letters
+    losslessly, so "работает_в" is as legitimate as "works_on"), then
+    letters, decimal digits, or underscores. The store uppercases
+    relationship types, so case variants of one predicate intentionally
+    merge; what this EXCLUDES are the punctuation/space variants
+    ("works-at", "works at") that would silently collapse into one edge
+    type while both writes report success, the leading-digit forms whose
+    sanitized shape a caller can never legally submit, and Unicode
+    number-but-not-digit characters (superscripts ², Roman numerals Ⅳ,
+    circled digits ① — categories No/Nl) that a regex ``\\w`` admits but
+    that either get silently underscore-mangled by the store's sanitizer
+    (leading position, both categories) or are rejected by Cypher's
+    unescaped-identifier grammar (category No, any position); a
+    non-leading Nl would actually survive both, but the whole class is
+    rejected uniformly — one rule, no positional carve-outs. Accepted
+    characters pass the sanitizer without substitution; uppercasing is
+    the only transformation (a handful of letters uppercase into
+    decomposed forms — ``ǰ`` → ``J̌`` — which the store and Cypher both
+    accept).
+    """
+    return predicate[0].isalpha() and all(
+        c.isalpha() or c.isdecimal() or c == "_" for c in predicate
+    )
+
+#: Bounds for one remote triple — enforced in the SHARED validator so the
+#: MCP surface is capped identically to HTTP's pydantic schema (an
+#: unbounded predicate would flow into a Cypher relationship token).
+REMOTE_MAX_TRIPLE_CHARS = 512
+REMOTE_MAX_VALIDITY_CHARS = 64
+
+
+def validate_remote_triple(
+    subject: str,
+    predicate: str,
+    obj: str,
+    valid_from: str | None,
+    valid_until: str | None,
+) -> str | None:
+    """First violated constraint of one remote graph triple, or None.
+
+    Shared by POST /triples and the MCP graph_add_triple tool so both
+    surfaces enforce the identical contract.
+    """
+    for field_name, value in (("subject", subject), ("predicate", predicate), ("object", obj)):
+        if not isinstance(value, str) or not value.strip():
+            return f"{field_name} must be a non-blank string"
+        if len(value) > REMOTE_MAX_TRIPLE_CHARS:
+            return f"{field_name} exceeds {REMOTE_MAX_TRIPLE_CHARS} characters"
+        if not _utf8_encodable(value):
+            return f"{field_name} must be valid UTF-8"
+    if not _valid_remote_predicate(predicate):
+        return (
+            "predicate must be a relation identifier (letters, decimal digits, "
+            "underscores; starting with a letter) — the store uppercases it"
+        )
+    vf_dt = None
+    if valid_from is not None:
+        if not isinstance(valid_from, str) or len(valid_from) > REMOTE_MAX_VALIDITY_CHARS:
+            return "valid_from must be ISO-8601"
+        vf_dt = _parse_iso_timestamp(valid_from)
+        if vf_dt is None:
+            return "valid_from must be ISO-8601"
+    if valid_until is not None and valid_until != "current":
+        if not isinstance(valid_until, str) or len(valid_until) > REMOTE_MAX_VALIDITY_CHARS:
+            return "valid_until must be ISO-8601 or 'current'"
+        vu_dt = _parse_iso_timestamp(valid_until)
+        if vu_dt is None:
+            return "valid_until must be ISO-8601 or 'current'"
+        if vf_dt is not None and _instants_not_increasing(vf_dt, vu_dt):
+            return "valid_from must precede valid_until"
+    return None
+
+
+def ensure_remote_schema_keys(text_key: str, timestamp_key: str) -> None:
+    """Fail loud on a schema-key configuration the write path cannot honor.
+
+    Called at SERVICE BOOT by both surfaces (a misconfigured deployment
+    must not start and then 500 on every write) and defensively at the
+    ingest boundary for library callers.
+    """
+    if not isinstance(text_key, str) or not text_key.strip():
+        raise ValueError("text_key must be a non-blank string")
+    if not isinstance(timestamp_key, str) or not timestamp_key.strip():
+        raise ValueError("timestamp_key must be a non-blank string")
+    if text_key != "text" and text_key.startswith("_"):
+        # The whole underscore namespace is server-structural by convention
+        # (ownership markers like _enrich_keys/_md_keys included — a text
+        # mirror there would make refresh iterate garbage or delete
+        # unrelated fields). Same rule client metadata already obeys.
+        raise ValueError(f"text_key {text_key!r} is in the reserved underscore namespace")
+    if timestamp_key != "timestamp" and timestamp_key.startswith("_"):
+        raise ValueError(
+            f"timestamp_key {timestamp_key!r} is in the reserved underscore namespace"
+        )
+    if text_key != "text" and text_key in _PIPELINE_PAYLOAD_KEYS:
+        raise ValueError(
+            f"text_key {text_key!r} collides with a payload field the ingest "
+            "pipeline writes"
+        )
+    if timestamp_key != "timestamp" and timestamp_key in _PIPELINE_PAYLOAD_KEYS:
+        raise ValueError(
+            f"timestamp_key {timestamp_key!r} collides with a payload field "
+            "the ingest pipeline writes"
+        )
+    if text_key == timestamp_key and text_key != "text":
+        raise ValueError(
+            "text_key and timestamp_key must differ — one field cannot carry both"
+        )
+
+
+def ingest_remote_items(
+    embedding: EmbeddingProvider,
+    store: VectorStore,
+    items: list[IngestItem],
+    *,
+    tenant: str | None = None,
+    max_points: int | None = None,
+    text_key: str = "text",
+    timestamp_key: str = "timestamp",
+    timestamp_format: str = "iso",
+) -> list[RemoteMemoryResult]:
+    """Ingest client-supplied items with store-backed duplicate detection.
+
+    The deterministic id of every item is computed up front; ids already in
+    the store (tenant-scoped when scoped) — and repeats within the request —
+    are reported as ``duplicate`` WITHOUT embedding, so a client retry or a
+    re-sent conversation costs zero provider calls. The rest go through a
+    fresh :class:`Ingestor` (space guard, quota check before upsert,
+    resilient batch embedding). Raises ``QuotaExceededError`` /
+    ``EmbeddingSpaceError`` for the caller's surface to map; per-item
+    embedding failures are reported as ``failed``, never raised.
+
+    ``text_key``/``timestamp_key``/``timestamp_format`` mirror the
+    deployment's recall schema: on a collection with non-default keys the
+    payload additionally carries the text under ``text_key`` and the event
+    time under ``timestamp_key`` (converted into the collection's own
+    domain — iso/epoch/epoch_ms), so remotely written memories are
+    readable and temporally recallable exactly like operator-indexed ones.
+
+    The read-then-write sequences (quota preflight, duplicate detection)
+    are serialized per tenant within this process; cross-process writers
+    remain best-effort (the quota is a guardrail — see deployment docs).
+
+    Validation (`validate_remote_item`) is the CALLER's obligation — this
+    function trusts its items are within caps and clean of reserved keys.
+    """
+    ensure_remote_schema_keys(text_key, timestamp_key)
+    # First remote write on a fresh deployment must not require an operator
+    # ingest to have created the collection. Bootstrap runs ONCE per store
+    # instance: on a sparse-aware store ensure_collection re-verifies sparse
+    # coverage with collection-wide counts, which must not be paid on every
+    # small write. ensure_collection is check-then-create: two concurrent
+    # FIRST writers (any tenants — the per-tenant lock below cannot cover
+    # this) can both see "missing" and race the create; the loser checks
+    # whether the winner's collection now exists instead of retrying blind —
+    # a genuine failure (store down, dimension mismatch) re-raises without
+    # doubling load.
+    if not getattr(store, "_remote_bootstrap_done", False):
+        # Existence is sampled BEFORE ensure: the create race has exactly one
+        # shape — absent before, present after. An ensure failure on a
+        # PRE-EXISTING collection is validation (dimension mismatch, missing
+        # sparse space) and must propagate untouched; treating "exists now"
+        # alone as proof of a race would swallow exactly those guards.
+        # Hook PRESENCE is probed with getattr, never `except
+        # AttributeError` around the call: an AttributeError raised INSIDE
+        # an implemented hook is a genuine failure (broken adapter, wire
+        # format change) and must propagate — not be mistaken for a duck
+        # store without the hook and silently skipped.
+        exists_fn = getattr(store, "collection_exists", None)
+        ensure_fn = getattr(store, "ensure_collection", None)
+        existed_before: bool | None = (
+            exists_fn() if callable(exists_fn) else None
+        )  # duck store without the hook: cannot discriminate a race
+        if callable(ensure_fn):
+            try:
+                ensure_fn()
+            except Exception:
+                appeared = False
+                if existed_before is False and callable(exists_fn):
+                    try:
+                        appeared = bool(exists_fn())
+                    except Exception:  # noqa: BLE001 — keep the ORIGINAL error
+                        appeared = False
+                if not appeared:
+                    raise  # genuine failure (or undiscriminable duck): loud
+                # Lost the concurrent create race — the winner's collection
+                # is up, but it still has to pass OUR validation (dimension,
+                # sparse space): re-run ensure and let it raise honestly.
+                ensure_fn()
+        try:
+            # Instance-level marker, deliberately not part of the store
+            # protocol (a slotted/frozen duck store just re-runs bootstrap).
+            store._remote_bootstrap_done = True  # type: ignore[attr-defined]
+        except AttributeError:
+            pass
+    with _tenant_write_lock(tenant):
+        return _ingest_remote_items_locked(
+            embedding,
+            store,
+            items,
+            tenant=tenant,
+            max_points=max_points,
+            text_key=text_key,
+            timestamp_key=timestamp_key,
+            timestamp_format=timestamp_format,
+        )
+
+
+def _apply_timestamp_domain(
+    items: list[IngestItem], timestamp_key: str, timestamp_format: str
+) -> None:
+    """Map each item's ISO event time onto the collection's schema, in place.
+
+    Conversion is keyed to the FORMAT, not the key name: a deployment with
+    the default ``timestamp`` key but a numeric format still needs its epoch
+    value. The converted value travels via ``metadata`` (the payload merge),
+    and for the default key the explicit field is cleared — the pipeline
+    treats an explicit item timestamp as authoritative, which would shadow
+    the conversion. Naive ISO inputs are treated as UTC (the recall validity
+    convention) — ``datetime.timestamp()`` on a naive value would otherwise
+    use the server's LOCAL zone and silently skew every stored instant.
+    """
+    from datetime import timezone as _tz
+
+    if timestamp_format not in ("epoch", "epoch_ms"):
+        # "iso" — and, deliberately, ANY unrecognized format: the safe
+        # default is ISO passthrough (the codebase-wide convention —
+        # _emit_epoch_bound, validity utils). Converting on an unvalidated
+        # format string would let a typo'd config silently replace every
+        # ISO event time with bogus numbers. The service surfaces validate
+        # the format at boot, so this branch is their "iso" path and the
+        # library caller's safety net.
+        if timestamp_key != "timestamp":
+            for item in items:
+                if item.timestamp:
+                    # Mirror under the configured key; the historical
+                    # `timestamp` field keeps ISO via the explicit field.
+                    item.metadata[timestamp_key] = item.timestamp
+        return
+    for item in items:
+        if not item.timestamp:
+            continue
+        dt = _parse_iso_timestamp(item.timestamp)
+        if dt is None:
+            continue  # validated surfaces never get here; fail soft for ducks
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_tz.utc)
+        value = dt.timestamp() * (1000 if timestamp_format == "epoch_ms" else 1)
+        item.metadata[timestamp_key] = value
+        if timestamp_key == "timestamp":
+            item.timestamp = None  # would shadow the numeric value otherwise
+
+
+def _ingest_remote_items_locked(
+    embedding: EmbeddingProvider,
+    store: VectorStore,
+    items: list[IngestItem],
+    *,
+    tenant: str | None,
+    max_points: int | None,
+    text_key: str,
+    timestamp_key: str,
+    timestamp_format: str,
+) -> list[RemoteMemoryResult]:
+    ids = [
+        stable_chunk_id(item.source, item.offset, item.text, tenant=tenant)
+        for item in items
+    ]
+    tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
+    # getattr, not `except AttributeError` around the call: an internal
+    # AttributeError from an implemented probe must propagate — swallowed,
+    # it would re-embed every duplicate and 507 tenants at their quota.
+    probe = getattr(store, "retrieve_existing_ids", None)
+    existing = (
+        probe(list(ids), **tkw)
+        if callable(probe)
+        else set()  # duck store without the hook: everything embeds
+    )
+    to_ingest: list[IngestItem] = []
+    seen_now: set[str] = set()
+    for pid, item in zip(ids, items, strict=True):
+        if pid in existing or pid in seen_now:
+            continue
+        seen_now.add(pid)
+        to_ingest.append(item)
+    # QUOTA FIRST: every effect of this call — new points AND lifecycle
+    # reactivations below — must sit behind the preflight, or a
+    # 507-rejected request would still have un-retracted memories
+    # (commit-nothing means nothing).
+    if to_ingest and tenant is not None and max_points is not None:
+        enforce_points_quota(
+            tenant, store.count(tenant=tenant), len(to_ingest), max_points
+        )
+    stored: set[str] = set()
+    if to_ingest:
+        # Map event times and the text mirror onto the collection's schema
+        # BEFORE the pipeline: conversion happens only for items actually
+        # being stored (ids are (source, offset, text)-derived — neither
+        # timestamps nor the mirror are id material). The mirror travels via
+        # metadata — a STRUCTURAL payload field — never via the enrichment
+        # hook: apply_enrichment records its keys in _enrich_keys, and a
+        # later `index --refresh-payloads` run WITHOUT an enricher would
+        # treat the schema field as stale enrichment and delete it, blanking
+        # recall for deployments with a custom text_key.
+        if text_key != "text":
+            # Server-injected structural field: deliberately OUTSIDE the
+            # client metadata caps (those bound caller-controlled data; the
+            # mirror is server-owned and bounded by the text caps).
+            for item in to_ingest:
+                item.metadata[text_key] = item.text
+        _apply_timestamp_domain(to_ingest, timestamp_key, timestamp_format)
+        # (Quota was preflighted above, before ANY effect of this call —
+        # including reactivations. Deliberately CONSERVATIVE: items that
+        # will later fail embedding still count, since which one fails is
+        # unknowable pre-embed — a mixed batch at the cap edge is rejected
+        # whole rather than the commit-nothing invariant weakened.)
+        ingestor = Ingestor(
+            embedding,
+            store,
+            # One flush for the whole request (expansion is capped below this),
+            # so the Ingestor's own per-flush quota re-check — kept as
+            # defense-in-depth against concurrent writers — can never split
+            # the request into a committed half and a rejected half.
+            batch_size=REMOTE_MAX_CHUNKS_PER_REQUEST,
+            skip_seen=False,  # duplicates were resolved against the STORE above
+            tenant=tenant,
+            max_points=max_points,
+        )
+        stats = ingestor.ingest(to_ingest)
+        stored = {str(pid) for pid in stats.ids}
+    # Lifecycle: an existing id may be a RETRACTED memory (invalidated_at
+    # set). Re-remembering the same fact must make it recallable again —
+    # reporting a hidden point as "duplicate" would claim success while
+    # default recall stays empty. Reactivate via a payload patch clearing
+    # ONLY invalidated_at: valid_until is dual-use (the invalidate call
+    # MAY set it, but it is equally legitimate ingest-declared expiry, and
+    # payloads carry no provenance to tell the two apart) — deleting it
+    # would destroy client content, so it is PRESERVED and the as_of
+    # caveat documented instead. Content is byte-identical, so the stored
+    # vector stays valid — no re-embedding. Duck stores without the hooks
+    # keep the historical duplicate semantics; a failing patch propagates.
+    # ORDER: this runs AFTER the new-item ingest above — embedding calls an
+    # external provider and is the failure-prone step; were the store-local
+    # patch applied first, an embedding/space failure would 5xx the request
+    # with the reactivation already visible. The residual (patch raising
+    # after a successful upsert) shares the store the upsert just wrote —
+    # correlated availability — and still propagates loudly.
+    reactivated: set[str] = set()
+    if existing:
+        # Same getattr-not-except discipline as the duplicate probe above.
+        # `collection` is part of the probed SHAPE too: a duck store with a
+        # client but no collection attribute keeps the historical duplicate
+        # semantics instead of raising on the direct attribute access.
+        retrieve_fn = getattr(getattr(store, "client", None), "retrieve", None)
+        collection = getattr(store, "collection", None)
+        stale_ids: list[str] = []
+        if callable(retrieve_fn) and collection is not None:
+            points = retrieve_fn(collection, ids=list(existing), with_payload=True)
+            stale_ids = [
+                str(pt.id)
+                for pt in points
+                if (getattr(pt, "payload", None) or {}).get("invalidated_at")
+            ]
+        # else: duck store — historical duplicate semantics
+        if stale_ids:
+            from mnemostack.vector.patch import PayloadPatch
+
+            patched = store.apply_payload_patches(
+                [
+                    PayloadPatch(id=pid, delete_keys=("invalidated_at",))
+                    for pid in stale_ids
+                ],
+                **tkw,
+            )
+            if patched == len(stale_ids):
+                reactivated = set(stale_ids)
+            else:
+                # The patch silently skips points that vanished mid-flight
+                # (concurrent prune/delete) — re-verify instead of reporting
+                # "stored" for a memory that no longer exists; unverified
+                # ids drop out of `existing` so they surface as failed.
+                # (stale_ids non-empty implies retrieve_fn/collection were
+                # present — the guard is for the type checker.)
+                verify = (
+                    retrieve_fn(collection, ids=stale_ids, with_payload=True)
+                    if callable(retrieve_fn)
+                    else []
+                )
+                cleared = {
+                    str(pt.id)
+                    for pt in verify
+                    if not (getattr(pt, "payload", None) or {}).get("invalidated_at")
+                }
+                reactivated = cleared
+                for pid in stale_ids:
+                    if pid not in cleared:
+                        existing.discard(pid)
+    results: list[RemoteMemoryResult] = []
+    first_seen: set[str] = set()
+    for pid in ids:
+        status: Literal["stored", "duplicate", "failed"]
+        if pid in first_seen:
+            # An in-request repeat mirrors its first occurrence: duplicate
+            # only when the content actually exists — a repeat of a FAILED
+            # item must not read as stored-elsewhere.
+            status = "duplicate" if (pid in stored or pid in existing) else "failed"
+        elif pid in stored or pid in reactivated:
+            # Reactivated = the memory became recallable again: the caller's
+            # intent succeeded, and "duplicate" would undersell the change.
+            status = "stored"
+        elif pid in existing:
+            status = "duplicate"
+        else:
+            status = "failed"
+        first_seen.add(pid)
+        results.append(RemoteMemoryResult(id=pid, status=status))
+    counter("mnemostack.ingest.remote_items", len(items))
+    counter("mnemostack.ingest.remote_stored", sum(r.status == "stored" for r in results))
+    return results
 
 
 def apply_enrichment(

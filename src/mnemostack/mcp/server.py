@@ -9,6 +9,7 @@ Design notes:
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from collections.abc import Callable
@@ -26,8 +27,22 @@ except ImportError:  # pragma: no cover
 
 from ..config import Config, model_kwargs, provider_kwargs
 from ..embeddings import get_provider
+from ..embeddings.roles import EmbeddingSpaceError
 from ..feedback import apply_feedback
+from ..ingest import (
+    REMOTE_MAX_DOC_CHARS,
+    REMOTE_MAX_OFFSET,
+    REMOTE_MAX_TEXT_CHARS,
+    IngestItem,
+    RemoteRequestTooLarge,
+    ensure_remote_schema_keys,
+    expand_remote_items,
+    ingest_remote_items,
+    validate_remote_item,
+    validate_remote_triple,
+)
 from ..llm import get_llm
+from ..quotas import QuotaExceededError
 from ..recall import (
     RERANK_MODES,
     AnswerGenerator,
@@ -47,16 +62,19 @@ from ..recall import (
 from ..recall.pipeline import FileStateStore, default_state_path
 from ..vector import VectorStore
 
+log = logging.getLogger(__name__)
+
 
 def _public_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
     if not payload:
         return {}
-    # Internal recall mechanics stay internal: the vector-floor working set
-    # and the graph filter-attribution proof marker are not user metadata.
+    # Internal recall mechanics stay internal: the vector-floor working set,
+    # the graph filter-attribution proof marker, and the enrichment
+    # ownership record are not user metadata.
     return {
         key: value
         for key, value in payload.items()
-        if key not in ("_vector_floor_candidates", "_attributed_filters")
+        if key not in ("_vector_floor_candidates", "_attributed_filters", "_enrich_keys")
     }
 
 
@@ -99,6 +117,12 @@ def build_server(
     # recall flow — both fragile by construction.
     reranker: Reranker | None = None,
     recall_middleware: Callable[..., list[Any]] | None = None,
+    # Quota store for the remember tool's per-tenant storage cap — the same
+    # file `serve --quotas-file` reads. Tail-appended; None falls back to
+    # MNEMOSTACK_QUOTAS_FILE, then the default path, so a deployment that
+    # configures quotas anywhere non-default MUST pass this (or the env var)
+    # to keep MCP writes under the same caps as HTTP writes.
+    quotas_file: str | None = None,
 ) -> Any:
     """Build and return a configured FastMCP server.
 
@@ -149,6 +173,17 @@ def build_server(
     """
     if not _FASTMCP_AVAILABLE:
         raise ImportError("fastmcp not installed. Install with: pip install 'mnemostack[mcp]'")
+    # Fail a schema-key misconfiguration at BOOT (HTTP does the same) —
+    # a bad text/timestamp key must not 500 every remember call instead.
+    ensure_remote_schema_keys(text_key, timestamp_key)
+    if timestamp_format not in ("iso", "epoch", "epoch_ms"):
+        # HTTP fails a typo'd format loud at boot (eager TemporalRetriever);
+        # MCP builds retrievers lazily, so an unvalidated format could reach
+        # the remember tool's domain conversion first — same eager check.
+        raise ValueError(
+            "timestamp_format must be one of ('iso', 'epoch', 'epoch_ms'), "
+            f"got {timestamp_format!r}"
+        )
     if rerank_mode not in RERANK_MODES:
         allowed = ", ".join(sorted(RERANK_MODES))
         raise ValueError(f"rerank_mode must be one of: {allowed}")
@@ -242,14 +277,23 @@ def build_server(
         )
 
     def _get_vector():
-        return _component(
-            "vector",
-            lambda: VectorStore(
+        def _make():
+            from mnemostack.config import resolve_text_search_mode
+
+            # The remember tool WRITES through this store: under
+            # text_search=sparse it must maintain the named sparse vector on
+            # every point, or remembered memories silently drop out of the
+            # sparse lexical arm (and demand a backfill later).
+            mode = resolve_text_search_mode(text_search, bm25_paths)
+            return VectorStore(
                 collection=collection,
                 dimension=_get_embedding().dimension,
                 host=qdrant_host,
-            ),
-        )
+                sparse_text=mode == "sparse",
+                text_key=text_key,
+            )
+
+        return _component("vector", _make)
 
     def _get_vector_payload_only():
         # Invalidation is a payload write (retrieve + set_payload) that never
@@ -820,6 +864,179 @@ def build_server(
             return {"ok": False, "error": str(e), "requested": len(ids)}
 
     @mcp.tool()
+    def mnemostack_remember(
+        text: Annotated[
+            str,
+            Field(
+                min_length=1,
+                max_length=REMOTE_MAX_DOC_CHARS,
+                description=(
+                    "The memory content to store. Embedded server-side. Plain "
+                    f"items are capped at {REMOTE_MAX_TEXT_CHARS} characters; "
+                    "longer documents need chunk=true."
+                ),
+            ),
+        ],
+        source: Annotated[
+            str,
+            Field(
+                description=(
+                    "Logical origin (e.g. 'chat/2026-08-19'). With `offset` it "
+                    "forms the deterministic id: re-sending the same content "
+                    "is a no-cost duplicate, never a second copy."
+                )
+            ),
+        ] = "",
+        offset: Annotated[
+            int,
+            Field(
+                ge=0,
+                le=REMOTE_MAX_OFFSET,
+                description="Position within `source` for multi-part documents.",
+            ),
+        ] = 0,
+        timestamp: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Event time of the content (ISO-8601); drives temporal recall."
+                )
+            ),
+        ] = None,
+        tags: Annotated[
+            list[str] | None, Field(description="Optional tags stored in the payload.")
+        ] = None,
+        metadata: Annotated[
+            dict[str, Any] | None,
+            Field(
+                description=(
+                    "Free payload fields, filterable at recall. Server-reserved "
+                    "keys (underscore-prefixed, structural ones like "
+                    "tenant_id/source, tags/timestamp — use their dedicated "
+                    "parameters — and the lifecycle marker invalidated_at, "
+                    "settable only via mnemostack_invalidate) are rejected."
+                )
+            ),
+        ] = None,
+        chunk: Annotated[
+            bool,
+            Field(
+                description=(
+                    "Split a long document server-side into the same fixed "
+                    "character windows `mnemostack index` uses (identical "
+                    "chunk ids). Requires a non-empty source."
+                )
+            ),
+        ] = False,
+    ) -> dict:
+        """Store a memory for the caller's tenant (the write counterpart of
+        mnemostack_search).
+
+        A write tool: requires the `write` scope, embeds server-side, and
+        stamps the process key's tenant so the memory lands in — and is
+        recallable from — exactly this tenant's scope. Ids are deterministic
+        from (source, offset, text): retries and repeated content return
+        `duplicate` without a second embedding call. Long documents pass
+        `chunk=true` and yield one result per chunk. Use
+        mnemostack_invalidate to retract a stored memory.
+        """
+        try:
+            try:
+                tenant = _tenant_of(_authorize("write"))
+            except _AuthError as e:
+                return {"ok": False, "error": str(e), "error_kind": "unauthorized"}
+            # The deployment's configured schema keys are reserved too —
+            # metadata must not shadow what recall actually reads.
+            schema_reserved = {text_key, timestamp_key} - {"text", "timestamp"}
+            problem = validate_remote_item(
+                text,
+                source,
+                timestamp,
+                list(tags or []),
+                dict(metadata or {}),
+                offset=offset,
+                chunk=chunk,
+                reserved_extra=schema_reserved or None,
+            )
+            if problem:
+                # error_kind lets an agent distinguish "fix your input" from
+                # backend conditions — MCP has no HTTP status codes to carry
+                # the 400/507/503 split the HTTP surface uses.
+                return {"ok": False, "error": problem, "error_kind": "invalid_argument"}
+            item = IngestItem(
+                text=text,
+                source=source,
+                offset=offset,
+                metadata=dict(metadata or {}),
+                tags=list(tags or []),
+                timestamp=timestamp,
+            )
+            try:
+                flat_items, _origins = expand_remote_items([(item, chunk)])
+            except RemoteRequestTooLarge as e:
+                # Same condition HTTP maps to 400: the caller must split the
+                # document — an agent retrying a generic error would spin.
+                return {"ok": False, "error": str(e), "error_kind": "invalid_argument"}
+            max_points = None
+            if tenant is not None:
+                try:
+                    from mnemostack.quotas import FileQuotaStore
+
+                    resolved_quotas = (
+                        quotas_file or os.environ.get("MNEMOSTACK_QUOTAS_FILE") or None
+                    )
+                    q = FileQuotaStore(resolved_quotas).get(tenant)
+                    max_points = q.max_points if q is not None else None
+                except Exception:  # noqa: BLE001 — quota store is fail-open by contract
+                    # Fail-open is the quota contract (a guardrail, not a
+                    # security boundary) — but never silently: this is the
+                    # only signal that per-tenant caps stopped applying.
+                    log.warning(
+                        "quota store lookup failed; storage quota not enforced "
+                        "for this remember call",
+                        exc_info=True,
+                    )
+                    max_points = None
+            try:
+                results = ingest_remote_items(
+                    _get_embedding(),
+                    _get_vector(),
+                    flat_items,
+                    tenant=tenant,
+                    max_points=max_points,
+                    text_key=text_key,
+                    timestamp_key=timestamp_key,
+                    timestamp_format=timestamp_format,
+                )
+            except QuotaExceededError as e:
+                return {"ok": False, "error": str(e), "error_kind": "quota_exceeded"}
+            except EmbeddingSpaceError as e:
+                return {"ok": False, "error": str(e), "error_kind": "embedding_space"}
+            failed_n = sum(r.status == "failed" for r in results)
+            if results and failed_n == len(results):
+                # Same honesty rule as the HTTP 502: when EVERY item failed
+                # to embed the write path is down — ok:true would hide it.
+                return {
+                    "ok": False,
+                    "error": f"embedding failed for all {failed_n} item(s)",
+                    "error_kind": "embedding_failed",
+                }
+            return {
+                "ok": True,
+                "results": [
+                    {"id": r.id, "status": r.status, "offset": it.offset}
+                    for r, it in zip(results, flat_items, strict=True)
+                ],
+                "stored": sum(r.status == "stored" for r in results),
+                "duplicates": sum(r.status == "duplicate" for r in results),
+                "failed": failed_n,
+            }
+        except Exception as e:  # noqa: BLE001
+            # error_kind is present on EVERY failure shape of this tool;
+            # "error" is the generic backend bucket (do not retry blindly).
+            return {"ok": False, "error": str(e), "error_kind": "error"}
+
+    @mcp.tool()
     def mnemostack_feedback(
         hit_id: str,
         signal: str,
@@ -943,7 +1160,18 @@ def build_server(
                 # Structured write — stamp the caller's tenant so the triple lands
                 # in that tenant's isolated subgraph (its nodes/edges carry
                 # `tenant`), never a shared namespace. Unscoped when auth is off.
-                tenant = _tenant_of(_authorize("write"))
+                try:
+                    tenant = _tenant_of(_authorize("write"))
+                except _AuthError as e:
+                    return {"ok": False, "error": str(e), "error_kind": "unauthorized"}
+                # Same contract as POST /triples (shared validator): predicate
+                # shape (punctuation variants would silently collapse into one
+                # relationship type), UTF-8 entities, ordered validity bounds.
+                problem = validate_remote_triple(
+                    subject, predicate, obj, valid_from, valid_until
+                )
+                if problem:
+                    return {"ok": False, "error": problem, "error_kind": "invalid_argument"}
                 from ..graph.factory import make_graph_store
 
                 gs = make_graph_store(
@@ -964,7 +1192,8 @@ def build_server(
                 gs.close()
                 return {"ok": True, "subject": subject, "predicate": predicate, "obj": obj}
             except Exception as e:  # noqa: BLE001
-                return {"ok": False, "error": str(e)}
+                # error_kind on every failure shape, mirroring remember.
+                return {"ok": False, "error": str(e), "error_kind": "error"}
 
     return mcp
 

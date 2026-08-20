@@ -22,6 +22,8 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
@@ -102,7 +104,7 @@ ignore = ["E501"]
 # 3.12, not our 3.10 floor: numpy >= 2.5 ships PEP 695 `type` statements in
 # its stubs, which mypy refuses to parse under python_version < 3.12 and
 # aborts the whole run. 3.10 runtime compatibility is covered by the CI test
-# matrix (3.10-3.13), not by mypy's stdlib gating.
+# matrix (3.10-3.14), not by mypy's stdlib gating.
 python_version = "3.12"
 ignore_missing_imports = true
 no_implicit_optional = true

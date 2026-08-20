@@ -4201,6 +4201,16 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         default=None,
         help="Service-key store path (default: $MNEMOSTACK_KEYS_FILE or ~/.config/mnemostack/keys.json)",
     )
+    p_mcp.add_argument(
+        "--quotas-file",
+        default=None,
+        help=(
+            "Tenant quota store the remember tool enforces (default: "
+            "$MNEMOSTACK_QUOTAS_FILE or the standard path). Point it at the "
+            "SAME file `serve --quotas-file` uses so MCP writes obey the "
+            "same per-tenant caps as HTTP writes."
+        ),
+    )
     p_mcp.set_defaults(func=cmd_mcp_serve)
 
     p_init = sub.add_parser(
@@ -4592,6 +4602,9 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
         in {"1", "true", "yes", "on"},
         api_key=args.api_key or os.environ.get("MNEMOSTACK_API_KEY") or None,
         keys_file=args.keys_file,
+        # getattr: programmatic callers construct bare Namespaces without
+        # every parser default (the tier tests do exactly that).
+        quotas_file=getattr(args, "quotas_file", None),
         text_key=_schema_text,
         timestamp_key=_schema_ts,
         timestamp_format=_schema_fmt,
