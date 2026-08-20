@@ -1717,6 +1717,11 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         # past the number of points actually touched.
         ids = list(dict.fromkeys(coerce_point_ids(req.ids)))
         try:
+            if not store.collection_exists():
+                # Fresh deployment before the first write: the collection is
+                # created lazily by /memories. Nothing exists — the same
+                # "unknown ids are skipped" semantics, not a 500.
+                return InvalidateResponse(requested=len(req.ids), invalidated=0)
             updated = store.invalidate(
                 ids,
                 invalidated_at=req.invalidated_at,
@@ -1762,6 +1767,9 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         # Dedup AFTER coercion — duplicates would inflate `deleted`.
         ids = list(dict.fromkeys(coerce_point_ids(req.ids)))
         try:
+            if not store.collection_exists():
+                # See /invalidate: pre-bootstrap there is nothing to erase.
+                return DeleteMemoriesResponse(requested=len(req.ids), deleted=0)
             if req.index_root is not None or tenant is None:
                 # One retrieve serves two jobs. (1) The index_root owner
                 # guard, matching /invalidate: points owned by a DIFFERENT

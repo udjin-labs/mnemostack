@@ -50,6 +50,26 @@ def test_validate_remote_ids_contract():
     # valid id is that id, not a length violation ("007" is point 7).
     assert validate_remote_ids(["0" * 20 + "1"]) is None
     assert coerce_point_ids(["0" * 20 + "1"]) == [1]
+    assert coerce_point_ids(["0" * 10000]) == [0]  # linear, resolves to 0
+    # Standalone safety: an unvalidated over-u64 digit string passes
+    # through as a string, never as an out-of-range int.
+    assert coerce_point_ids(["0" + "9" * 20]) == ["0" + "9" * 20]
+
+
+def test_lifecycle_on_fresh_deployment_is_empty_not_500(monkeypatch, tmp_path):
+    """Codex-R5: before the first write the collection doesn't exist (lazy
+    bootstrap) — lifecycle calls must report zero effect, not 500."""
+    app, store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
+    client = TestClient(app)
+    hdr = {"X-API-Key": keys["write"]}
+    store.client.delete_collection(store.collection)  # pre-bootstrap state
+    pid = "d9428888-122b-11e1-b85c-61cd3cbb3210"
+    r = client.post("/invalidate", json={"ids": [pid]}, headers=hdr)
+    assert r.status_code == 200
+    assert r.json() == {"requested": 1, "invalidated": 0}
+    r = client.request("DELETE", "/memories", json={"ids": [pid]}, headers=hdr)
+    assert r.status_code == 200
+    assert r.json() == {"requested": 1, "deleted": 0}
     # UUIDs canonicalize to lowercase — the store compares ids as
     # case-sensitive strings, so an uppercase spelling would no-op.
     assert coerce_point_ids(["D9428888-122B-11E1-B85C-61CD3CBB3210"]) == [

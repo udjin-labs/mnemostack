@@ -699,8 +699,11 @@ def coerce_point_ids(ids: Sequence[str | int]) -> list[str | int]:
         if isinstance(x, str):
             if _is_numeric_id_string(x):
                 # Significant digits only — leading zeros don't add range.
+                # The magnitude check keeps this helper safe standalone: an
+                # unvalidated over-u64 digit string passes through as a
+                # string instead of becoming an out-of-range int.
                 digits = x.lstrip("0") or "0"
-                if len(digits) <= 20:
+                if len(digits) <= 20 and int(digits) <= _QDRANT_ID_MAX:
                     out.append(int(digits))
                     continue
             if _REMOTE_UUID_RE.fullmatch(x):
