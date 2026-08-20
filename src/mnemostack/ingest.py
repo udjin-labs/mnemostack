@@ -751,27 +751,32 @@ def ingest_remote_items(
         # PRE-EXISTING collection is validation (dimension mismatch, missing
         # sparse space) and must propagate untouched; treating "exists now"
         # alone as proof of a race would swallow exactly those guards.
-        try:
-            existed_before: bool | None = store.collection_exists()
-        except AttributeError:
-            existed_before = None  # duck store: cannot discriminate a race
-        try:
-            store.ensure_collection()
-        except AttributeError:
-            pass  # duck store without the hook
-        except Exception:
-            appeared = False
-            if existed_before is False:
-                try:
-                    appeared = bool(store.collection_exists())
-                except Exception:  # noqa: BLE001 — keep the ORIGINAL error
-                    appeared = False
-            if not appeared:
-                raise  # genuine failure (or undiscriminable duck): loud
-            # Lost the concurrent create race — the winner's collection is
-            # up, but it still has to pass OUR validation (dimension,
-            # sparse space): re-run ensure and let it raise honestly.
-            store.ensure_collection()
+        # Hook PRESENCE is probed with getattr, never `except
+        # AttributeError` around the call: an AttributeError raised INSIDE
+        # an implemented hook is a genuine failure (broken adapter, wire
+        # format change) and must propagate — not be mistaken for a duck
+        # store without the hook and silently skipped.
+        exists_fn = getattr(store, "collection_exists", None)
+        ensure_fn = getattr(store, "ensure_collection", None)
+        existed_before: bool | None = (
+            exists_fn() if callable(exists_fn) else None
+        )  # duck store without the hook: cannot discriminate a race
+        if callable(ensure_fn):
+            try:
+                ensure_fn()
+            except Exception:
+                appeared = False
+                if existed_before is False and callable(exists_fn):
+                    try:
+                        appeared = bool(exists_fn())
+                    except Exception:  # noqa: BLE001 — keep the ORIGINAL error
+                        appeared = False
+                if not appeared:
+                    raise  # genuine failure (or undiscriminable duck): loud
+                # Lost the concurrent create race — the winner's collection
+                # is up, but it still has to pass OUR validation (dimension,
+                # sparse space): re-run ensure and let it raise honestly.
+                ensure_fn()
         try:
             # Instance-level marker, deliberately not part of the store
             # protocol (a slotted/frozen duck store just re-runs bootstrap).
@@ -852,10 +857,15 @@ def _ingest_remote_items_locked(
         for item in items
     ]
     tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
-    try:
-        existing = store.retrieve_existing_ids(list(ids), **tkw)
-    except AttributeError:
-        existing = set()  # duck store without the hook: everything embeds
+    # getattr, not `except AttributeError` around the call: an internal
+    # AttributeError from an implemented probe must propagate — swallowed,
+    # it would re-embed every duplicate and 507 tenants at their quota.
+    probe = getattr(store, "retrieve_existing_ids", None)
+    existing = (
+        probe(list(ids), **tkw)
+        if callable(probe)
+        else set()  # duck store without the hook: everything embeds
+    )
     to_ingest: list[IngestItem] = []
     seen_now: set[str] = set()
     for pid, item in zip(ids, items, strict=True):
@@ -927,9 +937,11 @@ def _ingest_remote_items_locked(
     # correlated availability — and still propagates loudly.
     reactivated: set[str] = set()
     if existing:
+        # Same getattr-not-except discipline as the duplicate probe above.
+        retrieve_fn = getattr(getattr(store, "client", None), "retrieve", None)
         stale_ids: list[str] = []
-        try:
-            points = store.client.retrieve(
+        if callable(retrieve_fn):
+            points = retrieve_fn(
                 store.collection, ids=list(existing), with_payload=True
             )
             stale_ids = [
@@ -937,8 +949,7 @@ def _ingest_remote_items_locked(
                 for pt in points
                 if (getattr(pt, "payload", None) or {}).get("invalidated_at")
             ]
-        except AttributeError:
-            pass  # duck store: historical duplicate semantics
+        # else: duck store — historical duplicate semantics
         if stale_ids:
             from mnemostack.vector.patch import PayloadPatch
 
@@ -956,12 +967,13 @@ def _ingest_remote_items_locked(
                 # (concurrent prune/delete) — re-verify instead of reporting
                 # "stored" for a memory that no longer exists; unverified
                 # ids drop out of `existing` so they surface as failed.
-                try:
-                    verify = store.client.retrieve(
-                        store.collection, ids=stale_ids, with_payload=True
-                    )
-                except AttributeError:
-                    verify = []
+                # (stale_ids non-empty implies retrieve_fn was callable —
+                # the guard is for the type checker.)
+                verify = (
+                    retrieve_fn(store.collection, ids=stale_ids, with_payload=True)
+                    if callable(retrieve_fn)
+                    else []
+                )
                 cleared = {
                     str(pt.id)
                     for pt in verify

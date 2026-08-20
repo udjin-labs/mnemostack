@@ -1039,10 +1039,14 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         if isinstance(value, str):
             # backslashreplace, not "replace": U+FFFD would collapse keys
             # that differ only in their surrogate, silently dropping
-            # entries from the echoed input.
+            # entries from the echoed input. Truncate AFTER the escape
+            # expansion (each surrogate becomes 6 chars) — truncating the
+            # raw string first would let an all-surrogate string overshoot
+            # the cap ~6x.
+            value = value.encode("utf-8", "backslashreplace").decode("utf-8")
             if len(value) > _ECHO_MAX_CHARS:
                 value = value[:_ECHO_MAX_CHARS] + "…[truncated]"
-            return value.encode("utf-8", "backslashreplace").decode("utf-8")
+            return value
         if isinstance(value, dict):
             # KEYS too: a surrogate metadata key echoed into the error body
             # would crash the response encoder exactly like a value. Keys

@@ -1573,6 +1573,48 @@ def test_422_echo_is_bounded(monkeypatch, tmp_path):
     assert len(echoed["big"]) < 3000 and echoed["big"].endswith("…[truncated]")
 
 
+def test_internal_attributeerror_from_hooks_propagates():
+    """Codex-R21: `except AttributeError` around duck-hook CALLS conflated
+    'hook missing' with an AttributeError raised INSIDE an implemented hook
+    — masking broken adapters (bootstrap silently skipped; every duplicate
+    re-embedded; tenants at quota falsely 507'd). Hook presence is now a
+    getattr probe; internal failures propagate."""
+    emb, store = _CountingEmbedding(), _mem_store()
+
+    def _broken(ids, **kw):
+        raise AttributeError("adapter drift: response object lost .points")
+
+    store.retrieve_existing_ids = _broken  # type: ignore[method-assign]
+    with pytest.raises(AttributeError, match="adapter drift"):
+        ingest_remote_items(emb, store, [IngestItem(text="x", source="s")], tenant="a")
+
+    emb2, store2 = _CountingEmbedding(), _mem_store("mem2")
+
+    def _broken_ensure():
+        raise AttributeError("client API changed")
+
+    store2.ensure_collection = _broken_ensure  # type: ignore[method-assign]
+    with pytest.raises(AttributeError, match="client API changed"):
+        ingest_remote_items(emb2, store2, [IngestItem(text="x", source="s")], tenant="a")
+
+
+def test_422_echo_surrogate_expansion_is_bounded(monkeypatch, tmp_path):
+    """Round-21 (agent P2): truncation ran BEFORE backslashreplace, so an
+    all-surrogate string expanded ~6x past the cap. Truncate post-expansion."""
+    app, _store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
+    surrogates = "\\ud800" * 3000  # JSON escapes: decodes to 3000 lone surrogates
+    raw = f'{{"big": "{surrogates}"}}'.encode()
+    r = TestClient(app).post(
+        "/memories",
+        content=raw,
+        headers={"X-API-Key": keys["write"], "Content-Type": "application/json"},
+    )
+    assert r.status_code == 422
+    echoed = r.json()["detail"][0]["input"]["big"]
+    assert len(echoed) <= 2048 + len("…[truncated]")
+    assert echoed.endswith("…[truncated]")
+
+
 def test_ingest_failure_leaves_retracted_memories_retracted(monkeypatch):
     """Codex-R20 P2: reactivation runs AFTER the failure-prone new-item
     ingest (embedding-space guard, provider, upsert) — a mixed batch whose
