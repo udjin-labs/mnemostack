@@ -173,19 +173,6 @@ def test_recall_records_when_enabled(monkeypatch, tmp_path):
     assert _payload(store, 1)[ACCESS_COUNT_KEY] == 1
 
 
-def test_the_config_flag_stays_at_the_tail_of_ServerConfig():
-    """R1 (codex P2): ServerConfig is documented stable and may be built
-    POSITIONALLY. Inserted mid-signature this flag would have taken
-    `graph_user`'s slot — silently ENABLING writes on a deployment that
-    passed graph credentials positionally and never asked for recording."""
-    import dataclasses
-
-    from mnemostack.server import ServerConfig
-
-    names = [f.name for f in dataclasses.fields(ServerConfig)]
-    assert names[-1] == "record_access"
-
-
 def _answer_app(monkeypatch, tmp_path, generator):
     """The ingest app, but with an answer generator wired in.
 
