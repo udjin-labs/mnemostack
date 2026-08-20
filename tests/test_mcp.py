@@ -901,6 +901,14 @@ def test_mcp_invalidate_shared_contract_and_error_kind(monkeypatch):
     assert empty["ok"] is False and empty["error_kind"] == "invalid_argument"
     assert vec.called is False
 
+    # A digit string past CPython's int-from-str limit must be classified
+    # as invalid_argument, not leak a ValueError as error_kind "error".
+    huge = asyncio.run(
+        mcp.call_tool("mnemostack_invalidate", {"ids": ["9" * 5000]})
+    ).structured_content
+    assert huge["ok"] is False and huge["error_kind"] == "invalid_argument"
+    assert vec.called is False
+
 
 # --- service-key auth (multi-tenant) ---
 

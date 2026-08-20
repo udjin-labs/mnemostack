@@ -40,6 +40,12 @@ def test_validate_remote_ids_contract():
     # strings would surface as opaque backend errors instead of a 400.
     assert "UUID" in validate_remote_ids(["not-a-uuid"])
     assert validate_remote_ids(["9" * 25]) is not None  # digit string > u64
+    # Past CPython's int-from-str digit limit (~4300) int() RAISES — the
+    # validator must return a message, never propagate ValueError (500).
+    assert "64-bit" in validate_remote_ids(["9" * 5000])
+    assert coerce_point_ids(["9" * 5000]) == ["9" * 5000]  # no int() crash
+    # Exact len==20 boundary still coerces (u64 max is 20 digits).
+    assert coerce_point_ids([str(2**64 - 1)]) == [2**64 - 1]
     assert validate_remote_ids(["²"]) is not None  # isdigit() but int() crashes
     assert validate_remote_ids(["٧"]) is not None  # non-ASCII decimal
     assert validate_remote_ids(
@@ -141,6 +147,12 @@ def test_invalidate_rejects_bad_input(monkeypatch, tmp_path):
     assert r.status_code == 400 and "UUID" in r.json()["detail"]
     r = client.post("/invalidate", json={"ids": ["9" * 25]}, headers=hdr)
     assert r.status_code == 400  # digit string past the u64 domain
+    r = client.post("/invalidate", json={"ids": ["9" * 5000]}, headers=hdr)
+    assert r.status_code == 400  # past int()'s digit limit — 400, not 500
+    r = client.request(
+        "DELETE", "/memories", json={"ids": ["9" * 5000]}, headers=hdr
+    )
+    assert r.status_code == 400
     r = client.post(
         "/invalidate",
         json={"ids": ["7"] * (REMOTE_MAX_IDS + 1)},

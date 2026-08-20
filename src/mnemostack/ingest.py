@@ -687,9 +687,16 @@ def coerce_point_ids(ids: Sequence[str | int]) -> list[str | int]:
 
     Qdrant stores integer ids as integers; a JSON caller often sends them
     as strings. UUID ids contain hyphens, so they stay strings. Shared by
-    the HTTP lifecycle endpoints and the MCP invalidate tool.
+    the HTTP lifecycle endpoints and the MCP invalidate tool. The length
+    gate mirrors validate_remote_ids: past CPython's int-from-str digit
+    limit int() RAISES, and a library caller may not have validated first.
     """
-    return [int(x) if isinstance(x, str) and _is_numeric_id_string(x) else x for x in ids]
+    return [
+        int(x)
+        if isinstance(x, str) and _is_numeric_id_string(x) and len(x) <= 20
+        else x
+        for x in ids
+    ]
 
 
 def validate_remote_ids(ids: Sequence[Any]) -> str | None:
@@ -710,7 +717,11 @@ def validate_remote_ids(ids: Sequence[Any]) -> str | None:
         elif _is_numeric_id_string(pid):
             # Same magnitude bound as literal ints — coerce_point_ids will
             # convert this string, and an over-range int is a backend error.
-            if int(pid) > _QDRANT_ID_MAX:
+            # Length gate BEFORE int(): CPython's int-from-str digit limit
+            # (~4300, sys.get_int_max_str_digits) makes int() itself RAISE
+            # on a long enough digit string — a 500, not the promised 400.
+            # u64 needs at most 20 digits.
+            if len(pid) > 20 or int(pid) > _QDRANT_ID_MAX:
                 return f"ids[{i}] must fit an unsigned 64-bit point id"
         elif not _REMOTE_UUID_RE.fullmatch(pid):
             return f"ids[{i}] must be a UUID or an unsigned 64-bit integer"
