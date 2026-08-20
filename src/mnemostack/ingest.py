@@ -303,6 +303,45 @@ def reserved_metadata_keys(metadata: dict[str, Any]) -> list[str]:
     return sorted(bad)
 
 
+#: Qdrant's integer payload domain is int64; Python/JSON integers beyond it
+#: would embed first and only fail (or silently lose precision) at upsert.
+_STORE_INT_MAX = 2**63 - 1
+
+
+def _find_unrepresentable_number(value: Any, path: str = "metadata") -> str | None:
+    """First metadata number the store cannot represent, or None.
+
+    Walks nested dicts/lists. Rejects integers outside int64 and non-finite
+    floats (json.dumps emits NaN/Infinity by default — invalid JSON for the
+    store and undefined for range filters).
+    """
+    import math
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        if abs(value) > _STORE_INT_MAX:
+            return f"{path} integer exceeds the store's 64-bit domain"
+        return None
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return f"{path} must be a finite number"
+        return None
+    if isinstance(value, dict):
+        for k, v in value.items():
+            found = _find_unrepresentable_number(v, f"{path}.{k}")
+            if found:
+                return found
+        return None
+    if isinstance(value, list):
+        for i, v in enumerate(value):
+            found = _find_unrepresentable_number(v, f"{path}[{i}]")
+            if found:
+                return found
+        return None
+    return None
+
+
 def validate_remote_item(
     text: str,
     source: str,
@@ -385,6 +424,20 @@ def validate_remote_item(
         reserved = sorted(set(reserved) | set(extra_hits))
     if reserved:
         return "metadata uses reserved key(s): " + ", ".join(reserved)
+    # Lifecycle validity bounds are ALLOWED (legitimate world-time content)
+    # but must parse: an unparseable bound degrades point-in-time recall to
+    # lexicographic comparison — the memory joins/leaves history at
+    # unrelated as_of instants (same rule as /triples).
+    vf = metadata.get("valid_from")
+    if vf is not None and (not isinstance(vf, str) or _parse_iso_timestamp(vf) is None):
+        return "metadata.valid_from must be ISO-8601"
+    vu = metadata.get("valid_until")
+    if vu is not None and vu != "current":
+        if not isinstance(vu, str) or _parse_iso_timestamp(vu) is None:
+            return "metadata.valid_until must be ISO-8601 or 'current'"
+    bad_number = _find_unrepresentable_number(metadata)
+    if bad_number is not None:
+        return bad_number
     try:
         import json
 
@@ -551,19 +604,6 @@ def ingest_remote_items(
         )
 
 
-def _remote_schema_enricher(
-    text_key: str,
-) -> Callable[[IngestItem], dict[str, Any]] | None:
-    """Payload enricher mirroring text under a non-default recall text key."""
-    if text_key == "text":
-        return None
-
-    def _enrich(item: IngestItem) -> dict[str, Any]:
-        return {text_key: item.text}
-
-    return _enrich
-
-
 def _apply_timestamp_domain(
     items: list[IngestItem], timestamp_key: str, timestamp_format: str
 ) -> None:
@@ -638,9 +678,18 @@ def _ingest_remote_items_locked(
         to_ingest.append(item)
     stored: set[str] = set()
     if to_ingest:
-        # Map event times onto the collection's schema BEFORE the pipeline:
-        # conversion happens only for items actually being stored (ids are
-        # (source, offset, text)-derived — timestamps are not id material).
+        # Map event times and the text mirror onto the collection's schema
+        # BEFORE the pipeline: conversion happens only for items actually
+        # being stored (ids are (source, offset, text)-derived — neither
+        # timestamps nor the mirror are id material). The mirror travels via
+        # metadata — a STRUCTURAL payload field — never via the enrichment
+        # hook: apply_enrichment records its keys in _enrich_keys, and a
+        # later `index --refresh-payloads` run WITHOUT an enricher would
+        # treat the schema field as stale enrichment and delete it, blanking
+        # recall for deployments with a custom text_key.
+        if text_key != "text":
+            for item in to_ingest:
+                item.metadata[text_key] = item.text
         _apply_timestamp_domain(to_ingest, timestamp_key, timestamp_format)
         # Preflight the tenant's storage quota over the WHOLE deduplicated
         # request BEFORE any embedding: an over-quota request must cost zero
@@ -665,10 +714,6 @@ def _ingest_remote_items_locked(
             skip_seen=False,  # duplicates were resolved against the STORE above
             tenant=tenant,
             max_points=max_points,
-            # Non-default recall schema: mirror text/event-time under the
-            # deployment's configured keys so remote memories are readable
-            # and temporally recallable like operator-indexed ones.
-            enrich=_remote_schema_enricher(text_key),
         )
         stats = ingestor.ingest(to_ingest)
         stored = {str(pid) for pid in stats.ids}

@@ -1065,3 +1065,52 @@ def test_qdrant_bm25_mode_boots_without_a_collection(monkeypatch, tmp_path):
     client = TestClient(app)
     r = client.post("/memories", json={"items": [{"text": "first"}]})
     assert r.status_code == 200 and r.json()["stored"] == 1
+
+
+# --------------------------------------------------- bot round-3 batch pins
+
+
+def test_metadata_validity_bounds_must_parse():
+    """Bot-R3: valid_from/valid_until are allowed content but must parse —
+    unparseable bounds degrade as_of recall to lexicographic comparison."""
+    assert "valid_from" in validate_remote_item(
+        "t", "s", None, [], {"valid_from": "tomorrow"}
+    )
+    assert "valid_until" in validate_remote_item(
+        "t", "s", None, [], {"valid_until": "not-a-date"}
+    )
+    assert validate_remote_item(
+        "t", "s", None, [], {"valid_from": "2026-01-01", "valid_until": "current"}
+    ) is None
+
+
+def test_metadata_numbers_must_fit_the_store_domain():
+    """Bot-R3: an int64-overflowing or non-finite number embeds first and
+    only fails at upsert — reject before any provider cost, nested too."""
+    assert "64-bit" in validate_remote_item("t", "s", None, [], {"priority": 2**100})
+    assert "64-bit" in validate_remote_item(
+        "t", "s", None, [], {"nested": {"deep": [1, 2, 2**80]}}
+    )
+    assert "finite" in validate_remote_item("t", "s", None, [], {"score": float("inf")})
+    assert "finite" in validate_remote_item("t", "s", None, [], {"score": float("nan")})
+    assert validate_remote_item(
+        "t", "s", None, [], {"priority": 2**62, "score": 0.5, "flags": [True, 1]}
+    ) is None
+
+
+def test_schema_mirror_is_structural_not_enrichment():
+    """Bot-R3: the text_key mirror must NOT travel through the enrichment
+    hook — apply_enrichment records its keys in _enrich_keys, and a later
+    `index --refresh-payloads` without an enricher would delete the mirror,
+    blanking recall for custom-text_key deployments."""
+    emb, store = _CountingEmbedding(), _mem_store()
+    (res,) = ingest_remote_items(
+        emb,
+        store,
+        [IngestItem(text="hello", source="s")],
+        tenant="a",
+        text_key="content",
+    )
+    point = store.client.retrieve(store.collection, ids=[res.id], with_payload=True)[0]
+    assert point.payload["content"] == "hello"
+    assert "_enrich_keys" not in point.payload  # structural, not enrichment
