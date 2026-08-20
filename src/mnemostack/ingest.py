@@ -772,6 +772,25 @@ def validate_remote_source(source: Any) -> str | None:
     return None
 
 
+def validate_remote_cursor(after: Any) -> str | None:
+    """First violated constraint of a pagination cursor, or None.
+
+    A cursor IS a point id — it is one the listing itself returned — so it
+    lives in exactly the id domain the lifecycle selectors validate, and
+    reuses their rule rather than growing a second one that could drift
+    (the digit-limit guard in particular: a long enough digit string makes
+    ``int()`` itself raise, which would be a 500 on a malformed cursor).
+    """
+    if after is None:
+        return None
+    problem = validate_remote_ids([after])
+    if problem is None:
+        return None
+    if problem == "ids must be a non-empty list":
+        return "after must be a point id"
+    return problem.replace("ids[0]", "after")
+
+
 def find_source_points(
     store: Any,
     source: str,

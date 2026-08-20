@@ -70,6 +70,7 @@ from mnemostack.ingest import (
     find_source_points,
     ingest_remote_items,
     validate_invalidate_options,
+    validate_remote_cursor,
     validate_remote_invalidate,
     validate_remote_item,
     validate_remote_source,
@@ -431,10 +432,34 @@ class MemoryListItem(BaseModel):
             "service returning any memory text."
         ),
     )
-    timestamp: str | None = Field(
-        None, description="Event time of the memory, when it carries one."
+    timestamp: str | int | float | None = Field(
+        None,
+        description=(
+            "Event time of the memory, when it carries one, in the "
+            "deployment's own timestamp domain: an ISO-8601 string under "
+            "the default `recall.timestamp_format: iso`, a number under "
+            "`epoch` / `epoch_ms`. Returned as stored so a client can "
+            "compare it against its own record without a lossy conversion."
+        ),
     )
     indexed_at: str | None = Field(None, description="When the point was written.")
+
+
+def _list_text(value: Any) -> str | None:
+    """A listing metadata field, or None when the payload holds something
+    unexpected there. These fields are integrity hints; a single point with
+    a foreign value under a reserved key must not fail the WHOLE page with
+    a response-validation 500."""
+    return value if isinstance(value, str) else None
+
+
+def _list_timestamp(value: Any) -> str | int | float | None:
+    """The point's event time in the deployment's own domain — ISO string
+    under `timestamp_format: iso`, a number under `epoch`/`epoch_ms`.
+    Returned as stored (a bool is not a timestamp; int subclass or not)."""
+    if isinstance(value, bool):
+        return None
+    return value if isinstance(value, (str, int, float)) else None
 
 
 class MemoryListResponse(BaseModel):
@@ -1832,7 +1857,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         costs the page, not a full scan of the source. Under `--auth`
         only the key's tenant is visible.
         """
-        problem = validate_remote_source(source)
+        problem = validate_remote_source(source) or validate_remote_cursor(after)
         if problem:
             raise HTTPException(status_code=400, detail=problem)
         if limit < 1 or limit > REMOTE_LIST_PAGE:
@@ -1840,6 +1865,13 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 status_code=400, detail=f"limit must be 1..{REMOTE_LIST_PAGE}"
             )
         tenant = _tenant_of(principal)
+        # The cursor comes back through JSON as the string this endpoint
+        # printed, but a collection may use INTEGER point ids, and the store
+        # distinguishes 7 from "7" — an uncoerced cursor would resume from
+        # an id that does not exist, silently returning an empty page and
+        # reporting the listing complete while points remain. Same coercion
+        # the lifecycle selectors apply to caller-supplied ids.
+        cursor = coerce_point_ids([after])[0] if after is not None else None
         try:
             if not store.collection_exists():
                 return MemoryListResponse(items=[], complete=True)
@@ -1848,7 +1880,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 source,
                 tenant=tenant,
                 limit=limit,
-                start_after=after,
+                start_after=cursor,
             )
         except Exception as exc:
             log.exception("list memories failed")
@@ -1856,9 +1888,11 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         page = [
             MemoryListItem(
                 id=str(pid),
-                content_hash=payload.get(SOURCE_HASH_KEY),
-                timestamp=payload.get(cfg.timestamp_key) or payload.get("timestamp"),
-                indexed_at=payload.get("indexed_at"),
+                content_hash=_list_text(payload.get(SOURCE_HASH_KEY)),
+                timestamp=_list_timestamp(
+                    payload.get(cfg.timestamp_key) or payload.get("timestamp")
+                ),
+                indexed_at=_list_text(payload.get("indexed_at")),
             )
             for pid, payload in zip(ids, payloads, strict=True)
         ]

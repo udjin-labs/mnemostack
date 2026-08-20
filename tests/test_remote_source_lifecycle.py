@@ -346,3 +346,82 @@ def test_listing_page_costs_the_page_not_the_source(monkeypatch, tmp_path):
         {r["id"] for r in body["items"]}
     )
     assert seen_points < total, seen_points
+
+
+def _put_int_points(store, source: str, count: int, **extra) -> list[int]:
+    """Integer point ids — Qdrant's other supported id domain, and the one
+    a JSON cursor round-trip loses (the response prints "7", the store
+    distinguishes 7 from "7")."""
+    ids = list(range(1, count + 1))
+    for pid in ids:
+        store.upsert(
+            pid,
+            [0.1, 0.2, 0.3],
+            {"text": f"chunk {pid}", "source": source, "offset": pid, **extra},
+            tenant="alpha",  # the key the listing reads with
+        )
+    return ids
+
+
+def test_listing_paginates_integer_point_ids(monkeypatch, tmp_path):
+    """R2 (codex P2): the cursor comes back as the STRING the response
+    printed. Passed through uncoerced it resumes from an id that does not
+    exist, so page 2 is empty and the listing reports itself complete
+    while points remain."""
+    app, store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
+    client = TestClient(app)
+    ids = _put_int_points(store, "int.md", 5)
+    hdr = {"X-API-Key": keys["read"]}
+    seen: list[str] = []
+    after = None
+    for _ in range(5):
+        params = {"source": "int.md", "limit": 2}
+        if after:
+            params["after"] = after
+        body = client.get("/memories", params=params, headers=hdr).json()
+        seen.extend(row["id"] for row in body["items"])
+        if body["complete"]:
+            break
+        after = body["items"][-1]["id"]
+    assert sorted(seen, key=int) == [str(i) for i in ids]
+    assert len(seen) == len(set(seen))
+
+
+def test_listing_returns_a_numeric_timestamp_domain(monkeypatch, tmp_path):
+    """R2 (codex P2): under `recall.timestamp_format: epoch` the payload's
+    timestamp is a NUMBER. A str-only response field made listing any
+    timestamped memory a 500."""
+    app, store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
+    client = TestClient(app)
+    _put_int_points(store, "epoch.md", 1, timestamp=1755600000.0)
+    hdr = {"X-API-Key": keys["read"]}
+    r = client.get("/memories", params={"source": "epoch.md"}, headers=hdr)
+    assert r.status_code == 200, r.text
+    assert r.json()["items"][0]["timestamp"] == 1755600000.0
+
+
+def test_listing_metadata_of_a_foreign_type_does_not_fail_the_page(monkeypatch, tmp_path):
+    """One point with a junk value under a reserved key must not 500 the
+    whole page — the field is an integrity hint, reported absent instead."""
+    app, store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
+    client = TestClient(app)
+    _put_int_points(store, "junk.md", 1, **{SOURCE_HASH_KEY: 12345, "indexed_at": 7})
+    hdr = {"X-API-Key": keys["read"]}
+    r = client.get("/memories", params={"source": "junk.md"}, headers=hdr)
+    assert r.status_code == 200, r.text
+    item = r.json()["items"][0]
+    assert item["content_hash"] is None and item["indexed_at"] is None
+
+
+def test_listing_rejects_a_malformed_cursor(monkeypatch, tmp_path):
+    """A cursor IS a point id: same domain, same 400 — and notably the
+    digit-limit guard, since a long enough digit string makes int() itself
+    raise (a 500 on malformed input)."""
+    app, _store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
+    client = TestClient(app)
+    hdr = {"X-API-Key": keys["read"]}
+    for bad in ("not-a-point-id", "1" * 5000, "-3"):
+        r = client.get(
+            "/memories", params={"source": "a.md", "after": bad}, headers=hdr
+        )
+        assert r.status_code == 400, (bad, r.status_code)
