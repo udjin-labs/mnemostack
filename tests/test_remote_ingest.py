@@ -1615,6 +1615,29 @@ def test_422_echo_surrogate_expansion_is_bounded(monkeypatch, tmp_path):
     assert echoed.endswith("…[truncated]")
 
 
+def test_duck_store_with_client_but_no_collection_keeps_duplicate_semantics():
+    """Round-22 (agent P2): the getattr rewrite probed client.retrieve but
+    read store.collection DIRECTLY — a duck store exposing a client without
+    a collection attribute went from graceful historical-duplicate fallback
+    to an unhandled AttributeError (a 500 at the API layer)."""
+
+    class _Client:
+        def retrieve(self, *a, **kw):  # pragma: no cover — must not be reached
+            raise AssertionError("retrieve must not be called without a collection")
+
+    class _DuckStore:
+        client = _Client()
+
+        def retrieve_existing_ids(self, ids, **kw):
+            return set(ids)  # everything is a known duplicate
+
+    emb = _CountingEmbedding()
+    (res,) = ingest_remote_items(
+        emb, _DuckStore(), [IngestItem(text="x", source="s")], tenant="a"
+    )
+    assert res.status == "duplicate"  # graceful fallback, no AttributeError
+
+
 def test_ingest_failure_leaves_retracted_memories_retracted(monkeypatch):
     """Codex-R20 P2: reactivation runs AFTER the failure-prone new-item
     ingest (embedding-space guard, provider, upsert) — a mixed batch whose

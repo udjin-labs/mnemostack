@@ -938,12 +938,14 @@ def _ingest_remote_items_locked(
     reactivated: set[str] = set()
     if existing:
         # Same getattr-not-except discipline as the duplicate probe above.
+        # `collection` is part of the probed SHAPE too: a duck store with a
+        # client but no collection attribute keeps the historical duplicate
+        # semantics instead of raising on the direct attribute access.
         retrieve_fn = getattr(getattr(store, "client", None), "retrieve", None)
+        collection = getattr(store, "collection", None)
         stale_ids: list[str] = []
-        if callable(retrieve_fn):
-            points = retrieve_fn(
-                store.collection, ids=list(existing), with_payload=True
-            )
+        if callable(retrieve_fn) and collection is not None:
+            points = retrieve_fn(collection, ids=list(existing), with_payload=True)
             stale_ids = [
                 str(pt.id)
                 for pt in points
@@ -967,10 +969,10 @@ def _ingest_remote_items_locked(
                 # (concurrent prune/delete) — re-verify instead of reporting
                 # "stored" for a memory that no longer exists; unverified
                 # ids drop out of `existing` so they surface as failed.
-                # (stale_ids non-empty implies retrieve_fn was callable —
-                # the guard is for the type checker.)
+                # (stale_ids non-empty implies retrieve_fn/collection were
+                # present — the guard is for the type checker.)
                 verify = (
-                    retrieve_fn(store.collection, ids=stale_ids, with_payload=True)
+                    retrieve_fn(collection, ids=stale_ids, with_payload=True)
                     if callable(retrieve_fn)
                     else []
                 )
