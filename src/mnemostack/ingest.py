@@ -600,7 +600,9 @@ def _valid_remote_predicate(predicate: str) -> bool:
     circled digits ① — categories No/Nl) that a regex ``\\w`` admits but
     that either get silently underscore-mangled by the store's sanitizer
     (leading position, both categories) or are rejected by Cypher's
-    unescaped-identifier grammar (category No, any position). Accepted
+    unescaped-identifier grammar (category No, any position); a
+    non-leading Nl would actually survive both, but the whole class is
+    rejected uniformly — one rule, no positional carve-outs. Accepted
     characters pass the sanitizer without substitution; uppercasing is
     the only transformation (a handful of letters uppercase into
     decomposed forms — ``ǰ`` → ``J̌`` — which the store and Cypher both
@@ -869,6 +871,43 @@ def _ingest_remote_items_locked(
         enforce_points_quota(
             tenant, store.count(tenant=tenant), len(to_ingest), max_points
         )
+    stored: set[str] = set()
+    if to_ingest:
+        # Map event times and the text mirror onto the collection's schema
+        # BEFORE the pipeline: conversion happens only for items actually
+        # being stored (ids are (source, offset, text)-derived — neither
+        # timestamps nor the mirror are id material). The mirror travels via
+        # metadata — a STRUCTURAL payload field — never via the enrichment
+        # hook: apply_enrichment records its keys in _enrich_keys, and a
+        # later `index --refresh-payloads` run WITHOUT an enricher would
+        # treat the schema field as stale enrichment and delete it, blanking
+        # recall for deployments with a custom text_key.
+        if text_key != "text":
+            # Server-injected structural field: deliberately OUTSIDE the
+            # client metadata caps (those bound caller-controlled data; the
+            # mirror is server-owned and bounded by the text caps).
+            for item in to_ingest:
+                item.metadata[text_key] = item.text
+        _apply_timestamp_domain(to_ingest, timestamp_key, timestamp_format)
+        # (Quota was preflighted above, before ANY effect of this call —
+        # including reactivations. Deliberately CONSERVATIVE: items that
+        # will later fail embedding still count, since which one fails is
+        # unknowable pre-embed — a mixed batch at the cap edge is rejected
+        # whole rather than the commit-nothing invariant weakened.)
+        ingestor = Ingestor(
+            embedding,
+            store,
+            # One flush for the whole request (expansion is capped below this),
+            # so the Ingestor's own per-flush quota re-check — kept as
+            # defense-in-depth against concurrent writers — can never split
+            # the request into a committed half and a rejected half.
+            batch_size=REMOTE_MAX_CHUNKS_PER_REQUEST,
+            skip_seen=False,  # duplicates were resolved against the STORE above
+            tenant=tenant,
+            max_points=max_points,
+        )
+        stats = ingestor.ingest(to_ingest)
+        stored = {str(pid) for pid in stats.ids}
     # Lifecycle: an existing id may be a RETRACTED memory (invalidated_at
     # set). Re-remembering the same fact must make it recallable again —
     # reporting a hidden point as "duplicate" would claim success while
@@ -880,6 +919,12 @@ def _ingest_remote_items_locked(
     # caveat documented instead. Content is byte-identical, so the stored
     # vector stays valid — no re-embedding. Duck stores without the hooks
     # keep the historical duplicate semantics; a failing patch propagates.
+    # ORDER: this runs AFTER the new-item ingest above — embedding calls an
+    # external provider and is the failure-prone step; were the store-local
+    # patch applied first, an embedding/space failure would 5xx the request
+    # with the reactivation already visible. The residual (patch raising
+    # after a successful upsert) shares the store the upsert just wrote —
+    # correlated availability — and still propagates loudly.
     reactivated: set[str] = set()
     if existing:
         stale_ids: list[str] = []
@@ -926,43 +971,6 @@ def _ingest_remote_items_locked(
                 for pid in stale_ids:
                     if pid not in cleared:
                         existing.discard(pid)
-    stored: set[str] = set()
-    if to_ingest:
-        # Map event times and the text mirror onto the collection's schema
-        # BEFORE the pipeline: conversion happens only for items actually
-        # being stored (ids are (source, offset, text)-derived — neither
-        # timestamps nor the mirror are id material). The mirror travels via
-        # metadata — a STRUCTURAL payload field — never via the enrichment
-        # hook: apply_enrichment records its keys in _enrich_keys, and a
-        # later `index --refresh-payloads` run WITHOUT an enricher would
-        # treat the schema field as stale enrichment and delete it, blanking
-        # recall for deployments with a custom text_key.
-        if text_key != "text":
-            # Server-injected structural field: deliberately OUTSIDE the
-            # client metadata caps (those bound caller-controlled data; the
-            # mirror is server-owned and bounded by the text caps).
-            for item in to_ingest:
-                item.metadata[text_key] = item.text
-        _apply_timestamp_domain(to_ingest, timestamp_key, timestamp_format)
-        # (Quota was preflighted above, before ANY effect of this call —
-        # including reactivations. Deliberately CONSERVATIVE: items that
-        # will later fail embedding still count, since which one fails is
-        # unknowable pre-embed — a mixed batch at the cap edge is rejected
-        # whole rather than the commit-nothing invariant weakened.)
-        ingestor = Ingestor(
-            embedding,
-            store,
-            # One flush for the whole request (expansion is capped below this),
-            # so the Ingestor's own per-flush quota re-check — kept as
-            # defense-in-depth against concurrent writers — can never split
-            # the request into a committed half and a rejected half.
-            batch_size=REMOTE_MAX_CHUNKS_PER_REQUEST,
-            skip_seen=False,  # duplicates were resolved against the STORE above
-            tenant=tenant,
-            max_points=max_points,
-        )
-        stats = ingestor.ingest(to_ingest)
-        stored = {str(pid) for pid in stats.ids}
     results: list[RemoteMemoryResult] = []
     first_seen: set[str] = set()
     for pid in ids:

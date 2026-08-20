@@ -1028,11 +1028,20 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     from fastapi.exceptions import RequestValidationError
     from fastapi.responses import JSONResponse
 
+    # The 422 echo is a DIAGNOSTIC, not a mirror: it runs synchronously on
+    # the event loop for bodies that failed schema validation — i.e. before
+    # any business-rule cap — so both its total size and the collision
+    # loop's work below must be bounded here, not trusted to upstream caps.
+    _ECHO_MAX_ITEMS = 64
+    _ECHO_MAX_CHARS = 2048
+
     def _strip_surrogates(value: Any) -> Any:
         if isinstance(value, str):
             # backslashreplace, not "replace": U+FFFD would collapse keys
-            # that differ only in their surrogate (dict comprehension below
-            # keeps one), silently dropping entries from the echoed input.
+            # that differ only in their surrogate, silently dropping
+            # entries from the echoed input.
+            if len(value) > _ECHO_MAX_CHARS:
+                value = value[:_ECHO_MAX_CHARS] + "…[truncated]"
             return value.encode("utf-8", "backslashreplace").decode("utf-8")
         if isinstance(value, dict):
             # KEYS too: a surrogate metadata key echoed into the error body
@@ -1040,14 +1049,27 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             # can still collide post-sanitization (a literal backslash-u
             # sequence vs a real surrogate produce the same text) — suffix
             # U+FFFD until unique so no entry is ever silently dropped.
+            # The item cap bounds the disambiguation loop: unbounded, a
+            # batch of crafted all-colliding keys is quadratic on the
+            # event loop.
             out: dict[Any, Any] = {}
-            for k, v in value.items():
-                sk = _strip_surrogates(k)
-                while isinstance(sk, str) and sk in out:
-                    sk += "�"
-                out[sk] = _strip_surrogates(v)
+
+            def _put(key: Any, val: Any) -> None:
+                while isinstance(key, str) and key in out:
+                    key += "�"
+                out[key] = val
+
+            for i, (k, v) in enumerate(value.items()):
+                if i >= _ECHO_MAX_ITEMS:
+                    _put("…", f"{len(value) - _ECHO_MAX_ITEMS} more entries omitted")
+                    break
+                _put(_strip_surrogates(k), _strip_surrogates(v))
             return out
         if isinstance(value, list):
+            if len(value) > _ECHO_MAX_ITEMS:
+                return [_strip_surrogates(v) for v in value[:_ECHO_MAX_ITEMS]] + [
+                    f"…{len(value) - _ECHO_MAX_ITEMS} more items omitted"
+                ]
             return [_strip_surrogates(v) for v in value]
         return value
 

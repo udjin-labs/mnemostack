@@ -1548,3 +1548,57 @@ def test_422_echo_never_drops_colliding_sanitized_keys(monkeypatch, tmp_path):
     echoed = r.json()["detail"][0]["input"]["probe"]
     assert sorted(echoed.values()) == ["1", "2"]
     assert len(echoed) == 2
+
+
+def test_422_echo_is_bounded(monkeypatch, tmp_path):
+    """Round-20 (agent P1): the 422 echo runs pre-business-caps on the event
+    loop — unbounded, a batch of crafted all-colliding keys made the
+    disambiguation loop quadratic (seconds of stalled loop per request).
+    The echo is a diagnostic: cap entries per container and string length."""
+    app, _store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
+    many = ", ".join(f'"k{i}": "v"' for i in range(200))
+    long_s = "x" * 5000
+    arr = ", ".join('"e"' for _ in range(200))
+    raw = f'{{"probe": {{{many}}}, "big": "{long_s}", "arr": [{arr}]}}'.encode()
+    r = TestClient(app).post(
+        "/memories",
+        content=raw,
+        headers={"X-API-Key": keys["write"], "Content-Type": "application/json"},
+    )
+    assert r.status_code == 422
+    echoed = r.json()["detail"][0]["input"]
+    assert len(echoed["probe"]) == 65  # 64 entries + omission marker
+    assert any("omitted" in str(v) for v in echoed["probe"].values())
+    assert len(echoed["arr"]) == 65 and "omitted" in echoed["arr"][-1]
+    assert len(echoed["big"]) < 3000 and echoed["big"].endswith("…[truncated]")
+
+
+def test_ingest_failure_leaves_retracted_memories_retracted(monkeypatch):
+    """Codex-R20 P2: reactivation runs AFTER the failure-prone new-item
+    ingest (embedding-space guard, provider, upsert) — a mixed batch whose
+    ingest step raises must not leave the invalidated duplicate visibly
+    reactivated behind a 5xx response."""
+    import mnemostack.ingest as ingest_mod
+
+    emb, store = _CountingEmbedding(), _mem_store()
+    (first,) = ingest_remote_items(
+        emb, store, [IngestItem(text="fact", source="s")], tenant="a"
+    )
+    store.invalidate([first.id], tenant="a")
+
+    class _Boom(Exception):
+        pass
+
+    def _fail(self, items):
+        raise _Boom("space conflict")
+
+    monkeypatch.setattr(ingest_mod.Ingestor, "ingest", _fail)
+    with pytest.raises(_Boom):
+        ingest_remote_items(
+            emb,
+            store,
+            [IngestItem(text="fact", source="s"), IngestItem(text="new", source="s")],
+            tenant="a",
+        )
+    point = store.client.retrieve(store.collection, ids=[first.id], with_payload=True)[0]
+    assert point.payload.get("invalidated_at")  # still retracted — no side effect
