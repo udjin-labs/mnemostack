@@ -1157,7 +1157,9 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
 
     def _route_label(request) -> str:
         # The route TEMPLATE ("/resolve/{chunk_id}"), never the raw path —
-        # a per-id label would explode metric cardinality.
+        # a per-id label would explode metric cardinality. Starlette sets
+        # scope["route"] before dependencies run on every route this app
+        # registers; the fallback is pure defense, not a live case.
         route = request.scope.get("route")
         path = getattr(route, "path", None) or "unmatched"
         return f"{request.method} {path}"
@@ -1191,6 +1193,13 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 raise HTTPException(status_code=403, detail=f"key lacks '{scope}' scope")
             # Rate limit AFTER auth/authz so an unauthenticated flood can't
             # consume a tenant's tokens (an invalid key is rejected above, free).
+            # Count BEFORE the rate limiter so `requests` really is every
+            # authenticated request (as documented) — the 429 rejection
+            # ratio is then rate_limited / requests.
+            counter(
+                "mnemostack.tenant.requests",
+                labels={"tenant": principal.tenant, "endpoint": _route_label(request)},
+            )
             if rate_limiter is not None:
                 try:
                     rate_limiter.check(principal.tenant)
@@ -1211,10 +1220,6 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                         detail=str(exc),
                         headers={"Retry-After": str(secs)},
                     ) from exc
-            counter(
-                "mnemostack.tenant.requests",
-                labels={"tenant": principal.tenant, "endpoint": _route_label(request)},
-            )
             return principal
 
         return _dep
@@ -1622,10 +1627,12 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             log.exception("memories endpoint failed")
             raise HTTPException(status_code=500, detail="ingest failed") from exc
         if tenant is not None:
-            # Embedding cost attribution: duplicates cost zero embed calls;
-            # everything else (stored AND failed) paid the provider round
-            # trip. Chars are the provider-agnostic token proxy.
-            embedded = sum(r.status != "duplicate" for r in results)
+            # Embedding cost attribution from what the provider actually
+            # saw — NOT from statuses: duplicates cost zero, and so do
+            # REACTIVATIONS (re-remember of an invalidated point reuses the
+            # stored vector yet reports "stored"). Chars are the
+            # provider-agnostic token proxy.
+            embedded = sum(r.embed_attempted for r in results)
             if embedded:
                 counter(
                     "mnemostack.tenant.embedded_chunks",
@@ -1637,7 +1644,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                     sum(
                         len(flat.text)
                         for flat, r in zip(flat_items, results, strict=True)
-                        if r.status != "duplicate"
+                        if r.embed_attempted
                     ),
                     labels={"tenant": tenant},
                 )

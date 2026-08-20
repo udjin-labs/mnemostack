@@ -510,6 +510,11 @@ class RemoteMemoryResult:
 
     id: str
     status: Literal["stored", "duplicate", "failed"]
+    #: Whether this item was sent to the embedding provider. False for
+    #: duplicates AND for reactivations (a re-remember of an invalidated
+    #: point reuses the stored vector — status "stored", zero embed cost),
+    #: so metering can attribute actual provider spend, not statuses.
+    embed_attempted: bool = False
 
 
 class RemoteRequestTooLarge(ValueError):
@@ -1130,8 +1135,14 @@ def _ingest_remote_items_locked(
             status = "duplicate"
         else:
             status = "failed"
+        # seen_now = exactly the ids handed to the Ingestor (the embedding
+        # provider was called for them, stored or failed); reactivations,
+        # store-duplicates, and in-request repeats never were.
+        attempted = pid in seen_now and pid not in first_seen
         first_seen.add(pid)
-        results.append(RemoteMemoryResult(id=pid, status=status))
+        results.append(
+            RemoteMemoryResult(id=pid, status=status, embed_attempted=attempted)
+        )
     counter("mnemostack.ingest.remote_items", len(items))
     counter("mnemostack.ingest.remote_stored", sum(r.status == "stored" for r in results))
     return results

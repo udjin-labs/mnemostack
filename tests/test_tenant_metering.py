@@ -77,6 +77,74 @@ def test_tenant_embedding_cost_attribution(monkeypatch, tmp_path):
     ) == chars
 
 
+def test_reactivation_is_not_billed_as_embedding(monkeypatch, tmp_path):
+    """R1 (agent P1 + codex): re-remember of an invalidated point reuses
+    the stored vector — status 'stored' but ZERO provider calls; the cost
+    meters must not move (attribution follows embed_attempted, not status)."""
+    app, _store, emb, keys = _ingest_app(monkeypatch, tmp_path)
+    client = TestClient(app)
+    rec = _rec()
+    hdr = {"X-API-Key": keys["write"]}
+    text = "reactivated fact"
+    r = client.post(
+        "/memories", json={"items": [{"text": text, "source": "s"}]}, headers=hdr
+    )
+    pid = r.json()["results"][0]["id"]
+    chunks = rec.counter_value(
+        "mnemostack.tenant.embedded_chunks", labels={"tenant": "alpha"}
+    )
+    chars = rec.counter_value(
+        "mnemostack.tenant.embedded_chars", labels={"tenant": "alpha"}
+    )
+    embeds_before = len(emb.embedded)
+    client.post("/invalidate", json={"ids": [pid]}, headers=hdr)
+    r = client.post(
+        "/memories", json={"items": [{"text": text, "source": "s"}]}, headers=hdr
+    )
+    assert r.json()["results"][0]["status"] == "stored"  # reactivated
+    assert len(emb.embedded) == embeds_before  # zero provider calls...
+    assert rec.counter_value(
+        "mnemostack.tenant.embedded_chunks", labels={"tenant": "alpha"}
+    ) == chunks  # ...and zero billed cost
+    assert rec.counter_value(
+        "mnemostack.tenant.embedded_chars", labels={"tenant": "alpha"}
+    ) == chars
+
+
+def test_rate_limited_requests_still_count_as_requests(monkeypatch, tmp_path):
+    """R1 (codex): `requests` is documented as EVERY authenticated request
+    — the counter increments before the limiter, so the 429 ratio is
+    rate_limited / requests."""
+    from mnemostack.quotas import FileQuotaStore
+
+    app, _store, _emb, keys = _ingest_app(
+        monkeypatch, tmp_path, quotas={"alpha": 1000}
+    )
+    # Tighten the rate AFTER boot but before first resolve (config cache
+    # is lazy): 1 request per 2s, burst 1 → the second request 429s.
+    FileQuotaStore(tmp_path / "quotas.json").set("alpha", max_rps=0.5)
+    client = TestClient(app)
+    rec = _rec()
+    hdr = {"X-API-Key": keys["read"]}
+    before = sum(
+        v
+        for k, v in rec.snapshot_counters().items()
+        if k[0] == "mnemostack.tenant.requests"
+    )
+    ok = client.post("/recall", json={"query": "q"}, headers=hdr)
+    limited = client.post("/recall", json={"query": "q"}, headers=hdr)
+    assert limited.status_code == 429, (ok.status_code, limited.status_code)
+    after = sum(
+        v
+        for k, v in rec.snapshot_counters().items()
+        if k[0] == "mnemostack.tenant.requests"
+    )
+    assert after - before == 2  # the 429'd request is still a request
+    assert rec.counter_value(
+        "mnemostack.tenant.rate_limited", labels={"tenant": "alpha"}
+    ) == 1
+
+
 def test_tenant_quota_rejection_is_counted(monkeypatch, tmp_path):
     app, _store, _emb, keys = _ingest_app(
         monkeypatch, tmp_path, quotas={"alpha": 1}
