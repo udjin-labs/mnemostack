@@ -111,7 +111,7 @@ Vector search answers "what sounds similar?" Real retrieval over a growing corpu
 ## Three ways to use Mnemostack
 
 1. **MCP server — for agent users.** Start `mnemostack mcp-serve`, connect your agent, and use memory tools from the chat/runtime you already use.
-2. **HTTP API — for app developers.** Run `mnemostack serve` and call `/recall`, `/answer`, `/feedback`, `/health`, `/metrics`, or `/docs` from any language.
+2. **HTTP API — for app developers.** Run `mnemostack serve` and call `/recall`, `/answer`, `/feedback`, the memory write/lifecycle endpoints (`/memories`, `/invalidate`, `/triples`), `/health`, `/metrics`, or `/docs` from any language.
 3. **Python SDK — for library users.** Compose retrievers, stores, rerankers, graph tools, and the streaming ingest API inside your own Python application.
 
 ## Architecture
@@ -279,11 +279,11 @@ Not the best fit if you only need a single call to `text-embedding-3-small` + co
 - 🔁 **Reranking** — Gemini Flash (or any LLM) reorders top-K by relevance, or plug a cross-encoder / hosted rerank service through the score-based `ScoringReranker`. See [docs/recipes.md](docs/recipes.md) for a runnable `bge-reranker-v2-m3` example.
 - 🔤 **Pluggable BM25 analyzer** — the default is lowercase + Unicode word split (great for exact tokens); pass `BM25Retriever(tokenizer=...)` for stemming / lemmatization / language routing. Core stays dependency-free; [docs/recipes.md](docs/recipes.md) has per-language recipes.
 - ⚡ **Async API** — every blocking surface has a signature-stable async mirror: `Recaller.recall_async`, `recall_flow_async`, `Ingestor.ingest_async` / `ingest_one_async`, `AnswerGenerator.generate_async`, `synthesize_async`, plus `AsyncVectorStore` over the native async Qdrant client. Retrievers dispatch in parallel; five concurrent HTTP recalls finish in roughly one single-recall wall-clock.
-- 🕰️ **Stale-fact invalidation** — mark superseded memories stale without deleting or re-embedding them: `store.invalidate(ids, valid_until=...)` sets bi-temporal payload keys (`invalidated_at` system-time, `valid_until`/`valid_from` world-time) via a cheap merge write. Recall hides invalidated facts by default; `include_invalidated=True` shows them and `as_of="<iso>"` reconstructs what was valid at a past instant. The vector-side twin of the graph's `valid_until` model. CLI `mnemostack invalidate <id>...` and MCP `mnemostack_invalidate`; HTTP stays read-only.
+- 🕰️ **Stale-fact invalidation** — mark superseded memories stale without deleting or re-embedding them: `store.invalidate(ids, valid_until=...)` sets bi-temporal payload keys (`invalidated_at` system-time, `valid_until`/`valid_from` world-time) via a cheap merge write. Recall hides invalidated facts by default; `include_invalidated=True` shows them and `as_of="<iso>"` reconstructs what was valid at a past instant. The vector-side twin of the graph's `valid_until` model. CLI `mnemostack invalidate <id>...`, MCP `mnemostack_invalidate`, and — since 2.2 — HTTP `POST /invalidate` (with `DELETE /memories` for irreversible erasure), selecting either an id list or a whole `source`.
 - 🌍 **Unicode-aware entity resolution** — Memgraph retriever probes by `telegram_id`, handle, and precomputed `name_lower` so non-ASCII names match correctly (Memgraph's `toLower()` lower-cases ASCII only).
 - 📥 **Streaming `Ingestor` API** — batched, idempotent, LRU-cached ingest from any Python code. Lazy iterator means large corpora ingest with bounded memory. Same `(source, offset, text)` → same deterministic UUID-shaped content id, so re-runs are no-ops.
 - 📝 **Markdown indexer** — `mnemostack index-markdown <dir>` indexes a folder of markdown with structure: YAML frontmatter → payload filters, header-aware chunking with heading paths, and `[[wikilinks]]` / `[text](note.md)` → `File -[LINKS_TO]-> File` graph edges (with a Memgraph URI). Generic for any markdown folder; Obsidian vaults work as a side effect. Depends only on the already-present `pyyaml`.
-- 🌐 **HTTP API** (optional) — `pip install 'mnemostack[server]'` gives you `/recall`, `/answer`, `/health`, `/docs`, plus `/metrics` in Prometheus text format. See the HTTP server section below.
+- 🌐 **HTTP API** (optional) — `pip install 'mnemostack[server]'` gives you `/recall`, `/answer`, the write/lifecycle surface (`POST`/`GET`/`DELETE /memories`, `/invalidate`, `/triples`), `/health`, `/docs`, plus `/metrics` in Prometheus text format. See the HTTP server section below.
 - 🔌 **Pluggable embeddings** — Gemini, Ollama, or HuggingFace (local GPU), via provider registry
 - 🤖 **Pluggable LLM** — Gemini Flash / Ollama for answer generation and reranking
 - 📚 **Temporal knowledge graph** — facts have `valid_from`/`valid_until`, query point-in-time state; graph resurrection stage recovers evicted-but-relevant memories.
@@ -733,6 +733,11 @@ Endpoints:
 | `POST` | `/recall`  | Hybrid recall with optional 8-stage pipeline |
 | `POST` | `/answer`  | Recall + LLM answer synthesis with citations |
 | `POST` | `/feedback` | Explicit click/usefulness feedback for stateful learning |
+| `POST` | `/memories` | Create memories (server-side embedding, store-backed dedup) — `write` |
+| `GET`  | `/memories` | List what the tenant holds from one `source` (ids + integrity metadata, no text) — `read` |
+| `DELETE` | `/memories` | Irreversible erasure by id list or `source` — `write` |
+| `POST` | `/invalidate` | Non-destructive retraction by id list or `source` — `write` |
+| `POST` | `/triples` | Write knowledge-graph facts — `write` |
 | `GET`  | `/metrics` | Prometheus scrape endpoint (counters + summary histograms) |
 | `GET`  | `/docs`    | Interactive OpenAPI UI |
 
@@ -785,7 +790,7 @@ curl -s http://localhost:8000/recall \
     -d '{"query":"..."}'                                  # or: Authorization: Bearer msk_...
 ```
 
-The **tenant is resolved from the key** (a client can't assert another's), enforced across the vector store, the tenant-scoped knowledge graph, and per-tenant learning state — so it's a real authorization boundary, unlike the caller-supplied `filters` above. `/recall` and `/answer` require `read`, `/feedback` requires `write`; a missing/invalid key is `401`, insufficient scope `403`. Cap each tenant with `mnemostack quota set --tenant <id> --max-points N --max-rps R` (storage enforced at ingest, rate on the HTTP surface → `429`). The operator endpoints (`/health`, `/healthz`, `/readyz`, `/status`, `/metrics`) stay unauthenticated — protect them at your proxy if sensitive. Auth is **off by default**; you can still front the server with your own reverse proxy (nginx, Caddy, Traefik) either way. See [`docs/deployment.md`](docs/deployment.md) and [`docs/api-stability.md`](docs/api-stability.md).
+The **tenant is resolved from the key** (a client can't assert another's), enforced across the vector store, the tenant-scoped knowledge graph, and per-tenant learning state — so it's a real authorization boundary, unlike the caller-supplied `filters` above. `/recall`, `/answer` and `GET /memories` require `read`; `/feedback`, `POST`/`DELETE /memories`, `/invalidate` and `/triples` require `write`; a missing/invalid key is `401`, insufficient scope `403`. Cap each tenant with `mnemostack quota set --tenant <id> --max-points N --max-rps R` (storage enforced at ingest, rate on the HTTP surface → `429`). The operator endpoints (`/health`, `/healthz`, `/readyz`, `/status`, `/metrics`) stay unauthenticated — protect them at your proxy if sensitive. Auth is **off by default**; you can still front the server with your own reverse proxy (nginx, Caddy, Traefik) either way. See [`docs/deployment.md`](docs/deployment.md) and [`docs/api-stability.md`](docs/api-stability.md).
 
 ### Knowledge graph (optional)
 
