@@ -46,6 +46,10 @@ def test_validate_remote_ids_contract():
     assert coerce_point_ids(["9" * 5000]) == ["9" * 5000]  # no int() crash
     # Exact len==20 boundary still coerces (u64 max is 20 digits).
     assert coerce_point_ids([str(2**64 - 1)]) == [2**64 - 1]
+    # Leading zeros don't add range: a 21-char zero-padded spelling of a
+    # valid id is that id, not a length violation ("007" is point 7).
+    assert validate_remote_ids(["0" * 20 + "1"]) is None
+    assert coerce_point_ids(["0" * 20 + "1"]) == [1]
     # UUIDs canonicalize to lowercase — the store compares ids as
     # case-sensitive strings, so an uppercase spelling would no-op.
     assert coerce_point_ids(["D9428888-122B-11E1-B85C-61CD3CBB3210"]) == [

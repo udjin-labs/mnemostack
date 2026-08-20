@@ -697,9 +697,12 @@ def coerce_point_ids(ids: Sequence[str | int]) -> list[str | int]:
     out: list[str | int] = []
     for x in ids:
         if isinstance(x, str):
-            if _is_numeric_id_string(x) and len(x) <= 20:
-                out.append(int(x))
-                continue
+            if _is_numeric_id_string(x):
+                # Significant digits only — leading zeros don't add range.
+                digits = x.lstrip("0") or "0"
+                if len(digits) <= 20:
+                    out.append(int(digits))
+                    continue
             if _REMOTE_UUID_RE.fullmatch(x):
                 out.append(x.lower())
                 continue
@@ -728,8 +731,11 @@ def validate_remote_ids(ids: Sequence[Any]) -> str | None:
             # Length gate BEFORE int(): CPython's int-from-str digit limit
             # (~4300, sys.get_int_max_str_digits) makes int() itself RAISE
             # on a long enough digit string — a 500, not the promised 400.
-            # u64 needs at most 20 digits.
-            if len(pid) > 20 or int(pid) > _QDRANT_ID_MAX:
+            # u64 needs at most 20 SIGNIFICANT digits — leading zeros are
+            # stripped first ("007" is documented as point 7, so a
+            # zero-padded 21-char spelling of a valid id must not bounce).
+            digits = pid.lstrip("0") or "0"
+            if len(digits) > 20 or int(digits) > _QDRANT_ID_MAX:
                 return f"ids[{i}] must fit an unsigned 64-bit point id"
         elif not _REMOTE_UUID_RE.fullmatch(pid):
             return f"ids[{i}] must be a UUID or an unsigned 64-bit integer"
