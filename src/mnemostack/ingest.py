@@ -752,22 +752,188 @@ def validate_remote_ids(ids: Sequence[Any]) -> str | None:
     return None
 
 
-def validate_remote_invalidate(
-    ids: Sequence[Any],
+#: One source-scoped lifecycle call processes at most this many points.
+#: The operation is idempotent and reports whether it finished, so a
+#: caller repeats until complete — an unbounded delete-by-filter would
+#: be a single request that can run for minutes and cannot be metered.
+REMOTE_SOURCE_BATCH = 1000
+#: One listing page. Ids and hashes only, so pages can be generous.
+REMOTE_LIST_PAGE = 500
+
+
+def validate_remote_source(source: Any) -> str | None:
+    """First violated constraint of a source selector, or None."""
+    if not isinstance(source, str) or not source.strip():
+        return "source must be a non-blank string"
+    if len(source) > REMOTE_MAX_SOURCE_CHARS:
+        return f"source exceeds {REMOTE_MAX_SOURCE_CHARS} characters"
+    if not _utf8_encodable(source):
+        return "source must be valid UTF-8"
+    return None
+
+
+def _scroll_keywords(scroll: Any) -> set[str] | None:
+    """Keyword names a store's ``scroll`` accepts, or None for "anything".
+
+    None covers both a ``**kwargs`` signature and a callable whose
+    signature cannot be read — in either case passing our keywords is the
+    right bet, and a genuine TypeError from the callee's own body still
+    surfaces instead of being mistaken for an unsupported keyword.
+    """
+    import inspect
+
+    try:
+        sig = inspect.signature(scroll)
+    except (TypeError, ValueError):
+        return None
+    if any(p.kind is p.VAR_KEYWORD for p in sig.parameters.values()):
+        return None
+    return set(sig.parameters)
+
+
+def validate_remote_cursor(after: Any) -> str | None:
+    """First violated constraint of a pagination cursor, or None.
+
+    A cursor IS a point id — it is one the listing itself returned — so it
+    lives in exactly the id domain the lifecycle selectors validate, and
+    reuses their rule rather than growing a second one that could drift
+    (the digit-limit guard in particular: a long enough digit string makes
+    ``int()`` itself raise, which would be a 500 on a malformed cursor).
+    """
+    if after is None:
+        return None
+    problem = validate_remote_ids([after])
+    if problem is None:
+        return None
+    if problem == "ids must be a non-empty list":
+        return "after must be a point id"
+    return problem.replace("ids[0]", "after")
+
+
+def find_source_points(
+    store: Any,
+    source: str,
+    *,
+    tenant: str | None = None,
+    index_root: str | None = None,
+    limit: int | None = REMOTE_SOURCE_BATCH,
+    skip_invalidated: bool = False,
+    start_after: Any = None,
+) -> tuple[list[Any], list[dict[str, Any]], bool]:
+    """Ids and payloads of one source's points, plus whether more remain.
+
+    The store filter is a starting point, never the verdict: Qdrant's
+    MatchValue also matches an ARRAY payload containing the value, so a
+    point whose ``source`` is ``["a.md", "b.md"]`` comes back for
+    ``source="a.md"``. Every candidate is re-validated in Python before
+    it can be invalidated or deleted (the same rule the prune path has
+    followed since the selective-prune fix).
+
+    ``skip_invalidated`` is what makes a batched RETRACTION terminate:
+    an invalidated point keeps its source, so without excluding it the
+    next call re-selects the same first batch forever and the tail of a
+    large document is never reached. Deletion needs no such flag — a
+    deleted point cannot come back.
+
+    ``start_after`` resumes the store's iteration order after a point id,
+    so a paginated reader does not re-walk what it already returned.
+
+    STORE CONTRACT for pagination: an id cursor — native or emulated —
+    only means something if the store yields a STABLE order across calls.
+    That requirement belongs to cursor pagination itself, not to the
+    emulation: the shipped Qdrant store inherits it from Qdrant's own
+    id-ordered offset. A custom store whose ``scroll`` order can change
+    between calls (hash-backed iteration, no ORDER BY, reordering under
+    concurrent writes) cannot be paginated correctly by ANY id cursor —
+    pages will overlap and skip, and a short page reads as the end of the
+    source. Such a store must not back ``GET /memories``; the
+    source-scoped lifecycle calls are unaffected, since each of those
+    re-selects from the start and never passes a cursor.
+    """
+    scroll = getattr(store, "scroll", None)
+    if not callable(scroll):
+        return [], [], False
+    kwargs: dict[str, Any] = {}
+    if tenant is not None:
+        kwargs["tenant"] = tenant
+    if skip_invalidated:
+        kwargs["hide_invalidated"] = True
+    if start_after is not None:
+        kwargs["start_after"] = start_after
+    if index_root is not None:
+        # Pushed down, not merely re-checked below: the limit counts KEPT
+        # points, so a guard applied only in Python lets a bounded batch
+        # scroll every point of the other roots to fill itself — the
+        # collection-scale request this whole surface exists to avoid.
+        # A store without the parameter still gets the Python check.
+        kwargs["index_root_guard"] = index_root
+    # A custom store may implement an older `scroll` signature. Which
+    # keywords it takes decides what we can push down — but NOT what the
+    # operation means: silently dropping `hide_invalidated` would resurrect
+    # the non-terminating retraction (an invalidated point keeps its
+    # source), and silently dropping `start_after` would make every
+    # paginated call return the SAME page forever. So each keyword the
+    # store lacks is either emulated here with identical semantics or, for
+    # `tenant`, refused outright — a scope keyword must never be dropped.
+    supported = _scroll_keywords(scroll)
+    emulate_cursor: Any = None
+    emulate_invalidated = False
+    if supported is not None:
+        if "index_root_guard" not in supported:
+            # Pure optimization — the Python check below is the semantics.
+            kwargs.pop("index_root_guard", None)
+        if "hide_invalidated" not in supported and kwargs.pop("hide_invalidated", None):
+            emulate_invalidated = True
+        if "start_after" not in supported and kwargs.get("start_after") is not None:
+            emulate_cursor = kwargs.pop("start_after")
+    ids: list[Any] = []
+    payloads: list[dict[str, Any]] = []
+    more = False
+    skipping = emulate_cursor is not None
+    for hit in scroll(filters={"source": source}, **kwargs):
+        if skipping:
+            # Emulated cursor: the store yields in its own stable order, so
+            # resume right after the id the previous page ended on. Costs a
+            # re-walk (that is exactly what start_after exists to avoid),
+            # but a re-walk is correct and a dropped cursor is not.
+            if str(hit.id) == str(emulate_cursor):
+                skipping = False
+            continue
+        payload = dict(getattr(hit, "payload", None) or {})
+        if payload.get("source") != source:
+            continue  # array/partial match — not this source
+        if emulate_invalidated and payload.get("invalidated_at"):
+            continue  # the store could not push it down; same exclusion
+        if index_root is not None and payload.get("index_root") not in (
+            None,
+            index_root,
+        ):
+            continue  # another root's chunk
+        if limit is not None and len(ids) >= limit:
+            more = True
+            break
+        ids.append(hit.id)
+        payloads.append(payload)
+    if skipping:
+        # The cursor's point is gone and the store cannot resume by id, so
+        # we cannot tell "the tail is empty" from "we never reached it".
+        # Returning an empty page would report the listing COMPLETE while
+        # points remain — the exact lie this surface must not tell.
+        raise ValueError(
+            "cursor point is no longer present and this store cannot resume "
+            "by id — restart the listing from the beginning"
+        )
+    return ids, payloads, more
+
+
+def validate_invalidate_options(
     invalidated_at: str | None,
     valid_until: str | None,
     index_root: str | None = None,
 ) -> str | None:
-    """First violated constraint of one remote invalidate call, or None.
-
-    Shared by POST /invalidate and the MCP mnemostack_invalidate tool so
-    both surfaces enforce the identical contract. The two timestamps live
-    on different axes (system-time vs world-time), so no ordering between
-    them is required.
-    """
-    problem = validate_remote_ids(ids)
-    if problem:
-        return problem
+    """The non-id constraints of a lifecycle call (timestamps, owner
+    guard) — shared by the id path and the source path, which has no ids
+    to validate and must not have to invent one."""
     for field_name, value in (
         ("invalidated_at", invalidated_at),
         ("valid_until", valid_until),
@@ -786,12 +952,29 @@ def validate_remote_invalidate(
             # silently skipped while the response reads like a no-op.
             return "index_root must be a non-blank string"
         if len(index_root) > REMOTE_MAX_INDEX_ROOT_CHARS:
-            # Same bound as the HTTP models — the MCP surface relies
-            # solely on this validator for the cap.
             return f"index_root exceeds {REMOTE_MAX_INDEX_ROOT_CHARS} characters"
         if not _utf8_encodable(index_root):
             return "index_root must be valid UTF-8"
     return None
+
+
+def validate_remote_invalidate(
+    ids: Sequence[Any],
+    invalidated_at: str | None,
+    valid_until: str | None,
+    index_root: str | None = None,
+) -> str | None:
+    """First violated constraint of one remote invalidate call, or None.
+
+    Shared by POST /invalidate and the MCP mnemostack_invalidate tool so
+    both surfaces enforce the identical contract. The two timestamps live
+    on different axes (system-time vs world-time), so no ordering between
+    them is required.
+    """
+    problem = validate_remote_ids(ids)
+    if problem:
+        return problem
+    return validate_invalidate_options(invalidated_at, valid_until, index_root)
 
 
 def ensure_remote_schema_keys(text_key: str, timestamp_key: str) -> None:

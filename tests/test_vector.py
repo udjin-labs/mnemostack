@@ -174,3 +174,16 @@ def test_ensure_collection_recreate_skips_validation(store):
 
     with pytest.raises(DimensionMismatchError):
         store.ensure_collection()
+
+
+def test_scroll_resumes_when_the_first_batch_is_only_the_cursor(store):
+    """R6 (codex P2): Qdrant's offset is INCLUSIVE, so a small batch can
+    contain nothing but the cursor we then drop. Treating that empty
+    filtered batch as exhaustion silently omitted every successor."""
+    store.ensure_collection()
+    for pid in range(1, 6):
+        store.upsert(pid, [0.1, 0.2, 0.3, 0.4], {"source": "s.md"})
+    ids = [hit.id for hit in store.scroll(batch_size=1, start_after=1)]
+    assert ids == [2, 3, 4, 5]
+    # And a cursor that IS the last point still terminates.
+    assert [hit.id for hit in store.scroll(batch_size=1, start_after=5)] == []

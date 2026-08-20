@@ -51,6 +51,7 @@ from mnemostack.embeddings.roles import EmbeddingSpaceError
 from mnemostack.feedback import apply_feedback, record_recall_events
 from mnemostack.ingest import (
     REMOTE_CHUNK_SIZE,
+    REMOTE_LIST_PAGE,
     REMOTE_MAX_DOC_CHARS,
     REMOTE_MAX_IDS,
     REMOTE_MAX_INDEX_ROOT_CHARS,
@@ -60,14 +61,19 @@ from mnemostack.ingest import (
     REMOTE_MAX_TAGS,
     REMOTE_MAX_TEXT_CHARS,
     REMOTE_MAX_TIMESTAMP_CHARS,
+    REMOTE_SOURCE_BATCH,
     IngestItem,
     RemoteRequestTooLarge,
     coerce_point_ids,
     ensure_remote_schema_keys,
     expand_remote_items,
+    find_source_points,
     ingest_remote_items,
+    validate_invalidate_options,
+    validate_remote_cursor,
     validate_remote_invalidate,
     validate_remote_item,
+    validate_remote_source,
     validate_remote_triple,
 )
 from mnemostack.llm import get_llm
@@ -77,6 +83,7 @@ from mnemostack.observability.recorder import (
     get_recorder,
     set_recorder,
 )
+from mnemostack.provenance import SOURCE_HASH_KEY
 from mnemostack.quotas import QuotaExceededError
 from mnemostack.recall import (
     DEGRADED_COUNTER,
@@ -307,7 +314,18 @@ class TriplesResponse(BaseModel):
 class InvalidateRequest(BaseModel):
     # StrictInt, not int: the lax union coerces JSON true/false to 1/0,
     # which would silently target numeric point ids 1/0 instead of a 422.
-    ids: list[str | StrictInt] = Field(..., min_length=1, max_length=REMOTE_MAX_IDS)
+    ids: list[str | StrictInt] | None = Field(
+        None, min_length=1, max_length=REMOTE_MAX_IDS
+    )
+    source: str | None = Field(
+        None,
+        max_length=REMOTE_MAX_SOURCE_CHARS,
+        description=(
+            "Retract every memory from this source instead of listing ids "
+            "— the lifecycle operation a client actually has (a file was "
+            "rewritten or a session reset). Exactly one of ids/source."
+        ),
+    )
     invalidated_at: str | None = Field(
         None,
         max_length=64,
@@ -333,7 +351,19 @@ class InvalidateRequest(BaseModel):
 
 
 class InvalidateResponse(BaseModel):
-    requested: int
+    requested: int = Field(
+        description=(
+            "Ids submitted, or points matched in this batch for a "
+            "source-scoped call."
+        )
+    )
+    complete: bool = Field(
+        True,
+        description=(
+            "False when a source-scoped call hit its per-request batch cap "
+            "— repeat the identical call until it reports true."
+        ),
+    )
     invalidated: int = Field(
         description=(
             "Points actually updated. Ids that do not exist, belong to "
@@ -346,7 +376,17 @@ class InvalidateResponse(BaseModel):
 
 class DeleteMemoriesRequest(BaseModel):
     # StrictInt: see InvalidateRequest.
-    ids: list[str | StrictInt] = Field(..., min_length=1, max_length=REMOTE_MAX_IDS)
+    ids: list[str | StrictInt] | None = Field(
+        None, min_length=1, max_length=REMOTE_MAX_IDS
+    )
+    source: str | None = Field(
+        None,
+        max_length=REMOTE_MAX_SOURCE_CHARS,
+        description=(
+            "Erase every memory from this source instead of listing ids. "
+            "Exactly one of ids/source."
+        ),
+    )
     index_root: str | None = Field(
         None,
         max_length=REMOTE_MAX_INDEX_ROOT_CHARS,
@@ -359,12 +399,75 @@ class DeleteMemoriesRequest(BaseModel):
 
 
 class DeleteMemoriesResponse(BaseModel):
-    requested: int
+    requested: int = Field(
+        description=(
+            "Ids submitted, or points matched in this batch for a "
+            "source-scoped call."
+        )
+    )
+    complete: bool = Field(
+        True,
+        description=(
+            "False when a source-scoped call hit its per-request batch cap "
+            "— repeat the identical call until it reports true."
+        ),
+    )
     deleted: int = Field(
         description=(
             "Points actually deleted. Ids that do not exist or belong to "
             "another tenant are skipped — indistinguishably, so the count "
             "is not an oracle for foreign ids."
+        )
+    )
+
+
+class MemoryListItem(BaseModel):
+    id: str
+    content_hash: str | None = Field(
+        None,
+        description=(
+            "Snapshot hash of the SOURCE document at ingest, when the "
+            "point carries one (points ingested before provenance shipped "
+            "return null). Lets a client detect divergence without the "
+            "service returning any memory text."
+        ),
+    )
+    timestamp: str | int | float | None = Field(
+        None,
+        description=(
+            "Event time of the memory, when it carries one, in the "
+            "deployment's own timestamp domain: an ISO-8601 string under "
+            "the default `recall.timestamp_format: iso`, a number under "
+            "`epoch` / `epoch_ms`. Returned as stored so a client can "
+            "compare it against its own record without a lossy conversion."
+        ),
+    )
+    indexed_at: str | None = Field(None, description="When the point was written.")
+
+
+def _list_text(value: Any) -> str | None:
+    """A listing metadata field, or None when the payload holds something
+    unexpected there. These fields are integrity hints; a single point with
+    a foreign value under a reserved key must not fail the WHOLE page with
+    a response-validation 500."""
+    return value if isinstance(value, str) else None
+
+
+def _list_timestamp(value: Any) -> str | int | float | None:
+    """The point's event time in the deployment's own domain — ISO string
+    under `timestamp_format: iso`, a number under `epoch`/`epoch_ms`.
+    Returned as stored (a bool is not a timestamp; int subclass or not)."""
+    if isinstance(value, bool):
+        return None
+    return value if isinstance(value, (str, int, float)) else None
+
+
+class MemoryListResponse(BaseModel):
+    items: list[MemoryListItem]
+    complete: bool = Field(
+        description=(
+            "False when more points match than fit this page — repeat with "
+            "`after` set to the last id returned."
         )
     )
 
@@ -1722,10 +1825,113 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             )
         return TriplesResponse(results=results, added=added, failed=failed)
 
+    def _selector_problem(ids: Any, source: Any) -> str | None:
+        """Exactly one selector: a request naming both is ambiguous about
+        which one bounds the operation, and one naming neither would be an
+        unscoped lifecycle call."""
+        if (ids is None) == (source is None):
+            return "exactly one of ids/source is required"
+        if source is not None:
+            return validate_remote_source(source)
+        return None
+
+    @app.get("/memories", response_model=MemoryListResponse)
+    def list_memories(
+        source: str,
+        after: str | None = None,
+        limit: int = REMOTE_LIST_PAGE,
+        index_root: str | None = None,
+        principal=Depends(_require("read")),  # noqa: B008 — FastAPI DI pattern
+    ):
+        """List what this tenant holds from one source, for reconciliation.
+
+        Ids and integrity metadata only — NEVER memory text: a client
+        needs to detect that its own state and the service's have
+        diverged (a file it re-indexed, points it thinks it deleted), and
+        that check must not become a second read channel for memory
+        content with its own scope semantics. `content_hash` is the
+        source snapshot written at ingest; points stored before that
+        feature return null.
+
+        Pagination follows the store's own iteration order and `after`
+        is an opaque cursor: pass back the last id you received. A page
+        costs the page, not a full scan of the source. Under `--auth`
+        only the key's tenant is visible.
+
+        `index_root` is the same owner guard the lifecycle endpoints
+        take, and for the same reason: one source name can exist under
+        several indexing roots, and a client reconciling ONE root must
+        not be shown (or, on the sibling endpoints, act on) another's
+        points. Identical semantics to those endpoints, including the
+        edge: a point carrying NO `index_root` tag is still listed under
+        any guard — the guard excludes a DIFFERENT root, it does not
+        require one ("points carrying no index_root tag are not protected
+        by it").
+        """
+        problem = (
+            validate_remote_source(source)
+            or validate_remote_cursor(after)
+            or validate_invalidate_options(None, None, index_root)
+        )
+        if problem:
+            raise HTTPException(status_code=400, detail=problem)
+        if limit < 1 or limit > REMOTE_LIST_PAGE:
+            raise HTTPException(
+                status_code=400, detail=f"limit must be 1..{REMOTE_LIST_PAGE}"
+            )
+        tenant = _tenant_of(principal)
+        # The cursor comes back through JSON as the string this endpoint
+        # printed, but a collection may use INTEGER point ids, and the store
+        # distinguishes 7 from "7" — an uncoerced cursor would resume from
+        # an id that does not exist, silently returning an empty page and
+        # reporting the listing complete while points remain. Same coercion
+        # the lifecycle selectors apply to caller-supplied ids.
+        cursor = coerce_point_ids([after])[0] if after is not None else None
+        try:
+            if not store.collection_exists():
+                return MemoryListResponse(items=[], complete=True)
+            ids, payloads, more = find_source_points(
+                store,
+                source,
+                tenant=tenant,
+                index_root=index_root,
+                limit=limit,
+                start_after=cursor,
+            )
+        except Exception as exc:
+            log.exception("list memories failed")
+            raise HTTPException(status_code=500, detail="listing failed") from exc
+        page = [
+            MemoryListItem(
+                id=str(pid),
+                content_hash=_list_text(payload.get(SOURCE_HASH_KEY)),
+                # `is None`, not `or`: under `timestamp_format: epoch` the
+                # Unix epoch itself is a VALID timestamp stored as numeric
+                # 0, and a falsy test would silently substitute the legacy
+                # mirror for it.
+                timestamp=_list_timestamp(
+                    payload[cfg.timestamp_key]
+                    if payload.get(cfg.timestamp_key) is not None
+                    else payload.get("timestamp")
+                ),
+                indexed_at=_list_text(payload.get("indexed_at")),
+            )
+            for pid, payload in zip(ids, payloads, strict=True)
+        ]
+        counter("mnemostack.server.list_memories", len(page))
+        return MemoryListResponse(items=page, complete=not more)
+
     @app.post("/invalidate", response_model=InvalidateResponse)
     def invalidate_endpoint(req: InvalidateRequest, principal=Depends(_require("write"))):  # noqa: B008 — FastAPI DI pattern
-        """Mark memories stale by id, non-destructively (HTTP parity with
-        the MCP `mnemostack_invalidate` tool).
+        """Mark memories stale, non-destructively.
+
+        The `ids` path is HTTP parity with the MCP `mnemostack_invalidate`
+        tool (same shared validator, same anti-oracle skip semantics). The
+        `source` path has NO MCP twin: source-scoped retraction, the
+        reconciliation listing and `DELETE /memories` are HTTP-only for
+        now — an agent tool that can retract a whole document from a
+        conversation is a bigger blast radius than one that names ids, so
+        that surface is deliberately operator-side until asked for.
 
         Sets `invalidated_at` (and optionally `valid_until`) on each
         point's payload without deleting or re-embedding it; invalidated
@@ -1739,10 +1945,24 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         Scope note: vector and temporal recall honor the marker
         immediately; an in-process BM25 corpus built from Qdrant payloads
         (`text_search=qdrant_bm25`) reflects it only after a restart.
+
+        Source scope is FIRST-RETRACTION-WINS: a point this source already
+        had invalidated is not restamped by a later source-scoped call
+        (and is not counted in `requested`), because `invalidated_at`
+        records when the memory was actually retracted. Retract by id to
+        change an existing retraction's bounds.
         """
-        problem = validate_remote_invalidate(
-            req.ids, req.invalidated_at, req.valid_until, req.index_root
-        )
+        problem = _selector_problem(req.ids, req.source)
+        if problem is None:
+            problem = (
+                validate_remote_invalidate(
+                    req.ids, req.invalidated_at, req.valid_until, req.index_root
+                )
+                if req.ids is not None
+                else validate_invalidate_options(
+                    req.invalidated_at, req.valid_until, req.index_root
+                )
+            )
         if problem:
             raise HTTPException(status_code=400, detail=problem)
         tenant = _tenant_of(principal)
@@ -1750,13 +1970,44 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         # Dedup AFTER coercion ("7" and 7 are the same point): the store
         # counts per requested id, so duplicates would inflate `invalidated`
         # past the number of points actually touched.
-        ids = list(dict.fromkeys(coerce_point_ids(req.ids)))
+        complete = True
         try:
             if not store.collection_exists():
                 # Fresh deployment before the first write: the collection is
                 # created lazily by /memories. Nothing exists — the same
                 # "unknown ids are skipped" semantics, not a 500.
-                return InvalidateResponse(requested=len(req.ids), invalidated=0)
+                return InvalidateResponse(
+                    requested=len(req.ids or []), invalidated=0, complete=True
+                )
+            if req.source is not None:
+                ids, _payloads, more = find_source_points(
+                    store,
+                    req.source,
+                    tenant=tenant,
+                    index_root=req.index_root,
+                    limit=REMOTE_SOURCE_BATCH,
+                    # Without this the next call re-selects the same first
+                    # batch forever: an invalidated point keeps its source.
+                    # Consequence, documented rather than papered over:
+                    # source retraction is FIRST-RETRACTION-WINS. A point
+                    # already invalidated keeps the `invalidated_at` and
+                    # `valid_until` of the call that retracted it — a later
+                    # source-scoped call does not restamp it, because
+                    # `invalidated_at` records WHEN the memory was actually
+                    # retracted and rewriting it would falsify that. To
+                    # change an existing retraction's world-time bound, name
+                    # the point by id.
+                    skip_invalidated=True,
+                )
+                complete = not more
+                requested = len(ids)
+                if not ids:
+                    return InvalidateResponse(
+                        requested=0, invalidated=0, complete=complete
+                    )
+            else:
+                ids = list(dict.fromkeys(coerce_point_ids(req.ids or [])))
+                requested = len(req.ids or [])
             updated = store.invalidate(
                 ids,
                 invalidated_at=req.invalidated_at,
@@ -1768,7 +2019,9 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             log.exception("invalidate endpoint failed")
             raise HTTPException(status_code=500, detail="invalidate failed") from exc
         counter("mnemostack.server.invalidate", updated)
-        return InvalidateResponse(requested=len(req.ids), invalidated=updated)
+        return InvalidateResponse(
+            requested=requested, invalidated=updated, complete=complete
+        )
 
     @app.delete("/memories", response_model=DeleteMemoriesResponse)
     def delete_memories_endpoint(req: DeleteMemoriesRequest, principal=Depends(_require("write"))):  # noqa: B008 — FastAPI DI pattern
@@ -1794,18 +2047,41 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         via `/triples` are separate records and are not deleted by this
         endpoint.
         """
-        problem = validate_remote_invalidate(req.ids, None, None, req.index_root)
+        problem = _selector_problem(req.ids, req.source)
+        if problem is None:
+            problem = (
+                validate_remote_invalidate(req.ids, None, None, req.index_root)
+                if req.ids is not None
+                else validate_invalidate_options(None, None, req.index_root)
+            )
         if problem:
             raise HTTPException(status_code=400, detail=problem)
         tenant = _tenant_of(principal)
         tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
         # Dedup AFTER coercion — duplicates would inflate `deleted`.
-        ids = list(dict.fromkeys(coerce_point_ids(req.ids)))
+        ids = list(dict.fromkeys(coerce_point_ids(req.ids or [])))
+        requested = len(req.ids or [])
+        complete = True
+        source_scoped = req.source is not None
         try:
             if not store.collection_exists():
                 # See /invalidate: pre-bootstrap there is nothing to erase.
-                return DeleteMemoriesResponse(requested=len(req.ids), deleted=0)
-            if req.index_root is not None or tenant is None:
+                return DeleteMemoriesResponse(
+                    requested=requested, deleted=0, complete=True
+                )
+            if source_scoped:
+                # The finder already re-validated payload ownership and the
+                # index_root guard, so no second precheck is needed here.
+                ids, _payloads, more = find_source_points(
+                    store,
+                    req.source or "",
+                    tenant=tenant,
+                    index_root=req.index_root,
+                    limit=REMOTE_SOURCE_BATCH,
+                )
+                complete = not more
+                requested = len(ids)
+            elif req.index_root is not None or tenant is None:
                 # One retrieve serves two jobs. (1) The index_root owner
                 # guard, matching /invalidate: points owned by a DIFFERENT
                 # root are skipped; untagged points pass (documented). (2)
@@ -1828,6 +2104,8 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             log.exception("delete memories endpoint failed")
             raise HTTPException(status_code=500, detail="delete failed") from exc
         counter("mnemostack.server.deleted", deleted)
-        return DeleteMemoriesResponse(requested=len(req.ids), deleted=deleted)
+        return DeleteMemoriesResponse(
+            requested=requested, deleted=deleted, complete=complete
+        )
 
     return app

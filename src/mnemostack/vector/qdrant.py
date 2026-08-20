@@ -232,6 +232,12 @@ class VectorStore:
             # read, so in a large shared collection a small-tenant search/count
             # would otherwise degrade to collection-wide filtered work.
             self.index_payload_field(TENANT_ID_KEY, PayloadSchemaType.KEYWORD)
+            # Index source for the same reason: source-scoped lifecycle
+            # (retract/erase everything from one document) and the
+            # reconciliation listing filter on it, and an unindexed filter
+            # is a collection scan per call — the "one request that runs
+            # for minutes" those endpoints exist to avoid.
+            self.index_payload_field("source", PayloadSchemaType.KEYWORD)
             return True
         self._validate_dimension()
         if sparse_cfg is not None:
@@ -571,6 +577,8 @@ class VectorStore:
         *,
         tenant: str | None = None,
         hide_invalidated: bool = False,
+        start_after: Any = None,
+        index_root_guard: str | None = None,
     ):
         """Iterate over points in the collection lazily.
 
@@ -584,14 +592,44 @@ class VectorStore:
         marker are excluded server-side (the same push-down ``search``
         offers — the current-facts view). Yields `Hit` objects (score=1.0
         since this isn't a similarity query).
+
+        ``index_root_guard`` pushes the LIFECYCLE owner guard down to the
+        backend: match that root, or carry no root at all. It is a
+        disjunction, so it cannot ride the plain equality ``filters`` dict —
+        and it must be pushed down rather than filtered in the caller,
+        because a guard applied only in Python means a bounded page can
+        still scroll every point of the OTHER roots to fill itself. Callers
+        re-validate the payload anyway (a value match also matches an array
+        payload containing the value).
         """
         must: list[Any] = list(self._build_filter(filters).must or []) if filters else []
         if tenant is not None:
             must.append(_tenant_condition(tenant))
         if hide_invalidated:
             must.append(_hide_invalidated_condition())
+        if index_root_guard is not None:
+            must.append(
+                Filter(
+                    should=[
+                        FieldCondition(
+                            key="index_root", match=MatchValue(value=index_root_guard)
+                        ),
+                        # IsEmpty alone is the whole "carries no root"
+                        # case: Qdrant matches it when the field is
+                        # missing, null, OR an empty array (verified
+                        # against a live server, not only the in-memory
+                        # client). An IsNull branch beside it would be
+                        # unreachable.
+                        IsEmptyCondition(is_empty=PayloadField(key="index_root")),
+                    ]
+                )
+            )
         qfilter = Filter(must=must) if must else None
-        next_offset: Any = None
+        # start_after resumes the store's own iteration order from a point
+        # id, so a paginated reader pays for its page instead of re-walking
+        # everything it has already seen.
+        next_offset: Any = start_after
+        first = True
         while True:
             points, next_offset = self.client.scroll(
                 collection_name=self.collection,
@@ -601,7 +639,22 @@ class VectorStore:
                 with_vectors=with_vectors,
                 scroll_filter=qfilter,
             )
+            dropped_cursor = False
+            if first and start_after is not None:
+                # Qdrant's offset is inclusive; the caller asked for what
+                # comes AFTER that id.
+                kept = [pt for pt in points if str(pt.id) != str(start_after)]
+                dropped_cursor = len(kept) != len(points)
+                points = kept
+                first = False
             if not points:
+                # An empty batch means exhaustion — UNLESS the only thing in
+                # it was the cursor we just dropped and the backend handed
+                # back a continuation. With a small batch_size that batch can
+                # be exactly the cursor, and stopping there would silently
+                # omit every successor.
+                if dropped_cursor and next_offset is not None:
+                    continue
                 break
             for pt in points:
                 pid = str(pt.id) if isinstance(pt.id, UUID) else pt.id

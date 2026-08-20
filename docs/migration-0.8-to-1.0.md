@@ -166,8 +166,10 @@ existing data needs migrating.
   same source *under a tenant* the new points get different ids and land **beside**
   the stamped legacy points — recall then sees duplicates. `mnemostack index-markdown
   --tenant <id>` is tenant-scoped (ids, payloads, and graph nodes); the generic
-  `mnemostack index` CLI has no `--tenant` (that path is library-only via
-  `Ingestor(tenant=...)`). Since `--prune` on the *unscoped* generic `index` is
+  `mnemostack index` CLI had no `--tenant` at 1.0 (that path was library-only via
+  `Ingestor(tenant=...)`); it gained one in a later release — ids, payload stamps,
+  `--prune` and `--refresh-payloads` are all tenant-scoped there now. Since
+  `--prune` on the *unscoped* generic `index` is
   `index_root`-scoped (not tenant-scoped), reconcile a tenant re-ingest with the library
   `prune_stale_chunks(store, fresh, tenant=<t>)` (tenant-scoped), or — simplest —
   ingest each tenant into a **fresh collection** and cut over. Stamping alone (no

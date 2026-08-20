@@ -2231,18 +2231,25 @@ def cmd_answer(args: argparse.Namespace) -> int:
     return 0
 
 
-def _stable_chunk_id(source: str, offset: int, text: str) -> str:
+def _stable_chunk_id(
+    source: str, offset: int, text: str, *, tenant: str | None = None
+) -> str:
     """Deterministic UUID for an (source, offset, text) triple.
 
     Same inputs always produce the same id. That makes `mnemostack index` safe
     to re-run: unchanged chunks upsert onto themselves (no duplicates), and
     edited chunks produce a different id so old content can be cleaned up.
-    """
-    import hashlib
-    import uuid
 
-    digest = hashlib.sha256(f"{source}|{offset}|{text}".encode()).hexdigest()
-    return str(uuid.UUID(digest[:32]))
+    Delegates to the library's :func:`~mnemostack.ingest.stable_chunk_id` so
+    this command, the remote write surface and the markdown indexer all
+    compute the SAME id for the same chunk — including the tenant scoping,
+    without which an operator re-indexing a document a client had POSTed to
+    /memories would create a second, unscoped copy instead of deduplicating
+    onto the tenant's points (`tenant=None` reproduces the historical id).
+    """
+    from .ingest import stable_chunk_id
+
+    return stable_chunk_id(source, offset, text, tenant=tenant)
 
 
 def _normalize_source_filter(sources: list[str] | None) -> set[str] | None:
@@ -2454,6 +2461,30 @@ def _build_recaller(
 
 
 def cmd_index(args: argparse.Namespace) -> int:
+    tenant = getattr(args, "tenant", None)
+    if tenant is not None and not str(tenant).strip():
+        # An explicitly empty --tenant (e.g. `--tenant "$UNSET_VAR"`) fails
+        # closed rather than silently running unscoped — otherwise
+        # `--tenant "" --recreate` slips past the guard below and drops the
+        # whole shared collection.
+        print(
+            "error: --tenant was given an empty value; omit --tenant for an "
+            "unscoped index, or pass a non-empty tenant id",
+            file=sys.stderr,
+        )
+        return 2
+    if tenant is not None and args.recreate:
+        # --recreate drops and rebuilds the WHOLE collection, which in a
+        # shared multi-tenant collection deletes every other tenant's
+        # points. Same refusal index-markdown has carried since #114.
+        print(
+            "error: --recreate drops the entire collection (all tenants); it "
+            "can't be scoped to --tenant. Re-index the tenant with --prune, "
+            "or recreate without --tenant.",
+            file=sys.stderr,
+        )
+        return 2
+    tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
     target = Path(args.path)
     if not target.exists():
         print(f"error: path does not exist: {target}", file=sys.stderr)
@@ -2560,7 +2591,7 @@ def cmd_index(args: argparse.Namespace) -> int:
             from .code import chunk_code
 
             for cc in chunk_code(text, code_language, max_chars=args.chunk_size):
-                cid = _stable_chunk_id(source, cc.offset, cc.text)
+                cid = _stable_chunk_id(source, cc.offset, cc.text, tenant=tenant)
                 payload: dict[str, Any] = {
                     "text": cc.text,
                     "source": source,
@@ -2612,7 +2643,7 @@ def cmd_index(args: argparse.Namespace) -> int:
             if not chunk.strip():
                 continue
             file_chunks.append((i, chunk))
-            cid = _stable_chunk_id(source, i, chunk)
+            cid = _stable_chunk_id(source, i, chunk, tenant=tenant)
             payload = {
                 "text": chunk,
                 "source": source,
@@ -2633,7 +2664,7 @@ def cmd_index(args: argparse.Namespace) -> int:
                 window = file_chunks[start : start + args.window_size]
                 middle_offset, _middle_text = window[args.window_size // 2]
                 chunk = "\n".join(piece for _offset, piece in window)
-                cid = _stable_chunk_id(source, middle_offset, chunk)
+                cid = _stable_chunk_id(source, middle_offset, chunk, tenant=tenant)
                 payload = {
                     "text": chunk,
                     "source": source,
@@ -2675,15 +2706,42 @@ def cmd_index(args: argparse.Namespace) -> int:
     existing_payloads: dict[str, dict] = {}
     if not args.recreate and store.collection_exists():
         if args.refresh_payloads:
-            for hit in store.scroll():
+            for hit in store.scroll(**tkw):
                 pid = str(hit.id)
                 existing_ids.add(pid)
                 existing_payloads[pid] = hit.payload or {}
         else:
-            existing_ids = {str(pid) for pid in store.iter_ids()}
+            existing_ids = {str(pid) for pid in store.iter_ids(**tkw)}
 
     to_embed = [c for c in chunks if c[0] not in existing_ids]
     skipped = len(chunks) - len(to_embed)
+
+    if tenant is not None and to_embed:
+        # The same storage cap the markdown indexer and the remote write
+        # surface enforce: without it this path was the one way to blow past
+        # `mnemostack quota set` arbitrarily. `to_embed` is exactly the growth
+        # — a chunk whose id already exists re-upserts onto itself.
+        #
+        # Checked BEFORE embedding, so a rejected run costs no provider calls
+        # and writes nothing. That earliness is also why the check is GROSS,
+        # not net: unlike the markdown sync (which buffers the whole batch and
+        # checks after embedding), this path streams batch-by-batch to keep a
+        # large corpus at constant memory, and `--prune` only runs after the
+        # upserts — so the collection really does hold current+inserted points
+        # before anything is removed. A `--prune` re-index of an edited corpus
+        # by a tenant at its cap is therefore refused even when it is
+        # net-neutral; raise the cap for the run, or prune first.
+        from .quotas import QuotaExceededError, enforce_points_quota
+
+        max_points = _resolve_max_points(args, tenant)
+        if max_points is not None:
+            try:
+                enforce_points_quota(
+                    tenant, store.count(tenant=tenant), len(to_embed), max_points
+                )
+            except QuotaExceededError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
 
     print(
         f"Indexing {len(chunks)} chunks from {len(files)} file(s)"
@@ -2747,15 +2805,23 @@ def cmd_index(args: argparse.Namespace) -> int:
         if doc_fp is not None:
             for _cid, _vec, payload in embedded:
                 payload[EMBEDDING_SPACE_KEY] = doc_fp
+        if tenant is not None:
+            # Stamped HERE, once, rather than in each chunking branch: a
+            # tenant-scoped id without the payload stamp would be invisible
+            # to tenant-filtered recall and to the tenant lifecycle tools.
+            from .vector.qdrant import TENANT_ID_KEY
+
+            for _cid, _vec, payload in embedded:
+                payload[TENANT_ID_KEY] = tenant
         if embedded:
             # One store round-trip per group where the store supports it —
             # otherwise HTTP overhead just moves from the embedding endpoint
             # to one Qdrant request per point.
             try:
-                store.upsert_batch(embedded)
+                store.upsert_batch(embedded, **tkw)
             except AttributeError:
                 for bcid, bvec, bpayload in embedded:
-                    store.upsert(bcid, bvec, bpayload)
+                    store.upsert(bcid, bvec, bpayload, **tkw)
             inserted += len(embedded)
 
     if inserted:
@@ -2855,9 +2921,9 @@ def cmd_index(args: argparse.Namespace) -> int:
             # matching accounting for the exact contract.
             pending_patches.append(patch)
             if len(pending_patches) >= PAYLOAD_PATCH_BATCH:
-                refreshed += apply_patches_via(store, pending_patches)
+                refreshed += apply_patches_via(store, pending_patches, **tkw)
                 pending_patches = []
-        refreshed += apply_patches_via(store, pending_patches)
+        refreshed += apply_patches_via(store, pending_patches, **tkw)
         if foreign_skipped:
             print(
                 f"warning: {foreign_skipped} chunk(s) skipped by --refresh-payloads: "
@@ -2896,7 +2962,7 @@ def cmd_index(args: argparse.Namespace) -> int:
         # a small walk, one root-scoped scroll for a bulk one.
         prune_snapshot = existing_payloads.items() if args.refresh_payloads else None
         pruned = prune_stale_chunks_from_snapshot(
-            store, fresh_by_source, prune_snapshot, index_root=index_root
+            store, fresh_by_source, prune_snapshot, index_root=index_root, **tkw
         )
 
     print(
@@ -3940,6 +4006,19 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
 
     p_index = sub.add_parser("index", parents=[common], help="Index files into vector store")
     p_index.add_argument("path", help="File or directory to index")
+    p_index.add_argument("--quotas-file", default=None, help=_quotas_file_help)
+    p_index.add_argument(
+        "--tenant",
+        default=None,
+        metavar="ID",
+        help=(
+            "Index this corpus under a tenant: chunk ids and payloads are "
+            "scoped to it, so the ids match what the same document written "
+            "through the authenticated remote surface produces, and "
+            "--prune/--refresh-payloads manage those points (default: "
+            "unscoped / single-tenant)"
+        ),
+    )
     p_index.add_argument(
         "--chunk-size", type=int, default=cfg.vector.chunk_size, help="Chunk size in chars"
     )

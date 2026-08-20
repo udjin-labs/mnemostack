@@ -243,7 +243,7 @@ def test_remote_ingest_quota_never_splits_a_multi_flush_request():
 # ------------------------------------------------------------- HTTP surface
 
 
-def _ingest_app(monkeypatch, tmp_path, *, auth=True, quotas=None):
+def _ingest_app(monkeypatch, tmp_path, *, auth=True, quotas=None, cfg_extra=None):
     """Build the app with real ingest wiring (in-memory store + counting
     embedder) and the recall layers stubbed out."""
     import mnemostack.server as srv
@@ -280,6 +280,7 @@ def _ingest_app(monkeypatch, tmp_path, *, auth=True, quotas=None):
         _, keys["read"] = ks.issue("alpha", ["read"])
         _, keys["write"] = ks.issue("alpha", ["write"])
         _, keys["beta_write"] = ks.issue("beta", ["write"])
+        _, keys["beta_read"] = ks.issue("beta", ["read"])
         cfg_kw = {"auth_enabled": True, "keys_file": str(tmp_path / "keys.json")}
         if quotas:
             from mnemostack.quotas import FileQuotaStore
@@ -288,7 +289,13 @@ def _ingest_app(monkeypatch, tmp_path, *, auth=True, quotas=None):
             for tenant, mp in quotas.items():
                 qs.set(tenant, max_points=mp)
             cfg_kw["quotas_file"] = str(tmp_path / "quotas.json")
-    cfg = ServerConfig(provider_name="fake", llm_name="fake", graph_uri=None, **cfg_kw)
+    cfg = ServerConfig(
+        provider_name="fake",
+        llm_name="fake",
+        graph_uri=None,
+        **cfg_kw,
+        **(cfg_extra or {}),
+    )
     app = build_app(cfg)
     return app, store, emb, keys
 
