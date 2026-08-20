@@ -280,6 +280,7 @@ def _ingest_app(monkeypatch, tmp_path, *, auth=True, quotas=None):
         _, keys["read"] = ks.issue("alpha", ["read"])
         _, keys["write"] = ks.issue("alpha", ["write"])
         _, keys["beta_write"] = ks.issue("beta", ["write"])
+        _, keys["beta_read"] = ks.issue("beta", ["read"])
         cfg_kw = {"auth_enabled": True, "keys_file": str(tmp_path / "keys.json")}
         if quotas:
             from mnemostack.quotas import FileQuotaStore

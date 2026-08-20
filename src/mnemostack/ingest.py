@@ -752,6 +752,67 @@ def validate_remote_ids(ids: Sequence[Any]) -> str | None:
     return None
 
 
+#: One source-scoped lifecycle call processes at most this many points.
+#: The operation is idempotent and reports whether it finished, so a
+#: caller repeats until complete — an unbounded delete-by-filter would
+#: be a single request that can run for minutes and cannot be metered.
+REMOTE_SOURCE_BATCH = 1000
+#: One listing page. Ids and hashes only, so pages can be generous.
+REMOTE_LIST_PAGE = 500
+
+
+def validate_remote_source(source: Any) -> str | None:
+    """First violated constraint of a source selector, or None."""
+    if not isinstance(source, str) or not source.strip():
+        return "source must be a non-blank string"
+    if len(source) > REMOTE_MAX_SOURCE_CHARS:
+        return f"source exceeds {REMOTE_MAX_SOURCE_CHARS} characters"
+    if not _utf8_encodable(source):
+        return "source must be valid UTF-8"
+    return None
+
+
+def find_source_points(
+    store: Any,
+    source: str,
+    *,
+    tenant: str | None = None,
+    index_root: str | None = None,
+    limit: int | None = REMOTE_SOURCE_BATCH,
+) -> tuple[list[Any], list[dict[str, Any]], bool]:
+    """Ids and payloads of one source's points, plus whether more remain.
+
+    The store filter is a starting point, never the verdict: Qdrant's
+    MatchValue also matches an ARRAY payload containing the value, so a
+    point whose ``source`` is ``["a.md", "b.md"]`` comes back for
+    ``source="a.md"``. Every candidate is re-validated in Python before
+    it can be invalidated or deleted (the same rule the prune path has
+    followed since the selective-prune fix).
+    """
+    scroll = getattr(store, "scroll", None)
+    if not callable(scroll):
+        return [], [], False
+    tkw = {"tenant": tenant} if tenant is not None else {}
+    ids: list[Any] = []
+    payloads: list[dict[str, Any]] = []
+    more = False
+    for hit in scroll(filters={"source": source}, **tkw):
+        payload = dict(getattr(hit, "payload", None) or {})
+        if payload.get("source") != source:
+            continue  # array/partial match — not this source
+        if index_root is not None and payload.get("index_root") not in (
+            None,
+            index_root,
+        ):
+            continue  # another root's chunk
+        if limit is not None and len(ids) >= limit:
+            more = True
+            break
+        ids.append(hit.id)
+        payloads.append(payload)
+    return ids, payloads, more
+
+
 def validate_remote_invalidate(
     ids: Sequence[Any],
     invalidated_at: str | None,
