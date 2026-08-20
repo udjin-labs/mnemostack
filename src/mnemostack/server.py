@@ -30,7 +30,7 @@ from functools import partial
 from typing import Any, Literal
 
 try:
-    from fastapi import Depends, FastAPI, Header, HTTPException
+    from fastapi import Depends, FastAPI, Header, HTTPException, Request
     from pydantic import BaseModel, Field, StrictInt
 except ImportError as e:  # pragma: no cover - import guard
     raise ImportError(
@@ -1155,11 +1155,27 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         detail = _strip_surrogates(jsonable_encoder(exc.errors()))
         return JSONResponse(status_code=422, content={"detail": detail})
 
+    def _route_label(request) -> str:
+        # The route TEMPLATE ("/resolve/{chunk_id}"), never the raw path —
+        # a per-id label would explode metric cardinality.
+        route = request.scope.get("route")
+        path = getattr(route, "path", None) or "unmatched"
+        return f"{request.method} {path}"
+
     def _require(scope: str):
         """FastAPI dependency: enforce a valid key with `scope` and return the
-        Principal (or None when auth is disabled → single-tenant, tenant=None)."""
+        Principal (or None when auth is disabled → single-tenant, tenant=None).
+
+        Also the per-tenant metering choke point: every authenticated call
+        increments `mnemostack.tenant.requests{tenant,endpoint}` (and 429s
+        `mnemostack.tenant.rate_limited{tenant}`) here, so a tenant burning
+        the deployment's budget is visible in /metrics without instrumenting
+        each endpoint. Tenants are few by design — label cardinality is
+        bounded. Auth-off mode emits no tenant metrics (the global counters
+        already cover single-tenant deployments)."""
 
         def _dep(
+            request: Request,
             authorization: str | None = Header(default=None),
             x_api_key: str | None = Header(default=None, alias="X-API-Key"),
         ):
@@ -1179,6 +1195,10 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 try:
                     rate_limiter.check(principal.tenant)
                 except RateLimitExceededError as exc:
+                    counter(
+                        "mnemostack.tenant.rate_limited",
+                        labels={"tenant": principal.tenant},
+                    )
                     # A vanishingly small (but valid) rate makes 1/rate overflow to
                     # inf, so guard/cap retry_after — never ceil(inf) → 500. A day is
                     # a sane ceiling for "come back later".
@@ -1191,6 +1211,10 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                         detail=str(exc),
                         headers={"Retry-After": str(secs)},
                     ) from exc
+            counter(
+                "mnemostack.tenant.requests",
+                labels={"tenant": principal.tenant, "endpoint": _route_label(request)},
+            )
             return principal
 
         return _dep
@@ -1586,6 +1610,8 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 timestamp_format=cfg.timestamp_format,
             )
         except QuotaExceededError as exc:
+            if tenant is not None:
+                counter("mnemostack.tenant.quota_rejected", labels={"tenant": tenant})
             raise HTTPException(status_code=507, detail=str(exc)) from exc
         except EmbeddingSpaceError as exc:
             # Server-side configuration fault (repointed model tag / mixed
@@ -1595,6 +1621,26 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         except Exception as exc:
             log.exception("memories endpoint failed")
             raise HTTPException(status_code=500, detail="ingest failed") from exc
+        if tenant is not None:
+            # Embedding cost attribution: duplicates cost zero embed calls;
+            # everything else (stored AND failed) paid the provider round
+            # trip. Chars are the provider-agnostic token proxy.
+            embedded = sum(r.status != "duplicate" for r in results)
+            if embedded:
+                counter(
+                    "mnemostack.tenant.embedded_chunks",
+                    embedded,
+                    labels={"tenant": tenant},
+                )
+                counter(
+                    "mnemostack.tenant.embedded_chars",
+                    sum(
+                        len(flat.text)
+                        for flat, r in zip(flat_items, results, strict=True)
+                        if r.status != "duplicate"
+                    ),
+                    labels={"tenant": tenant},
+                )
         failed_n = sum(r.status == "failed" for r in results)
         if results and failed_n == len(results):
             # Same honesty rule as /triples: per-item isolation is for
