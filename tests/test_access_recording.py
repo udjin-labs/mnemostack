@@ -247,3 +247,74 @@ def test_answer_records_when_generation_succeeds(monkeypatch, tmp_path):
     )
     assert r.status_code == 200, r.text
     assert _payload(store, 1)[ACCESS_COUNT_KEY] == 1
+
+
+def test_a_stale_hit_payload_does_not_freeze_the_counter(monkeypatch, tmp_path):
+    """R2 (codex P2): a lexical (BM25) hit carries the in-process corpus
+    SNAPSHOT taken at startup, not current store state. Incrementing that
+    would write 1 forever — the counter would never accumulate for a
+    deployment whose recalls come from the lexical arm."""
+    _app, store, _emb, _keys = _ingest_app(monkeypatch, tmp_path)
+    _seed(store, 1, {ACCESS_COUNT_KEY: 7})
+    # The hit still carries what the snapshot held when the server started.
+    stale = _Hit(1, {ACCESS_COUNT_KEY: 0, "source": "a.md"})
+    assert record_access(store, [stale], tenant="alpha") == 1
+    assert _payload(store, 1)[ACCESS_COUNT_KEY] == 8
+
+
+def test_a_stale_hit_payload_cannot_walk_the_counter_backwards(monkeypatch, tmp_path):
+    """The same snapshot in a FUSED result: whichever arm's payload wins,
+    the larger of stored-and-hit is the base, so a count never decreases."""
+    _app, store, _emb, _keys = _ingest_app(monkeypatch, tmp_path)
+    _seed(store, 1, {ACCESS_COUNT_KEY: 20})
+    record_access(store, [_Hit(1, {ACCESS_COUNT_KEY: 2})], tenant="alpha")
+    assert _payload(store, 1)[ACCESS_COUNT_KEY] == 21
+
+
+def test_the_counter_read_costs_one_round_trip(monkeypatch, tmp_path):
+    """Per-point reads would make an enabled deployment pay `limit` extra
+    requests on every recall."""
+    _app, store, _emb, _keys = _ingest_app(monkeypatch, tmp_path)
+    for pid in range(1, 11):
+        _seed(store, pid)
+    calls: list[int] = []
+    orig = store.retrieve_payload_fields
+
+    def _counting(ids, keys, **kwargs):
+        calls.append(len(list(ids)))
+        return orig(ids, keys, **kwargs)
+
+    store.retrieve_payload_fields = _counting  # type: ignore[method-assign]
+    record_access(store, [_Hit(pid) for pid in range(1, 11)], tenant="alpha")
+    assert calls == [10]
+
+
+def test_a_store_without_the_batch_reader_still_records(monkeypatch, tmp_path):
+    """Duck stores keep working — the hit's payload is the fallback."""
+    _app, store, _emb, _keys = _ingest_app(monkeypatch, tmp_path)
+    _seed(store, 1, {ACCESS_COUNT_KEY: 3})
+    monkeypatch.delattr(type(store), "retrieve_payload_fields", raising=False)
+    assert record_access(store, [_Hit(1, {ACCESS_COUNT_KEY: 3})], tenant="alpha") == 1
+    assert _payload(store, 1)[ACCESS_COUNT_KEY] == 4
+
+
+def test_a_failing_counter_read_does_not_stop_recording(monkeypatch, tmp_path):
+    _app, store, _emb, _keys = _ingest_app(monkeypatch, tmp_path)
+    _seed(store, 1)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("read failed")
+
+    monkeypatch.setattr(store, "retrieve_payload_fields", _boom)
+    assert record_access(store, [_Hit(1)], tenant="alpha") == 1
+    assert _payload(store, 1)[ACCESS_COUNT_KEY] == 1
+
+
+def test_the_counter_read_is_tenant_scoped(monkeypatch, tmp_path):
+    """A foreign point must not even reveal its counter to the read."""
+    _app, store, _emb, _keys = _ingest_app(monkeypatch, tmp_path)
+    _seed(store, 1, {ACCESS_COUNT_KEY: 9}, tenant="beta")
+    assert store.retrieve_payload_fields([1], [ACCESS_COUNT_KEY], tenant="alpha") == {}
+    assert store.retrieve_payload_fields([1], [ACCESS_COUNT_KEY], tenant="beta") == {
+        "1": {ACCESS_COUNT_KEY: 9}
+    }

@@ -38,12 +38,20 @@ Contract:
 - **Fail-open, always.** Bookkeeping must never fail a recall the caller
   already has the results of. Every failure is swallowed here, logged once,
   and counted — the recall response is identical either way.
-- **Best-effort counting.** Qdrant has no atomic increment, so the new count
-  is derived from the payload this recall already read. Two concurrent
-  recalls of the same point can therefore record one increment instead of
-  two. The reader clamps the reinforcement at 10 accesses, so a lost
-  increment changes a half-life by at most a few percent — a lock or a
-  read-back per hit would cost far more than it buys.
+- **The counter is read from the STORE, not from the hit.** A result's
+  payload is only current if it came from the vector arm: a lexical
+  (BM25) hit carries the in-process corpus SNAPSHOT taken at startup, so
+  incrementing that would write 1 forever — and a fused result whose
+  payload came from the stale arm could overwrite a higher stored count
+  with a lower one. The current values are fetched for the whole batch in
+  one round-trip before the write; the hit's own payload is only a
+  fallback for a store without the batch reader, and the larger of the two
+  always wins so a stale snapshot can never walk a counter backwards.
+- **Best-effort counting.** Qdrant has no atomic increment, so read and
+  write are still two steps: two concurrent recalls of the same point can
+  record one increment instead of two. The reader clamps the reinforcement
+  at 10 accesses, so a lost increment changes a half-life by at most a few
+  percent — a lock per hit would cost far more than it buys.
 - **Tenant-scoped.** Patches go through the store's tenant-aware batch hook,
   so a foreign-owned point is skipped by the store itself, not by trust.
 - **Point ids only.** A recall's results can include hits that are not
@@ -74,6 +82,25 @@ LAST_ACCESSED_KEY = "last_accessed"
 #: clamp it carries no information, so it is bounded rather than left to
 #: grow without limit on a hot memory.
 MAX_STORED_ACCESS_COUNT = 1_000_000
+
+
+def _stored_counts(store: Any, ids: list[Any], tenant: str | None) -> dict[str, int]:
+    """Authoritative access counts for these ids, in one round-trip.
+
+    Empty when the store has no batch reader or the read fails — the caller
+    then falls back to the hit's own payload, which is right for a vector
+    hit and merely stale for a lexical one. Never raises: this is
+    bookkeeping.
+    """
+    reader = getattr(store, "retrieve_payload_fields", None)
+    if not callable(reader):
+        return {}
+    try:
+        rows = reader(ids, [ACCESS_COUNT_KEY], tenant=tenant)
+    except Exception:  # noqa: BLE001 — fall back to the hit payloads
+        log.warning("access counter read failed for %d point(s)", len(ids), exc_info=True)
+        return {}
+    return {key: _current_count(value) for key, value in rows.items()}
 
 
 def _current_count(payload: dict[str, Any]) -> int:
@@ -127,11 +154,18 @@ def record_access(
     if not entries:
         return 0
     stamp = (now or datetime.now(timezone.utc)).isoformat()
+    stored = _stored_counts(store, [pid for pid, _ in entries], tenant)
     patches = [
         PayloadPatch(
             id=pid,
             set_values={
-                ACCESS_COUNT_KEY: min(_current_count(payload) + 1, MAX_STORED_ACCESS_COUNT),
+                # max(): the stored value is authoritative, the hit's payload
+                # is the fallback — and taking the larger means a stale
+                # lexical snapshot can never walk a counter backwards.
+                ACCESS_COUNT_KEY: min(
+                    max(stored.get(str(pid), 0), _current_count(payload)) + 1,
+                    MAX_STORED_ACCESS_COUNT,
+                ),
                 LAST_ACCESSED_KEY: stamp,
             },
         )

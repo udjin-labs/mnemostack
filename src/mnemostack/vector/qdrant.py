@@ -534,6 +534,43 @@ class VectorStore:
             return None
         return payload
 
+    def retrieve_payload_fields(
+        self,
+        ids: Sequence[str | int],
+        keys: Sequence[str],
+        *,
+        tenant: str | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """Selected payload keys for many points, keyed by string id, in ONE
+        round-trip.
+
+        For a caller that must read a stored value before writing it back and
+        cannot afford a request per point. Only the named keys are fetched.
+        ``tenant`` scopes it exactly like every other read: a point owned by
+        another tenant is simply absent from the result, indistinguishable
+        from one that does not exist.
+        """
+        if not ids:
+            return {}
+        wanted = list(dict.fromkeys(keys))
+        # The ownership check needs the marker even when the caller did not
+        # ask for it — a projection that omits it would make every point
+        # look unowned.
+        fetch = wanted + [TENANT_ID_KEY] if tenant is not None else wanted
+        found = self.client.retrieve(
+            collection_name=self.collection,
+            ids=list(ids),
+            with_payload=fetch,
+            with_vectors=False,
+        )
+        out: dict[str, dict[str, Any]] = {}
+        for point in found:
+            payload = dict(getattr(point, "payload", None) or {})
+            if tenant is not None and payload.get(TENANT_ID_KEY) != tenant:
+                continue
+            out[str(point.id)] = {k: payload[k] for k in wanted if k in payload}
+        return out
+
     def retrieve_existing_ids(
         self, ids: list[str | int], *, tenant: str | None = None
     ) -> set[str]:
