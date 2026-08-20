@@ -586,16 +586,26 @@ _PIPELINE_PAYLOAD_KEYS = _PROTECTED_PAYLOAD_KEYS | {
 }
 
 
-#: Predicate contract for remote graph writes: a LETTER (any script —
-#: the store's sanitizer is Unicode-aware and keeps non-ASCII letters
-#: losslessly, so "работает_в" is as legitimate as "works_on"), then
-#: letters/digits/underscores. The store uppercases relationship types,
-#: so case variants of one predicate intentionally merge; what the regex
-#: EXCLUDES are the punctuation/space variants ("works-at", "works at")
-#: that would silently collapse into one edge type while both writes
-#: report success — and the leading-digit forms whose sanitized shape a
-#: caller can never legally submit.
-_REMOTE_PREDICATE_RE = re.compile(r"^[^\W\d_]\w*$")
+def _valid_remote_predicate(predicate: str) -> bool:
+    """Predicate contract for remote graph writes: a LETTER (any script —
+    the store's sanitizer is Unicode-aware and keeps non-ASCII letters
+    losslessly, so "работает_в" is as legitimate as "works_on"), then
+    letters, decimal digits, or underscores. The store uppercases
+    relationship types, so case variants of one predicate intentionally
+    merge; what this EXCLUDES are the punctuation/space variants
+    ("works-at", "works at") that would silently collapse into one edge
+    type while both writes report success, the leading-digit forms whose
+    sanitized shape a caller can never legally submit, and Unicode
+    number-but-not-digit characters (superscripts ², Roman numerals Ⅳ,
+    circled digits ① — categories No/Nl) that a regex ``\\w`` admits but
+    that either get silently underscore-mangled by the store's sanitizer
+    (leading position) or blow up Cypher's unescaped-identifier grammar
+    (anywhere). ``isalpha``/``isdecimal`` match exactly the characters
+    the sanitizer passes through unchanged apart from uppercasing.
+    """
+    return predicate[0].isalpha() and all(
+        c.isalpha() or c.isdecimal() or c == "_" for c in predicate
+    )
 
 #: Bounds for one remote triple — enforced in the SHARED validator so the
 #: MCP surface is capped identically to HTTP's pydantic schema (an
@@ -623,9 +633,9 @@ def validate_remote_triple(
             return f"{field_name} exceeds {REMOTE_MAX_TRIPLE_CHARS} characters"
         if not _utf8_encodable(value):
             return f"{field_name} must be valid UTF-8"
-    if not _REMOTE_PREDICATE_RE.fullmatch(predicate):
+    if not _valid_remote_predicate(predicate):
         return (
-            "predicate must be a relation identifier (letters, digits, "
+            "predicate must be a relation identifier (letters, decimal digits, "
             "underscores; starting with a letter) — the store uppercases it"
         )
     vf_dt = None

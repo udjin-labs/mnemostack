@@ -1352,3 +1352,14 @@ def test_mcp_graph_add_triple_caps_and_unicode(tmp_path, monkeypatch):
         )
     ).structured_content
     assert uni["ok"] is True and added[-1]["predicate"] == "работает_в"
+    # R18: Unicode number-but-not-digit characters (No/Nl) are rejected on
+    # the MCP surface too — leading they'd be underscore-mangled by
+    # _safe_rel, embedded they'd crash Cypher's rel-type grammar.
+    for bad in ("²abc", "Ⅳabc", "a①bc"):
+        res = asyncio.run(
+            mcp.call_tool(
+                "mnemostack_graph_add_triple",
+                {"subject": "a", "predicate": bad, "obj": "b"},
+            )
+        ).structured_content
+        assert res["ok"] is False and res["error_kind"] == "invalid_argument", bad

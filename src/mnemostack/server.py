@@ -1030,7 +1030,10 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
 
     def _strip_surrogates(value: Any) -> Any:
         if isinstance(value, str):
-            return value.encode("utf-8", "replace").decode("utf-8")
+            # backslashreplace, not "replace": U+FFFD would collapse keys
+            # that differ only in their surrogate (dict comprehension below
+            # keeps one), silently dropping entries from the echoed input.
+            return value.encode("utf-8", "backslashreplace").decode("utf-8")
         if isinstance(value, dict):
             # KEYS too: a surrogate metadata key echoed into the error body
             # would crash the response encoder exactly like a value.

@@ -24,6 +24,7 @@ from mnemostack.ingest import (
     reserved_metadata_keys,
     stable_chunk_id,
     validate_remote_item,
+    validate_remote_triple,
 )
 from mnemostack.server import ServerConfig, build_app
 from mnemostack.vector import VectorStore
@@ -1492,3 +1493,39 @@ def test_triples_reject_inverted_intervals(monkeypatch, tmp_path):
         headers=hdr,
     )
     assert r.status_code == 400 and "precede" in r.json()["detail"]
+
+
+def test_predicate_rejects_unicode_number_characters():
+    """Round-18 (codex+agent): categories No/Nl (superscripts ², Roman
+    numerals Ⅳ, circled digits ①) pass a ``\\w``-based regex — ``\\d`` only
+    covers Nd — but leading they get silently underscore-prefixed by
+    GraphStore._safe_rel (not isalpha), and anywhere they survive _safe_rel
+    unchanged (isalnum) yet crash Memgraph's unescaped rel-type grammar.
+    Reject them up front on both positions."""
+    for bad in ("²abc", "Ⅳabc", "①abc", "a²bc", "aⅣ", "a①bc", "١abc"):
+        assert "relation identifier" in (
+            validate_remote_triple("s", bad, "o", None, None) or ""
+        ), bad
+    # Letters of any script + decimal digits + underscore stay valid.
+    for good in ("works_on", "работает_в", "中文", "a9", "Éto_1"):
+        assert validate_remote_triple("s", good, "o", None, None) is None, good
+
+
+def test_422_echo_keeps_distinct_surrogate_keys(monkeypatch, tmp_path):
+    """Round-18 (agent P3): U+FFFD replacement collapsed metadata keys that
+    differ only by their lone surrogate — the dict comprehension then kept a
+    single entry, so the 422 echo misrepresented what the caller sent.
+    backslashreplace keeps each key distinct (and shows WHICH surrogate)."""
+    app, _store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
+    # No "items" → the missing-field 422 echoes the WHOLE body as `input`,
+    # surrogate keys included.
+    raw = b'{"probe": {"a\\ud800": "1", "a\\ud801": "2", "a\\ud802": "3"}}'
+    r = TestClient(app).post(
+        "/memories",
+        content=raw,
+        headers={"X-API-Key": keys["write"], "Content-Type": "application/json"},
+    )
+    assert r.status_code == 422
+    body = r.text
+    for echoed in ("a\\\\ud800", "a\\\\ud801", "a\\\\ud802"):
+        assert echoed in body, echoed

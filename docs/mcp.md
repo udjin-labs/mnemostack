@@ -509,7 +509,7 @@ On failure:
 | Name | Type | Default | Description |
 | --- | --- | --- | --- |
 | `subject` | `string` | Required | Subject node, such as a person, project, or service. |
-| `predicate` | `string` | Required | Relationship identifier: a letter (any script) followed by letters/digits/underscores, max 512 chars. The store uppercases relationship types, so case variants merge into one relation; punctuation/space variants (`works-at`, `works at`) and leading digits are rejected. Examples: `works_on`, `owns`, `depends_on`, `prefers`. |
+| `predicate` | `string` | Required | Relationship identifier: a letter (any script) followed by letters, decimal digits, or underscores, max 512 chars. The store uppercases relationship types, so case variants merge into one relation; punctuation/space variants (`works-at`, `works at`), leading digits, and number-like characters that are not decimal digits (`²`, `Ⅳ`, `①`) are rejected. Examples: `works_on`, `owns`, `depends_on`, `prefers`. |
 | `obj` | `string` | Required | Object node or value. |
 | `valid_from` | nullable `string` | `null` | Optional ISO date when the fact starts being valid. |
 | `valid_until` | nullable `string` | `null` | Optional ISO date when the fact stops being valid. |
