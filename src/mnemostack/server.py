@@ -761,6 +761,8 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     # handles single-worker fine.
     set_recorder(InMemoryRecorder())
 
+    # Fail a schema-key misconfiguration at BOOT, before any provider cost.
+    ensure_remote_schema_keys(cfg.text_key, cfg.timestamp_key)
     provider = get_provider(
         cfg.provider_name,
         **provider_kwargs(
@@ -772,8 +774,6 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     )
     text_mode = resolve_text_search_mode(cfg.text_search, cfg.bm25_paths)
     ensure_text_fields_mode(text_mode, cfg.text_search_fields)
-    # Fail a schema-key misconfiguration at BOOT, not on every write.
-    ensure_remote_schema_keys(cfg.text_key, cfg.timestamp_key)
     store = VectorStore(
         collection=cfg.collection,
         dimension=provider.dimension,
@@ -1023,6 +1023,28 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         if authorization and authorization.lower().startswith("bearer "):
             return authorization[7:].strip()
         return None
+
+    from fastapi.encoders import jsonable_encoder
+    from fastapi.exceptions import RequestValidationError
+    from fastapi.responses import JSONResponse
+
+    def _strip_surrogates(value: Any) -> Any:
+        if isinstance(value, str):
+            return value.encode("utf-8", "replace").decode("utf-8")
+        if isinstance(value, dict):
+            return {k: _strip_surrogates(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [_strip_surrogates(v) for v in value]
+        return value
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error_handler(request, exc):  # noqa: ANN001 — FastAPI signature
+        # The default 422 renderer echoes the raw offending input into the
+        # response body; a lone surrogate in it (valid JSON escape) crashes
+        # the UTF-8 response encoder — the client would see a bare 500 for
+        # caller-fixable input. Sanitize before serializing.
+        detail = _strip_surrogates(jsonable_encoder(exc.errors()))
+        return JSONResponse(status_code=422, content={"detail": detail})
 
     def _require(scope: str):
         """FastAPI dependency: enforce a valid key with `scope` and return the

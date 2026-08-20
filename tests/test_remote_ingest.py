@@ -1296,3 +1296,45 @@ def test_schema_key_misconfiguration_fails_at_boot(monkeypatch, tmp_path):
             ServerConfig(provider_name="fake", llm_name="fake", graph_uri=None,
                          text_key="source")
         )
+
+
+# -------------------------------------------------- round-12 review batch pins
+
+
+def test_lifecycle_keys_are_forbidden_schema_keys():
+    """Agent-R12 P1: text_key='invalidated_at' would stamp EVERY stored
+    point as stale — writes report stored while default recall hides them
+    all, silently. valid_from/valid_until corrupt as_of the same way."""
+    emb, store = _CountingEmbedding(), _mem_store()
+    for bad in ("invalidated_at", "valid_from", "valid_until"):
+        with pytest.raises(ValueError, match="pipeline"):
+            ingest_remote_items(
+                emb, store, [IngestItem(text="x", source="s")], text_key=bad
+            )
+        with pytest.raises(ValueError, match="pipeline"):
+            ingest_remote_items(
+                emb, store, [IngestItem(text="x", source="s")], timestamp_key=bad
+            )
+
+
+def test_lone_surrogates_are_rejected_not_500(monkeypatch, tmp_path):
+    """Codex-R12: '\\ud800' is a valid JSON escape but crashes UTF-8
+    encoding in id generation — must be a 400, never a 500."""
+    bad = "\ud800"
+    assert "UTF-8" in validate_remote_item("x" + bad, "s", None, [], {})
+    assert "UTF-8" in validate_remote_item("x", "s" + bad, None, [], {})
+    assert "UTF-8" in validate_remote_item("x", "s", None, [bad], {})
+    assert "UTF-8" in validate_remote_item("x", "s", None, [], {"k": bad})
+    app, _store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
+    # A real client delivers the surrogate as a raw JSON escape sequence —
+    # the transport bytes are clean ASCII; the decoded STRING is not.
+    raw = b'{"items": [{"text": "x\\ud800", "source": "s"}]}'
+    r = TestClient(app).post(
+        "/memories",
+        content=raw,
+        headers={"X-API-Key": keys["write"], "Content-Type": "application/json"},
+    )
+    # pydantic v2's str type itself rejects lone surrogates at the schema
+    # layer (422) — the shared validator remains the guard for library and
+    # duck-typed callers that bypass pydantic.
+    assert r.status_code == 422

@@ -285,6 +285,17 @@ def _normalized_metadata_key(key: str) -> str:
     return unicodedata.normalize("NFKC", key).casefold()
 
 
+def _utf8_encodable(value: str) -> bool:
+    """Whether the string survives UTF-8 encoding (JSON permits lone
+    surrogates like "\\ud800"; deterministic ids and the store transport
+    do not — they must be a 400, never a 500)."""
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def reserved_metadata_keys(metadata: dict[str, Any]) -> list[str]:
     """Names in *metadata* a remote caller is not allowed to set.
 
@@ -379,6 +390,8 @@ def validate_remote_item(
     metadata can't shadow what recall actually reads."""
     if not isinstance(text, str) or not text.strip():
         return "text must be a non-empty string"
+    if not _utf8_encodable(text):
+        return "text must be valid UTF-8 (no lone surrogates)"
     if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
         return "offset must be a non-negative integer"
     if offset > REMOTE_MAX_OFFSET:
@@ -398,6 +411,8 @@ def validate_remote_item(
         return "source must be a string"
     if len(source) > REMOTE_MAX_SOURCE_CHARS:
         return f"source exceeds {REMOTE_MAX_SOURCE_CHARS} characters"
+    if not _utf8_encodable(source):
+        return "source must be valid UTF-8 (no lone surrogates)"
     if "|" in source or any(ord(ch) < 0x20 for ch in source):
         # `stable_chunk_id` joins (source, offset, text) with "|" (and the
         # tenant with NUL): ("a", 0, "0|X") and ("a|0", 0, "X") would hash
@@ -418,6 +433,8 @@ def validate_remote_item(
     for tag in tags:
         if not isinstance(tag, str) or len(tag) > REMOTE_MAX_TAG_CHARS:
             return f"each tag must be a string of at most {REMOTE_MAX_TAG_CHARS} characters"
+        if not _utf8_encodable(tag):
+            return "tags must be valid UTF-8 (no lone surrogates)"
     if not isinstance(metadata, dict):
         return "metadata must be an object"
     if len(metadata) > REMOTE_MAX_METADATA_KEYS:
@@ -460,6 +477,11 @@ def validate_remote_item(
         return "metadata must be JSON-serializable"
     if len(encoded) > REMOTE_MAX_METADATA_CHARS:
         return f"metadata exceeds {REMOTE_MAX_METADATA_CHARS} serialized characters"
+    if not _utf8_encodable(encoded):
+        # A lone surrogate (valid JSON escape) survives json.dumps with
+        # ensure_ascii=False and would crash UTF-8 encoding downstream —
+        # id generation for text/source, the HTTP layer for metadata.
+        return "metadata strings must be valid UTF-8 (no lone surrogates)"
     return None
 
 
@@ -530,7 +552,19 @@ def expand_remote_items(
 #: schema key colliding with ANY of these corrupts a downstream step
 #: (text_key="source" overwrites provenance; timestamp_key="tags" feeds a
 #: float to the tag materializer and 500s every timestamped write).
-_PIPELINE_PAYLOAD_KEYS = _PROTECTED_PAYLOAD_KEYS | {"tags", "timestamp", "indexed_at"}
+_PIPELINE_PAYLOAD_KEYS = _PROTECTED_PAYLOAD_KEYS | {
+    "tags",
+    "timestamp",
+    "indexed_at",
+    # Lifecycle keys the reactivation/invalidate machinery reads and writes:
+    # text_key="invalidated_at" would stamp every stored point with a truthy
+    # stale marker — writes report "stored" while default recall hides them
+    # ALL, silently and permanently. valid_from/valid_until would corrupt
+    # as_of recall the same way (lexicographic fallback on non-ISO values).
+    "invalidated_at",
+    "valid_from",
+    "valid_until",
+}
 
 
 def ensure_remote_schema_keys(text_key: str, timestamp_key: str) -> None:
