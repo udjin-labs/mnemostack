@@ -35,6 +35,7 @@ from ..ingest import (
     REMOTE_MAX_TEXT_CHARS,
     IngestItem,
     RemoteRequestTooLarge,
+    ensure_remote_schema_keys,
     expand_remote_items,
     ingest_remote_items,
     validate_remote_item,
@@ -171,6 +172,9 @@ def build_server(
     """
     if not _FASTMCP_AVAILABLE:
         raise ImportError("fastmcp not installed. Install with: pip install 'mnemostack[mcp]'")
+    # Fail a schema-key misconfiguration at BOOT (HTTP does the same) —
+    # a bad text/timestamp key must not 500 every remember call instead.
+    ensure_remote_schema_keys(text_key, timestamp_key)
     if timestamp_format not in ("iso", "epoch", "epoch_ms"):
         # HTTP fails a typo'd format loud at boot (eager TemporalRetriever);
         # MCP builds retrievers lazily, so an unvalidated format could reach

@@ -1269,3 +1269,12 @@ def test_mcp_remember_all_failed_reports_embedding_failed(tmp_path, monkeypatch)
         mcp.call_tool("mnemostack_remember", {"text": "will not embed", "source": "s"})
     ).structured_content
     assert r["ok"] is False and r["error_kind"] == "embedding_failed"
+
+
+def test_mcp_build_server_rejects_colliding_schema_keys(tmp_path, monkeypatch):
+    import mnemostack.mcp.server as srv
+
+    monkeypatch.setattr(srv, "get_provider", lambda *a, **k: SimpleNamespace(dimension=3))
+    monkeypatch.setattr(srv, "VectorStore", lambda **_: MagicMock())
+    with pytest.raises(ValueError, match="pipeline"):
+        build_server(collection="t", embedding_provider="ollama", timestamp_key="tags")

@@ -1212,18 +1212,24 @@ def test_quota_rejection_leaves_retracted_memories_retracted():
     assert point.payload.get("invalidated_at")  # still retracted
 
 
-def test_reactivation_clears_valid_until_too():
-    """Agent-R10: a surviving valid_until would keep hiding the point from
-    as_of recall — 'recallable again' must hold bi-temporally."""
+def test_reactivation_preserves_valid_until():
+    """Agent-R11 P1: valid_until is dual-use — it may be legitimate
+    ingest-declared expiry, indistinguishable from an invalidate-set bound.
+    Reactivation clears ONLY invalidated_at; destroying client content to
+    fix an as_of edge would be worse than documenting the caveat."""
     emb, store = _CountingEmbedding(), _mem_store()
     (first,) = ingest_remote_items(
-        emb, store, [IngestItem(text="f2", source="s")], tenant="a"
+        emb,
+        store,
+        [IngestItem(text="promo", source="s", metadata={"valid_until": "2030-01-01"})],
+        tenant="a",
     )
-    store.invalidate([first.id], valid_until="2026-01-01", tenant="a")
-    ingest_remote_items(emb, store, [IngestItem(text="f2", source="s")], tenant="a")
+    store.invalidate([first.id], tenant="a")  # no valid_until arg
+    ingest_remote_items(emb, store, [IngestItem(text="promo", source="s",
+                                                 metadata={"valid_until": "2030-01-01"})], tenant="a")
     point = store.client.retrieve(store.collection, ids=[first.id], with_payload=True)[0]
-    assert "invalidated_at" not in (point.payload or {})
-    assert "valid_until" not in (point.payload or {})
+    assert "invalidated_at" not in (point.payload or {})  # recallable again
+    assert point.payload.get("valid_until") == "2030-01-01"  # content survives
 
 
 def test_vanished_stale_point_is_failed_not_stored():
@@ -1254,11 +1260,39 @@ def test_colliding_schema_keys_are_rejected_loudly():
     """Codex-R10 P2: text_key='source' would overwrite the provenance field
     (metadata merges last in payload construction) — operator error, loud."""
     emb, store = _CountingEmbedding(), _mem_store()
-    with pytest.raises(ValueError, match="structural"):
+    with pytest.raises(ValueError, match="pipeline"):
         ingest_remote_items(
             emb, store, [IngestItem(text="x", source="s")], text_key="source"
         )
-    with pytest.raises(ValueError, match="structural"):
+    with pytest.raises(ValueError, match="pipeline"):
         ingest_remote_items(
             emb, store, [IngestItem(text="x", source="s")], timestamp_key="offset"
+        )
+    # Codex-R11: DOWNSTREAM pipeline keys too — timestamp_key="tags" would
+    # feed the epoch float into the tag materializer and 500 every write.
+    with pytest.raises(ValueError, match="pipeline"):
+        ingest_remote_items(
+            emb, store, [IngestItem(text="x", source="s")], timestamp_key="tags"
+        )
+    with pytest.raises(ValueError, match="pipeline"):
+        ingest_remote_items(
+            emb, store, [IngestItem(text="x", source="s")], text_key="indexed_at"
+        )
+    with pytest.raises(ValueError, match="differ"):
+        ingest_remote_items(
+            emb, store, [IngestItem(text="x", source="s")],
+            text_key="content", timestamp_key="content",
+        )
+
+
+def test_schema_key_misconfiguration_fails_at_boot(monkeypatch, tmp_path):
+    """Agent-R11 P2: a colliding schema key must refuse BOOT on both
+    surfaces, not 500 every write with an opaque error."""
+    import mnemostack.server as srv
+
+    monkeypatch.setattr(srv, "get_provider", lambda _n, **_k: _CountingEmbedding())
+    with pytest.raises(ValueError, match="pipeline"):
+        build_app(
+            ServerConfig(provider_name="fake", llm_name="fake", graph_uri=None,
+                         text_key="source")
         )

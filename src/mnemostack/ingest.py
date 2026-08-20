@@ -526,6 +526,36 @@ def expand_remote_items(
     return flat, origins
 
 
+#: Every payload key the ingest pipeline itself writes — a configured
+#: schema key colliding with ANY of these corrupts a downstream step
+#: (text_key="source" overwrites provenance; timestamp_key="tags" feeds a
+#: float to the tag materializer and 500s every timestamped write).
+_PIPELINE_PAYLOAD_KEYS = _PROTECTED_PAYLOAD_KEYS | {"tags", "timestamp", "indexed_at"}
+
+
+def ensure_remote_schema_keys(text_key: str, timestamp_key: str) -> None:
+    """Fail loud on a schema-key configuration the write path cannot honor.
+
+    Called at SERVICE BOOT by both surfaces (a misconfigured deployment
+    must not start and then 500 on every write) and defensively at the
+    ingest boundary for library callers.
+    """
+    if text_key != "text" and text_key in _PIPELINE_PAYLOAD_KEYS:
+        raise ValueError(
+            f"text_key {text_key!r} collides with a payload field the ingest "
+            "pipeline writes"
+        )
+    if timestamp_key != "timestamp" and timestamp_key in _PIPELINE_PAYLOAD_KEYS:
+        raise ValueError(
+            f"timestamp_key {timestamp_key!r} collides with a payload field "
+            "the ingest pipeline writes"
+        )
+    if text_key == timestamp_key and text_key != "text":
+        raise ValueError(
+            "text_key and timestamp_key must differ — one field cannot carry both"
+        )
+
+
 def ingest_remote_items(
     embedding: EmbeddingProvider,
     store: VectorStore,
@@ -562,17 +592,7 @@ def ingest_remote_items(
     Validation (`validate_remote_item`) is the CALLER's obligation — this
     function trusts its items are within caps and clean of reserved keys.
     """
-    # Structural payload fields must never be shadowed by a configured
-    # schema key: text_key="source" would let the mirror overwrite the
-    # provenance field during payload construction (metadata merges last),
-    # corrupting /resolve handles. Loud operator error, not a client 4xx.
-    _forbidden = _PROTECTED_PAYLOAD_KEYS - {"text"}
-    if text_key != "text" and text_key in _forbidden:
-        raise ValueError(f"text_key {text_key!r} collides with a structural payload field")
-    if timestamp_key != "timestamp" and timestamp_key in _PROTECTED_PAYLOAD_KEYS:
-        raise ValueError(
-            f"timestamp_key {timestamp_key!r} collides with a structural payload field"
-        )
+    ensure_remote_schema_keys(text_key, timestamp_key)
     # First remote write on a fresh deployment must not require an operator
     # ingest to have created the collection. Bootstrap runs ONCE per store
     # instance: on a sparse-aware store ensure_collection re-verifies sparse
@@ -713,11 +733,13 @@ def _ingest_remote_items_locked(
     # set). Re-remembering the same fact must make it recallable again —
     # reporting a hidden point as "duplicate" would claim success while
     # default recall stays empty. Reactivate via a payload patch clearing
-    # BOTH markers the invalidate API sets (a surviving valid_until would
-    # still hide the point from as_of queries — "recallable again" must
-    # hold bi-temporally): content is byte-identical, so the stored vector
-    # stays valid — no re-embedding. Duck stores without the hooks keep
-    # the historical duplicate semantics; a failing patch propagates.
+    # ONLY invalidated_at: valid_until is dual-use (the invalidate call
+    # MAY set it, but it is equally legitimate ingest-declared expiry, and
+    # payloads carry no provenance to tell the two apart) — deleting it
+    # would destroy client content, so it is PRESERVED and the as_of
+    # caveat documented instead. Content is byte-identical, so the stored
+    # vector stays valid — no re-embedding. Duck stores without the hooks
+    # keep the historical duplicate semantics; a failing patch propagates.
     reactivated: set[str] = set()
     if existing:
         stale_ids: list[str] = []
@@ -737,9 +759,7 @@ def _ingest_remote_items_locked(
 
             patched = store.apply_payload_patches(
                 [
-                    PayloadPatch(
-                        id=pid, delete_keys=("invalidated_at", "valid_until")
-                    )
+                    PayloadPatch(id=pid, delete_keys=("invalidated_at",))
                     for pid in stale_ids
                 ],
                 **tkw,

@@ -61,6 +61,7 @@ from mnemostack.ingest import (
     IngestItem,
     RemoteRequestTooLarge,
     _parse_iso_timestamp,
+    ensure_remote_schema_keys,
     expand_remote_items,
     ingest_remote_items,
     validate_remote_item,
@@ -771,6 +772,8 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     )
     text_mode = resolve_text_search_mode(cfg.text_search, cfg.bm25_paths)
     ensure_text_fields_mode(text_mode, cfg.text_search_fields)
+    # Fail a schema-key misconfiguration at BOOT, not on every write.
+    ensure_remote_schema_keys(cfg.text_key, cfg.timestamp_key)
     store = VectorStore(
         collection=cfg.collection,
         dimension=provider.dimension,
