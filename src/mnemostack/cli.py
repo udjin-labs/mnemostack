@@ -2231,18 +2231,25 @@ def cmd_answer(args: argparse.Namespace) -> int:
     return 0
 
 
-def _stable_chunk_id(source: str, offset: int, text: str) -> str:
+def _stable_chunk_id(
+    source: str, offset: int, text: str, *, tenant: str | None = None
+) -> str:
     """Deterministic UUID for an (source, offset, text) triple.
 
     Same inputs always produce the same id. That makes `mnemostack index` safe
     to re-run: unchanged chunks upsert onto themselves (no duplicates), and
     edited chunks produce a different id so old content can be cleaned up.
-    """
-    import hashlib
-    import uuid
 
-    digest = hashlib.sha256(f"{source}|{offset}|{text}".encode()).hexdigest()
-    return str(uuid.UUID(digest[:32]))
+    Delegates to the library's :func:`~mnemostack.ingest.stable_chunk_id` so
+    this command, the remote write surface and the markdown indexer all
+    compute the SAME id for the same chunk — including the tenant scoping,
+    without which an operator re-indexing a document a client had POSTed to
+    /memories would create a second, unscoped copy instead of deduplicating
+    onto the tenant's points (`tenant=None` reproduces the historical id).
+    """
+    from .ingest import stable_chunk_id
+
+    return stable_chunk_id(source, offset, text, tenant=tenant)
 
 
 def _normalize_source_filter(sources: list[str] | None) -> set[str] | None:
@@ -2454,6 +2461,11 @@ def _build_recaller(
 
 
 def cmd_index(args: argparse.Namespace) -> int:
+    tenant = getattr(args, "tenant", None)
+    if tenant is not None and not tenant.strip():
+        print("error: --tenant must not be empty", file=sys.stderr)
+        return 2
+    tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
     target = Path(args.path)
     if not target.exists():
         print(f"error: path does not exist: {target}", file=sys.stderr)
@@ -2560,7 +2572,7 @@ def cmd_index(args: argparse.Namespace) -> int:
             from .code import chunk_code
 
             for cc in chunk_code(text, code_language, max_chars=args.chunk_size):
-                cid = _stable_chunk_id(source, cc.offset, cc.text)
+                cid = _stable_chunk_id(source, cc.offset, cc.text, tenant=tenant)
                 payload: dict[str, Any] = {
                     "text": cc.text,
                     "source": source,
@@ -2612,7 +2624,7 @@ def cmd_index(args: argparse.Namespace) -> int:
             if not chunk.strip():
                 continue
             file_chunks.append((i, chunk))
-            cid = _stable_chunk_id(source, i, chunk)
+            cid = _stable_chunk_id(source, i, chunk, tenant=tenant)
             payload = {
                 "text": chunk,
                 "source": source,
@@ -2633,7 +2645,7 @@ def cmd_index(args: argparse.Namespace) -> int:
                 window = file_chunks[start : start + args.window_size]
                 middle_offset, _middle_text = window[args.window_size // 2]
                 chunk = "\n".join(piece for _offset, piece in window)
-                cid = _stable_chunk_id(source, middle_offset, chunk)
+                cid = _stable_chunk_id(source, middle_offset, chunk, tenant=tenant)
                 payload = {
                     "text": chunk,
                     "source": source,
@@ -2675,12 +2687,12 @@ def cmd_index(args: argparse.Namespace) -> int:
     existing_payloads: dict[str, dict] = {}
     if not args.recreate and store.collection_exists():
         if args.refresh_payloads:
-            for hit in store.scroll():
+            for hit in store.scroll(**tkw):
                 pid = str(hit.id)
                 existing_ids.add(pid)
                 existing_payloads[pid] = hit.payload or {}
         else:
-            existing_ids = {str(pid) for pid in store.iter_ids()}
+            existing_ids = {str(pid) for pid in store.iter_ids(**tkw)}
 
     to_embed = [c for c in chunks if c[0] not in existing_ids]
     skipped = len(chunks) - len(to_embed)
@@ -2747,15 +2759,23 @@ def cmd_index(args: argparse.Namespace) -> int:
         if doc_fp is not None:
             for _cid, _vec, payload in embedded:
                 payload[EMBEDDING_SPACE_KEY] = doc_fp
+        if tenant is not None:
+            # Stamped HERE, once, rather than in each chunking branch: a
+            # tenant-scoped id without the payload stamp would be invisible
+            # to tenant-filtered recall and to the tenant lifecycle tools.
+            from .vector.qdrant import TENANT_ID_KEY
+
+            for _cid, _vec, payload in embedded:
+                payload[TENANT_ID_KEY] = tenant
         if embedded:
             # One store round-trip per group where the store supports it —
             # otherwise HTTP overhead just moves from the embedding endpoint
             # to one Qdrant request per point.
             try:
-                store.upsert_batch(embedded)
+                store.upsert_batch(embedded, **tkw)
             except AttributeError:
                 for bcid, bvec, bpayload in embedded:
-                    store.upsert(bcid, bvec, bpayload)
+                    store.upsert(bcid, bvec, bpayload, **tkw)
             inserted += len(embedded)
 
     if inserted:
@@ -2896,7 +2916,7 @@ def cmd_index(args: argparse.Namespace) -> int:
         # a small walk, one root-scoped scroll for a bulk one.
         prune_snapshot = existing_payloads.items() if args.refresh_payloads else None
         pruned = prune_stale_chunks_from_snapshot(
-            store, fresh_by_source, prune_snapshot, index_root=index_root
+            store, fresh_by_source, prune_snapshot, index_root=index_root, **tkw
         )
 
     print(
@@ -3940,6 +3960,18 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
 
     p_index = sub.add_parser("index", parents=[common], help="Index files into vector store")
     p_index.add_argument("path", help="File or directory to index")
+    p_index.add_argument(
+        "--tenant",
+        default=None,
+        metavar="ID",
+        help=(
+            "Index this corpus under a tenant: chunk ids and payloads are "
+            "scoped to it, so the ids match what the same document written "
+            "through the authenticated remote surface produces, and "
+            "--prune/--refresh-payloads manage those points (default: "
+            "unscoped / single-tenant)"
+        ),
+    )
     p_index.add_argument(
         "--chunk-size", type=int, default=cfg.vector.chunk_size, help="Chunk size in chars"
     )
