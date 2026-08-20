@@ -31,13 +31,16 @@ from ..embeddings.roles import EmbeddingSpaceError
 from ..feedback import apply_feedback
 from ..ingest import (
     REMOTE_MAX_DOC_CHARS,
+    REMOTE_MAX_IDS,
     REMOTE_MAX_OFFSET,
     REMOTE_MAX_TEXT_CHARS,
     IngestItem,
     RemoteRequestTooLarge,
+    coerce_point_ids,
     ensure_remote_schema_keys,
     expand_remote_items,
     ingest_remote_items,
+    validate_remote_invalidate,
     validate_remote_item,
     validate_remote_triple,
 )
@@ -804,7 +807,11 @@ def build_server(
     def mnemostack_invalidate(
         ids: Annotated[
             list[str | int],
-            Field(description="Point id(s) to mark stale (string or integer)"),
+            Field(
+                min_length=1,
+                max_length=REMOTE_MAX_IDS,
+                description="Point id(s) to mark stale (string or integer)",
+            ),
         ],
         valid_until: Annotated[
             str | None,
@@ -841,15 +848,32 @@ def build_server(
         requested, and invalidated (the number of points actually updated).
         """
         try:
-            tenant = _tenant_of(_authorize("write"))
-            # Coerce digit-only ids to int so numeric-id Qdrant collections can
-            # be invalidated (UUID strings contain hyphens, so stay strings).
-            coerced = [int(x) if isinstance(x, str) and x.isdigit() else x for x in ids]
+            try:
+                tenant = _tenant_of(_authorize("write"))
+            except _AuthError as e:
+                return {
+                    "ok": False,
+                    "error": str(e),
+                    "error_kind": "unauthorized",
+                    "requested": len(ids),
+                }
+            # Shared with POST /invalidate so both surfaces enforce the
+            # identical contract (ISO timestamps, id shapes, caps).
+            problem = validate_remote_invalidate(
+                ids, invalidated_at, valid_until, index_root
+            )
+            if problem:
+                return {
+                    "ok": False,
+                    "error": problem,
+                    "error_kind": "invalid_argument",
+                    "requested": len(ids),
+                }
             # tenant owner-guard: only pass it when set so a custom store without
             # the parameter (and the single-tenant path) is unaffected.
             tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
             updated = _get_vector_payload_only().invalidate(
-                coerced,
+                coerce_point_ids(ids),
                 invalidated_at=invalidated_at,
                 valid_until=valid_until,
                 index_root=index_root,
@@ -861,7 +885,13 @@ def build_server(
                 "invalidated": updated,
             }
         except Exception as e:  # noqa: BLE001
-            return {"ok": False, "error": str(e), "requested": len(ids)}
+            # error_kind on every failure shape, mirroring mnemostack_remember.
+            return {
+                "ok": False,
+                "error": str(e),
+                "error_kind": "error",
+                "requested": len(ids),
+            }
 
     @mcp.tool()
     def mnemostack_remember(

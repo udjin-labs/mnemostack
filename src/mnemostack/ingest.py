@@ -661,6 +661,87 @@ def validate_remote_triple(
     return None
 
 
+#: Cap for one remote lifecycle request (invalidate / hard delete). Ids are
+#: cheap to validate but every one costs a store round-trip in the ownership
+#: check — bounded like every other remote request.
+REMOTE_MAX_IDS = 256
+#: Qdrant point ids are UUIDs or unsigned 64-bit ints; anything longer than
+#: this is not an id from this system.
+_REMOTE_MAX_ID_CHARS = 128
+_QDRANT_ID_MAX = 2**64 - 1
+
+
+def coerce_point_ids(ids: Sequence[str | int]) -> list[str | int]:
+    """Digit-only string ids become ints so numeric-id collections match.
+
+    Qdrant stores integer ids as integers; a JSON caller often sends them
+    as strings. UUID ids contain hyphens, so they stay strings. Shared by
+    the HTTP lifecycle endpoints and the MCP invalidate tool.
+    """
+    return [int(x) if isinstance(x, str) and x.isdigit() else x for x in ids]
+
+
+def validate_remote_ids(ids: Sequence[Any]) -> str | None:
+    """First violated constraint of a remote id list, or None."""
+    if not isinstance(ids, (list, tuple)) or not ids:
+        return "ids must be a non-empty list"
+    if len(ids) > REMOTE_MAX_IDS:
+        return f"at most {REMOTE_MAX_IDS} ids per request"
+    for i, pid in enumerate(ids):
+        # bool is an int subclass — True would silently target point id 1.
+        if isinstance(pid, bool) or not isinstance(pid, (str, int)):
+            return f"ids[{i}] must be a string or integer"
+        if isinstance(pid, int):
+            if pid < 0 or pid > _QDRANT_ID_MAX:
+                return f"ids[{i}] must fit an unsigned 64-bit point id"
+        else:
+            if not pid.strip():
+                return f"ids[{i}] must be a non-blank string"
+            if len(pid) > _REMOTE_MAX_ID_CHARS:
+                return f"ids[{i}] exceeds {_REMOTE_MAX_ID_CHARS} characters"
+            if not _utf8_encodable(pid):
+                return f"ids[{i}] must be valid UTF-8"
+    return None
+
+
+def validate_remote_invalidate(
+    ids: Sequence[Any],
+    invalidated_at: str | None,
+    valid_until: str | None,
+    index_root: str | None = None,
+) -> str | None:
+    """First violated constraint of one remote invalidate call, or None.
+
+    Shared by POST /invalidate and the MCP mnemostack_invalidate tool so
+    both surfaces enforce the identical contract. The two timestamps live
+    on different axes (system-time vs world-time), so no ordering between
+    them is required.
+    """
+    problem = validate_remote_ids(ids)
+    if problem:
+        return problem
+    for field_name, value in (
+        ("invalidated_at", invalidated_at),
+        ("valid_until", valid_until),
+    ):
+        if value is None:
+            continue
+        if (
+            not isinstance(value, str)
+            or len(value) > REMOTE_MAX_VALIDITY_CHARS
+            or _parse_iso_timestamp(value) is None
+        ):
+            return f"{field_name} must be ISO-8601"
+    if index_root is not None:
+        if not isinstance(index_root, str) or not index_root.strip():
+            # A blank owner guard matches NO owner — every id would be
+            # silently skipped while the response reads like a no-op.
+            return "index_root must be a non-blank string"
+        if not _utf8_encodable(index_root):
+            return "index_root must be valid UTF-8"
+    return None
+
+
 def ensure_remote_schema_keys(text_key: str, timestamp_key: str) -> None:
     """Fail loud on a schema-key configuration the write path cannot honor.
 

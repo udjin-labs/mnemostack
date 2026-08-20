@@ -401,9 +401,10 @@ Validation failures return structured errors:
 
 | Name | Type | Default | Description |
 | --- | --- | --- | --- |
-| `ids` | `array<string>` | Required | Point id(s) to mark stale. |
+| `ids` | `array<string\|integer>` | Required | Point id(s) to mark stale, max 256 per call; digit-only strings are matched as integer ids. |
 | `valid_until` | `string` | `null` | World-time the fact stopped being true (ISO-8601); optional, separate from the system-time invalidation stamp. |
 | `invalidated_at` | `string` | `null` | System-time stamp (ISO-8601); default: now (UTC). |
+| `index_root` | `string` | `null` | Owner guard: when set, points owned by a different `index_root` are skipped, so one root cannot invalidate another's chunks in a shared collection. |
 
 **Return shape:**
 
@@ -415,7 +416,7 @@ Validation failures return structured errors:
 }
 ```
 
-`invalidated` is the number of points actually updated — points that do not exist are skipped, so it may be less than `requested`.
+`invalidated` is the number of points actually updated — ids that do not exist, belong to another tenant, or fail the `index_root` owner guard are skipped indistinguishably (the count is not an existence oracle), so it may be less than `requested`. Every failure carries `error_kind` (`invalid_argument` for contract violations — non-ISO timestamps, malformed ids, over-cap lists — `unauthorized` for key/scope failures, `error` otherwise), matching `mnemostack_remember`. The same contract is served over HTTP as `POST /invalidate`.
 
 **Example usage scenario:** When the agent learns a stored fact is superseded (a preference changed, a project moved), call `mnemostack_invalidate` with the stale result's id; later searches stop returning it, but an `as_of` query can still reconstruct what was believed before.
 

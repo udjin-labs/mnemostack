@@ -850,6 +850,43 @@ def test_mcp_invalidate_passes_index_root(monkeypatch):
     assert vec.kwargs["index_root"] == "/root/A"
 
 
+def test_mcp_invalidate_shared_contract_and_error_kind(monkeypatch):
+    """Lifecycle-surface parity: the tool enforces the same validator as
+    POST /invalidate and reports error_kind on every failure shape."""
+    import mnemostack.mcp.server as srv
+
+    class _RecordingVector:
+        def __init__(self, **_):
+            self.called = False
+
+        def invalidate(self, ids, **_):
+            self.called = True
+            return len(ids)
+
+    vec = _RecordingVector()
+
+    class _FakeEmbedding:
+        dimension = 3
+
+    monkeypatch.setattr(srv, "get_provider", lambda *_a, **_k: _FakeEmbedding())
+    monkeypatch.setattr(srv, "VectorStore", lambda **_: vec)
+    mcp = build_server(collection="test", embedding_provider="ollama")
+
+    bad = asyncio.run(
+        mcp.call_tool(
+            "mnemostack_invalidate", {"ids": ["a"], "valid_until": "garbage"}
+        )
+    ).structured_content
+    assert bad["ok"] is False and bad["error_kind"] == "invalid_argument"
+    assert vec.called is False  # rejected before any store round-trip
+
+    blank = asyncio.run(
+        mcp.call_tool("mnemostack_invalidate", {"ids": ["a"], "index_root": " "})
+    ).structured_content
+    assert blank["ok"] is False and blank["error_kind"] == "invalid_argument"
+    assert vec.called is False
+
+
 # --- service-key auth (multi-tenant) ---
 
 
