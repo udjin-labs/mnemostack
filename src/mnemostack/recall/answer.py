@@ -363,6 +363,13 @@ class Answer:
     #: answer. The retry paths can swap in a freshly recalled pool, so this
     #: may differ from an estimate over the memories the caller passed in.
     context_tokens_estimate: int | None = None
+    #: The memory pool that actually produced the answer — the same pool the
+    #: estimate above measures. After an accepted retry it is the merged
+    #: retry pool, which can contain points the CALLER never saw: a caller
+    #: that accounts for what its memories were used for (access recording)
+    #: needs the pool, not just the estimate. Appended at the tail; Answer
+    #: may be constructed positionally.
+    context_memories: list[RecallResult] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -643,9 +650,18 @@ class AnswerGenerator:
         # sets the estimate itself; every other path (including extraction's
         # single-prompt fallback) prompts over at most max_memories.
         if answer.context_tokens_estimate is None:
-            answer.context_tokens_estimate = sum_tokens(
-                specificity_memories[: self.max_memories], token_counter
-            )
+            # Single-prompt paths: only this slice ever reached the LLM. The
+            # retry paths return the WHOLE merged pool, but prompt over
+            # `[:max_memories]` — reporting the rest would name memories
+            # nothing read.
+            prompted = specificity_memories[: self.max_memories]
+            answer.context_tokens_estimate = sum_tokens(prompted, token_counter)
+            if not answer.context_memories:
+                answer.context_memories = list(prompted)
+        elif not answer.context_memories:
+            # Extraction set the estimate itself because it walked the FULL
+            # pool in batches; there the whole pool really was read.
+            answer.context_memories = list(specificity_memories)
         return answer
 
     async def generate_async(

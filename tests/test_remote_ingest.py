@@ -243,7 +243,7 @@ def test_remote_ingest_quota_never_splits_a_multi_flush_request():
 # ------------------------------------------------------------- HTTP surface
 
 
-def _ingest_app(monkeypatch, tmp_path, *, auth=True, quotas=None, cfg_extra=None):
+def _ingest_app(monkeypatch, tmp_path, *, auth=True, quotas=None, cfg_extra=None, llm=None):
     """Build the app with real ingest wiring (in-memory store + counting
     embedder) and the recall layers stubbed out."""
     import mnemostack.server as srv
@@ -269,7 +269,11 @@ def _ingest_app(monkeypatch, tmp_path, *, auth=True, quotas=None, cfg_extra=None
     def _no_llm(*_a, **_k):
         raise RuntimeError("no llm")
 
-    monkeypatch.setattr(srv, "get_llm", _no_llm)
+    # Default: no LLM at all, so /answer is a 503 and nothing here pays for
+    # a generator. A test that needs the answer path passes one in — the
+    # generator is resolved ONCE at build time, so it cannot be patched in
+    # afterwards.
+    monkeypatch.setattr(srv, "get_llm", (lambda *_a, **_k: llm) if llm else _no_llm)
 
     keys = {}
     cfg_kw = {}

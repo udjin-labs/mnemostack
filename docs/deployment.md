@@ -1081,6 +1081,7 @@ Symptoms:
 
 - `/feedback` fails;
 - `--auto-record-ior` requests fail or log write errors;
+- `mnemostack_access_record_failed_total` grows under `--record-access` (the reinforcement write is failing; recall itself is unaffected — it is fail-open by contract);
 - state file remains empty or missing.
 
 Fix:

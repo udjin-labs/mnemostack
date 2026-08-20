@@ -4356,6 +4356,15 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         help="Record returned recall ids for inhibition-of-return state",
     )
     p_serve.add_argument(
+        "--record-access",
+        action="store_true",
+        help=(
+            "Stamp access_count/last_accessed on every point a recall returns "
+            "(reinforcement for the freshness stage). Turns reads into writes; "
+            "best-effort and fail-open. Env: MNEMOSTACK_RECORD_ACCESS"
+        ),
+    )
+    p_serve.add_argument(
         "--auth",
         action="store_true",
         help=(
@@ -4503,6 +4512,11 @@ def cmd_serve(args: argparse.Namespace) -> int:
         token_budget=_effective_token_budget(args),
         state_path=args.state_path,
         auto_record_ior=args.auto_record_ior,
+        # getattr, like quotas_file above: cmd_serve is called with
+        # hand-built namespaces (tests, embedders) that predate each new flag.
+        record_access=(
+            getattr(args, "record_access", False) or _env_bool("MNEMOSTACK_RECORD_ACCESS")
+        ),
         # Honor MNEMOSTACK_AUTH_ENABLED too: cmd_serve builds ServerConfig
         # explicitly (never from_env), so without this the documented env toggle
         # would silently leave the endpoints unauthenticated.
@@ -4537,6 +4551,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     print(f"  memgraph:   {cfg.graph_uri}")
     print(f"  state:      {cfg.state_path}")
     print(f"  auto IoR:   {cfg.auto_record_ior}")
+    print(f"  access rec: {cfg.record_access}")
     print(f"  docs:       http://{args.host}:{args.port}/docs")
     uvicorn.run(app, host=args.host, port=args.port, reload=args.reload)
     return 0
