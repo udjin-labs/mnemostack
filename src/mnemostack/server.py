@@ -69,6 +69,7 @@ from mnemostack.ingest import (
     expand_remote_items,
     find_source_points,
     ingest_remote_items,
+    validate_invalidate_options,
     validate_remote_invalidate,
     validate_remote_item,
     validate_remote_source,
@@ -1826,8 +1827,10 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         source snapshot written at ingest; points stored before that
         feature return null.
 
-        Pages are ordered by id; pass the last id back as `after`. Under
-        `--auth` only the key's tenant is visible.
+        Pagination follows the store's own iteration order and `after`
+        is an opaque cursor: pass back the last id you received. A page
+        costs the page, not a full scan of the source. Under `--auth`
+        only the key's tenant is visible.
         """
         problem = validate_remote_source(source)
         if problem:
@@ -1840,30 +1843,27 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         try:
             if not store.collection_exists():
                 return MemoryListResponse(items=[], complete=True)
-            ids, payloads, _more = find_source_points(
-                store, source, tenant=tenant, limit=None
+            ids, payloads, more = find_source_points(
+                store,
+                source,
+                tenant=tenant,
+                limit=limit,
+                start_after=after,
             )
         except Exception as exc:
             log.exception("list memories failed")
             raise HTTPException(status_code=500, detail="listing failed") from exc
-        rows = sorted(
-            (
-                MemoryListItem(
-                    id=str(pid),
-                    content_hash=payload.get(SOURCE_HASH_KEY),
-                    timestamp=payload.get(cfg.timestamp_key)
-                    or payload.get("timestamp"),
-                    indexed_at=payload.get("indexed_at"),
-                )
-                for pid, payload in zip(ids, payloads, strict=True)
-            ),
-            key=lambda r: r.id,
-        )
-        if after is not None:
-            rows = [r for r in rows if r.id > after]
-        page = rows[:limit]
+        page = [
+            MemoryListItem(
+                id=str(pid),
+                content_hash=payload.get(SOURCE_HASH_KEY),
+                timestamp=payload.get(cfg.timestamp_key) or payload.get("timestamp"),
+                indexed_at=payload.get("indexed_at"),
+            )
+            for pid, payload in zip(ids, payloads, strict=True)
+        ]
         counter("mnemostack.server.list_memories", len(page))
-        return MemoryListResponse(items=page, complete=len(page) == len(rows))
+        return MemoryListResponse(items=page, complete=not more)
 
     @app.post("/invalidate", response_model=InvalidateResponse)
     def invalidate_endpoint(req: InvalidateRequest, principal=Depends(_require("write"))):  # noqa: B008 — FastAPI DI pattern
@@ -1885,11 +1885,14 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         """
         problem = _selector_problem(req.ids, req.source)
         if problem is None:
-            problem = validate_remote_invalidate(
-                req.ids if req.ids is not None else ["0"],
-                req.invalidated_at,
-                req.valid_until,
-                req.index_root,
+            problem = (
+                validate_remote_invalidate(
+                    req.ids, req.invalidated_at, req.valid_until, req.index_root
+                )
+                if req.ids is not None
+                else validate_invalidate_options(
+                    req.invalidated_at, req.valid_until, req.index_root
+                )
             )
         if problem:
             raise HTTPException(status_code=400, detail=problem)
@@ -1914,6 +1917,9 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                     tenant=tenant,
                     index_root=req.index_root,
                     limit=REMOTE_SOURCE_BATCH,
+                    # Without this the next call re-selects the same first
+                    # batch forever: an invalidated point keeps its source.
+                    skip_invalidated=True,
                 )
                 complete = not more
                 requested = len(ids)
@@ -1965,8 +1971,10 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         """
         problem = _selector_problem(req.ids, req.source)
         if problem is None:
-            problem = validate_remote_invalidate(
-                req.ids if req.ids is not None else ["0"], None, None, req.index_root
+            problem = (
+                validate_remote_invalidate(req.ids, None, None, req.index_root)
+                if req.ids is not None
+                else validate_invalidate_options(None, None, req.index_root)
             )
         if problem:
             raise HTTPException(status_code=400, detail=problem)

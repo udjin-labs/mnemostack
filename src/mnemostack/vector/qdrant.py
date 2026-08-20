@@ -232,6 +232,12 @@ class VectorStore:
             # read, so in a large shared collection a small-tenant search/count
             # would otherwise degrade to collection-wide filtered work.
             self.index_payload_field(TENANT_ID_KEY, PayloadSchemaType.KEYWORD)
+            # Index source for the same reason: source-scoped lifecycle
+            # (retract/erase everything from one document) and the
+            # reconciliation listing filter on it, and an unindexed filter
+            # is a collection scan per call — the "one request that runs
+            # for minutes" those endpoints exist to avoid.
+            self.index_payload_field("source", PayloadSchemaType.KEYWORD)
             return True
         self._validate_dimension()
         if sparse_cfg is not None:
@@ -571,6 +577,7 @@ class VectorStore:
         *,
         tenant: str | None = None,
         hide_invalidated: bool = False,
+        start_after: Any = None,
     ):
         """Iterate over points in the collection lazily.
 
@@ -591,7 +598,11 @@ class VectorStore:
         if hide_invalidated:
             must.append(_hide_invalidated_condition())
         qfilter = Filter(must=must) if must else None
-        next_offset: Any = None
+        # start_after resumes the store's own iteration order from a point
+        # id, so a paginated reader pays for its page instead of re-walking
+        # everything it has already seen.
+        next_offset: Any = start_after
+        first = True
         while True:
             points, next_offset = self.client.scroll(
                 collection_name=self.collection,
@@ -601,6 +612,11 @@ class VectorStore:
                 with_vectors=with_vectors,
                 scroll_filter=qfilter,
             )
+            if first and start_after is not None:
+                # Qdrant's offset is inclusive; the caller asked for what
+                # comes AFTER that id.
+                points = [pt for pt in points if str(pt.id) != str(start_after)]
+                first = False
             if not points:
                 break
             for pt in points:

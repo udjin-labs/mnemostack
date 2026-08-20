@@ -6,10 +6,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [Unreleased]
-
-### Added
-
 - **Source-scoped retraction and a reconciliation listing — `source` on `POST /invalidate` and `DELETE /memories`, plus `GET /memories?source=…`**: the lifecycle surface only accepted explicit id lists, but the operation every client actually performs is "this file was rewritten (or this session reset) — forget what came from it", and there was no way to obtain those ids from the service. Both endpoints now take exactly one selector, `ids` or `source`; a source-scoped call is tenant-guarded and `index_root`-guarded like the id path, processes a bounded batch, and reports `complete: false` when more remain so the caller repeats until done (an unbounded delete-by-filter is one request that can run for minutes and cannot be metered). Matches are re-validated against each point's payload before anything is touched — the store's value match also matches an array payload containing the value, so a chunk whose `source` is `["a.md", "b.md"]` is not part of `source: "a.md"`. The new `read`-scoped listing returns `{id, content_hash, timestamp, indexed_at}` per point (ordered by id, `after`/`limit` pagination) and deliberately **no memory text**: it exists so a client can detect that its state and the service's have diverged — the failure mode where files silently never get re-indexed — without becoming a second read channel for memory content. `content_hash` is the source snapshot written at ingest; points stored before that feature return `null`.
 
 ## [2.2.0] - 2026-08-20

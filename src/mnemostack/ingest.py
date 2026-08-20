@@ -779,6 +779,8 @@ def find_source_points(
     tenant: str | None = None,
     index_root: str | None = None,
     limit: int | None = REMOTE_SOURCE_BATCH,
+    skip_invalidated: bool = False,
+    start_after: Any = None,
 ) -> tuple[list[Any], list[dict[str, Any]], bool]:
     """Ids and payloads of one source's points, plus whether more remain.
 
@@ -788,15 +790,30 @@ def find_source_points(
     ``source="a.md"``. Every candidate is re-validated in Python before
     it can be invalidated or deleted (the same rule the prune path has
     followed since the selective-prune fix).
+
+    ``skip_invalidated`` is what makes a batched RETRACTION terminate:
+    an invalidated point keeps its source, so without excluding it the
+    next call re-selects the same first batch forever and the tail of a
+    large document is never reached. Deletion needs no such flag — a
+    deleted point cannot come back.
+
+    ``start_after`` resumes the store's iteration order after a point id,
+    so a paginated reader does not re-walk what it already returned.
     """
     scroll = getattr(store, "scroll", None)
     if not callable(scroll):
         return [], [], False
-    tkw = {"tenant": tenant} if tenant is not None else {}
+    kwargs: dict[str, Any] = {}
+    if tenant is not None:
+        kwargs["tenant"] = tenant
+    if skip_invalidated:
+        kwargs["hide_invalidated"] = True
+    if start_after is not None:
+        kwargs["start_after"] = start_after
     ids: list[Any] = []
     payloads: list[dict[str, Any]] = []
     more = False
-    for hit in scroll(filters={"source": source}, **tkw):
+    for hit in scroll(filters={"source": source}, **kwargs):
         payload = dict(getattr(hit, "payload", None) or {})
         if payload.get("source") != source:
             continue  # array/partial match — not this source
@@ -813,22 +830,14 @@ def find_source_points(
     return ids, payloads, more
 
 
-def validate_remote_invalidate(
-    ids: Sequence[Any],
+def validate_invalidate_options(
     invalidated_at: str | None,
     valid_until: str | None,
     index_root: str | None = None,
 ) -> str | None:
-    """First violated constraint of one remote invalidate call, or None.
-
-    Shared by POST /invalidate and the MCP mnemostack_invalidate tool so
-    both surfaces enforce the identical contract. The two timestamps live
-    on different axes (system-time vs world-time), so no ordering between
-    them is required.
-    """
-    problem = validate_remote_ids(ids)
-    if problem:
-        return problem
+    """The non-id constraints of a lifecycle call (timestamps, owner
+    guard) — shared by the id path and the source path, which has no ids
+    to validate and must not have to invent one."""
     for field_name, value in (
         ("invalidated_at", invalidated_at),
         ("valid_until", valid_until),
@@ -847,12 +856,29 @@ def validate_remote_invalidate(
             # silently skipped while the response reads like a no-op.
             return "index_root must be a non-blank string"
         if len(index_root) > REMOTE_MAX_INDEX_ROOT_CHARS:
-            # Same bound as the HTTP models — the MCP surface relies
-            # solely on this validator for the cap.
             return f"index_root exceeds {REMOTE_MAX_INDEX_ROOT_CHARS} characters"
         if not _utf8_encodable(index_root):
             return "index_root must be valid UTF-8"
     return None
+
+
+def validate_remote_invalidate(
+    ids: Sequence[Any],
+    invalidated_at: str | None,
+    valid_until: str | None,
+    index_root: str | None = None,
+) -> str | None:
+    """First violated constraint of one remote invalidate call, or None.
+
+    Shared by POST /invalidate and the MCP mnemostack_invalidate tool so
+    both surfaces enforce the identical contract. The two timestamps live
+    on different axes (system-time vs world-time), so no ordering between
+    them is required.
+    """
+    problem = validate_remote_ids(ids)
+    if problem:
+        return problem
+    return validate_invalidate_options(invalidated_at, valid_until, index_root)
 
 
 def ensure_remote_schema_keys(text_key: str, timestamp_key: str) -> None:

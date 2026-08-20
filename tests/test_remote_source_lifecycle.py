@@ -264,3 +264,85 @@ def test_finder_is_a_pure_helper_without_a_scroll_hook():
 
     assert find_source_points(_NoScroll(), "a.md") == ([], [], False)
     assert REMOTE_SOURCE_BATCH > 0
+
+
+def test_batched_source_invalidate_reaches_the_tail(monkeypatch, tmp_path):
+    """R1 (codex P1): an invalidated point keeps its source, so without
+    excluding it the next call re-selects the same first batch forever
+    and a document larger than one batch is never fully retracted."""
+    import mnemostack.server as srv
+
+    app, store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
+    client = TestClient(app)
+    hdr = {"X-API-Key": keys["write"]}
+    ids = _store_items(
+        client,
+        keys["write"],
+        [
+            {"text": f"tail chunk {i} of the doc", "source": "long.md", "offset": i}
+            for i in range(5)
+        ],
+    )
+    monkeypatch.setattr(srv, "REMOTE_SOURCE_BATCH", 2)
+    calls = 0
+    while True:
+        body = client.post("/invalidate", json={"source": "long.md"}, headers=hdr).json()
+        calls += 1
+        assert calls <= 6, "batches are not making progress"
+        if body["complete"]:
+            break
+    for pid in ids:  # every point, not just the first batch
+        point = store.client.retrieve(store.collection, ids=[pid], with_payload=True)[0]
+        assert point.payload.get("invalidated_at"), pid
+    # A finished retraction reports complete immediately, with nothing left.
+    body = client.post("/invalidate", json={"source": "long.md"}, headers=hdr).json()
+    assert body == {"requested": 0, "invalidated": 0, "complete": True}
+
+
+def test_listing_page_costs_the_page_not_the_source(monkeypatch, tmp_path):
+    """R1 (codex P2): every page used to scan the whole source and sort it
+    before slicing. Cost must follow the page, not the source — checked
+    with a source larger than one store batch, or the two are
+    indistinguishable."""
+    app, store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
+    client = TestClient(app)
+    total = 400
+    for start in range(0, total, 50):
+        _store_items(
+            client,
+            keys["write"],
+            [
+                {"text": f"scanned chunk {i}", "source": "wide.md", "offset": i}
+                for i in range(start, start + 50)
+            ],
+        )
+    seen_points = 0
+    orig_scroll = store.client.scroll
+
+    def _counting(*a, **kw):
+        nonlocal seen_points
+        points, offset = orig_scroll(*a, **kw)
+        seen_points += len(points)
+        return points, offset
+
+    store.client.scroll = _counting  # type: ignore[method-assign]
+    hdr = {"X-API-Key": keys["read"]}
+    body = client.get(
+        "/memories", params={"source": "wide.md", "limit": 3}, headers=hdr
+    ).json()
+    assert len(body["items"]) == 3 and body["complete"] is False
+    first_page_cost = seen_points
+    assert first_page_cost < total, first_page_cost  # not a full scan
+
+    # The next page resumes instead of re-walking what was returned.
+    seen_points = 0
+    body2 = client.get(
+        "/memories",
+        params={"source": "wide.md", "limit": 3, "after": body["items"][-1]["id"]},
+        headers=hdr,
+    ).json()
+    assert len(body2["items"]) == 3
+    assert {r["id"] for r in body2["items"]}.isdisjoint(
+        {r["id"] for r in body["items"]}
+    )
+    assert seen_points < total, seen_points
