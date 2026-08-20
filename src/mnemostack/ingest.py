@@ -303,24 +303,38 @@ def reserved_metadata_keys(metadata: dict[str, Any]) -> list[str]:
     return sorted(bad)
 
 
-#: Qdrant's integer payload domain is int64; Python/JSON integers beyond it
-#: would embed first and only fail (or silently lose precision) at upsert.
+#: Qdrant's integer payload domain is signed int64 — an ASYMMETRIC range:
+#: [-2**63, 2**63-1]. Python/JSON integers beyond it would embed first and
+#: only fail (or silently lose precision) at upsert.
+_STORE_INT_MIN = -(2**63)
 _STORE_INT_MAX = 2**63 - 1
 
+#: Nesting ceiling for the metadata walk: a few kilobytes of pathologically
+#: nested lists would otherwise blow Python's recursion limit inside the
+#: VALIDATOR itself — an uncaught 500 instead of a clean rejection. Real
+#: payload metadata is a handful of levels; 32 is generous.
+_METADATA_MAX_DEPTH = 32
 
-def _find_unrepresentable_number(value: Any, path: str = "metadata") -> str | None:
+
+def _find_unrepresentable_number(
+    value: Any, path: str = "metadata", depth: int = 0
+) -> str | None:
     """First metadata number the store cannot represent, or None.
 
-    Walks nested dicts/lists. Rejects integers outside int64 and non-finite
-    floats (json.dumps emits NaN/Infinity by default — invalid JSON for the
-    store and undefined for range filters).
+    Walks nested dicts/lists with a hard depth ceiling (the walk must never
+    be the thing that crashes on caller-shaped input). Rejects integers
+    outside signed int64 and non-finite floats (json.dumps emits
+    NaN/Infinity by default — invalid JSON for the store and undefined for
+    range filters).
     """
     import math
 
+    if depth > _METADATA_MAX_DEPTH:
+        return f"{path} exceeds {_METADATA_MAX_DEPTH} nesting levels"
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
-        if abs(value) > _STORE_INT_MAX:
+        if value < _STORE_INT_MIN or value > _STORE_INT_MAX:
             return f"{path} integer exceeds the store's 64-bit domain"
         return None
     if isinstance(value, float):
@@ -329,13 +343,13 @@ def _find_unrepresentable_number(value: Any, path: str = "metadata") -> str | No
         return None
     if isinstance(value, dict):
         for k, v in value.items():
-            found = _find_unrepresentable_number(v, f"{path}.{k}")
+            found = _find_unrepresentable_number(v, f"{path}.{k}", depth + 1)
             if found:
                 return found
         return None
     if isinstance(value, list):
         for i, v in enumerate(value):
-            found = _find_unrepresentable_number(v, f"{path}[{i}]")
+            found = _find_unrepresentable_number(v, f"{path}[{i}]", depth + 1)
             if found:
                 return found
         return None
@@ -688,6 +702,9 @@ def _ingest_remote_items_locked(
         # treat the schema field as stale enrichment and delete it, blanking
         # recall for deployments with a custom text_key.
         if text_key != "text":
+            # Server-injected structural field: deliberately OUTSIDE the
+            # client metadata caps (those bound caller-controlled data; the
+            # mirror is server-owned and bounded by the text caps).
             for item in to_ingest:
                 item.metadata[text_key] = item.text
         _apply_timestamp_domain(to_ingest, timestamp_key, timestamp_format)

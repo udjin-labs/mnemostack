@@ -1114,3 +1114,34 @@ def test_schema_mirror_is_structural_not_enrichment():
     point = store.client.retrieve(store.collection, ids=[res.id], with_payload=True)[0]
     assert point.payload["content"] == "hello"
     assert "_enrich_keys" not in point.payload  # structural, not enrichment
+
+
+# --------------------------------------------------- round-8 review batch pins
+
+
+def test_metadata_nesting_depth_is_bounded(monkeypatch, tmp_path):
+    """Agent-R8 P1: a few KB of pathologically nested lists must be a clean
+    400, never a RecursionError-turned-500 inside the validator itself."""
+    deep: list = []
+    cursor = deep
+    for _ in range(3000):
+        nxt: list = []
+        cursor.append(nxt)
+        cursor = nxt
+    assert "nesting" in validate_remote_item("t", "s", None, [], {"a": deep})
+    app, _store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
+    r = TestClient(app).post(
+        "/memories",
+        json={"items": [{"text": "x", "metadata": {"a": deep}}]},
+        headers={"X-API-Key": keys["write"]},
+    )
+    assert r.status_code == 400 and "nesting" in r.json()["detail"]
+
+
+def test_int64_bounds_are_asymmetric():
+    """Codex-R8: signed int64 is [-2^63, 2^63-1] — both exact boundaries are
+    valid store values; one past either edge is not."""
+    assert validate_remote_item("t", "s", None, [], {"n": -(2**63)}) is None
+    assert validate_remote_item("t", "s", None, [], {"n": 2**63 - 1}) is None
+    assert "64-bit" in validate_remote_item("t", "s", None, [], {"n": -(2**63) - 1})
+    assert "64-bit" in validate_remote_item("t", "s", None, [], {"n": 2**63})
