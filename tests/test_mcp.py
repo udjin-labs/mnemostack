@@ -1319,3 +1319,36 @@ def test_mcp_graph_add_triple_shares_the_remote_contract(tmp_path, monkeypatch):
         )
     ).structured_content
     assert ok["ok"] is True and added[-1]["predicate"] == "works_on"
+
+
+def test_mcp_graph_add_triple_caps_and_unicode(tmp_path, monkeypatch):
+    """R17 pins: MCP triple writes are capped like HTTP (512-char entities)
+    via the SHARED validator, and non-ASCII-letter predicates are legal —
+    the store's sanitizer keeps them losslessly."""
+    import mnemostack.graph.factory as gf
+
+    added: list = []
+
+    class _G:
+        def add_triple(self, **kw):
+            added.append(kw)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(gf, "make_graph_store", lambda *a, **k: _G())
+    mcp = _auth_mcp(tmp_path, monkeypatch, tenant="acme", scopes="admin", memgraph="bolt://x")
+    big = asyncio.run(
+        mcp.call_tool(
+            "mnemostack_graph_add_triple",
+            {"subject": "a", "predicate": "P" * 600, "obj": "b"},
+        )
+    ).structured_content
+    assert big["ok"] is False and big["error_kind"] == "invalid_argument"
+    uni = asyncio.run(
+        mcp.call_tool(
+            "mnemostack_graph_add_triple",
+            {"subject": "компания", "predicate": "работает_в", "obj": "офис"},
+        )
+    ).structured_content
+    assert uni["ok"] is True and added[-1]["predicate"] == "работает_в"

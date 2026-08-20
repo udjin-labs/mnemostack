@@ -1160,7 +1160,10 @@ def build_server(
                 # Structured write — stamp the caller's tenant so the triple lands
                 # in that tenant's isolated subgraph (its nodes/edges carry
                 # `tenant`), never a shared namespace. Unscoped when auth is off.
-                tenant = _tenant_of(_authorize("write"))
+                try:
+                    tenant = _tenant_of(_authorize("write"))
+                except _AuthError as e:
+                    return {"ok": False, "error": str(e), "error_kind": "unauthorized"}
                 # Same contract as POST /triples (shared validator): predicate
                 # shape (punctuation variants would silently collapse into one
                 # relationship type), UTF-8 entities, ordered validity bounds.
@@ -1189,7 +1192,8 @@ def build_server(
                 gs.close()
                 return {"ok": True, "subject": subject, "predicate": predicate, "obj": obj}
             except Exception as e:  # noqa: BLE001
-                return {"ok": False, "error": str(e)}
+                # error_kind on every failure shape, mirroring remember.
+                return {"ok": False, "error": str(e), "error_kind": "error"}
 
     return mcp
 

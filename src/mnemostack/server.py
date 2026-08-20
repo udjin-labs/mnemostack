@@ -1032,7 +1032,11 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         if isinstance(value, str):
             return value.encode("utf-8", "replace").decode("utf-8")
         if isinstance(value, dict):
-            return {k: _strip_surrogates(v) for k, v in value.items()}
+            # KEYS too: a surrogate metadata key echoed into the error body
+            # would crash the response encoder exactly like a value.
+            return {
+                _strip_surrogates(k): _strip_surrogates(v) for k, v in value.items()
+            }
         if isinstance(value, list):
             return [_strip_surrogates(v) for v in value]
         return value
