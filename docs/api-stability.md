@@ -86,8 +86,9 @@ this is purely additive. See [Multi-tenancy & authentication](#multi-tenancy--au
   `--burst`) — in a per-tenant quota store (`--quotas-file` /
   `MNEMOSTACK_QUOTAS_FILE`, default `~/.config/mnemostack/quotas.json`). `quota set`
   is a **partial update** (only the fields you pass change; `none` clears one). The
-  storage cap is enforced at ingest — `index-markdown --tenant <id>` (and the
-  library `Ingestor(max_points=)`) refuse a write that would exceed it. The rate
+  storage cap is enforced at ingest — `index-markdown --tenant <id>`, `index
+  --tenant <id>` (and the library `Ingestor(max_points=)`) refuse a write that
+  would exceed it. The rate
   cap is enforced at the authenticated HTTP surface — `serve --auth` returns **429**
   (with `Retry-After`) when a tenant exceeds its `max_rps` (a per-process token
   bucket; see [Multi-tenancy & authentication](#multi-tenancy--authentication)). A

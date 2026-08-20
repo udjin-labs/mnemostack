@@ -66,10 +66,10 @@ def test_lifecycle_on_fresh_deployment_is_empty_not_500(monkeypatch, tmp_path):
     pid = "d9428888-122b-11e1-b85c-61cd3cbb3210"
     r = client.post("/invalidate", json={"ids": [pid]}, headers=hdr)
     assert r.status_code == 200
-    assert r.json() == {"requested": 1, "invalidated": 0}
+    assert r.json() == {"requested": 1, "invalidated": 0, "complete": True}
     r = client.request("DELETE", "/memories", json={"ids": [pid]}, headers=hdr)
     assert r.status_code == 200
-    assert r.json() == {"requested": 1, "deleted": 0}
+    assert r.json() == {"requested": 1, "deleted": 0, "complete": True}
     # UUIDs canonicalize to lowercase — the store compares ids as
     # case-sensitive strings, so an uppercase spelling would no-op.
     assert coerce_point_ids(["D9428888-122B-11E1-B85C-61CD3CBB3210"]) == [
@@ -155,7 +155,7 @@ def test_invalidate_marks_own_point_stale(monkeypatch, tmp_path):
         headers={"X-API-Key": keys["write"]},
     )
     assert r.status_code == 200
-    assert r.json() == {"requested": 1, "invalidated": 1}
+    assert r.json() == {"requested": 1, "invalidated": 1, "complete": True}
     point = store.client.retrieve(store.collection, ids=[pid], with_payload=True)[0]
     assert point.payload.get("invalidated_at")
     assert point.payload.get("valid_until") == "2026-01-01"
@@ -170,7 +170,7 @@ def test_invalidate_never_touches_foreign_tenant(monkeypatch, tmp_path):
     )
     assert r.status_code == 200
     # Skipped indistinguishably from a missing id — no existence oracle.
-    assert r.json() == {"requested": 1, "invalidated": 0}
+    assert r.json() == {"requested": 1, "invalidated": 0, "complete": True}
     point = store.client.retrieve(store.collection, ids=[pid], with_payload=True)[0]
     assert "invalidated_at" not in (point.payload or {})
 
@@ -257,7 +257,7 @@ def test_delete_removes_own_point(monkeypatch, tmp_path):
         "DELETE", "/memories", json={"ids": [pid]}, headers={"X-API-Key": keys["write"]}
     )
     assert r.status_code == 200
-    assert r.json() == {"requested": 1, "deleted": 1}
+    assert r.json() == {"requested": 1, "deleted": 1, "complete": True}
     assert store.client.retrieve(store.collection, ids=[pid], with_payload=True) == []
     # Idempotent retry: already gone.
     r = client.request(
@@ -277,7 +277,7 @@ def test_delete_never_touches_foreign_tenant(monkeypatch, tmp_path):
         headers={"X-API-Key": keys["beta_write"]},
     )
     assert r.status_code == 200
-    assert r.json() == {"requested": 1, "deleted": 0}  # no oracle, no effect
+    assert r.json() == {"requested": 1, "deleted": 0, "complete": True}  # no oracle, no effect
     assert len(store.client.retrieve(store.collection, ids=[pid], with_payload=True)) == 1
 
 
@@ -371,11 +371,11 @@ def test_duplicate_ids_count_once(monkeypatch, tmp_path):
     hdr = {"X-API-Key": keys["write"]}
     pid = _stored_id(client, keys["write"])
     r = client.post("/invalidate", json={"ids": [pid, pid]}, headers=hdr)
-    assert r.json() == {"requested": 2, "invalidated": 1}
+    assert r.json() == {"requested": 2, "invalidated": 1, "complete": True}
     r = client.request(
         "DELETE", "/memories", json={"ids": [pid, pid]}, headers=hdr
     )
-    assert r.json() == {"requested": 2, "deleted": 1}
+    assert r.json() == {"requested": 2, "deleted": 1, "complete": True}
 
 
 def test_unscoped_delete_counts_actual_removals(monkeypatch, tmp_path):
@@ -390,7 +390,7 @@ def test_unscoped_delete_counts_actual_removals(monkeypatch, tmp_path):
     missing = "00000000-0000-0000-0000-000000000000"
     r = client.request("DELETE", "/memories", json={"ids": [pid, pid, missing]})
     assert r.status_code == 200
-    assert r.json() == {"requested": 3, "deleted": 1}
+    assert r.json() == {"requested": 3, "deleted": 1, "complete": True}
     # Retry: everything already gone.
     r = client.request("DELETE", "/memories", json={"ids": [pid]})
     assert r.json()["deleted"] == 0
@@ -417,7 +417,7 @@ def test_delete_respects_index_root_guard(monkeypatch, tmp_path):
     )
     assert r.status_code == 200
     # Foreign-root point survives; the untagged one is NOT protected.
-    assert r.json() == {"requested": 2, "deleted": 1}
+    assert r.json() == {"requested": 2, "deleted": 1, "complete": True}
     assert len(store.client.retrieve(store.collection, ids=[owned], with_payload=True)) == 1
     assert store.client.retrieve(store.collection, ids=[untagged], with_payload=True) == []
     r = client.request(
