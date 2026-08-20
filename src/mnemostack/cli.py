@@ -2716,6 +2716,33 @@ def cmd_index(args: argparse.Namespace) -> int:
     to_embed = [c for c in chunks if c[0] not in existing_ids]
     skipped = len(chunks) - len(to_embed)
 
+    if tenant is not None and to_embed:
+        # The same storage cap the markdown indexer and the remote write
+        # surface enforce: without it this path was the one way to blow past
+        # `mnemostack quota set` arbitrarily. `to_embed` is exactly the growth
+        # — a chunk whose id already exists re-upserts onto itself.
+        #
+        # Checked BEFORE embedding, so a rejected run costs no provider calls
+        # and writes nothing. That earliness is also why the check is GROSS,
+        # not net: unlike the markdown sync (which buffers the whole batch and
+        # checks after embedding), this path streams batch-by-batch to keep a
+        # large corpus at constant memory, and `--prune` only runs after the
+        # upserts — so the collection really does hold current+inserted points
+        # before anything is removed. A `--prune` re-index of an edited corpus
+        # by a tenant at its cap is therefore refused even when it is
+        # net-neutral; raise the cap for the run, or prune first.
+        from .quotas import QuotaExceededError, enforce_points_quota
+
+        max_points = _resolve_max_points(args, tenant)
+        if max_points is not None:
+            try:
+                enforce_points_quota(
+                    tenant, store.count(tenant=tenant), len(to_embed), max_points
+                )
+            except QuotaExceededError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+
     print(
         f"Indexing {len(chunks)} chunks from {len(files)} file(s)"
         f" — {len(to_embed)} new, {skipped} already indexed (skipped)."
@@ -3979,6 +4006,7 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
 
     p_index = sub.add_parser("index", parents=[common], help="Index files into vector store")
     p_index.add_argument("path", help="File or directory to index")
+    p_index.add_argument("--quotas-file", default=None, help=_quotas_file_help)
     p_index.add_argument(
         "--tenant",
         default=None,

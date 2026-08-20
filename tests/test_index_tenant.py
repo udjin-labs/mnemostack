@@ -23,7 +23,11 @@ from mnemostack.vector.qdrant import TENANT_ID_KEY
 class _FakeEmbedding:
     dimension = 3
 
+    def __init__(self) -> None:
+        self.embedded = 0
+
     def embed(self, text: str) -> list[float]:
+        self.embedded += 1
         h = abs(hash(text))
         return [(h % 97) / 97.0, (h % 89) / 89.0, 1.0]
 
@@ -175,6 +179,52 @@ def test_recreate_is_refused_under_a_tenant(indexer, tmp_path):
     args.recreate = True
     assert cli.cmd_index(args) == 2  # refused, not executed
     assert {str(pid) for pid in store.iter_ids()} == before  # nothing dropped
+
+
+def _quota_file(tmp_path: Path, tenant: str, max_points: int) -> str:
+    from mnemostack.quotas import FileQuotaStore
+
+    path = tmp_path / "quotas.json"
+    FileQuotaStore(str(path)).set(tenant, max_points=max_points)
+    return str(path)
+
+
+def test_quota_refuses_the_run_and_writes_nothing(indexer, tmp_path):
+    """R1 (review agent): `index --tenant` was the ONE write path that
+    ignored `mnemostack quota set` — 158 points landed against a cap of 2.
+    The refusal must also cost no embedding: the check runs before the
+    provider is called, so a rejected run is free."""
+    _run, store, emb = indexer
+    doc = _doc(tmp_path, "big.txt", "quota" * 200)
+    args = _index_args(doc, tenant=True, _tenant_value="acme")
+    args.quotas_file = _quota_file(tmp_path, "acme", 2)
+    args.chunk_size = 40
+    embedded_before = emb.embedded
+    assert cli.cmd_index(args) == 2
+    assert list(store.iter_ids()) == []  # nothing written
+    assert emb.embedded == embedded_before  # nothing embedded
+
+
+def test_quota_admits_a_run_that_fits(indexer, tmp_path):
+    """The guard rejects growth past the cap, not indexing itself."""
+    _run, store, _emb = indexer
+    doc = _doc(tmp_path, "small.txt", "one chunk of content")
+    args = _index_args(doc, tenant=True, _tenant_value="acme")
+    args.quotas_file = _quota_file(tmp_path, "acme", 50)
+    assert cli.cmd_index(args) == 0
+    assert len(list(store.iter_ids())) == 1
+
+
+def test_another_tenants_quota_does_not_bind(indexer, tmp_path):
+    """The cap is per tenant: globex's own limit is what applies to globex,
+    and a tenant with no quota row is unlimited."""
+    _run, store, _emb = indexer
+    doc = _doc(tmp_path, "big.txt", "quota" * 200)
+    args = _index_args(doc, tenant=True, _tenant_value="globex")
+    args.quotas_file = _quota_file(tmp_path, "acme", 2)  # acme's cap, not globex's
+    args.chunk_size = 40
+    assert cli.cmd_index(args) == 0
+    assert len(list(store.iter_ids())) > 2
 
 
 def test_refresh_payload_writes_are_tenant_scoped(indexer, tmp_path):
