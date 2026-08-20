@@ -425,3 +425,28 @@ def test_listing_rejects_a_malformed_cursor(monkeypatch, tmp_path):
             "/memories", params={"source": "a.md", "after": bad}, headers=hdr
         )
         assert r.status_code == 400, (bad, r.status_code)
+
+
+def test_listing_takes_the_index_root_owner_guard(monkeypatch, tmp_path):
+    """R2 (review agent P3): one source name can exist under several
+    indexing roots. The lifecycle endpoints scope by `index_root`; the
+    listing silently ignored the parameter, so a client reconciling ONE
+    root saw another root's points mixed in with no warning."""
+    app, store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
+    client = TestClient(app)
+    store.upsert(1, [0.1, 0.2, 0.3], {"source": "shared.md", "index_root": "/a"}, tenant="alpha")
+    store.upsert(2, [0.1, 0.2, 0.3], {"source": "shared.md", "index_root": "/b"}, tenant="alpha")
+    store.upsert(3, [0.1, 0.2, 0.3], {"source": "shared.md"}, tenant="alpha")  # untagged
+    hdr = {"X-API-Key": keys["read"]}
+    body = client.get(
+        "/memories", params={"source": "shared.md", "index_root": "/a"}, headers=hdr
+    ).json()
+    # The guard EXCLUDES a different root; it does not require one, so the
+    # untagged point stays listed — the semantics the siblings document.
+    assert sorted(row["id"] for row in body["items"]) == ["1", "3"]
+    body = client.get("/memories", params={"source": "shared.md"}, headers=hdr).json()
+    assert len(body["items"]) == 3  # no guard: everything
+    r = client.get(
+        "/memories", params={"source": "shared.md", "index_root": "  "}, headers=hdr
+    )
+    assert r.status_code == 400  # a blank guard matches no owner

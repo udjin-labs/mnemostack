@@ -1840,6 +1840,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         source: str,
         after: str | None = None,
         limit: int = REMOTE_LIST_PAGE,
+        index_root: str | None = None,
         principal=Depends(_require("read")),  # noqa: B008 — FastAPI DI pattern
     ):
         """List what this tenant holds from one source, for reconciliation.
@@ -1856,8 +1857,22 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         is an opaque cursor: pass back the last id you received. A page
         costs the page, not a full scan of the source. Under `--auth`
         only the key's tenant is visible.
+
+        `index_root` is the same owner guard the lifecycle endpoints
+        take, and for the same reason: one source name can exist under
+        several indexing roots, and a client reconciling ONE root must
+        not be shown (or, on the sibling endpoints, act on) another's
+        points. Identical semantics to those endpoints, including the
+        edge: a point carrying NO `index_root` tag is still listed under
+        any guard — the guard excludes a DIFFERENT root, it does not
+        require one ("points carrying no index_root tag are not protected
+        by it").
         """
-        problem = validate_remote_source(source) or validate_remote_cursor(after)
+        problem = (
+            validate_remote_source(source)
+            or validate_remote_cursor(after)
+            or validate_invalidate_options(None, None, index_root)
+        )
         if problem:
             raise HTTPException(status_code=400, detail=problem)
         if limit < 1 or limit > REMOTE_LIST_PAGE:
@@ -1879,6 +1894,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 store,
                 source,
                 tenant=tenant,
+                index_root=index_root,
                 limit=limit,
                 start_after=cursor,
             )
@@ -1901,8 +1917,15 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
 
     @app.post("/invalidate", response_model=InvalidateResponse)
     def invalidate_endpoint(req: InvalidateRequest, principal=Depends(_require("write"))):  # noqa: B008 — FastAPI DI pattern
-        """Mark memories stale by id, non-destructively (HTTP parity with
-        the MCP `mnemostack_invalidate` tool).
+        """Mark memories stale, non-destructively.
+
+        The `ids` path is HTTP parity with the MCP `mnemostack_invalidate`
+        tool (same shared validator, same anti-oracle skip semantics). The
+        `source` path has NO MCP twin: source-scoped retraction, the
+        reconciliation listing and `DELETE /memories` are HTTP-only for
+        now — an agent tool that can retract a whole document from a
+        conversation is a bigger blast radius than one that names ids, so
+        that surface is deliberately operator-side until asked for.
 
         Sets `invalidated_at` (and optionally `valid_until`) on each
         point's payload without deleting or re-embedding it; invalidated
