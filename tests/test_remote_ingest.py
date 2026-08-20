@@ -1361,3 +1361,18 @@ def test_underscore_schema_keys_are_reserved():
             ingest_remote_items(
                 emb, store, [IngestItem(text="x", source="s")], timestamp_key=bad
             )
+
+
+def test_blank_schema_keys_are_rejected():
+    """Agent-R14: an empty/whitespace schema key slipped every guard branch
+    and produced a payload keyed by '' — reject as config error."""
+    emb, store = _CountingEmbedding(), _mem_store()
+    for bad in ("", "  "):
+        with pytest.raises(ValueError, match="non-blank"):
+            ingest_remote_items(
+                emb, store, [IngestItem(text="x", source="s")], text_key=bad
+            )
+        with pytest.raises(ValueError, match="non-blank"):
+            ingest_remote_items(
+                emb, store, [IngestItem(text="x", source="s")], timestamp_key=bad
+            )

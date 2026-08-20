@@ -574,6 +574,10 @@ def ensure_remote_schema_keys(text_key: str, timestamp_key: str) -> None:
     must not start and then 500 on every write) and defensively at the
     ingest boundary for library callers.
     """
+    if not isinstance(text_key, str) or not text_key.strip():
+        raise ValueError("text_key must be a non-blank string")
+    if not isinstance(timestamp_key, str) or not timestamp_key.strip():
+        raise ValueError("timestamp_key must be a non-blank string")
     if text_key != "text" and text_key.startswith("_"):
         # The whole underscore namespace is server-structural by convention
         # (ownership markers like _enrich_keys/_md_keys included — a text
