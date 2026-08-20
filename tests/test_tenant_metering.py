@@ -174,6 +174,35 @@ def test_embedding_spend_counted_even_when_ingest_fails(monkeypatch, tmp_path):
     ) == len(text)
 
 
+def test_space_guard_rejection_is_not_billed(monkeypatch, tmp_path):
+    """R3 (both reviewers): the space guard aborts BEFORE any provider
+    call (503 misconfig) — billing it would inflate the meters on every
+    retry for the whole incident."""
+    import mnemostack.ingest as ingest_mod
+    from mnemostack.embeddings.roles import EmbeddingSpaceError
+
+    app, _store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
+    client = TestClient(app)
+    rec = _rec()
+
+    def _guard_reject(self, items):
+        raise EmbeddingSpaceError("collection stamped with a different space")
+
+    monkeypatch.setattr(ingest_mod.Ingestor, "ingest", _guard_reject)
+    r = client.post(
+        "/memories",
+        json={"items": [{"text": "never embedded", "source": "s"}]},
+        headers={"X-API-Key": keys["write"]},
+    )
+    assert r.status_code == 503
+    assert rec.counter_value(
+        "mnemostack.tenant.embedded_chunks", labels={"tenant": "alpha"}
+    ) == 0
+    assert rec.counter_value(
+        "mnemostack.tenant.embedded_chars", labels={"tenant": "alpha"}
+    ) == 0
+
+
 def test_embed_attempted_field_attribution(monkeypatch, tmp_path):
     """The additive RemoteMemoryResult.embed_attempted field carries the
     same per-item attribution for API consumers: True only for items the

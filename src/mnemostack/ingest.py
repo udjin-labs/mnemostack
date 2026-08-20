@@ -1037,17 +1037,17 @@ def _ingest_remote_items_locked(
         # will later fail embedding still count, since which one fails is
         # unknowable pre-embed — a mixed batch at the cap edge is rejected
         # whole rather than the commit-nothing invariant weakened.)
-        if tenant is not None:
-            # Per-tenant embedding-spend attribution, emitted at SUBMISSION
-            # time — not from result statuses: the provider round trip is
-            # paid even when a later upsert/space-check fails the request,
-            # so counting after the fact would lose exactly the spend that
-            # needs watching. Duplicates and reactivations never reach this
-            # branch (zero cost). Per-item retries inside the resilience
-            # ladder count once — retry amplification is provider health,
-            # not tenant behavior. Chars are the provider-agnostic token
-            # proxy. Emitted here (the shared layer), so the MCP remember
-            # tool attributes identically into its process recorder.
+        def _meter_spend() -> None:
+            # Per-tenant embedding-spend attribution — not from result
+            # statuses: duplicates and reactivations never reach this
+            # branch (zero cost), per-item retries inside the resilience
+            # ladder count once (retry amplification is provider health,
+            # not tenant behavior), and chars are the provider-agnostic
+            # token proxy. Emitted in the shared layer, so the MCP
+            # remember tool attributes identically into its process
+            # recorder.
+            if tenant is None:
+                return
             counter(
                 "mnemostack.tenant.embedded_chunks",
                 len(to_ingest),
@@ -1058,6 +1058,7 @@ def _ingest_remote_items_locked(
                 sum(len(item.text) for item in to_ingest),
                 labels={"tenant": tenant},
             )
+
         ingestor = Ingestor(
             embedding,
             store,
@@ -1070,7 +1071,23 @@ def _ingest_remote_items_locked(
             tenant=tenant,
             max_points=max_points,
         )
-        stats = ingestor.ingest(to_ingest)
+        # Emission is EXCEPTION-AWARE, after the attempt: the space guard
+        # aborts BEFORE any provider call (EmbeddingSpaceError, the 503
+        # deployment-misconfig shape — billing it would inflate the meters
+        # on every retry for the whole incident), while every OTHER failure
+        # (upsert, storage, quota re-check) happens after embedding — that
+        # spend is real and must be attributed even though the request
+        # 5xxes. Residual: an EmbeddingSpaceError from the post-embed
+        # sandwich/revalidation checks (a concurrent space flip mid-request)
+        # is not billed — a rare bounded undercount, preferred over
+        # persistently overbilling during a misconfig incident.
+        try:
+            stats = ingestor.ingest(to_ingest)
+        except BaseException as exc:
+            if not isinstance(exc, EmbeddingSpaceError):
+                _meter_spend()
+            raise
+        _meter_spend()
         stored = {str(pid) for pid in stats.ids}
     # Lifecycle: an existing id may be a RETRACTED memory (invalidated_at
     # set). Re-remembering the same fact must make it recallable again —
