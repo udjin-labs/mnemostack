@@ -873,8 +873,17 @@ def build_server(
             # tenant owner-guard: only pass it when set so a custom store without
             # the parameter (and the single-tenant path) is unaffected.
             tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
+            payload_store = _get_vector_payload_only()
+            # HTTP-parity pre-bootstrap short-circuit: before the first
+            # write the collection doesn't exist (lazy bootstrap) — report
+            # zero effect like unknown ids, not an opaque backend error.
+            # getattr probe, not except: duck stores without the hook
+            # proceed as before.
+            exists_fn = getattr(payload_store, "collection_exists", None)
+            if callable(exists_fn) and not exists_fn():
+                return {"ok": True, "requested": len(ids), "invalidated": 0}
             # Dedup after coercion — duplicates would inflate `invalidated`.
-            updated = _get_vector_payload_only().invalidate(
+            updated = payload_store.invalidate(
                 list(dict.fromkeys(coerce_point_ids(ids))),
                 invalidated_at=invalidated_at,
                 valid_until=valid_until,

@@ -910,6 +910,39 @@ def test_mcp_invalidate_shared_contract_and_error_kind(monkeypatch):
     assert vec.called is False
 
 
+def test_mcp_invalidate_pre_bootstrap_is_zero_not_error(monkeypatch):
+    """Agent-R6: before the first write the collection doesn't exist —
+    HTTP /invalidate reports zero effect; the MCP twin must match instead
+    of surfacing an opaque error_kind 'error'."""
+    import mnemostack.mcp.server as srv
+
+    class _FreshVector:
+        def __init__(self, **_):
+            self.invalidate_called = False
+
+        def collection_exists(self):
+            return False
+
+        def invalidate(self, ids, **_):  # pragma: no cover — must not run
+            self.invalidate_called = True
+            raise ValueError("Collection not found")
+
+    vec = _FreshVector()
+
+    class _FakeEmbedding:
+        dimension = 3
+
+    monkeypatch.setattr(srv, "get_provider", lambda *_a, **_k: _FakeEmbedding())
+    monkeypatch.setattr(srv, "VectorStore", lambda **_: vec)
+    mcp = build_server(collection="test", embedding_provider="ollama")
+
+    res = asyncio.run(
+        mcp.call_tool("mnemostack_invalidate", {"ids": ["7"]})
+    ).structured_content
+    assert res == {"ok": True, "requested": 1, "invalidated": 0}
+    assert vec.invalidate_called is False
+
+
 # --- service-key auth (multi-tenant) ---
 
 
