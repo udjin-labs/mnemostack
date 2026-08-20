@@ -1627,8 +1627,8 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             log.exception("memories endpoint failed")
             raise HTTPException(status_code=500, detail="ingest failed") from exc
         # (Per-tenant embedding-spend meters are emitted inside
-        # ingest_remote_items at submission time, so spend is attributed
-        # even when a later ingest step fails the request.)
+        # ingest_remote_items with exception-aware semantics: post-embed
+        # failures bill, a pre-embed space-guard abort does not.)
         failed_n = sum(r.status == "failed" for r in results)
         if results and failed_n == len(results):
             # Same honesty rule as /triples: per-item isolation is for

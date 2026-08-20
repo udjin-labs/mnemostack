@@ -1074,16 +1074,22 @@ def _ingest_remote_items_locked(
         # Emission is EXCEPTION-AWARE, after the attempt: the space guard
         # aborts BEFORE any provider call (EmbeddingSpaceError, the 503
         # deployment-misconfig shape — billing it would inflate the meters
-        # on every retry for the whole incident), while every OTHER failure
-        # (upsert, storage, quota re-check) happens after embedding — that
-        # spend is real and must be attributed even though the request
-        # 5xxes. Residual: an EmbeddingSpaceError from the post-embed
-        # sandwich/revalidation checks (a concurrent space flip mid-request)
-        # is not billed — a rare bounded undercount, preferred over
-        # persistently overbilling during a misconfig incident.
+        # on every retry for the whole incident), while every OTHER ingest
+        # failure (upsert, storage, quota re-check) happens after embedding
+        # — that spend is real and must be attributed even though the
+        # request 5xxes. `except Exception`, NOT BaseException: interrupt/
+        # cancellation signals (KeyboardInterrupt, SystemExit,
+        # CancelledError on client disconnect) can fire pre-embed and must
+        # propagate unbilled. Documented residuals, both bounded to one
+        # request: a post-embed EmbeddingSpaceError from the sandwich/
+        # revalidation checks (concurrent space flip) undercounts; a hard
+        # crash mid-batch in a per-item embedding fallback bills the whole
+        # request as an UPPER BOUND (exact per-item accounting on crash
+        # paths would mean threading counts out of the embedding layer —
+        # deliberately not done for a monitoring proxy).
         try:
             stats = ingestor.ingest(to_ingest)
-        except BaseException as exc:
+        except Exception as exc:
             if not isinstance(exc, EmbeddingSpaceError):
                 _meter_spend()
             raise
