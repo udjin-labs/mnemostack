@@ -562,6 +562,17 @@ def ingest_remote_items(
     Validation (`validate_remote_item`) is the CALLER's obligation — this
     function trusts its items are within caps and clean of reserved keys.
     """
+    # Structural payload fields must never be shadowed by a configured
+    # schema key: text_key="source" would let the mirror overwrite the
+    # provenance field during payload construction (metadata merges last),
+    # corrupting /resolve handles. Loud operator error, not a client 4xx.
+    _forbidden = _PROTECTED_PAYLOAD_KEYS - {"text"}
+    if text_key != "text" and text_key in _forbidden:
+        raise ValueError(f"text_key {text_key!r} collides with a structural payload field")
+    if timestamp_key != "timestamp" and timestamp_key in _PROTECTED_PAYLOAD_KEYS:
+        raise ValueError(
+            f"timestamp_key {timestamp_key!r} collides with a structural payload field"
+        )
     # First remote write on a fresh deployment must not require an operator
     # ingest to have created the collection. Bootstrap runs ONCE per store
     # instance: on a sparse-aware store ensure_collection re-verifies sparse
@@ -683,36 +694,6 @@ def _ingest_remote_items_locked(
         existing = store.retrieve_existing_ids(list(ids), **tkw)
     except AttributeError:
         existing = set()  # duck store without the hook: everything embeds
-    # Lifecycle: an existing id may be a RETRACTED memory (invalidated_at
-    # set). Re-remembering the same fact must make it recallable again —
-    # reporting a hidden point as "duplicate" would claim success while
-    # default recall stays empty. Reactivate via a payload patch: content
-    # is byte-identical, so the stored vector is still valid — no
-    # re-embedding. Duck stores without the hooks keep the historical
-    # duplicate semantics; a failing patch propagates (an unrecallable
-    # "success" must not be reported).
-    reactivated: set[str] = set()
-    if existing:
-        try:
-            points = store.client.retrieve(
-                store.collection, ids=list(existing), with_payload=True
-            )
-        except AttributeError:
-            points = []
-        stale_ids = [
-            str(pt.id) for pt in points if (pt.payload or {}).get("invalidated_at")
-        ]
-        if stale_ids:
-            from mnemostack.vector.patch import PayloadPatch
-
-            store.apply_payload_patches(
-                [
-                    PayloadPatch(id=pid, delete_keys=("invalidated_at",))
-                    for pid in stale_ids
-                ],
-                **tkw,
-            )
-            reactivated = set(stale_ids)
     to_ingest: list[IngestItem] = []
     seen_now: set[str] = set()
     for pid, item in zip(ids, items, strict=True):
@@ -720,6 +701,71 @@ def _ingest_remote_items_locked(
             continue
         seen_now.add(pid)
         to_ingest.append(item)
+    # QUOTA FIRST: every effect of this call — new points AND lifecycle
+    # reactivations below — must sit behind the preflight, or a
+    # 507-rejected request would still have un-retracted memories
+    # (commit-nothing means nothing).
+    if to_ingest and tenant is not None and max_points is not None:
+        enforce_points_quota(
+            tenant, store.count(tenant=tenant), len(to_ingest), max_points
+        )
+    # Lifecycle: an existing id may be a RETRACTED memory (invalidated_at
+    # set). Re-remembering the same fact must make it recallable again —
+    # reporting a hidden point as "duplicate" would claim success while
+    # default recall stays empty. Reactivate via a payload patch clearing
+    # BOTH markers the invalidate API sets (a surviving valid_until would
+    # still hide the point from as_of queries — "recallable again" must
+    # hold bi-temporally): content is byte-identical, so the stored vector
+    # stays valid — no re-embedding. Duck stores without the hooks keep
+    # the historical duplicate semantics; a failing patch propagates.
+    reactivated: set[str] = set()
+    if existing:
+        stale_ids: list[str] = []
+        try:
+            points = store.client.retrieve(
+                store.collection, ids=list(existing), with_payload=True
+            )
+            stale_ids = [
+                str(pt.id)
+                for pt in points
+                if (getattr(pt, "payload", None) or {}).get("invalidated_at")
+            ]
+        except AttributeError:
+            pass  # duck store: historical duplicate semantics
+        if stale_ids:
+            from mnemostack.vector.patch import PayloadPatch
+
+            patched = store.apply_payload_patches(
+                [
+                    PayloadPatch(
+                        id=pid, delete_keys=("invalidated_at", "valid_until")
+                    )
+                    for pid in stale_ids
+                ],
+                **tkw,
+            )
+            if patched == len(stale_ids):
+                reactivated = set(stale_ids)
+            else:
+                # The patch silently skips points that vanished mid-flight
+                # (concurrent prune/delete) — re-verify instead of reporting
+                # "stored" for a memory that no longer exists; unverified
+                # ids drop out of `existing` so they surface as failed.
+                try:
+                    verify = store.client.retrieve(
+                        store.collection, ids=stale_ids, with_payload=True
+                    )
+                except AttributeError:
+                    verify = []
+                cleared = {
+                    str(pt.id)
+                    for pt in verify
+                    if not (getattr(pt, "payload", None) or {}).get("invalidated_at")
+                }
+                reactivated = cleared
+                for pid in stale_ids:
+                    if pid not in cleared:
+                        existing.discard(pid)
     stored: set[str] = set()
     if to_ingest:
         # Map event times and the text mirror onto the collection's schema
@@ -738,18 +784,11 @@ def _ingest_remote_items_locked(
             for item in to_ingest:
                 item.metadata[text_key] = item.text
         _apply_timestamp_domain(to_ingest, timestamp_key, timestamp_format)
-        # Preflight the tenant's storage quota over the WHOLE deduplicated
-        # request BEFORE any embedding: an over-quota request must cost zero
-        # provider calls and commit nothing — never a partial write behind a
-        # quota error. (`to_ingest` is exactly the genuinely-new unique ids.)
-        # Deliberately CONSERVATIVE: items that will later fail embedding
-        # still count here (which one will fail is unknowable pre-embed), so
-        # a mixed batch at the cap edge is rejected whole rather than the
-        # invariant weakened to a partial commit.
-        if tenant is not None and max_points is not None:
-            enforce_points_quota(
-                tenant, store.count(tenant=tenant), len(to_ingest), max_points
-            )
+        # (Quota was preflighted above, before ANY effect of this call —
+        # including reactivations. Deliberately CONSERVATIVE: items that
+        # will later fail embedding still count, since which one fails is
+        # unknowable pre-embed — a mixed batch at the cap edge is rejected
+        # whole rather than the commit-nothing invariant weakened.)
         ingestor = Ingestor(
             embedding,
             store,

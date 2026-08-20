@@ -1185,3 +1185,80 @@ def test_current_duplicates_still_skip_the_reactivation_patch():
     (res,) = ingest_remote_items(emb, store, [IngestItem(text="live", source="s")], tenant="a")
     assert res.status == "duplicate"
     assert patches == []  # no patch issued for a current point
+
+
+# -------------------------------------------------- round-10 review batch pins
+
+
+def test_quota_rejection_leaves_retracted_memories_retracted():
+    """Codex-R10 P1: commit-nothing means NOTHING — a 507-rejected request
+    must not have reactivated an invalidated duplicate on the way."""
+    from mnemostack.quotas import QuotaExceededError
+
+    emb, store = _CountingEmbedding(), _mem_store()
+    (first,) = ingest_remote_items(
+        emb, store, [IngestItem(text="fact", source="s")], tenant="a", max_points=1
+    )
+    store.invalidate([first.id], tenant="a")
+    with pytest.raises(QuotaExceededError):
+        ingest_remote_items(
+            emb,
+            store,
+            [IngestItem(text="fact", source="s"), IngestItem(text="new", source="s")],
+            tenant="a",
+            max_points=1,
+        )
+    point = store.client.retrieve(store.collection, ids=[first.id], with_payload=True)[0]
+    assert point.payload.get("invalidated_at")  # still retracted
+
+
+def test_reactivation_clears_valid_until_too():
+    """Agent-R10: a surviving valid_until would keep hiding the point from
+    as_of recall — 'recallable again' must hold bi-temporally."""
+    emb, store = _CountingEmbedding(), _mem_store()
+    (first,) = ingest_remote_items(
+        emb, store, [IngestItem(text="f2", source="s")], tenant="a"
+    )
+    store.invalidate([first.id], valid_until="2026-01-01", tenant="a")
+    ingest_remote_items(emb, store, [IngestItem(text="f2", source="s")], tenant="a")
+    point = store.client.retrieve(store.collection, ids=[first.id], with_payload=True)[0]
+    assert "invalidated_at" not in (point.payload or {})
+    assert "valid_until" not in (point.payload or {})
+
+
+def test_vanished_stale_point_is_failed_not_stored():
+    """Agent-R10: apply_payload_patches silently skips vanished points — the
+    ignored return value must not turn that into a reported 'stored'."""
+    emb, store = _CountingEmbedding(), _mem_store()
+    (first,) = ingest_remote_items(
+        emb, store, [IngestItem(text="gone", source="s")], tenant="a"
+    )
+    store.invalidate([first.id], tenant="a")
+
+    orig = store.apply_payload_patches
+
+    def _skipping(patches, **kw):
+        # Simulate the concurrent-delete race: the store patched nothing.
+        store.delete_points([first.id], tenant="a")
+        return 0
+
+    store.apply_payload_patches = _skipping  # type: ignore[method-assign]
+    (res,) = ingest_remote_items(
+        emb, store, [IngestItem(text="gone", source="s")], tenant="a"
+    )
+    store.apply_payload_patches = orig  # type: ignore[method-assign]
+    assert res.status == "failed"  # never a fabricated 'stored'/'duplicate'
+
+
+def test_colliding_schema_keys_are_rejected_loudly():
+    """Codex-R10 P2: text_key='source' would overwrite the provenance field
+    (metadata merges last in payload construction) — operator error, loud."""
+    emb, store = _CountingEmbedding(), _mem_store()
+    with pytest.raises(ValueError, match="structural"):
+        ingest_remote_items(
+            emb, store, [IngestItem(text="x", source="s")], text_key="source"
+        )
+    with pytest.raises(ValueError, match="structural"):
+        ingest_remote_items(
+            emb, store, [IngestItem(text="x", source="s")], timestamp_key="offset"
+        )
