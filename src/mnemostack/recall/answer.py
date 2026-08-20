@@ -650,11 +650,17 @@ class AnswerGenerator:
         # sets the estimate itself; every other path (including extraction's
         # single-prompt fallback) prompts over at most max_memories.
         if answer.context_tokens_estimate is None:
-            answer.context_tokens_estimate = sum_tokens(
-                specificity_memories[: self.max_memories], token_counter
-            )
-        # Same pool the estimate describes — reported, not just measured.
-        if not answer.context_memories:
+            # Single-prompt paths: only this slice ever reached the LLM. The
+            # retry paths return the WHOLE merged pool, but prompt over
+            # `[:max_memories]` — reporting the rest would name memories
+            # nothing read.
+            prompted = specificity_memories[: self.max_memories]
+            answer.context_tokens_estimate = sum_tokens(prompted, token_counter)
+            if not answer.context_memories:
+                answer.context_memories = list(prompted)
+        elif not answer.context_memories:
+            # Extraction set the estimate itself because it walked the FULL
+            # pool in batches; there the whole pool really was read.
             answer.context_memories = list(specificity_memories)
         return answer
 

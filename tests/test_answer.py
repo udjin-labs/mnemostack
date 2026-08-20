@@ -641,3 +641,35 @@ def test_expansion_retry_filters_sub_recall_by_validity(sample_memories):
     retry_prompt = llm.prompts[-1]
     assert "fresh" in retry_prompt
     assert "stale" not in retry_prompt
+
+
+def _mem(pid: int) -> RecallResult:
+    return RecallResult(
+        id=pid, text=f"memory number {pid}", score=0.9, payload={}, sources=["vector"]
+    )
+
+
+def test_context_memories_reports_only_what_was_prompted(sample_memories):
+    """Bot round-2 (P2) on the access-recording PR: the pool is what access
+    accounting credits, so it must name memories something READ. A
+    single-prompt answer reads `[:max_memories]` — reporting more would
+    credit memories neither the caller nor the LLM ever saw."""
+    llm = FakeLLM(response_text="Postgres\nCONFIDENCE: 0.95")
+    gen = AnswerGenerator(llm=llm, max_memories=2)
+    answer = gen.generate("what database", [_mem(1), _mem(2), _mem(3), _mem(4)])
+    assert answer.ok
+    assert [m.id for m in answer.context_memories] == [1, 2]
+    # And the estimate describes exactly that same pool.
+    from mnemostack.recall.tokens import sum_tokens
+
+    assert answer.context_tokens_estimate == sum_tokens([_mem(1), _mem(2)], None)
+
+
+def test_context_memories_never_exceeds_what_the_prompt_saw(sample_memories):
+    """The property, stated independently of any one path: whatever pool is
+    reported, it is a prefix of what the generator was willing to prompt."""
+    llm = FakeLLM(response_text="an answer\nCONFIDENCE: 0.9")
+    for cap in (1, 2, 5):
+        gen = AnswerGenerator(llm=llm, max_memories=cap)
+        answer = gen.generate("q", [_mem(i) for i in range(1, 6)])
+        assert len(answer.context_memories) <= cap, cap
