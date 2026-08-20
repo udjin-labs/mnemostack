@@ -665,6 +665,8 @@ def validate_remote_triple(
 #: cheap to validate but every one costs a store round-trip in the ownership
 #: check — bounded like every other remote request.
 REMOTE_MAX_IDS = 256
+#: Owner-guard path cap, shared with the HTTP models' max_length.
+REMOTE_MAX_INDEX_ROOT_CHARS = 4096
 #: Qdrant's point id domain: an unsigned 64-bit integer or a UUID. Anything
 #: else is not an id this system could have produced (stable_chunk_id emits
 #: UUID-shaped strings) and would surface as an opaque backend error instead
@@ -778,6 +780,10 @@ def validate_remote_invalidate(
             # A blank owner guard matches NO owner — every id would be
             # silently skipped while the response reads like a no-op.
             return "index_root must be a non-blank string"
+        if len(index_root) > REMOTE_MAX_INDEX_ROOT_CHARS:
+            # Same bound as the HTTP models — the MCP surface relies
+            # solely on this validator for the cap.
+            return f"index_root exceeds {REMOTE_MAX_INDEX_ROOT_CHARS} characters"
         if not _utf8_encodable(index_root):
             return "index_root must be valid UTF-8"
     return None

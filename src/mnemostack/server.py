@@ -53,6 +53,7 @@ from mnemostack.ingest import (
     REMOTE_CHUNK_SIZE,
     REMOTE_MAX_DOC_CHARS,
     REMOTE_MAX_IDS,
+    REMOTE_MAX_INDEX_ROOT_CHARS,
     REMOTE_MAX_ITEMS,
     REMOTE_MAX_OFFSET,
     REMOTE_MAX_SOURCE_CHARS,
@@ -322,7 +323,7 @@ class InvalidateRequest(BaseModel):
     )
     index_root: str | None = Field(
         None,
-        max_length=4096,
+        max_length=REMOTE_MAX_INDEX_ROOT_CHARS,
         description=(
             "Owner guard: when set, points owned by a different index_root "
             "are skipped, so one root cannot invalidate another's chunks in "
@@ -348,7 +349,7 @@ class DeleteMemoriesRequest(BaseModel):
     ids: list[str | StrictInt] = Field(..., min_length=1, max_length=REMOTE_MAX_IDS)
     index_root: str | None = Field(
         None,
-        max_length=4096,
+        max_length=REMOTE_MAX_INDEX_ROOT_CHARS,
         description=(
             "Owner guard, matching /invalidate: when set, points owned by a "
             "different index_root are skipped. Points carrying no index_root "

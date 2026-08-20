@@ -108,6 +108,9 @@ def test_validate_remote_invalidate_contract():
     # index_root guard: blank would silently skip every id.
     assert "index_root" in validate_remote_invalidate(ok, None, None, "")
     assert "index_root" in validate_remote_invalidate(ok, None, None, "   ")
+    # The 4096 cap lives in the SHARED validator — the MCP surface has no
+    # pydantic model to enforce it.
+    assert "index_root" in validate_remote_invalidate(ok, None, None, "x" * 4097)
     assert validate_remote_invalidate(ok, None, None, "/srv/corpus") is None
 
 
