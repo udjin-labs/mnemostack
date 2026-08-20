@@ -837,6 +837,18 @@ def find_source_points(
 
     ``start_after`` resumes the store's iteration order after a point id,
     so a paginated reader does not re-walk what it already returned.
+
+    STORE CONTRACT for pagination: an id cursor — native or emulated —
+    only means something if the store yields a STABLE order across calls.
+    That requirement belongs to cursor pagination itself, not to the
+    emulation: the shipped Qdrant store inherits it from Qdrant's own
+    id-ordered offset. A custom store whose ``scroll`` order can change
+    between calls (hash-backed iteration, no ORDER BY, reordering under
+    concurrent writes) cannot be paginated correctly by ANY id cursor —
+    pages will overlap and skip, and a short page reads as the end of the
+    source. Such a store must not back ``GET /memories``; the
+    source-scoped lifecycle calls are unaffected, since each of those
+    re-selects from the start and never passes a cursor.
     """
     scroll = getattr(store, "scroll", None)
     if not callable(scroll):

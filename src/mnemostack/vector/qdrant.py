@@ -20,7 +20,6 @@ from qdrant_client.models import (
     FilterSelector,
     HasVectorCondition,
     IsEmptyCondition,
-    IsNullCondition,
     MatchText,
     MatchValue,
     Modifier,
@@ -615,11 +614,13 @@ class VectorStore:
                         FieldCondition(
                             key="index_root", match=MatchValue(value=index_root_guard)
                         ),
-                        # Missing/empty and explicitly-null are distinct
-                        # conditions in Qdrant; the guard's contract counts
-                        # both as "carries no root".
+                        # IsEmpty alone is the whole "carries no root"
+                        # case: Qdrant matches it when the field is
+                        # missing, null, OR an empty array (verified
+                        # against a live server, not only the in-memory
+                        # client). An IsNull branch beside it would be
+                        # unreachable.
                         IsEmptyCondition(is_empty=PayloadField(key="index_root")),
-                        IsNullCondition(is_null=PayloadField(key="index_root")),
                     ]
                 )
             )

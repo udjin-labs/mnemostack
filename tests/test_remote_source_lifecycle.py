@@ -601,3 +601,22 @@ def test_legacy_store_refuses_a_vanished_cursor_instead_of_lying(monkeypatch, tm
     store = _LegacyStore([(1, {"source": "a.md"}), (2, {"source": "a.md"})])
     with pytest.raises(ValueError, match="no longer present"):
         find_source_points(store, "a.md", start_after=999)
+
+
+def test_a_store_that_cannot_scope_by_tenant_fails_closed():
+    """R5 (review agent P3): `tenant` is deliberately NOT checked against
+    the store's supported keywords — a scope keyword must never be dropped
+    or emulated, so a store that cannot honor it fails at argument binding
+    rather than silently serving one tenant another's points."""
+
+    class _TenantlessStore:
+        def scroll(self, batch_size=256, filters=None, with_vectors=False):
+            yield type("Hit", (), {"id": 1, "payload": {"source": "a.md"}})()
+
+    store = _TenantlessStore()
+    # Unscoped use is fine — nothing to leak.
+    ids, _p, _more = find_source_points(store, "a.md")
+    assert ids == [1]
+    # Scoped use refuses, loudly.
+    with pytest.raises(TypeError):
+        find_source_points(store, "a.md", tenant="acme")
