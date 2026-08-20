@@ -46,7 +46,10 @@ Contract:
   with a lower one. The current values are fetched for the whole batch in
   one round-trip before the write; the hit's own payload is only a
   fallback for a store without the batch reader, and the larger of the two
-  always wins so a stale snapshot can never walk a counter backwards.
+  always wins so a stale snapshot can never walk a counter backwards. Cost
+  is constant in the number of hits — that read, the store's own
+  existence/ownership pre-check, and one batched write — never a request
+  per point.
 - **Best-effort counting.** Qdrant has no atomic increment, so read and
   write are still two steps: two concurrent recalls of the same point can
   record one increment instead of two. The reader clamps the reinforcement
@@ -160,6 +163,25 @@ def record_access(
     disabled by having nothing to do, or when the write failed — see the
     fail-open rule in the module docstring).
     """
+    try:
+        return _record(store, results, tenant=tenant, now=now)
+    except Exception:  # noqa: BLE001 — bookkeeping must not fail the recall
+        # The WHOLE body, not just the write. Every step in _record is safe
+        # by construction today, but "must never raise" is a contract for
+        # the function, and a future edit adding a fallible step inside it
+        # would otherwise break that contract with nothing to catch it.
+        log.warning("access recording failed", exc_info=True)
+        counter("mnemostack.access.record_failed", 1)
+        return 0
+
+
+def _record(
+    store: Any,
+    results: Any,
+    *,
+    tenant: str | None = None,
+    now: datetime | None = None,
+) -> int:
     entries = _recordable_ids(results)
     if not entries:
         return 0
@@ -190,11 +212,6 @@ def record_access(
         )
         for pid, payload in entries
     ]
-    try:
-        applied = int(apply_patches_via(store, patches, tenant=tenant))
-    except Exception:  # noqa: BLE001 — bookkeeping must not fail the recall
-        log.warning("access recording failed for %d point(s)", len(patches), exc_info=True)
-        counter("mnemostack.access.record_failed", 1)
-        return 0
+    applied = int(apply_patches_via(store, patches, tenant=tenant))
     counter("mnemostack.access.recorded", applied)
     return applied

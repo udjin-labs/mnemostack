@@ -313,3 +313,20 @@ def test_the_counter_read_is_tenant_scoped(monkeypatch, tmp_path):
     assert store.retrieve_payload_fields([1], [ACCESS_COUNT_KEY], tenant="beta") == {
         "1": {ACCESS_COUNT_KEY: 9}
     }
+
+
+def test_fail_open_covers_the_whole_body_not_just_the_write(monkeypatch, tmp_path):
+    """R6 (review agent P3): the guard used to wrap only the store write,
+    so the contract "record_access must never raise" held by construction
+    rather than by structure — a future fallible step in the patch-building
+    block would have broken it silently."""
+    import mnemostack.access as acc
+
+    _app, store, _emb, _keys = _ingest_app(monkeypatch, tmp_path)
+    _seed(store, 1)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("a future step blew up")
+
+    monkeypatch.setattr(acc, "_recordable_ids", _boom)
+    assert record_access(store, [_Hit(1)], tenant="alpha") == 0
