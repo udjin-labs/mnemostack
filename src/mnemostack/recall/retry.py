@@ -91,7 +91,10 @@ def retry_weak_recall(
     """(results, retried) — the original results, or better ones.
 
     Returns the input untouched when the recall was not weak, when no LLM
-    is available to paraphrase with, or when the retry found nothing new.
+    is available to paraphrase with, or when no paraphrase came back with
+    anything at all. A paraphrase that returns only memories the caller
+    already had is NOT nothing: finding the same memory twice is evidence
+    about its rank, and the fusion is where that evidence is spent.
     Never raises: a failed retry is a recall that did not improve, not a
     failed request.
     """
@@ -131,19 +134,31 @@ def retry_weak_recall(
     # already uses to combine rankings of the SAME items from different
     # queries, and it is what makes a second phrasing able to win.
     #
-    # ONE notion of identity, `str(id)`, decides both questions asked
-    # below — "did this pass find anything new" and "are these two hits
-    # the same memory" — because a vector store may hand back `1` where
-    # another pass got `"1"` (Qdrant point ids are `str | int`). Two
-    # notions disagreeing is not a cosmetic difference: RRF dedupes on
-    # whatever object it is given, so the same memory would occupy two
-    # slots of the caller's page. `_canonical` therefore returns the
-    # object already standing for that id, and every list handed to the
-    # fusion is built from those, so the fusion's own key cannot split
-    # what this dict joined.
+    # ONE notion of identity, `str(id)`, decides whether two hits are the
+    # same memory, because a vector store may hand back `1` where another
+    # pass got `"1"` (Qdrant point ids are `str | int`). Two notions
+    # disagreeing is not a cosmetic difference: RRF dedupes on whatever
+    # object it is given, so the same memory would occupy two slots of the
+    # caller's page. `_canonical` therefore returns the object already
+    # standing for that id, and every list handed to the fusion is built
+    # from those, so the fusion's own key cannot split what this dict
+    # joined.
     by_id: dict[str, Any] = {}
     ranked: list[list[tuple[Any, float]]] = [[(_canonical(by_id, r), r.score) for r in results]]
-    known = len(by_id)
+    #: What the caller already had, counted the way the merge counts —
+    #: `len(results)` would double-count a memory the original pass listed
+    #: under two id types, and the recovery counter is supposed to report
+    #: memories gained, not rows.
+    original_count = len(by_id)
+    #: Whether any paraphrase came back with hits at all. This, and NOT
+    #: "did a paraphrase find an id we lacked", is what decides whether
+    #: there is anything to fuse: a memory that TWO phrasings found should
+    #: outrank one only the original found, and that is precisely what RRF
+    #: expresses. Gating on new ids instead would silently skip the fusion
+    #: this feature advertises whenever the paraphrases merely corroborate
+    #: — reachable as soon as `--retry-weak-below` is above 1, where the
+    #: original list is not empty.
+    retrieved = False
     for variant in variants:
         variant_trace = _fresh_trace(caller_trace)
         if variant_trace is not None:
@@ -158,13 +173,15 @@ def retry_weak_recall(
         except Exception:  # noqa: BLE001 — same rule, per variant
             counter("mnemostack.recall.weak_retry_failed", 1)
             continue
+        if extra:
+            retrieved = True
         ranked.append([(_canonical(by_id, r), r.score) for r in extra])
         _absorb(caller_trace, variant_trace, variant)
     flow_kwargs.pop("trace", None)
     if caller_trace is not None:
         flow_kwargs["trace"] = caller_trace
 
-    if len(by_id) == known:
+    if not retrieved:
         return results, True  # asked again, still nothing: an answer too
 
     from .fusion import reciprocal_rank_fusion
@@ -188,7 +205,7 @@ def retry_weak_recall(
         from .tokens import apply_token_budget
 
         merged, _tokens = apply_token_budget(merged, budget, counter_fn)
-    gained = len(merged) - len(results)
+    gained = len(merged) - original_count
     if gained <= 0:
         final = results if not merged else merged
         _retrace(caller_trace, final)
@@ -222,8 +239,10 @@ def _absorb(caller_trace: Any, variant_trace: Any, variant: str) -> None:
     """Fold one variant's work into the caller's trace.
 
     Retriever entries are kept — the extra retrieval is exactly the cost
-    an operator reading a trace wants to see — and labelled with the
-    paraphrase that produced them. Degradations and notes carry over
+    an operator reading a trace wants to see — marked `:retry` in the name
+    and carrying the paraphrase that produced them in `query`, so two
+    paraphrases in one trace stay tellable apart. Degradations and notes
+    carry over
     verbatim: an arm that failed during the retry failed, and hiding that
     because it happened in the second pass would be the opposite of what
     a trace is for.
@@ -236,6 +255,15 @@ def _absorb(caller_trace: Any, variant_trace: Any, variant: str) -> None:
     # an unbounded loop is a bad thing to leave one refactor away.
     for entry in list(getattr(variant_trace, "retrievers", [])):
         entry.name = f"{entry.name}:retry"
+        # `RetrieverTrace.query` is the text this retriever was actually
+        # given, and with two paraphrases in the same trace the name alone
+        # cannot say which one produced these hits, this latency, this
+        # error. An inner expansion may already have recorded its own
+        # variant there — that is the text that reached the retriever, so
+        # it is kept; the paraphrase fills the field only when nothing
+        # more specific claimed it.
+        if getattr(entry, "query", None) is None:
+            entry.query = variant
         caller_trace.retrievers.append(entry)
     # Copied, not re-`mark`ed: the variant's own trace already emitted the
     # process-wide degradation counter for these tags, and marking them
@@ -249,7 +277,6 @@ def _absorb(caller_trace: Any, variant_trace: Any, variant: str) -> None:
     for tag in getattr(variant_trace, "notes", []):
         if tag not in caller_trace.notes:
             caller_trace.notes.append(tag)
-    del variant  # named for readability at the call site
 
 
 def _retrace(caller_trace: Any, final: list[Any]) -> None:

@@ -588,11 +588,10 @@ def test_one_memory_stays_one_memory_across_id_types(monkeypatch):
     assert trace.fused == [(str(r.id), r.score) for r in out]
 
 
-def test_a_second_phrasing_of_a_known_memory_is_not_new(monkeypatch):
-    """The same disagreement in its other direction: when the ONLY thing a
-    paraphrase returns is a memory the caller already has under the other
-    id type, the retry found nothing — and must say so by returning the
-    caller's own results, not a fusion that lists that memory twice."""
+def test_a_second_phrasing_of_a_known_memory_is_one_memory(monkeypatch):
+    """The same disagreement in its other direction: when a paraphrase
+    returns a memory the caller already has under the OTHER id type, that
+    is one memory corroborated, not two found. It takes one slot."""
     _flow(
         monkeypatch,
         {
@@ -603,5 +602,90 @@ def test_a_second_phrasing_of_a_known_memory_is_not_new(monkeypatch):
     original = _Hit("1")
     out, retried = retry_weak_recall(None, "q", 10, llm=_LLM(), results=[original], below=5)
     assert retried is True
-    assert out == [original]  # the caller's own list, untouched
-    assert original.score == 0.9  # no fused score written over it
+    assert out == [original]  # one row, and it is the caller's own object
+
+
+def test_corroboration_re_ranks_even_when_nothing_new_is_found(monkeypatch):
+    """R9 (codex P2): with `--retry-weak-below` above 1 the original list
+    is not empty, and the paraphrases can come back holding only memories
+    the caller already had — but in a DIFFERENT order. That is not
+    "nothing": a memory both phrasings put first is better evidenced than
+    one only the original found, which is the whole point of fusing the
+    rounds. Gating the fusion on "did we see an unseen id" skipped it and
+    returned the original order with pre-fusion scores."""
+    a, b = _Hit("A"), _Hit("B")
+    a.score, b.score = 0.9, 0.5  # the original pass preferred A
+    seen = _flow(
+        monkeypatch,
+        {
+            "how did we decide auth": [_Hit("B")],  # both paraphrases...
+            "what was chosen for login": [_Hit("B")],  # ...prefer B
+        },
+    )
+    out, retried = retry_weak_recall(None, "q", 10, llm=_LLM(), results=[a, b], below=5)
+    assert retried is True and len(seen) == MAX_VARIANTS
+    assert [r.id for r in out] == ["B", "A"]  # corroboration wins the top slot
+    assert out[0].score > out[1].score  # ...and the scores say so
+
+
+def test_nothing_at_all_leaves_the_caller_untouched(monkeypatch):
+    """The other side of that rule: paraphrases that come back EMPTY have
+    contributed no evidence, so there is nothing to fuse and the caller's
+    own results and scores must survive verbatim."""
+    a = _Hit("A")
+    _flow(monkeypatch, {})  # neither phrasing retrieves anything
+    out, retried = retry_weak_recall(None, "q", 10, llm=_LLM(), results=[a], below=5)
+    assert retried is True
+    assert out == [a] and a.score == 0.9  # no fused score written over it
+
+
+def test_the_trace_says_which_paraphrase_produced_which_entry(monkeypatch):
+    """R9 (codex P2): `:retry` in the name says an entry came from the
+    retry, not WHICH of the two paraphrases produced its hits, latency or
+    error. `RetrieverTrace.query` is the field for that."""
+    from mnemostack.recall.trace import RecallTrace, RetrieverTrace
+
+    def _fake(_recaller, query, _limit, **kwargs):
+        trace = kwargs.get("trace")
+        if trace is not None:
+            trace.retrievers.append(RetrieverTrace(name="vector"))
+            if query == "what was chosen for login":
+                # an inner expansion recorded the text IT sent
+                trace.retrievers.append(RetrieverTrace(name="bm25", query="inner"))
+        return [_Hit(query)]
+
+    import mnemostack.recall.retry as retry_mod
+
+    monkeypatch.setattr(retry_mod, "recall_flow", _fake)
+    trace = RecallTrace()
+    retry_weak_recall(None, "q", 10, llm=_LLM(), results=[], trace=trace)
+    labelled = [(e.name, e.query) for e in trace.retrievers]
+    assert labelled == [
+        ("vector:retry", "how did we decide auth"),
+        ("vector:retry", "what was chosen for login"),
+        ("bm25:retry", "inner"),  # the text that actually reached it, kept
+    ]
+
+
+def test_recovery_counts_memories_not_rows(monkeypatch):
+    """The recovery counter answers "how much did the retry add", so it
+    has to count what the merge counts. A caller list holding one memory
+    under two id types is two rows and one memory: measuring the merge
+    against the row count hides a genuine recovery behind the dedup."""
+    from mnemostack.observability.recorder import (
+        InMemoryRecorder,
+        NullRecorder,
+        set_recorder,
+    )
+
+    _flow(monkeypatch, {"how did we decide auth": [_Hit("N")]})
+    rec = InMemoryRecorder()
+    set_recorder(rec)
+    try:
+        out, _retried = retry_weak_recall(
+            None, "q", 10, llm=_LLM(), results=[_Hit(1), _Hit("1")], below=5
+        )
+    finally:
+        set_recorder(NullRecorder())
+    assert [str(r.id) for r in out] == ["1", "N"]  # one memory, plus the new one
+    assert rec.counters.get(("mnemostack.recall.weak_retry_recovered",)) == 1.0
