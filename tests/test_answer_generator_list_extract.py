@@ -294,7 +294,7 @@ def test_default_abstention_prompts_unchanged(memories):
 def test_prompt_overrides_left_verbatim_under_localized_abstention(memories):
     """Override authors write their own abstention line — localization must
     not rewrite their template."""
-    override = 'Réponds: {query}\n{context}\nSi rien trouvé: "Pas en mémoire."'
+    override = "Réponds: {query}\n{context}\nSi rien trouvé: \"Pas en mémoire.\""
     llm = SequenceLLM(["réponse"])
     gen = AnswerGenerator(
         llm=llm,
@@ -609,9 +609,7 @@ def test_provenance_matches_projected_context_fields():
         payload = {"source": f"chat-{i}"}
         if author:
             payload["author"] = author
-        return RecallResult(
-            id=str(i), text=text, score=1.0 - i * 0.01, payload=payload, sources=["vector"]
-        )
+        return RecallResult(id=str(i), text=text, score=1.0 - i * 0.01, payload=payload, sources=["vector"])
 
     pool = [_mem(i, f"routine status update number {i}") for i in range(1, 7)]
     pool.append(_mem(7, "the deployment was approved", author="Teilnehmer B"))

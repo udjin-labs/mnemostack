@@ -198,12 +198,16 @@ def synthesize(
         from .recall.recaller import derive_payload_schema
 
         missing = tuple(
-            f for f in ("text_key", "timestamp_key", "timestamp_format") if not kwargs.get(f)
+            f
+            for f in ("text_key", "timestamp_key", "timestamp_format")
+            if not kwargs.get(f)
         )
         derived = derive_payload_schema(list(kwargs.get("retrievers") or []), missing)
     text_key = str(kwargs.get("text_key") or derived.get("text_key", "text"))
     timestamp_key = str(kwargs.get("timestamp_key") or derived.get("timestamp_key", "timestamp"))
-    timestamp_format = str(kwargs.get("timestamp_format") or derived.get("timestamp_format", "iso"))
+    timestamp_format = str(
+        kwargs.get("timestamp_format") or derived.get("timestamp_format", "iso")
+    )
     facts = _dedupe_facts(
         _facts_from_results(
             raw_results,

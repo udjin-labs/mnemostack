@@ -74,14 +74,8 @@ def test_filter_include_invalidated_keeps_all():
 def test_filter_as_of_uses_world_time_ignoring_invalidation():
     # invalidated_at present but as_of asks what was true then → still returned
     results = [
-        _r(
-            "a",
-            {
-                "valid_from": "2026-01-01",
-                "valid_until": "2026-06-01",
-                "invalidated_at": "2026-07-04",
-            },
-        ),
+        _r("a", {"valid_from": "2026-01-01", "valid_until": "2026-06-01",
+                 "invalidated_at": "2026-07-04"}),
         _r("b", {"valid_from": "2026-07-01"}),
     ]
     kept = filter_by_validity(results, as_of="2026-03-01")
@@ -159,7 +153,8 @@ class _StubRecaller:
     def __init__(self, results):
         self._results = results
 
-    def recall(self, query, limit=10, filters=None, include_invalidated=False, as_of=None, **_):
+    def recall(self, query, limit=10, filters=None, include_invalidated=False,
+               as_of=None, **_):
         from mnemostack.recall import filter_by_validity
 
         # A real Recaller applies the validity filter internally; mirror that
@@ -210,13 +205,8 @@ def test_recaller_recall_excludes_invalidated_end_to_end():
         def search(self, query, limit, filters=None):
             return [
                 RecallResult(id="a", text="a", score=0.9, payload={}, sources=["fake"]),
-                RecallResult(
-                    id="b",
-                    text="b",
-                    score=0.8,
-                    payload={"invalidated_at": "2026-07-04"},
-                    sources=["fake"],
-                ),
+                RecallResult(id="b", text="b", score=0.8,
+                             payload={"invalidated_at": "2026-07-04"}, sources=["fake"]),
             ]
 
     recaller = Recaller(retrievers=[_FakeRetriever()])
@@ -245,9 +235,8 @@ async def test_async_invalidate_mirrors_sync():
         await s.upsert(1, [0.1, 0.2, 0.3, 0.4], {"text": "fact"})
         n = await s.invalidate(1, invalidated_at="2026-07-04T00:00:00Z")
         assert n == 1
-        retrieved = await s.client.retrieve(
-            collection_name=s.collection, ids=[1], with_payload=True
-        )
+        retrieved = await s.client.retrieve(collection_name=s.collection, ids=[1],
+                                            with_payload=True)
         assert retrieved[0].payload["invalidated_at"] == "2026-07-04T00:00:00Z"
         assert retrieved[0].payload["text"] == "fact"
     finally:
@@ -262,7 +251,7 @@ def test_valid_at_timezone_offset_compared_as_instant():
     # compare would reject as_of=2026-07-03T23:00Z (text starts with the prior
     # day); instant comparison correctly accepts it.
     p = {"valid_from": "2026-07-04T00:00:00+02:00"}
-    assert valid_at(p, "2026-07-03T23:00:00Z") is True  # after real start
+    assert valid_at(p, "2026-07-03T23:00:00Z") is True   # after real start
     assert valid_at(p, "2026-07-03T21:00:00Z") is False  # before real start
 
 
@@ -291,13 +280,8 @@ def test_recall_stale_top_hit_does_not_starve_limit():
 
         def search(self, query, limit, filters=None):
             return [
-                RecallResult(
-                    id="stale",
-                    text="s",
-                    score=0.9,
-                    payload={"invalidated_at": "2026-07-04"},
-                    sources=["vector"],
-                ),
+                RecallResult(id="stale", text="s", score=0.9,
+                             payload={"invalidated_at": "2026-07-04"}, sources=["vector"]),
                 RecallResult(id="fresh", text="f", score=0.8, payload={}, sources=["vector"]),
             ]
 
@@ -317,20 +301,11 @@ def test_vector_floor_does_not_reinject_stale():
 
         def search(self, query, limit, filters=None):
             return [
-                RecallResult(
-                    id="fresh",
-                    text="f",
-                    score=0.5,
-                    payload={"raw_vector_score": 0.5},
-                    sources=["vector"],
-                ),
-                RecallResult(
-                    id="stale",
-                    text="s",
-                    score=0.99,
-                    payload={"invalidated_at": "x", "raw_vector_score": 0.99},
-                    sources=["vector"],
-                ),
+                RecallResult(id="fresh", text="f", score=0.5,
+                             payload={"raw_vector_score": 0.5}, sources=["vector"]),
+                RecallResult(id="stale", text="s", score=0.99,
+                             payload={"invalidated_at": "x", "raw_vector_score": 0.99},
+                             sources=["vector"]),
             ]
 
     recaller = Recaller(retrievers=[_FakeRetriever()], vector_floor=1)
@@ -400,15 +375,8 @@ def test_over_fetch_recovers_valid_below_stale_window():
             out = []
             for i in range(min(limit, 25)):
                 payload = {"invalidated_at": "x"} if i < 20 else {}
-                out.append(
-                    RecallResult(
-                        id=str(i),
-                        text=f"t{i}",
-                        score=1.0 - i * 0.01,
-                        payload=payload,
-                        sources=["vector"],
-                    )
-                )
+                out.append(RecallResult(id=str(i), text=f"t{i}", score=1.0 - i * 0.01,
+                                        payload=payload, sources=["vector"]))
             return out
 
     retr = _FakeRetriever()
@@ -589,17 +557,13 @@ def test_mca_hits_filtered_by_validity_before_fusion():
         name = "vector"
 
         def search(self, query, limit, filters=None):
-            return [RecallResult(id="fresh", text="f", score=0.5, payload={}, sources=["vector"])]
+            return [RecallResult(id="fresh", text="f", score=0.5, payload={},
+                                 sources=["vector"])]
 
     recaller = Recaller(retrievers=[_FakeRetriever()], mca_prefilter=True)
     recaller._mca_hits = lambda q, limit, filters: [
-        RecallResult(
-            id="stale",
-            text="s",
-            score=0.99,
-            payload={"invalidated_at": "2026-07-04"},
-            sources=["mca"],
-        )
+        RecallResult(id="stale", text="s", score=0.99,
+                     payload={"invalidated_at": "2026-07-04"}, sources=["mca"])
     ]
     out = recaller.recall("q", limit=1)
     assert "stale" not in {r.id for r in out}
@@ -631,9 +595,8 @@ def test_over_fetch_trims_back_to_per_source_limit_on_clean_index():
             self.last_limit = limit
             # return `limit` current hits (nothing stale)
             return [
-                RecallResult(
-                    id=str(i), text=f"t{i}", score=1.0 - i * 0.001, payload={}, sources=["vector"]
-                )
+                RecallResult(id=str(i), text=f"t{i}", score=1.0 - i * 0.001,
+                             payload={}, sources=["vector"])
                 for i in range(limit)
             ]
 
@@ -641,8 +604,8 @@ def test_over_fetch_trims_back_to_per_source_limit_on_clean_index():
     recaller = Recaller(retrievers=[retr])
     # recall with a large limit so fusion doesn't cut below the window
     out = recaller.recall("q", limit=100, vector_limit=20)
-    assert retr.last_limit >= 60  # over-fetched
-    assert len(out) == 20  # but trimmed back to the 20-wide window
+    assert retr.last_limit >= 60          # over-fetched
+    assert len(out) == 20                 # but trimmed back to the 20-wide window
 
 
 def test_graph_valid_clause_used_for_target_node():
@@ -692,7 +655,7 @@ def test_include_invalidated_only_sent_to_advertising_retriever():
 
     recaller = Recaller(retrievers=[_AsOfOnlyRetriever()])
     out = recaller.recall("q", limit=5, as_of="2026-03-01")
-    assert captured["called"] is True  # not silently dropped
+    assert captured["called"] is True          # not silently dropped
     assert captured["as_of"] == "2026-03-01"
     assert [r.id for r in out] == ["x"]
 
@@ -731,9 +694,9 @@ def test_bare_date_as_of_matches_full_instant_bound_lexically():
     # valid at a bare-date as_of once as_of is expanded to the full instant.
     from mnemostack.recall.validity import to_utc_instant, to_utc_iso
 
-    as_of = to_utc_instant("2026-03-01")  # 2026-03-01T00:00:00Z
-    valid_from = to_utc_iso("2026-03-01T00:00:00Z")  # stored bound, same canonical form
-    assert valid_from <= as_of  # was False without expansion
+    as_of = to_utc_instant("2026-03-01")               # 2026-03-01T00:00:00Z
+    valid_from = to_utc_iso("2026-03-01T00:00:00Z")    # stored bound, same canonical form
+    assert valid_from <= as_of                         # was False without expansion
 
 
 def test_search_many_filters_per_vector_before_fusion():
@@ -768,10 +731,9 @@ def test_graph_bare_node_skipped_when_no_valid_edge():
         def run(self, cypher, **params):
             class _R:
                 def data(self_inner):
-                    if "labels(n)[0]" in cypher:  # node probe
+                    if "labels(n)[0]" in cypher:      # node probe
                         return [{"name": "Alice", "type": "Person", "mc": ""}]
-                    return []  # rel query: no valid edges
-
+                    return []                          # rel query: no valid edges
             return _R()
 
         def __enter__(self):
@@ -810,19 +772,16 @@ def test_fallback_filters_validity_before_truncate():
     recaller.vector = None
 
     # stub the fallback hit source: stale hit first, valid one below
-    stale = RecallResult(
-        id="stale",
-        text="s",
-        score=0.9,
-        payload={"invalidated_at": "2026-07-04"},
-        sources=["vector"],
-    )
+    stale = RecallResult(id="stale", text="s", score=0.9,
+                         payload={"invalidated_at": "2026-07-04"}, sources=["vector"])
     fresh = RecallResult(id="fresh", text="f", score=0.5, payload={}, sources=["vector"])
     recaller._vector_fallback_hits = (
         lambda query, limit, filters, hide_invalidated=False, tenant=None: [stale, fresh]
     )
 
-    out = recaller._maybe_apply_fallback("q", [], limit=1, vector_limit=1, filters=None)
+    out = recaller._maybe_apply_fallback(
+        "q", [], limit=1, vector_limit=1, filters=None
+    )
     assert "stale" not in {r.id for r in out}
     assert "fresh" in {r.id for r in out}
 
@@ -836,9 +795,9 @@ def test_graph_rel_probe_is_undirected_and_overfetches_nodes():
     from mnemostack.recall.retrievers import MemgraphRetriever
 
     src = inspect.getsource(MemgraphRetriever.search)
-    assert "-[r]-(m)" in src and "-[r]->(m)" not in src  # undirected
+    assert "-[r]-(m)" in src and "-[r]->(m)" not in src   # undirected
     assert "startNode(r).name" in src and "endNode(r).name" in src
-    assert "self.max_nodes * 3" in src  # node over-fetch
+    assert "self.max_nodes * 3" in src                     # node over-fetch
 
 
 def test_to_utc_iso_normalizes_non_T_separators():
@@ -879,10 +838,10 @@ def test_to_utc_iso_preserves_precision_for_existing_bound_compat():
     # bound written by the previous normalizer still compares equal to a
     # normalized as_of at the exact boundary — widening would make '...00Z' and
     # '...00.000000Z' (the same instant) sort unequal and drop the fact.
-    stored = "2026-03-01T00:00:00Z"  # existing graph bound
+    stored = "2026-03-01T00:00:00Z"          # existing graph bound
     as_of = to_utc_instant("2026-03-01")
     assert as_of == "2026-03-01T00:00:00Z"
-    assert stored <= as_of and as_of <= stored  # equal -> boundary holds
+    assert stored <= as_of and as_of <= stored   # equal -> boundary holds
     # a fractional bound keeps its precision (sub-second lexical ordering across
     # mixed precision is a known limitation of the raw-string graph compare)
     assert to_utc_iso("2026-01-01t00:00:00.500000+00:00") == "2026-01-01T00:00:00.500000Z"

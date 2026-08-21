@@ -211,9 +211,7 @@ def test_ingest_window_size_1_matches_current_behavior():
 
     def _normalized(upserts):
         # indexed_at is wall-clock — equal up to microseconds, strip it
-        return [
-            (pid, vec, {k: v for k, v in p.items() if k != "indexed_at"}) for pid, vec, p in upserts
-        ]
+        return [(pid, vec, {k: v for k, v in p.items() if k != "indexed_at"}) for pid, vec, p in upserts]
 
     assert _normalized(baseline_store.upserts) == _normalized(window_store.upserts)
 

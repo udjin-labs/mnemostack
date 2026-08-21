@@ -340,7 +340,9 @@ _STORE_INT_MAX = 2**63 - 1
 _METADATA_MAX_DEPTH = 32
 
 
-def _find_unrepresentable_number(value: Any, path: str = "metadata", depth: int = 0) -> str | None:
+def _find_unrepresentable_number(
+    value: Any, path: str = "metadata", depth: int = 0
+) -> str | None:
     """First metadata number the store cannot represent, or None.
 
     Walks nested dicts/lists with a hard depth ceiling (the walk must never
@@ -460,7 +462,9 @@ def validate_remote_item(
         # Both sides through the SAME normalization: a configured key stored
         # in a non-NFKC form must still catch its normalized client variant.
         normalized_extra = {_normalized_metadata_key(e) for e in reserved_extra}
-        extra_hits = sorted(k for k in metadata if _normalized_metadata_key(k) in normalized_extra)
+        extra_hits = sorted(
+            k for k in metadata if _normalized_metadata_key(k) in normalized_extra
+        )
         reserved = sorted(set(reserved) | set(extra_hits))
     if reserved:
         return "metadata uses reserved key(s): " + ", ".join(reserved)
@@ -612,7 +616,6 @@ def _valid_remote_predicate(predicate: str) -> bool:
     return predicate[0].isalpha() and all(
         c.isalpha() or c.isdecimal() or c == "_" for c in predicate
     )
-
 
 #: Bounds for one remote triple — enforced in the SHARED validator so the
 #: MCP surface is capped identically to HTTP's pydantic schema (an
@@ -992,10 +995,13 @@ def ensure_remote_schema_keys(text_key: str, timestamp_key: str) -> None:
         # unrelated fields). Same rule client metadata already obeys.
         raise ValueError(f"text_key {text_key!r} is in the reserved underscore namespace")
     if timestamp_key != "timestamp" and timestamp_key.startswith("_"):
-        raise ValueError(f"timestamp_key {timestamp_key!r} is in the reserved underscore namespace")
+        raise ValueError(
+            f"timestamp_key {timestamp_key!r} is in the reserved underscore namespace"
+        )
     if text_key != "text" and text_key in _PIPELINE_PAYLOAD_KEYS:
         raise ValueError(
-            f"text_key {text_key!r} collides with a payload field the ingest pipeline writes"
+            f"text_key {text_key!r} collides with a payload field the ingest "
+            "pipeline writes"
         )
     if timestamp_key != "timestamp" and timestamp_key in _PIPELINE_PAYLOAD_KEYS:
         raise ValueError(
@@ -1003,7 +1009,9 @@ def ensure_remote_schema_keys(text_key: str, timestamp_key: str) -> None:
             "the ingest pipeline writes"
         )
     if text_key == timestamp_key and text_key != "text":
-        raise ValueError("text_key and timestamp_key must differ — one field cannot carry both")
+        raise ValueError(
+            "text_key and timestamp_key must differ — one field cannot carry both"
+        )
 
 
 def ingest_remote_items(
@@ -1160,7 +1168,10 @@ def _ingest_remote_items_locked(
     timestamp_key: str,
     timestamp_format: str,
 ) -> list[RemoteMemoryResult]:
-    ids = [stable_chunk_id(item.source, item.offset, item.text, tenant=tenant) for item in items]
+    ids = [
+        stable_chunk_id(item.source, item.offset, item.text, tenant=tenant)
+        for item in items
+    ]
     tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
     # getattr, not `except AttributeError` around the call: an internal
     # AttributeError from an implemented probe must propagate — swallowed,
@@ -1183,7 +1194,9 @@ def _ingest_remote_items_locked(
     # 507-rejected request would still have un-retracted memories
     # (commit-nothing means nothing).
     if to_ingest and tenant is not None and max_points is not None:
-        enforce_points_quota(tenant, store.count(tenant=tenant), len(to_ingest), max_points)
+        enforce_points_quota(
+            tenant, store.count(tenant=tenant), len(to_ingest), max_points
+        )
     stored: set[str] = set()
     if to_ingest:
         # Map event times and the text mirror onto the collection's schema
@@ -1202,7 +1215,6 @@ def _ingest_remote_items_locked(
             for item in to_ingest:
                 item.metadata[text_key] = item.text
         _apply_timestamp_domain(to_ingest, timestamp_key, timestamp_format)
-
         # (Quota was preflighted above, before ANY effect of this call —
         # including reactivations. Deliberately CONSERVATIVE: items that
         # will later fail embedding still count, since which one fails is
@@ -1304,7 +1316,10 @@ def _ingest_remote_items_locked(
             from mnemostack.vector.patch import PayloadPatch
 
             patched = store.apply_payload_patches(
-                [PayloadPatch(id=pid, delete_keys=("invalidated_at",)) for pid in stale_ids],
+                [
+                    PayloadPatch(id=pid, delete_keys=("invalidated_at",))
+                    for pid in stale_ids
+                ],
                 **tkw,
             )
             if patched == len(stale_ids):
@@ -1352,7 +1367,9 @@ def _ingest_remote_items_locked(
         # store-duplicates, and in-request repeats never were.
         attempted = pid in seen_now and pid not in first_seen
         first_seen.add(pid)
-        results.append(RemoteMemoryResult(id=pid, status=status, embed_attempted=attempted))
+        results.append(
+            RemoteMemoryResult(id=pid, status=status, embed_attempted=attempted)
+        )
     counter("mnemostack.ingest.remote_items", len(items))
     counter("mnemostack.ingest.remote_stored", sum(r.status == "stored" for r in results))
     return results
@@ -1528,7 +1545,11 @@ def prune_stale_chunks_from_snapshot(
             stale.clear()
 
     has_scroll = hasattr(vector_store, "scroll")
-    if existing is None and has_scroll and len(fresh_ids_by_source) <= selective_scan_max_sources:
+    if (
+        existing is None
+        and has_scroll
+        and len(fresh_ids_by_source) <= selective_scan_max_sources
+    ):
         # Selective re-index: narrow server-indexed scans, one per source —
         # but payload-bearing, because a Qdrant MatchValue filter ALSO
         # matches array payloads containing the value ({"source": ["a.md"]}
@@ -1569,7 +1590,9 @@ def prune_stale_chunks_from_snapshot(
                         _flush()
     else:
         if existing is None:
-            root_filter = {"index_root": index_root} if index_root is not None else None
+            root_filter = (
+                {"index_root": index_root} if index_root is not None else None
+            )
             existing = (
                 (hit.id, hit.payload or {})
                 for hit in vector_store.scroll(filters=root_filter, **tkw)
@@ -1707,9 +1730,7 @@ def _sync_wrapper_graph(
         with graph.driver.session(database=database) as session:
             session.run(query, **params)
         return
-    if hasattr(graph, "add_file_tags") and (
-        tenant is None or _accepts_kw(graph.add_file_tags, "tenant")
-    ):
+    if hasattr(graph, "add_file_tags") and (tenant is None or _accepts_kw(graph.add_file_tags, "tenant")):
         # Use the adapter's own hook, threading tenant only when it accepts it.
         fkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
         graph.add_file_tags(
@@ -1929,9 +1950,7 @@ class Ingestor:
         # within a TTL: a repointed tag inside the window would stamp fresh
         # fingerprints next to old-space points and corrupt the collection
         # BEFORE any read-side revalidation could notice.
-        self._space_guard = SpaceGuard(
-            vector_store, embedding, recheck_seconds=0.0, fail_closed=True
-        )
+        self._space_guard = SpaceGuard(vector_store, embedding, recheck_seconds=0.0, fail_closed=True)
 
     # ---- Public API ----
 

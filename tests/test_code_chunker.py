@@ -26,8 +26,12 @@ PY_SOURCE = (
     "def first_function(x):\n"
     + "".join(f"    a{i} = x + {i}\n" for i in range(20))
     + "    return x\n\n\n"
-    "class SecondThing:\n" + "".join(f"    attr{i} = {i}\n" for i in range(20)) + "\n\n"
-    "def third_helper():\n" + "".join(f"    b{i} = {i}\n" for i in range(20)) + "    return None\n"
+    "class SecondThing:\n"
+    + "".join(f"    attr{i} = {i}\n" for i in range(20))
+    + "\n\n"
+    "def third_helper():\n"
+    + "".join(f"    b{i} = {i}\n" for i in range(20))
+    + "    return None\n"
 )
 
 
@@ -87,7 +91,7 @@ def test_oversized_segment_falls_back_to_char_splitting():
 
 def test_brace_family_boundaries_go_and_js():
     go_src = (
-        'package main\n\nimport "fmt"\n\n'
+        "package main\n\nimport \"fmt\"\n\n"
         "func FirstThing(x int) int {\n"
         + "".join(f"\ty{i} := x + {i}\n" for i in range(20))
         + "\treturn x\n}\n\n"
@@ -161,10 +165,14 @@ def test_c_type_prefixed_functions_are_boundaries():
 
 def test_leading_doc_comment_travels_with_its_definition():
     src = (
-        "def first():\n" + "".join(f"    a{i} = {i}\n" for i in range(20)) + "    return 1\n\n"
+        "def first():\n"
+        + "".join(f"    a{i} = {i}\n" for i in range(20))
+        + "    return 1\n\n"
         "# Documents the second function.\n"
         "# Spanning two comment lines.\n"
-        "def second():\n" + "".join(f"    b{i} = {i}\n" for i in range(20)) + "    return 2\n"
+        "def second():\n"
+        + "".join(f"    b{i} = {i}\n" for i in range(20))
+        + "    return 2\n"
     )
     chunks = chunk_code(src, "python", max_chars=2000)
     _assert_partition(src, chunks)
@@ -210,9 +218,13 @@ def test_kotlin_fun_definitions_are_boundaries():
 
 def test_annotations_and_templates_travel_with_their_definition():
     java_src = (
-        "public class First {\n" + "".join(f"    int a{i} = {i};\n" for i in range(20)) + "}\n\n"
+        "public class First {\n"
+        + "".join(f"    int a{i} = {i};\n" for i in range(20))
+        + "}\n\n"
         "@Deprecated\n"
-        "public class Second {\n" + "".join(f"    int b{i} = {i};\n" for i in range(20)) + "}\n"
+        "public class Second {\n"
+        + "".join(f"    int b{i} = {i};\n" for i in range(20))
+        + "}\n"
     )
     chunks = chunk_code(java_src, "java", max_chars=2000)
     _assert_partition(java_src, chunks)
@@ -252,8 +264,12 @@ def test_typed_typescript_const_definitions_are_boundaries():
 
 def test_ruby_modules_and_methods_are_boundaries():
     rb_src = (
-        "module Outer\n" + "".join(f"  CONST_{i} = {i}\n" for i in range(20)) + "end\n\n"
-        "def helper_method?\n" + "".join(f"  x{i} = {i}\n" for i in range(20)) + "end\n"
+        "module Outer\n"
+        + "".join(f"  CONST_{i} = {i}\n" for i in range(20))
+        + "end\n\n"
+        "def helper_method?\n"
+        + "".join(f"  x{i} = {i}\n" for i in range(20))
+        + "end\n"
     )
     chunks = chunk_code(rb_src, "ruby", max_chars=2000)
     _assert_partition(rb_src, chunks)
@@ -264,8 +280,12 @@ def test_ruby_modules_and_methods_are_boundaries():
 
 def test_scoped_enum_captures_the_declared_name():
     src = (
-        "enum class Color {\n" + "".join(f"    VALUE_{i},\n" for i in range(20)) + "};\n\n"
-        "enum Plain {\n" + "".join(f"    P_{i},\n" for i in range(20)) + "};\n"
+        "enum class Color {\n"
+        + "".join(f"    VALUE_{i},\n" for i in range(20))
+        + "};\n\n"
+        "enum Plain {\n"
+        + "".join(f"    P_{i},\n" for i in range(20))
+        + "};\n"
     )
     chunks = chunk_code(src, "cpp", max_chars=2000)
     symbols = [c.symbol for c in chunks]
@@ -319,7 +339,8 @@ def test_c_prototypes_with_trailing_comments_are_not_boundaries():
         "int commented_proto(int x); // API declaration\n"
         "int block_proto(int y); /* legacy */\n\n"
         + "".join(
-            f"static int real_def{i}(void) {{ return {i}; }} // one-liner\n" for i in range(6)
+            f"static int real_def{i}(void) {{ return {i}; }} // one-liner\n"
+            for i in range(6)
         )
         + "\nstatic int big_def(void) {\n"
         + "".join(f"    int a{i} = {i};\n" for i in range(20))
@@ -338,7 +359,9 @@ def test_oversized_merge_resplits_at_the_internal_definition_boundary():
     """A small helper merged with a large following function must split at
     the function's start, not at an arbitrary character offset."""
     helper = "def helper():\n" + "".join(f"    h{i} = {i}\n" for i in range(12))
-    big = "def big_function():\n" + "".join(f"    value_{i} = {i} * 2\n" for i in range(90))
+    big = "def big_function():\n" + "".join(
+        f"    value_{i} = {i} * 2\n" for i in range(90)
+    )
     src = helper + big
     assert len(helper) < 200  # below the merge minimum — gets merged
     assert len(helper) + len(big) > 2000 > len(big)  # combined would char-split
@@ -355,8 +378,10 @@ def test_rust_attributes_travel_with_their_definition():
         + "".join(f"    let a{i} = {i};\n" for i in range(20))
         + "    0\n}\n\n"
         "#[derive(Debug, Clone)]\n"
-        '#[cfg(feature = "extra")]\n'
-        "struct Config {\n" + "".join(f"    field{i}: u32,\n" for i in range(20)) + "}\n"
+        "#[cfg(feature = \"extra\")]\n"
+        "struct Config {\n"
+        + "".join(f"    field{i}: u32,\n" for i in range(20))
+        + "}\n"
     )
     chunks = chunk_code(src, "rust", max_chars=2000)
     _assert_partition(src, chunks)
@@ -384,11 +409,13 @@ def test_lua_local_functions_are_boundaries():
 
 def test_cpp_qualified_member_definitions_are_boundaries():
     src = (
-        '#include "widget.h"\n\n'
+        "#include \"widget.h\"\n\n"
         "int Widget::render(const Frame &f) {\n"
         + "".join(f"    int a{i} = {i};\n" for i in range(20))
         + "    return 0;\n}\n\n"
-        "Widget::~Widget() {\n" + "".join(f"    int b{i} = {i};\n" for i in range(20)) + "}\n"
+        "Widget::~Widget() {\n"
+        + "".join(f"    int b{i} = {i};\n" for i in range(20))
+        + "}\n"
     )
     chunks = chunk_code(src, "cpp", max_chars=2000)
     _assert_partition(src, chunks)
@@ -402,8 +429,11 @@ def test_decorator_stays_with_its_definition_when_resplitting():
     """A tiny helper + decorated large function: the re-split must cut at
     the DECORATOR line, never between the decorator and its def."""
     helper = "def helper():\n" + "".join(f"    h{i} = {i}\n" for i in range(12))
-    big = "@app.route('/endpoint')\n@cached\ndef big_function():\n" + "".join(
-        f"    value_{i} = {i} * 2\n" for i in range(85)
+    big = (
+        "@app.route('/endpoint')\n"
+        "@cached\n"
+        "def big_function():\n"
+        + "".join(f"    value_{i} = {i} * 2\n" for i in range(85))
     )
     src = helper + big
     assert len(helper) < 200 and len(helper) + len(big) > 2000 > len(big)
@@ -412,18 +442,17 @@ def test_decorator_stays_with_its_definition_when_resplitting():
     by_symbol = {c.symbol: c for c in chunks}
     assert by_symbol["helper"].text == helper
     assert by_symbol["big_function"].text == big  # decorators included
-    assert not any(c.text.strip() == "@app.route('/endpoint')\n@cached".strip() for c in chunks)
+    assert not any(c.text.strip() == "@app.route('/endpoint')\n@cached".strip()
+                   for c in chunks)
 
 
 def test_doc_comment_prefix_stays_with_definition_when_resplitting():
     """Round-6 completion: the internal cut is recorded BEFORE the trailing
     doc-comment/attribute run, so a resplit never strands the prefix on the
     preceding helper chunk."""
-    helper = (
-        "fn helper() -> u32 {\n"
-        + "".join(f"    let h{i} = {i};\n" for i in range(8))
-        + "    0\n}\n"
-    )
+    helper = "fn helper() -> u32 {\n" + "".join(
+        f"    let h{i} = {i};\n" for i in range(8)
+    ) + "    0\n}\n"
     big = (
         "/// Documents the big function.\n"
         "#[inline]\n"
@@ -445,8 +474,12 @@ def test_long_decorator_stack_stays_with_its_definition_at_flush():
     minimum on its own still travels with the def below it — pass-1 flush
     peels decorator lines exactly like comments."""
     helper = "def helper():\n" + "".join(f"    h{i} = {i}\n" for i in range(20))
-    decorators = "".join(f"@app.middleware_number_{i}(priority={i})\n" for i in range(12))
-    big = decorators + "def decorated():\n" + "".join(f"    d{i} = {i}\n" for i in range(20))
+    decorators = "".join(
+        f"@app.middleware_number_{i}(priority={i})\n" for i in range(12)
+    )
+    big = decorators + "def decorated():\n" + "".join(
+        f"    d{i} = {i}\n" for i in range(20)
+    )
     src = helper + big
     assert len(decorators) > 200  # the stack alone exceeds the flush minimum
     chunks = chunk_code(src, "python", max_chars=4000)
@@ -468,7 +501,9 @@ def test_sql_with_cte_keeps_its_final_select():
     filler = "".join(f"    , col_{i} AS (SELECT {i})\n" for i in range(20))
     src = (
         "CREATE TABLE t (id INT);\n\n"
-        "WITH base AS (\n    SELECT 1 AS x\n)\n" + filler + "SELECT * FROM base;\n\n"
+        "WITH base AS (\n    SELECT 1 AS x\n)\n"
+        + filler
+        + "SELECT * FROM base;\n\n"
         "INSERT INTO t VALUES (1);\n"
     )
     chunks = chunk_code(src, "sql", max_chars=4000)
@@ -554,17 +589,9 @@ def _patch_stack(monkeypatch, store):
 
 def _index_args(tmp_path, **overrides) -> argparse.Namespace:
     defaults = dict(
-        path=str(tmp_path),
-        provider="fake",
-        collection="test_collection",
-        qdrant="http://localhost:6333",
-        recreate=False,
-        yes=False,
-        prune=False,
-        enrich=None,
-        refresh_payloads=False,
-        chunk_size=2000,
-        window_size=1,
+        path=str(tmp_path), provider="fake", collection="test_collection",
+        qdrant="http://localhost:6333", recreate=False, yes=False, prune=False,
+        enrich=None, refresh_payloads=False, chunk_size=2000, window_size=1,
         code=False,
     )
     defaults.update(overrides)
@@ -639,7 +666,9 @@ def test_cmd_index_code_finds_uppercase_extensions(monkeypatch, tmp_path, store)
     assert any(p.get("language") == "typescript" for p in payloads)
 
 
-def test_enricher_cannot_fabricate_a_symbol_on_an_unnamed_chunk(monkeypatch, tmp_path, store):
+def test_enricher_cannot_fabricate_a_symbol_on_an_unnamed_chunk(
+    monkeypatch, tmp_path, store
+):
     (tmp_path / "data.py").write_text("x = 1\n" * 40, encoding="utf-8")  # no defs
     mod = types.ModuleType("fake_enricher_mod")
 

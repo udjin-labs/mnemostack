@@ -197,7 +197,9 @@ class GraphStore:
         # with its edges deleted-but-not-recreated (silent link loss). The driver
         # also auto-retries the whole transaction on a transient error.
         with self.driver.session(database=self.database) as session:
-            session.execute_write(self._sync_file_links_tx, source, list(targets), root, tenant)
+            session.execute_write(
+                self._sync_file_links_tx, source, list(targets), root, tenant
+            )
         return len(targets)
 
     @staticmethod
@@ -396,7 +398,9 @@ class GraphStore:
             # Confine both endpoints AND the relationship to the tenant — the
             # boundary lives on nodes and edges, so an edge missing/mismatched on
             # tenant (partial or hand-edited migration) is excluded, not returned.
-            where_parts.append("s.tenant = $tenant AND o.tenant = $tenant AND r.tenant = $tenant")
+            where_parts.append(
+                "s.tenant = $tenant AND o.tenant = $tenant AND r.tenant = $tenant"
+            )
             params["tenant"] = tenant
         if as_of:
             # Expand a bare-date as_of to a full midnight-UTC instant, then
@@ -500,8 +504,12 @@ class GraphStore:
         rel_where = "WHERE r.tenant IS NULL" if only_missing else ""
         with self.driver.session(database=self.database) as session:
             if dry_run:
-                nodes = session.run(f"MATCH (n) {node_where} RETURN count(n) AS n").single()
-                rels = session.run(f"MATCH ()-[r]->() {rel_where} RETURN count(r) AS n").single()
+                nodes = session.run(
+                    f"MATCH (n) {node_where} RETURN count(n) AS n"
+                ).single()
+                rels = session.run(
+                    f"MATCH ()-[r]->() {rel_where} RETURN count(r) AS n"
+                ).single()
             else:
                 nodes = session.run(
                     f"MATCH (n) {node_where} SET n.tenant = $tenant RETURN count(n) AS n",
@@ -546,8 +554,12 @@ class GraphStore:
                 tenant=tenant,
             ).single()
             if not dry_run:
-                session.run("MATCH ()-[r {tenant: $tenant}]->() DELETE r", tenant=tenant)
-                session.run("MATCH (n {tenant: $tenant}) DETACH DELETE n", tenant=tenant)
+                session.run(
+                    "MATCH ()-[r {tenant: $tenant}]->() DELETE r", tenant=tenant
+                )
+                session.run(
+                    "MATCH (n {tenant: $tenant}) DETACH DELETE n", tenant=tenant
+                )
         return {
             "nodes": int(nodes["n"] if nodes else 0),
             "relationships": int(rels["n"] if rels else 0),

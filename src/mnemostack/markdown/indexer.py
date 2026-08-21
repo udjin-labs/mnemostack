@@ -211,7 +211,11 @@ def collect_markdown(
         # Qdrant payload field names must be strings; a YAML key like ``2026:``
         # parses to an int and would abort the upsert, so coerce keys to str.
         # Structural resolver keys are RESERVED — frontmatter cannot set them.
-        meta = {str(k): v for k, v in meta.items() if str(k) not in _RESERVED_STRUCTURAL_KEYS}
+        meta = {
+            str(k): v
+            for k, v in meta.items()
+            if str(k) not in _RESERVED_STRUCTURAL_KEYS
+        }
         out.sources.append(rel)
 
         for link in extract_links(body):
@@ -222,9 +226,7 @@ def collect_markdown(
                 # first (handles ../ and same-dir links, and duplicate
                 # basenames), then fall back to a corpus-wide name/path match.
                 resolved = _resolve_relative(rel, link.target, rels_lower)
-            resolved = (
-                resolved or key_to_rel.get(link.target.lower()) or key_to_rel.get(norm.lower())
-            )
+            resolved = resolved or key_to_rel.get(link.target.lower()) or key_to_rel.get(norm.lower())
             out.edges.append(
                 LinkEdge(
                     source=rel,

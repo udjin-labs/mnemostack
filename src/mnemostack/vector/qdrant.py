@@ -300,7 +300,9 @@ class VectorStore:
         The honesty check behind enabling/diagnosing sparse mode."""
         covered = self.client.count(
             collection_name=self.collection,
-            count_filter=Filter(must=[HasVectorCondition(has_vector=SPARSE_TEXT_VECTOR)]),
+            count_filter=Filter(
+                must=[HasVectorCondition(has_vector=SPARSE_TEXT_VECTOR)]
+            ),
             exact=True,
         ).count
         total = self.client.count(collection_name=self.collection, exact=True).count
@@ -337,7 +339,9 @@ class VectorStore:
                 updates.append(
                     PointVectors(
                         id=pt.id,
-                        vector={SPARSE_TEXT_VECTOR: SparseVector(indices=indices, values=values)},
+                        vector={
+                            SPARSE_TEXT_VECTOR: SparseVector(indices=indices, values=values)
+                        },
                     )
                 )
             self.client.update_vectors(collection_name=self.collection, points=updates)
@@ -567,7 +571,9 @@ class VectorStore:
             out[str(point.id)] = {k: payload[k] for k in wanted if k in payload}
         return out
 
-    def retrieve_existing_ids(self, ids: list[str | int], *, tenant: str | None = None) -> set[str]:
+    def retrieve_existing_ids(
+        self, ids: list[str | int], *, tenant: str | None = None
+    ) -> set[str]:
         """Which of ``ids`` already exist (as string ids), for re-upsert detection.
 
         Lets a caller distinguish genuinely-new points from re-upserts of
@@ -591,7 +597,9 @@ class VectorStore:
         )
         if tenant is None:
             return {str(p.id) for p in found}
-        return {str(p.id) for p in found if (p.payload or {}).get(TENANT_ID_KEY) == tenant}
+        return {
+            str(p.id) for p in found if (p.payload or {}).get(TENANT_ID_KEY) == tenant
+        }
 
     def delete(self) -> None:
         self.client.delete_collection(self.collection)
@@ -640,7 +648,9 @@ class VectorStore:
             must.append(
                 Filter(
                     should=[
-                        FieldCondition(key="index_root", match=MatchValue(value=index_root_guard)),
+                        FieldCondition(
+                            key="index_root", match=MatchValue(value=index_root_guard)
+                        ),
                         # IsEmpty alone is the whole "carries no root"
                         # case: Qdrant matches it when the field is
                         # missing, null, OR an empty array (verified
@@ -793,9 +803,7 @@ class VectorStore:
             stamped[TENANT_ID_KEY] = owner
         self.client.upsert(
             collection_name=self.collection,
-            points=[
-                PointStruct(id=id, vector=self._point_vector(vector, stamped), payload=stamped)
-            ],
+            points=[PointStruct(id=id, vector=self._point_vector(vector, stamped), payload=stamped)],
         )
 
     def upsert_batch(
@@ -1010,13 +1018,19 @@ class VectorStore:
                     if delete_keys:
                         operations.append(
                             DeletePayloadOperation(
-                                delete_payload=DeletePayload(keys=delete_keys, points=[patch.id])
+                                delete_payload=DeletePayload(
+                                    keys=delete_keys, points=[patch.id]
+                                )
                             )
                         )
                     if tenant is not None:
                         values = {**dict(patch.set_values), TENANT_ID_KEY: tenant}
                     else:
-                        values = {k: v for k, v in patch.set_values.items() if k != TENANT_ID_KEY}
+                        values = {
+                            k: v
+                            for k, v in patch.set_values.items()
+                            if k != TENANT_ID_KEY
+                        }
                     if values:
                         operations.append(
                             SetPayloadOperation(
@@ -1161,7 +1175,9 @@ class VectorStore:
             target.append(pid)
         if not target:
             return 0
-        self.client.set_payload(collection_name=self.collection, payload=payload, points=target)
+        self.client.set_payload(
+            collection_name=self.collection, payload=payload, points=target
+        )
         return len(target)
 
     # ---------- search ----------
@@ -1270,7 +1286,9 @@ class VectorStore:
         indices, values = self._sparse_encoder.encode_query(query_text)
         if not indices:
             return []
-        qfilter = self._assemble_filter(filters, tenant=tenant, hide_invalidated=hide_invalidated)
+        qfilter = self._assemble_filter(
+            filters, tenant=tenant, hide_invalidated=hide_invalidated
+        )
         result = self.client.query_points(
             collection_name=self.collection,
             query=SparseVector(indices=indices, values=values),

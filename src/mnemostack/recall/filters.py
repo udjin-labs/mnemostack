@@ -69,7 +69,9 @@ def _exact_instant_match(condition: Any, candidates: list[Any], numeric_unit: st
     want = parse_payload_instant(condition, numeric_unit=numeric_unit)
     if want is None:
         return False
-    return any(parse_payload_instant(c, numeric_unit=numeric_unit) == want for c in candidates)
+    return any(
+        parse_payload_instant(c, numeric_unit=numeric_unit) == want for c in candidates
+    )
 
 
 def _in_range(
@@ -93,7 +95,11 @@ def _in_range(
         v = parse_payload_instant(value, numeric_unit=numeric_unit)
         g = parse_payload_instant(gte, numeric_unit=numeric_unit) if gte is not None else None
         t = parse_payload_instant(lte, numeric_unit=numeric_unit) if lte is not None else None
-        if v is not None and (gte is None or g is not None) and (lte is None or t is not None):
+        if (
+            v is not None
+            and (gte is None or g is not None)
+            and (lte is None or t is not None)
+        ):
             if g is not None and v < g:
                 return False
             if t is not None and v > t:
@@ -137,7 +143,9 @@ def result_passes_filters(
     this call is enforcing.
     """
     payload = getattr(result, "payload", None) or {}
-    if payload_matches(payload, filters, timestamp_key=timestamp_key, numeric_unit=numeric_unit):
+    if payload_matches(
+        payload, filters, timestamp_key=timestamp_key, numeric_unit=numeric_unit
+    ):
         return True
     if not filters:
         return True

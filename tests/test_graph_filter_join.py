@@ -41,7 +41,9 @@ class _Session:
             return _Result(rows[: params.get("probe_lim") or len(rows)])
         name, root_key = params["name"], params["root_key"]
         targets = self._files.get((name, root_key), [])
-        return _Result([{"from_n": name, "rel": "LINKS_TO", "to_n": t} for t in targets])
+        return _Result(
+            [{"from_n": name, "rel": "LINKS_TO", "to_n": t} for t in targets]
+        )
 
 
 class _Driver:
@@ -53,7 +55,9 @@ class _Driver:
 
 
 def _retriever(files, probe=None) -> MemgraphRetriever:
-    return MemgraphRetriever(uri="bolt://x", driver=_Driver(files), chunk_filter_probe=probe)
+    return MemgraphRetriever(
+        uri="bolt://x", driver=_Driver(files), chunk_filter_probe=probe
+    )
 
 
 FILES = {("note.md", "/corpus/a"): ["other.md"]}
@@ -102,11 +106,16 @@ def test_own_payload_keys_short_circuit_without_a_probe_call():
 
     retr = _retriever(FILES, probe)
     # index_root is IN the hit payload: a matching filter needs no probe...
-    out = retr.search("note.md", filters={"index_root": "/corpus/a"}, include_invalidated=True)
+    out = retr.search(
+        "note.md", filters={"index_root": "/corpus/a"}, include_invalidated=True
+    )
     assert [r.payload["name"] for r in out] == ["note.md"]
     # ...and a mismatching one drops the hit, also without probing.
     assert (
-        retr.search("note.md", filters={"index_root": "/elsewhere"}, include_invalidated=True) == []
+        retr.search(
+            "note.md", filters={"index_root": "/elsewhere"}, include_invalidated=True
+        )
+        == []
     )
 
 
@@ -125,7 +134,10 @@ def test_source_filter_is_evaluated_against_the_node_name():
     out = retr.search("note.md", filters={"source": "note.md"}, include_invalidated=True)
     assert [r.payload["name"] for r in out] == ["note.md"]
     assert calls and calls[0]["source"] == "note.md"  # chunk-existence proof ran
-    assert retr.search("note.md", filters={"source": "other.md"}, include_invalidated=True) == []
+    assert (
+        retr.search("note.md", filters={"source": "other.md"}, include_invalidated=True)
+        == []
+    )
 
 
 def test_dangling_link_targets_never_pass_a_source_filter():
@@ -133,10 +145,16 @@ def test_dangling_link_targets_never_pass_a_source_filter():
     node whose document has no chunks must not surface under
     filters={"source": ...}, and without a probe it fails closed."""
     retr = _retriever(FILES, lambda f, t, inv, ao: False)  # no chunks exist
-    assert retr.search("note.md", filters={"source": "note.md"}, include_invalidated=True) == []
+    assert (
+        retr.search("note.md", filters={"source": "note.md"}, include_invalidated=True)
+        == []
+    )
     probeless = _retriever(FILES)
     assert (
-        probeless.search("note.md", filters={"source": "note.md"}, include_invalidated=True) == []
+        probeless.search(
+            "note.md", filters={"source": "note.md"}, include_invalidated=True
+        )
+        == []
     )
 
 
@@ -162,8 +180,12 @@ def test_tenant_is_threaded_into_the_probe():
             # The tenant-scoped Cypher shape differs; reuse the fake matching.
             return super().run(cypher, **params)
 
-    retr = MemgraphRetriever(uri="bolt://x", driver=_Driver(files), chunk_filter_probe=probe)
-    out = retr.search("note.md", filters={"project": "x"}, include_invalidated=True, tenant="acme")
+    retr = MemgraphRetriever(
+        uri="bolt://x", driver=_Driver(files), chunk_filter_probe=probe
+    )
+    out = retr.search(
+        "note.md", filters={"project": "x"}, include_invalidated=True, tenant="acme"
+    )
     assert out and calls[0][1] == "acme"
 
 
@@ -209,7 +231,10 @@ def test_entity_hits_with_explicit_none_root_fail_an_index_root_filter():
     retr = MemgraphRetriever(
         uri="bolt://x", driver=_D(), chunk_filter_probe=lambda f, t, inv, ao: True
     )
-    assert retr.search("alice", filters={"index_root": "/x"}, include_invalidated=True) == []
+    assert (
+        retr.search("alice", filters={"index_root": "/x"}, include_invalidated=True)
+        == []
+    )
 
 
 class _RootlessFileSession(_Session):
@@ -239,7 +264,10 @@ def test_legacy_rootless_file_hits_are_dropped_not_probed():
             return _RootlessFileSession({})
 
     retr = MemgraphRetriever(uri="bolt://x", driver=_D(), chunk_filter_probe=probe)
-    assert retr.search("note.md", filters={"project": "x"}, include_invalidated=True) == []
+    assert (
+        retr.search("note.md", filters={"project": "x"}, include_invalidated=True)
+        == []
+    )
 
 
 # ------------------------------------------------------------ probe factory
@@ -287,7 +315,10 @@ def test_source_filter_never_admits_an_entity_named_like_a_document():
     retr = MemgraphRetriever(
         uri="bolt://x", driver=_D(), chunk_filter_probe=lambda f, t, inv, ao: True
     )
-    assert retr.search("alice", filters={"source": "Alice"}, include_invalidated=True) == []
+    assert (
+        retr.search("alice", filters={"source": "Alice"}, include_invalidated=True)
+        == []
+    )
 
 
 def test_tenant_id_filter_is_never_provable_by_chunks():
@@ -299,7 +330,10 @@ def test_tenant_id_filter_is_never_provable_by_chunks():
         raise AssertionError("tenant identity must never reach the chunk probe")
 
     retr = _retriever(FILES, probe)
-    assert retr.search("note.md", filters={"tenant_id": "A"}, include_invalidated=True) == []
+    assert (
+        retr.search("note.md", filters={"tenant_id": "A"}, include_invalidated=True)
+        == []
+    )
 
 
 def test_validity_view_is_threaded_into_the_probe():
@@ -343,7 +377,9 @@ def test_result_passes_filters_honors_the_marker_for_graph_hits_only():
     assert not result_passes_filters(graph_hit, {"project": "y"})
 
     # A vector hit with a planted marker must not bypass the filter.
-    spoofed = SimpleNamespace(payload={"_attributed_filters": {"project": "x"}}, sources=["vector"])
+    spoofed = SimpleNamespace(
+        payload={"_attributed_filters": {"project": "x"}}, sources=["vector"]
+    )
     assert not result_passes_filters(spoofed, filters)
 
     # Ordinary payload matching still works.
@@ -381,7 +417,9 @@ def test_flow_post_filter_keeps_attributed_graph_hits():
         def __iter__(self):
             return iter([])
 
-    out = recall_flow(_Recaller(), "q", 10, pipeline=_Pipeline(), filters={"project": "x"})
+    out = recall_flow(
+        _Recaller(), "q", 10, pipeline=_Pipeline(), filters={"project": "x"}
+    )
     ids = [r.id for r in out]
     assert "graph:/corpus/a:note.md" in ids  # proven graph hit survives
     assert "v1" in ids
@@ -396,7 +434,9 @@ def test_factory_converts_timestamp_bounds_and_forwards_validity():
             calls.append((dict(filters), tenant, include_invalidated, as_of))
             return True
 
-    probe = chunk_filter_probe_via(_Store(), timestamp_key="timestamp", timestamp_format="epoch")
+    probe = chunk_filter_probe_via(
+        _Store(), timestamp_key="timestamp", timestamp_format="epoch"
+    )
     assert probe is not None
     assert probe(
         {"timestamp": {"gte": "2026-01-01T00:00:00+00:00"}, "source": "a.md"},
@@ -542,7 +582,9 @@ def test_placeholder_metadata_stays_probe_provable():
         return True
 
     retr = _retriever(FILES, probe)
-    out = retr.search("note.md", filters={"memory_class": "decision"}, include_invalidated=True)
+    out = retr.search(
+        "note.md", filters={"memory_class": "decision"}, include_invalidated=True
+    )
     assert [r.payload["name"] for r in out] == ["note.md"]
     assert calls and calls[0]["memory_class"] == "decision"
 
@@ -594,7 +636,9 @@ def test_probe_budget_bounds_backend_round_trips(monkeypatch):
         calls.append(dict(filters))
         return False  # nothing attributes — every candidate wants a probe
 
-    retr = MemgraphRetriever(uri="bolt://x", driver=_Driver(files), chunk_filter_probe=probe)
+    retr = MemgraphRetriever(
+        uri="bolt://x", driver=_Driver(files), chunk_filter_probe=probe
+    )
     out = retr.search(
         "doc0.md doc1.md doc2.md doc3.md doc4.md doc5.md",
         filters={"project": "x"},
@@ -614,7 +658,9 @@ def test_synthetic_fields_never_self_attribute():
         return False  # the chunks do NOT contain this text
 
     retr = _retriever(FILES, probe)
-    out = retr.search("note.md", filters={"text": "File: note.md"}, include_invalidated=True)
+    out = retr.search(
+        "note.md", filters={"text": "File: note.md"}, include_invalidated=True
+    )
     assert out == []  # not admitted by its own synthetic text
     assert calls and "text" in calls[0]  # the condition went to the probe
 
@@ -635,9 +681,7 @@ def test_attribution_marker_is_stripped_from_public_payloads():
     from types import SimpleNamespace
 
     mem = _memory_of(
-        SimpleNamespace(
-            id="g1", text="File: note.md", score=1.0, payload=dict(payload), sources=["memgraph"]
-        )
+        SimpleNamespace(id="g1", text="File: note.md", score=1.0, payload=dict(payload), sources=["memgraph"])
     )
     assert "_attributed_filters" not in mem.metadata
     assert "_vector_floor_candidates" not in mem.metadata
@@ -648,7 +692,9 @@ def test_self_provable_filters_pass_without_any_probe_configured():
     metadata proves by itself (index_root) still pass — only chunk-proof
     keys fail closed."""
     retr = _retriever(FILES)  # no probe at all
-    out = retr.search("note.md", filters={"index_root": "/corpus/a"}, include_invalidated=True)
+    out = retr.search(
+        "note.md", filters={"index_root": "/corpus/a"}, include_invalidated=True
+    )
     assert [r.payload["name"] for r in out] == ["note.md"]
     # Residual-needing filters keep the historical fail-closed drop.
     assert retr.search("note.md", filters={"project": "x"}, include_invalidated=True) == []
@@ -737,7 +783,9 @@ def test_probe_circuit_breaker_trips_on_first_store_failure():
         raise RuntimeError("store down")
 
     retr = _retriever(files, broken_probe)
-    out = retr.search("note.md report.md", filters={"project": "x"}, include_invalidated=True)
+    out = retr.search(
+        "note.md report.md", filters={"project": "x"}, include_invalidated=True
+    )
 
     assert out == []  # fail closed, never leaked
     assert len(calls) == 1  # second candidate never touched the store
@@ -798,8 +846,12 @@ def test_recall_cypher_calls_bounded_under_expansion():
 
     driver = _RunCountingDriver(FILES)
     retr = MemgraphRetriever(uri="bolt://x", driver=driver)
-    recaller = Recaller(retrievers=[retr], query_expansion=True, expansion_llm=object())
-    variants = [" ".join(f"tok{v}x{i:02d}" for i in range(16)) for v in range(4)]
+    recaller = Recaller(
+        retrievers=[retr], query_expansion=True, expansion_llm=object()
+    )
+    variants = [
+        " ".join(f"tok{v}x{i:02d}" for i in range(16)) for v in range(4)
+    ]
     recaller._query_expansion_cache[variants[0]] = variants[1:]
 
     recaller.recall(variants[0], include_invalidated=True)
@@ -841,7 +893,9 @@ def test_expansion_variants_share_the_probe_result_cache():
 
     driver = _CountingDriver(FILES)
     retr = MemgraphRetriever(uri="bolt://x", driver=driver)
-    recaller = Recaller(retrievers=[retr], query_expansion=True, expansion_llm=object())
+    recaller = Recaller(
+        retrievers=[retr], query_expansion=True, expansion_llm=object()
+    )
     recaller._query_expansion_cache["note.md"] = ["note.md doc"]
 
     out = recaller.recall("note.md", include_invalidated=True)
@@ -895,12 +949,16 @@ def test_query_expansion_shares_the_probe_breaker_across_variants():
         raise RuntimeError("store down")
 
     retr = _retriever(FILES, broken_probe)
-    recaller = Recaller(retrievers=[retr], query_expansion=True, expansion_llm=object())
+    recaller = Recaller(
+        retrievers=[retr], query_expansion=True, expansion_llm=object()
+    )
     # Pre-seed the expansion cache so no LLM call happens: the public query
     # plus two variants — three serial runs of the graph arm.
     recaller._query_expansion_cache["note.md"] = ["note.md doc", "note.md file"]
 
-    out = recaller.recall("note.md", filters={"project": "x"}, include_invalidated=True)
+    out = recaller.recall(
+        "note.md", filters={"project": "x"}, include_invalidated=True
+    )
 
     assert out == []
     assert len(calls) == 1  # one failed probe for the whole recall

@@ -111,10 +111,7 @@ def test_failing_file_does_not_stop_the_watch(tmp_path):
     syncer = _FakeSyncer(boom="bad.md")
     errors: list[tuple[str, str, Exception]] = []
     w = MarkdownWatcher(
-        syncer,
-        tmp_path,
-        debounce=1.0,
-        clock=clock,
+        syncer, tmp_path, debounce=1.0, clock=clock,
         on_error=lambda p, k, e: errors.append((p, k, e)),
     )
     bad = str(tmp_path / "bad.md")
@@ -352,9 +349,7 @@ def test_reconcile_drops_sources_whose_file_is_gone(tmp_path):
 
     gid = stable_chunk_id("ghost.md", 0, "ghost")
     store.upsert(
-        gid,
-        [1.0, 0.0, 0.0, 0.0],
-        {"text": "ghost", "source": "ghost.md", "index_root": root, "_md_keys": ["text", "source"]},
+        gid, [1.0, 0.0, 0.0, 0.0], {"text": "ghost", "source": "ghost.md", "index_root": root, "_md_keys": ["text", "source"]}
     )
 
     removed = syncer.reconcile_deletions()
@@ -471,7 +466,8 @@ def _mem_store():
 
 def _sources_in(store, index_root):
     return {
-        (h.payload or {}).get("source") for h in store.scroll(filters={"index_root": index_root})
+        (h.payload or {}).get("source")
+        for h in store.scroll(filters={"index_root": index_root})
     }
 
 
@@ -521,7 +517,11 @@ class _ReverseGraph:
     def referrers_of_dangling(self, name_keys, *, index_root=None):
         self.referrer_queries += 1
         keys = {k.lower() for k in name_keys}
-        return [src for src, tgts in self.edges.items() if any(t.lower() in keys for t in tgts)]
+        return [
+            src
+            for src, tgts in self.edges.items()
+            if any(t.lower() in keys for t in tgts)
+        ]
 
     def file_link_sources(self, *, index_root=None):
         return list(self.edges)
@@ -593,7 +593,9 @@ def test_unscoped_syncer_omits_tenant_kwarg(tmp_path):
     store = _mem_store()
     root = str(tmp_path.resolve())
     graph = _ReverseGraph()  # its sync_file_links has NO tenant kwarg
-    syncer = MarkdownSyncer(store, _FakeProvider(), index_root=root, chunk_size=10000, graph=graph)
+    syncer = MarkdownSyncer(
+        store, _FakeProvider(), index_root=root, chunk_size=10000, graph=graph
+    )
     (tmp_path / "a.md").write_text("# Title\n\n[[b]] link.\n")
     res = syncer.index_file(tmp_path / "a.md")  # must not raise
     assert res.source == "a.md"
@@ -605,7 +607,9 @@ def test_creating_a_note_reresolves_referring_dangling_wikilink(tmp_path):
     store = _mem_store()
     root = str(tmp_path.resolve())
     graph = _ReverseGraph()
-    syncer = MarkdownSyncer(store, _FakeProvider(), index_root=root, chunk_size=10000, graph=graph)
+    syncer = MarkdownSyncer(
+        store, _FakeProvider(), index_root=root, chunk_size=10000, graph=graph
+    )
 
     (tmp_path / "a.md").write_text("# A\n\nsee [[B]]\n")
     syncer.index_file(tmp_path / "a.md")
@@ -623,7 +627,9 @@ def test_referrer_resolution_is_idempotent_on_reindex(tmp_path):
     store = _mem_store()
     root = str(tmp_path.resolve())
     graph = _ReverseGraph()
-    syncer = MarkdownSyncer(store, _FakeProvider(), index_root=root, chunk_size=10000, graph=graph)
+    syncer = MarkdownSyncer(
+        store, _FakeProvider(), index_root=root, chunk_size=10000, graph=graph
+    )
     (tmp_path / "a.md").write_text("# A\n\nsee [[B]]\n")
     (tmp_path / "b.md").write_text("# B\n")
     syncer.index_file(tmp_path / "a.md")
@@ -644,11 +650,7 @@ def test_referrer_resolution_stays_within_watched_subtree(tmp_path):
     sub.mkdir()
     graph = _ReverseGraph()
     syncer = MarkdownSyncer(
-        store,
-        _FakeProvider(),
-        index_root=root,
-        chunk_size=10000,
-        graph=graph,
+        store, _FakeProvider(), index_root=root, chunk_size=10000, graph=graph,
         subtree=str(sub),
     )
     # a referrer OUTSIDE the watched subtree already links to a dangling "B"
@@ -674,7 +676,9 @@ def test_syncer_syncs_and_clears_graph_links(tmp_path):
             return len(targets)
 
     graph = _Graph()
-    syncer = MarkdownSyncer(store, _FakeProvider(), index_root=root, chunk_size=10000, graph=graph)
+    syncer = MarkdownSyncer(
+        store, _FakeProvider(), index_root=root, chunk_size=10000, graph=graph
+    )
 
     (tmp_path / "b.md").write_text("# B\n")
     (tmp_path / "a.md").write_text("# A\n\nSee [B](b.md).\n")
@@ -726,16 +730,16 @@ def test_failed_retry_not_starved_by_fast_poll(tmp_path):
     w._failed.add(a)
     snap = w._scan()
 
-    w.poll_once(snap)  # t=0: queue retry, deadline 1.0
-    for t in (0.4, 0.8):  # fast polls inside the debounce window
+    w.poll_once(snap)                      # t=0: queue retry, deadline 1.0
+    for t in (0.4, 0.8):                   # fast polls inside the debounce window
         clock.t = t
-        w.poll_once(snap)  # must NOT reset the deadline
-        assert w.flush() == 0  # not due yet
+        w.poll_once(snap)                  # must NOT reset the deadline
+        assert w.flush() == 0              # not due yet
     assert syncer.indexed == []
-    clock.t = 1.2  # past the anchored deadline
+    clock.t = 1.2                          # past the anchored deadline
     w.poll_once(snap)
     w.flush()
-    assert syncer.indexed == [a]  # applied once, not starved
+    assert syncer.indexed == [a]           # applied once, not starved
 
 
 def test_over_quota_watch_retry_backs_off(tmp_path):
@@ -763,14 +767,8 @@ def test_over_quota_watch_retry_backs_off(tmp_path):
     clock = _FakeClock()
     errors: list = []
     syncer = _QuotaSyncer()
-    w = MarkdownWatcher(
-        syncer,
-        tmp_path,
-        debounce=0.0,
-        poll_interval=1.0,
-        clock=clock,
-        on_error=lambda p, k, e: errors.append(p),
-    )
+    w = MarkdownWatcher(syncer, tmp_path, debounce=0.0, poll_interval=1.0,
+                        clock=clock, on_error=lambda p, k, e: errors.append(p))
     a = next(iter(w._scan()))
     w._failed.add(a)  # queued at startup (over quota)
     snap = w._scan()

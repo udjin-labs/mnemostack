@@ -202,7 +202,9 @@ def build_server(
     )
 
     text_search_fields = parse_text_search_fields(text_search_fields)
-    ensure_text_fields_mode(resolve_text_search_mode(text_search, bm25_paths), text_search_fields)
+    ensure_text_fields_mode(
+        resolve_text_search_mode(text_search, bm25_paths), text_search_fields
+    )
 
     mcp = FastMCP("mnemostack")
 
@@ -333,13 +335,7 @@ def build_server(
                 )
         elif mode == "qdrant_bm25":
             lexical_arms.append(
-                BM25Retriever.from_qdrant(
-                    vec.client,
-                    collection,
-                    text_key=schema_kw["text_key"],
-                    timestamp_key=schema_kw["timestamp_key"],
-                    timestamp_format=schema_kw["timestamp_format"],
-                )
+                BM25Retriever.from_qdrant(vec.client, collection, text_key=schema_kw["text_key"], timestamp_key=schema_kw["timestamp_key"], timestamp_format=schema_kw["timestamp_format"])
             )
         elif mode == "lexical":
             arms, lexical_weights = build_qdrant_text_arms(
@@ -355,12 +351,7 @@ def build_server(
                 text_key=text_key,
             )
             lexical_arms.append(
-                QdrantSparseRetriever(
-                    vector_store=sparse_store,
-                    text_key=schema_kw["text_key"],
-                    timestamp_key=schema_kw["timestamp_key"],
-                    timestamp_format=schema_kw["timestamp_format"],
-                )
+                QdrantSparseRetriever(vector_store=sparse_store, text_key=schema_kw["text_key"], timestamp_key=schema_kw["timestamp_key"], timestamp_format=schema_kw["timestamp_format"])
             )
         retrievers = [
             VectorRetriever(
@@ -474,7 +465,9 @@ def build_server(
             trace=trace,
             # Per-call budget wins; unset falls back to the server-wide default.
             token_budget=(
-                token_budget_override if token_budget_override is not None else default_token_budget
+                token_budget_override
+                if token_budget_override is not None
+                else default_token_budget
             ),
             include_invalidated=include_invalidated,
             as_of=as_of,
@@ -644,12 +637,7 @@ def build_server(
         try:
             principal = _authorize("read")
             results, trace = _run_recall(
-                query,
-                limit,
-                filters,
-                token_budget,
-                include_invalidated,
-                as_of,
+                query, limit, filters, token_budget, include_invalidated, as_of,
                 tenant=_tenant_of(principal),
             )
             response = {
@@ -872,7 +860,9 @@ def build_server(
                 }
             # Shared with POST /invalidate so both surfaces enforce the
             # identical contract (ISO timestamps, id shapes, caps).
-            problem = validate_remote_invalidate(ids, invalidated_at, valid_until, index_root)
+            problem = validate_remote_invalidate(
+                ids, invalidated_at, valid_until, index_root
+            )
             if problem:
                 return {
                     "ok": False,
@@ -948,7 +938,11 @@ def build_server(
         ] = 0,
         timestamp: Annotated[
             str | None,
-            Field(description=("Event time of the content (ISO-8601); drives temporal recall.")),
+            Field(
+                description=(
+                    "Event time of the content (ISO-8601); drives temporal recall."
+                )
+            ),
         ] = None,
         tags: Annotated[
             list[str] | None, Field(description="Optional tags stored in the payload.")
@@ -1214,7 +1208,9 @@ def build_server(
                 # Same contract as POST /triples (shared validator): predicate
                 # shape (punctuation variants would silently collapse into one
                 # relationship type), UTF-8 entities, ordered validity bounds.
-                problem = validate_remote_triple(subject, predicate, obj, valid_from, valid_until)
+                problem = validate_remote_triple(
+                    subject, predicate, obj, valid_from, valid_until
+                )
                 if problem:
                     return {"ok": False, "error": problem, "error_kind": "invalid_argument"}
                 from ..graph.factory import make_graph_store

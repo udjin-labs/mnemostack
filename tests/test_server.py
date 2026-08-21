@@ -754,7 +754,9 @@ def test_recall_endpoint_threads_filters_to_recaller(monkeypatch):
     app, recaller = _patched_app(monkeypatch, with_answer=False)
     client = TestClient(app)
 
-    resp = client.post("/recall", json={"query": "hello", "filters": {"tenant": "a"}})
+    resp = client.post(
+        "/recall", json={"query": "hello", "filters": {"tenant": "a"}}
+    )
 
     assert resp.status_code == 200
     assert recaller.last_filters == {"tenant": "a"}
@@ -766,7 +768,9 @@ def test_answer_endpoint_threads_filters_to_recall_and_generator(monkeypatch):
     app, recaller = _patched_app(monkeypatch)
     client = TestClient(app)
 
-    resp = client.post("/answer", json={"query": "hello", "filters": {"tenant": "b"}})
+    resp = client.post(
+        "/answer", json={"query": "hello", "filters": {"tenant": "b"}}
+    )
 
     assert resp.status_code == 200
     assert recaller.last_filters == {"tenant": "b"}
@@ -808,20 +812,15 @@ def test_feedback_endpoint_threads_tenant_under_auth(monkeypatch, tmp_path):
     def _spy(_pipeline, **kw):
         captured.update(kw)
         return FeedbackOutcome(
-            hit_id=kw["hit_id"],
-            signal=kw["signal"],
-            reward=1.0,
-            query_type="general",
-            ior_recorded=False,
-            q_learning_updates=0,
+            hit_id=kw["hit_id"], signal=kw["signal"], reward=1.0,
+            query_type="general", ior_recorded=False, q_learning_updates=0,
         )
 
     monkeypatch.setattr(srv, "apply_feedback", _spy)
     app, _rec, _rk, write_key, _ak = _auth_app(monkeypatch, tmp_path)
     client = TestClient(app)
     r = client.post(
-        "/feedback",
-        json={"hit_id": "h", "signal": "useful"},
+        "/feedback", json={"hit_id": "h", "signal": "useful"},
         headers={"X-API-Key": write_key},
     )
     assert r.status_code == 200
@@ -924,7 +923,9 @@ def test_recall_not_rate_limited_without_quota(monkeypatch, tmp_path):
 def test_recall_accepts_bearer_scheme(monkeypatch, tmp_path):
     app, recaller, read_key, *_ = _auth_app(monkeypatch, tmp_path)
     client = TestClient(app)
-    r = client.post("/recall", json={"query": "x"}, headers={"Authorization": f"Bearer {read_key}"})
+    r = client.post(
+        "/recall", json={"query": "x"}, headers={"Authorization": f"Bearer {read_key}"}
+    )
     assert r.status_code == 200
     assert recaller.last_tenant == "alpha"
 
@@ -1095,12 +1096,8 @@ def test_recall_endpoint_include_invalidated_and_as_of_threaded(monkeypatch):
     recaller.recall = _spy
     resp = client.post(
         "/recall",
-        json={
-            "query": "q",
-            "full_pipeline": False,
-            "include_invalidated": True,
-            "as_of": "2026-03-01",
-        },
+        json={"query": "q", "full_pipeline": False,
+              "include_invalidated": True, "as_of": "2026-03-01"},
     )
     assert resp.status_code == 200
     assert captured.get("include_invalidated") is True
@@ -1120,10 +1117,7 @@ def test_auth_works_with_external_verify_only_keystore(monkeypatch, tmp_path):
 
     monkeypatch.setattr("mnemostack.auth.make_key_store", lambda *_a, **_k: _VerifyOnly())
     cfg = ServerConfig(
-        provider_name="fake",
-        llm_name="fake",
-        graph_uri=None,
-        auth_enabled=True,
+        provider_name="fake", llm_name="fake", graph_uri=None, auth_enabled=True,
         quotas_file=str(tmp_path / "quotas.json"),
     )
     app, recaller = _patched_app(monkeypatch, config=cfg)

@@ -172,7 +172,9 @@ def test_fused_recall_without_filters_sees_everything(fused_recaller):
 
 
 def test_recall_flow_threads_filters(fused_recaller):
-    results = recall_flow(fused_recaller, "quarterly report", limit=10, filters={"tenant": "b"})
+    results = recall_flow(
+        fused_recaller, "quarterly report", limit=10, filters={"tenant": "b"}
+    )
 
     assert results
     assert all(r.payload.get("tenant") == "b" for r in results)
@@ -208,15 +210,8 @@ def test_expansion_retry_stays_inside_filtered_scope():
     expansion_llm.generate.return_value = LLMResponse(
         text="variant one\nvariant two\nhypothetical answer"
     )
-
     def _mem(mid: str, text: str):
-        attrs = {
-            "id": mid,
-            "text": text,
-            "score": 0.9,
-            "payload": {"tenant": "a"},
-            "sources": ["vector"],
-        }
+        attrs = {"id": mid, "text": text, "score": 0.9, "payload": {"tenant": "a"}, "sources": ["vector"]}
         return type("R", (), attrs)()
 
     recaller = MagicMock()
@@ -236,15 +231,7 @@ def test_expansion_retry_stays_inside_filtered_scope():
         category_aware_prompts=False,
     )
     memory = type(
-        "R",
-        (),
-        {
-            "id": "m",
-            "text": "some memory",
-            "score": 0.5,
-            "payload": {"tenant": "a"},
-            "sources": ["vector"],
-        },
+        "R", (), {"id": "m", "text": "some memory", "score": 0.5, "payload": {"tenant": "a"}, "sources": ["vector"]}
     )()
 
     gen.generate("a question", [memory], recall_filters={"tenant": "a"})
@@ -273,7 +260,9 @@ def test_legacy_recaller_path_filters_bm25():
         store.upsert(pid, embedder.embed(text), payload)
         bm25_docs.append(BM25Doc(id=pid, text=text, payload=payload))
 
-    recaller = Recaller(embedding_provider=embedder, vector_store=store, bm25_docs=bm25_docs)
+    recaller = Recaller(
+        embedding_provider=embedder, vector_store=store, bm25_docs=bm25_docs
+    )
 
     results = recaller.recall("quarterly report", limit=10, filters={"tenant": "a"})
 

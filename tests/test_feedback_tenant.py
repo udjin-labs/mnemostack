@@ -111,13 +111,8 @@ def test_apply_feedback_threads_tenant_into_state():
     store = InMemoryStateStore()
     pipeline = [QLearningReranker(store), InhibitionOfReturn(store)]
     apply_feedback(
-        pipeline,
-        hit_id="h",
-        signal="clicked",
-        query="who is alice",
-        sources=["vector"],
-        reward=1.0,
-        tenant="acme",
+        pipeline, hit_id="h", signal="clicked", query="who is alice",
+        sources=["vector"], reward=1.0, tenant="acme",
     )
     # Both blobs landed in the tenant's partition, none in the bare keys.
     assert "q_table:acme" in store._data and "ior_log:acme" in store._data

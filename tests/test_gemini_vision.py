@@ -25,7 +25,9 @@ def _gemini(monkeypatch, reply_text="a red bicycle leaning on a wall"):
         captured["body"] = json.loads(req.data.decode())
         captured["headers"] = dict(req.headers)
         return _FakeResponse(
-            json.dumps({"candidates": [{"content": {"parts": [{"text": reply_text}]}}]}).encode()
+            json.dumps(
+                {"candidates": [{"content": {"parts": [{"text": reply_text}]}}]}
+            ).encode()
         )
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)

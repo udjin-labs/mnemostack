@@ -522,7 +522,9 @@ class Recaller:
         # facts can't crowd out current ones in the top-K, and vector-floor
         # candidates stay clean). This is a cheap idempotent safety net for any
         # path that might inject records after fusion.
-        results = filter_by_validity(results, include_invalidated=include_invalidated, as_of=as_of)
+        results = filter_by_validity(
+            results, include_invalidated=include_invalidated, as_of=as_of
+        )
         # Tenant isolation backstop: when a tenant is scoped, keep only its own
         # records regardless of which retriever produced them. Guarantees no
         # cross-tenant leak even if a retriever path forgot the tenant filter,
@@ -577,7 +579,6 @@ class Recaller:
                 "legacy recall path requires embedding_provider and vector_store "
                 "(or pass retrievers=[...])"
             )
-
         # Drop stale hits at the source — before fusion's top-K cut and before
         # vector-floor candidates are built — so invalidated facts can neither
         # crowd out current ones nor be re-appended by the floor.
@@ -970,7 +971,9 @@ class Recaller:
                     search_kwargs["include_invalidated"] = include_invalidated
                 if tenant is not None and getattr(retr, "accepts_tenant", False):
                     search_kwargs["tenant"] = tenant
-                if recall_scope is not None and getattr(retr, "accepts_recall_scope", False):
+                if recall_scope is not None and getattr(
+                    retr, "accepts_recall_scope", False
+                ):
                     # Per-recall shared state (e.g. the graph arm's probe
                     # budget must span expanded-query variants, not reset
                     # per variant).
@@ -986,7 +989,9 @@ class Recaller:
                 hits = [
                     h
                     for h in hits
-                    if keep_payload(h.payload, include_invalidated=include_invalidated, as_of=as_of)
+                    if keep_payload(
+                        h.payload, include_invalidated=include_invalidated, as_of=as_of
+                    )
                 ][:per_source_limit]
             except EmbeddingSpaceError:
                 # An arm refusing to cross embedding spaces is not a broken
@@ -1029,7 +1034,9 @@ class Recaller:
                 mca_hits = [
                     h
                     for h in mca_hits
-                    if keep_payload(h.payload, include_invalidated=include_invalidated, as_of=as_of)
+                    if keep_payload(
+                        h.payload, include_invalidated=include_invalidated, as_of=as_of
+                    )
                 ][:per_source_limit]
                 if mca_hits:
                     all_lists.append([(hit, hit.score) for hit in mca_hits])
@@ -1306,11 +1313,8 @@ class Recaller:
                 return []
             try:
                 hits = self.vector.search(
-                    query_vec,
-                    limit=limit,
-                    filters=self._vector_filters(filters),
-                    hide_invalidated=hide_invalidated,
-                    **tkw,
+                    query_vec, limit=limit, filters=self._vector_filters(filters),
+                    hide_invalidated=hide_invalidated, **tkw
                 )
             except Exception:
                 return []

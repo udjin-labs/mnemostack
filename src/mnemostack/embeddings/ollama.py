@@ -155,7 +155,8 @@ class OllamaProvider(EmbeddingProvider):
         vec = vectors[0] if vectors else []
         if not vec or not all(isinstance(x, (int, float)) for x in vec):
             raise ProviderProbeError(
-                f"dimension probe of {self.model!r} returned an empty or non-numeric vector"
+                f"dimension probe of {self.model!r} returned an empty or "
+                "non-numeric vector"
             )
         return len(vec)
 
@@ -289,7 +290,9 @@ class OllamaProvider(EmbeddingProvider):
             logger.debug("ollama embed failed: %s", exc)
             return []
 
-    def embed_batch(self, texts: list[str], max_workers: int | None = None) -> list[list[float]]:
+    def embed_batch(
+        self, texts: list[str], max_workers: int | None = None
+    ) -> list[list[float]]:
         """Native batch via /api/embed (single request per batch).
 
         On failure every item reports failed (``[]``) — cardinality

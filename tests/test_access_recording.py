@@ -140,10 +140,14 @@ def test_recall_records_only_when_the_operator_asked(monkeypatch, tmp_path):
     import mnemostack.server as srv
 
     seen: list[tuple] = []
-    monkeypatch.setattr(srv, "record_access", lambda *a, **k: seen.append((a, k)) or 0)
+    monkeypatch.setattr(
+        srv, "record_access", lambda *a, **k: seen.append((a, k)) or 0
+    )
     app, store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
     _seed(store, 1)
-    monkeypatch.setattr(srv, "recall_flow", lambda *_a, **_k: [_Hit(1)])
+    monkeypatch.setattr(
+        srv, "recall_flow", lambda *_a, **_k: [_Hit(1)]
+    )
     client = TestClient(app)
     r = client.post(
         "/recall", json={"query": "anything", "limit": 5}, headers={"X-API-Key": keys["read"]}
@@ -155,7 +159,9 @@ def test_recall_records_only_when_the_operator_asked(monkeypatch, tmp_path):
 def test_recall_records_when_enabled(monkeypatch, tmp_path):
     import mnemostack.server as srv
 
-    app, store, _emb, keys = _ingest_app(monkeypatch, tmp_path, cfg_extra={"record_access": True})
+    app, store, _emb, keys = _ingest_app(
+        monkeypatch, tmp_path, cfg_extra={"record_access": True}
+    )
     _seed(store, 1)
     monkeypatch.setattr(srv, "recall_flow", lambda *_a, **_k: [_Hit(1)])
     client = TestClient(app)
@@ -202,7 +208,9 @@ def test_answer_does_not_record_when_generation_fails(monkeypatch, tmp_path):
     _seed(store, 1)
     monkeypatch.setattr(srv, "recall_flow", lambda *_a, **_k: [_Hit(1)])
     client = TestClient(app)
-    r = client.post("/answer", json={"query": "anything"}, headers={"X-API-Key": keys["read"]})
+    r = client.post(
+        "/answer", json={"query": "anything"}, headers={"X-API-Key": keys["read"]}
+    )
     assert r.status_code == 500, r.text
     assert ACCESS_COUNT_KEY not in _payload(store, 1)
 
@@ -213,13 +221,17 @@ def test_answer_records_when_generation_succeeds(monkeypatch, tmp_path):
 
     class _Ok:
         def generate(self, *_a, **_k):
-            return type("Ans", (), {"text": "an answer", "confidence": 0.9, "sources": []})()
+            return type(
+                "Ans", (), {"text": "an answer", "confidence": 0.9, "sources": []}
+            )()
 
     app, store, _emb, keys = _answer_app(monkeypatch, tmp_path, _Ok())
     _seed(store, 1)
     monkeypatch.setattr(srv, "recall_flow", lambda *_a, **_k: [_Hit(1)])
     client = TestClient(app)
-    r = client.post("/answer", json={"query": "anything"}, headers={"X-API-Key": keys["read"]})
+    r = client.post(
+        "/answer", json={"query": "anything"}, headers={"X-API-Key": keys["read"]}
+    )
     assert r.status_code == 200, r.text
     assert _payload(store, 1)[ACCESS_COUNT_KEY] == 1
 
@@ -345,7 +357,9 @@ def test_answer_records_the_pool_that_produced_it(monkeypatch, tmp_path):
     _seed(store, 2)
     monkeypatch.setattr(srv, "recall_flow", lambda *_a, **_k: [_Hit(1)])
     client = TestClient(app)
-    r = client.post("/answer", json={"query": "anything"}, headers={"X-API-Key": keys["read"]})
+    r = client.post(
+        "/answer", json={"query": "anything"}, headers={"X-API-Key": keys["read"]}
+    )
     assert r.status_code == 200, r.text
     assert [m["id"] for m in r.json()["memories"]] == ["1"]  # unchanged response
     assert _payload(store, 1)[ACCESS_COUNT_KEY] == 1
@@ -360,12 +374,6 @@ def test_the_answer_pool_field_stays_at_the_tail():
 
     names = [f.name for f in dataclasses.fields(Answer)]
     assert names == [
-        "text",
-        "confidence",
-        "sources",
-        "raw",
-        "error",
-        "tokens_used",
-        "context_tokens_estimate",
-        "context_memories",
+        "text", "confidence", "sources", "raw", "error", "tokens_used",
+        "context_tokens_estimate", "context_memories",
     ]

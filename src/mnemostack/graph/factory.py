@@ -27,4 +27,6 @@ def make_graph_store(
     """
     from .store import GraphStore
 
-    return GraphStore(uri=uri, user=user, password=password, database=database, timeout=timeout)
+    return GraphStore(
+        uri=uri, user=user, password=password, database=database, timeout=timeout
+    )

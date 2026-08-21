@@ -324,7 +324,9 @@ def test_mcp_search_trace_opt_in(monkeypatch):
     _patch_minimal(monkeypatch, srv, _OneHitRecaller)
     mcp = build_server(collection="test", embedding_provider="ollama")
 
-    result = asyncio.run(mcp.call_tool("mnemostack_search", {"query": "q", "include_trace": True}))
+    result = asyncio.run(
+        mcp.call_tool("mnemostack_search", {"query": "q", "include_trace": True})
+    )
     payload = result.structured_content
 
     assert payload["ok"] is True
@@ -358,7 +360,9 @@ def test_build_server_uses_injected_reranker_without_resolving_an_llm(monkeypatc
         raise AssertionError("an injected reranker must not resolve an LLM")
 
     monkeypatch.setattr(srv, "get_llm", _no_llm)
-    mcp = build_server(collection="test", embedding_provider="ollama", reranker=_Reversing())
+    mcp = build_server(
+        collection="test", embedding_provider="ollama", reranker=_Reversing()
+    )
 
     result = asyncio.run(mcp.call_tool("mnemostack_search", {"query": "q"}))
     payload = result.structured_content
@@ -395,7 +399,9 @@ def test_build_server_recall_middleware_wraps_the_flow(monkeypatch):
         return results[:1]  # a policy decision only visible if consumed
 
     _patch_minimal(monkeypatch, srv, _TwoHits)
-    mcp = build_server(collection="test", embedding_provider="ollama", recall_middleware=middleware)
+    mcp = build_server(
+        collection="test", embedding_provider="ollama", recall_middleware=middleware
+    )
 
     result = asyncio.run(mcp.call_tool("mnemostack_search", {"query": "q"}))
     payload = result.structured_content
@@ -404,16 +410,8 @@ def test_build_server_recall_middleware_wraps_the_flow(monkeypatch):
     assert payload["count"] == 1  # 2 recalled — only the middleware's cut survives
     assert [r["id"] for r in payload["results"]] == ["a"]
     assert seen["flow_is_module_flow"]
-    assert {
-        "pipeline",
-        "reranker",
-        "filters",
-        "trace",
-        "token_budget",
-        "include_invalidated",
-        "as_of",
-        "tenant",
-    } <= seen["kwargs"]
+    assert {"pipeline", "reranker", "filters", "trace", "token_budget",
+            "include_invalidated", "as_of", "tenant"} <= seen["kwargs"]
 
 
 def test_broken_injected_reranker_still_degrades_fail_open(monkeypatch):
@@ -426,7 +424,9 @@ def test_broken_injected_reranker_still_degrades_fail_open(monkeypatch):
             raise RuntimeError("cross-encoder down")
 
     _patch_minimal(monkeypatch, srv, _OneHitRecaller)
-    mcp = build_server(collection="test", embedding_provider="ollama", reranker=_Boom())
+    mcp = build_server(
+        collection="test", embedding_provider="ollama", reranker=_Boom()
+    )
 
     result = asyncio.run(mcp.call_tool("mnemostack_search", {"query": "q"}))
     payload = result.structured_content
@@ -453,7 +453,11 @@ def test_mcp_search_reports_no_parse_as_note_not_degradation(monkeypatch):
                 # What the temporal retriever's explain_empty produces on
                 # any date-less query.
                 trace.mark("temporal:no_parse")
-            return [SimpleNamespace(id="a", text="text", score=0.9, sources=["vector"], payload={})]
+            return [
+                SimpleNamespace(
+                    id="a", text="text", score=0.9, sources=["vector"], payload={}
+                )
+            ]
 
     _patch_minimal(monkeypatch, srv, _NoParseRecaller)
     mcp = build_server(collection="test", embedding_provider="ollama")
@@ -495,7 +499,9 @@ def test_mcp_answer_carries_degraded(monkeypatch):
             pass
 
         def generate(self, query, memories, **kwargs):
-            return SimpleNamespace(ok=True, text="42", confidence=0.9, sources=["s"], error=None)
+            return SimpleNamespace(
+                ok=True, text="42", confidence=0.9, sources=["s"], error=None
+            )
 
         def should_fallback(self, answer):
             return False
@@ -559,7 +565,9 @@ def test_mcp_search_threads_filters_to_recaller(monkeypatch):
 
         def recall(self, query, limit=10, filters=None, **kwargs):
             captured["filters"] = filters
-            return [SimpleNamespace(id="a", text="text", score=0.9, sources=["vector"], payload={})]
+            return [
+                SimpleNamespace(id="a", text="text", score=0.9, sources=["vector"], payload={})
+            ]
 
     _patch_minimal(monkeypatch, srv, _FilterCapturingRecaller)
     mcp = build_server(collection="test", embedding_provider="ollama")
@@ -714,14 +722,17 @@ def test_mcp_invalidate_tool_marks_ids(monkeypatch):
     result = asyncio.run(
         mcp.call_tool(
             "mnemostack_invalidate",
-            {"ids": ["7", "d9428888-122b-11e1-b85c-61cd3cbb3210"], "valid_until": "2026-06-01"},
+            {"ids": ["7", "d9428888-122b-11e1-b85c-61cd3cbb3210"],
+             "valid_until": "2026-06-01"},
         )
     )
     payload = result.structured_content
     assert payload["ok"] is True
     assert payload["requested"] == 2
     assert payload["invalidated"] == 2
-    assert vec.calls == [([7, "d9428888-122b-11e1-b85c-61cd3cbb3210"], None, "2026-06-01")]
+    assert vec.calls == [
+        ([7, "d9428888-122b-11e1-b85c-61cd3cbb3210"], None, "2026-06-01")
+    ]
 
 
 def test_mcp_invalidate_tool_registered():
@@ -739,7 +750,8 @@ def test_mcp_search_threads_validity_params(monkeypatch):
         def __init__(self, **_):
             pass
 
-        def recall(self, query, limit=10, filters=None, include_invalidated=False, as_of=None, **_):
+        def recall(self, query, limit=10, filters=None, include_invalidated=False,
+                   as_of=None, **_):
             captured["include_invalidated"] = include_invalidated
             captured["as_of"] = as_of
             return [SimpleNamespace(id="a", text="t", score=0.9, sources=["v"], payload={})]
@@ -835,7 +847,9 @@ def test_mcp_invalidate_passes_index_root(monkeypatch):
     monkeypatch.setattr(srv, "VectorStore", lambda **_: vec)
     mcp = build_server(collection="test", embedding_provider="ollama")
 
-    asyncio.run(mcp.call_tool("mnemostack_invalidate", {"ids": ["7"], "index_root": "/root/A"}))
+    asyncio.run(mcp.call_tool(
+        "mnemostack_invalidate", {"ids": ["7"], "index_root": "/root/A"}
+    ))
     assert vec.kwargs["index_root"] == "/root/A"
 
 
@@ -862,7 +876,9 @@ def test_mcp_invalidate_shared_contract_and_error_kind(monkeypatch):
     mcp = build_server(collection="test", embedding_provider="ollama")
 
     bad = asyncio.run(
-        mcp.call_tool("mnemostack_invalidate", {"ids": ["7"], "valid_until": "garbage"})
+        mcp.call_tool(
+            "mnemostack_invalidate", {"ids": ["7"], "valid_until": "garbage"}
+        )
     ).structured_content
     assert bad["ok"] is False and bad["error_kind"] == "invalid_argument"
     assert vec.called is False  # rejected before any store round-trip
@@ -879,7 +895,9 @@ def test_mcp_invalidate_shared_contract_and_error_kind(monkeypatch):
         mcp.call_tool("mnemostack_invalidate", {"ids": ["7"] * 257})
     ).structured_content
     assert over["ok"] is False and over["error_kind"] == "invalid_argument"
-    empty = asyncio.run(mcp.call_tool("mnemostack_invalidate", {"ids": []})).structured_content
+    empty = asyncio.run(
+        mcp.call_tool("mnemostack_invalidate", {"ids": []})
+    ).structured_content
     assert empty["ok"] is False and empty["error_kind"] == "invalid_argument"
     assert vec.called is False
 
@@ -918,7 +936,9 @@ def test_mcp_invalidate_pre_bootstrap_is_zero_not_error(monkeypatch):
     monkeypatch.setattr(srv, "VectorStore", lambda **_: vec)
     mcp = build_server(collection="test", embedding_provider="ollama")
 
-    res = asyncio.run(mcp.call_tool("mnemostack_invalidate", {"ids": ["7"]})).structured_content
+    res = asyncio.run(
+        mcp.call_tool("mnemostack_invalidate", {"ids": ["7"]})
+    ).structured_content
     assert res == {"ok": True, "requested": 1, "invalidated": 0}
     assert vec.invalidate_called is False
 
@@ -1021,11 +1041,7 @@ def test_mcp_auth_revoked_key_denies_mid_session(tmp_path, monkeypatch):
     store = FileKeyStore(ks)
     kid, key = store.issue("alpha", "read")
     mcp = build_server(
-        collection="t",
-        embedding_provider="ollama",
-        auth_enabled=True,
-        api_key=key,
-        keys_file=str(ks),
+        collection="t", embedding_provider="ollama", auth_enabled=True, api_key=key, keys_file=str(ks)
     )
     store.revoke(kid)  # revoked after boot — per-call re-verify must catch it
     r = asyncio.run(mcp.call_tool("mnemostack_search", {"query": "q"}))
@@ -1177,14 +1193,18 @@ def test_mcp_remember_duplicates_cost_no_embedding(tmp_path, monkeypatch):
 def test_mcp_remember_rejects_reserved_metadata(tmp_path, monkeypatch):
     mcp, _store, _emb = _remember_mcp(tmp_path, monkeypatch)
     r = asyncio.run(
-        mcp.call_tool("mnemostack_remember", {"text": "x", "metadata": {"tenant_id": "evil"}})
+        mcp.call_tool(
+            "mnemostack_remember", {"text": "x", "metadata": {"tenant_id": "evil"}}
+        )
     ).structured_content
     assert r["ok"] is False and "tenant_id" in r["error"]
 
 
 def test_mcp_remember_needs_write_scope(tmp_path, monkeypatch):
     mcp, _store, _emb = _remember_mcp(tmp_path, monkeypatch, scopes="read")
-    r = asyncio.run(mcp.call_tool("mnemostack_remember", {"text": "x"})).structured_content
+    r = asyncio.run(
+        mcp.call_tool("mnemostack_remember", {"text": "x"})
+    ).structured_content
     assert r["ok"] is False and "scope" in r["error"]
 
 
@@ -1267,7 +1287,9 @@ def test_mcp_remember_oversized_chunk_expansion_is_invalid_argument(tmp_path, mo
     mcp, _store, _emb = _remember_mcp(tmp_path, monkeypatch)
     text = "z" * (REMOTE_CHUNK_SIZE * (REMOTE_MAX_CHUNKS_PER_REQUEST + 1))
     r = asyncio.run(
-        mcp.call_tool("mnemostack_remember", {"text": text, "source": "doc.md", "chunk": True})
+        mcp.call_tool(
+            "mnemostack_remember", {"text": text, "source": "doc.md", "chunk": True}
+        )
     ).structured_content
     assert r["ok"] is False and r["error_kind"] == "invalid_argument"
     assert "split" in r["error"]
@@ -1275,7 +1297,9 @@ def test_mcp_remember_oversized_chunk_expansion_is_invalid_argument(tmp_path, mo
 
 def test_mcp_remember_auth_failures_carry_error_kind(tmp_path, monkeypatch):
     mcp, _store, _emb = _remember_mcp(tmp_path, monkeypatch, scopes="read")
-    r = asyncio.run(mcp.call_tool("mnemostack_remember", {"text": "x"})).structured_content
+    r = asyncio.run(
+        mcp.call_tool("mnemostack_remember", {"text": "x"})
+    ).structured_content
     assert r["ok"] is False and r["error_kind"] == "unauthorized"
 
 
@@ -1321,7 +1345,9 @@ def test_mcp_build_server_rejects_bad_timestamp_format(tmp_path, monkeypatch):
     monkeypatch.setattr(srv, "get_provider", lambda *a, **k: SimpleNamespace(dimension=3))
     monkeypatch.setattr(srv, "VectorStore", lambda **_: MagicMock())
     with pytest.raises(ValueError, match="timestamp_format"):
-        build_server(collection="t", embedding_provider="ollama", timestamp_format="epoc_typo")
+        build_server(
+            collection="t", embedding_provider="ollama", timestamp_format="epoc_typo"
+        )
 
 
 def test_mcp_remember_all_failed_reports_embedding_failed(tmp_path, monkeypatch):
@@ -1374,13 +1400,8 @@ def test_mcp_graph_add_triple_shares_the_remote_contract(tmp_path, monkeypatch):
     inv = asyncio.run(
         mcp.call_tool(
             "mnemostack_graph_add_triple",
-            {
-                "subject": "a",
-                "predicate": "works_on",
-                "obj": "b",
-                "valid_from": "2026-02-01",
-                "valid_until": "2026-01-01",
-            },
+            {"subject": "a", "predicate": "works_on", "obj": "b",
+             "valid_from": "2026-02-01", "valid_until": "2026-01-01"},
         )
     ).structured_content
     assert inv["ok"] is False and "precede" in inv["error"]

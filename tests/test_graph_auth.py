@@ -315,7 +315,9 @@ def test_cmd_serve_threads_graph_auth(monkeypatch):
 
     args = _parsed_args(monkeypatch, ["serve"])
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(server_mod, "build_app", lambda cfg: captured.update(cfg=cfg) or "app")
+    monkeypatch.setattr(
+        server_mod, "build_app", lambda cfg: captured.update(cfg=cfg) or "app"
+    )
     fake_uvicorn = types.ModuleType("uvicorn")
     fake_uvicorn.run = lambda *a, **k: None  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)

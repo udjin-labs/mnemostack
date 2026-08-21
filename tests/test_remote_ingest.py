@@ -113,7 +113,9 @@ def test_validate_remote_item_caps_and_reserved():
     # shared validator; a chunked item may not supply a base offset (the
     # server assigns window offsets — a silent base shift would corrupt ids).
     assert "non-negative" in validate_remote_item("t", "s", None, [], {}, offset=-1)
-    assert "offset at 0" in validate_remote_item("t", "doc.md", None, [], {}, offset=7, chunk=True)
+    assert "offset at 0" in validate_remote_item(
+        "t", "doc.md", None, [], {}, offset=7, chunk=True
+    )
 
 
 def test_expand_remote_items_matches_cli_prose_split():
@@ -152,10 +154,7 @@ def test_expand_skips_whitespace_only_windows():
 
 def test_remote_ingest_stores_then_dedupes_at_zero_embedding_cost():
     emb, store = _CountingEmbedding(), _mem_store()
-    items = [
-        IngestItem(text="alpha fact", source="chat"),
-        IngestItem(text="beta fact", source="chat"),
-    ]
+    items = [IngestItem(text="alpha fact", source="chat"), IngestItem(text="beta fact", source="chat")]
 
     first = ingest_remote_items(emb, store, items, tenant="a")
     assert [r.status for r in first] == ["stored", "stored"]
@@ -400,9 +399,7 @@ def test_memories_maps_storage_quota_to_507(monkeypatch, tmp_path):
     app, _store, _emb, keys = _ingest_app(monkeypatch, tmp_path, quotas={"alpha": 1})
     client = TestClient(app)
     hdr = {"X-API-Key": keys["write"]}
-    assert (
-        client.post("/memories", json={"items": [{"text": "one"}]}, headers=hdr).status_code == 200
-    )
+    assert client.post("/memories", json={"items": [{"text": "one"}]}, headers=hdr).status_code == 200
     r = client.post("/memories", json={"items": [{"text": "two"}]}, headers=hdr)
     assert r.status_code == 507
 
@@ -602,7 +599,8 @@ def test_validator_reserves_configured_schema_keys():
     )
     assert "content" in err
     assert (
-        validate_remote_item("t", "s", None, [], {"other": 1}, reserved_extra={"content"}) is None
+        validate_remote_item("t", "s", None, [], {"other": 1}, reserved_extra={"content"})
+        is None
     )
 
 
@@ -643,10 +641,14 @@ def test_memories_rejects_configured_schema_key_in_metadata(monkeypatch, tmp_pat
 
     monkeypatch.setattr(srv, "get_llm", _no_llm)
     app = build_app(
-        ServerConfig(provider_name="fake", llm_name="fake", graph_uri=None, text_key="content")
+        ServerConfig(
+            provider_name="fake", llm_name="fake", graph_uri=None, text_key="content"
+        )
     )
     client = TestClient(app)
-    r = client.post("/memories", json={"items": [{"text": "x", "metadata": {"content": "shadow"}}]})
+    r = client.post(
+        "/memories", json={"items": [{"text": "x", "metadata": {"content": "shadow"}}]}
+    )
     assert r.status_code == 400 and "content" in r.json()["detail"]
 
 
@@ -834,7 +836,9 @@ def test_reserved_extra_matching_is_nfkc_symmetric():
     decomposed = unicodedata.normalize("NFD", "café")
     composed = unicodedata.normalize("NFC", "café")
     assert decomposed != composed  # premise: genuinely different strings
-    err = validate_remote_item("t", "s", None, [], {composed: "x"}, reserved_extra={decomposed})
+    err = validate_remote_item(
+        "t", "s", None, [], {composed: "x"}, reserved_extra={decomposed}
+    )
     assert err is not None and "reserved" in err
 
 
@@ -949,7 +953,9 @@ def test_offset_is_bounded_to_the_store_integer_domain():
     from mnemostack.ingest import REMOTE_MAX_OFFSET
 
     assert validate_remote_item("t", "s", None, [], {}, offset=REMOTE_MAX_OFFSET) is None
-    assert "exceeds" in validate_remote_item("t", "s", None, [], {}, offset=REMOTE_MAX_OFFSET + 1)
+    assert "exceeds" in validate_remote_item(
+        "t", "s", None, [], {}, offset=REMOTE_MAX_OFFSET + 1
+    )
     assert "exceeds" in validate_remote_item("t", "s", None, [], {}, offset=2**100)
 
 
@@ -991,13 +997,8 @@ def test_triples_validity_bounds_must_parse(monkeypatch, tmp_path):
             return object()
 
     monkeypatch.setattr(srv2, "_make_probe_client", lambda *_a, **_k: _Probe())
-    for name in (
-        "Recaller",
-        "VectorRetriever",
-        "BM25Retriever",
-        "MemgraphRetriever",
-        "TemporalRetriever",
-    ):
+    for name in ("Recaller", "VectorRetriever", "BM25Retriever", "MemgraphRetriever",
+                 "TemporalRetriever"):
         monkeypatch.setattr(srv2, name, lambda **_: object())
     monkeypatch.setattr(srv2, "build_full_pipeline", lambda **_: object())
     monkeypatch.setattr(srv2, "FileStateStore", lambda path: object())
@@ -1012,36 +1013,24 @@ def test_triples_validity_bounds_must_parse(monkeypatch, tmp_path):
     _, wk = ks.issue("alpha", ["write"])
     app = build_app(
         ServerConfig(
-            provider_name="fake",
-            llm_name="fake",
+            provider_name="fake", llm_name="fake",
             graph_uri="bolt://graph.invalid:7687",
-            auth_enabled=True,
-            keys_file=str(tmp_path / "k.json"),
+            auth_enabled=True, keys_file=str(tmp_path / "k.json"),
         )
     )
     client = TestClient(app)
     hdr = {"X-API-Key": wk}
     bad = client.post(
         "/triples",
-        json={
-            "triples": [{"subject": "a", "predicate": "P", "object": "b", "valid_from": "tomorrow"}]
-        },
+        json={"triples": [{"subject": "a", "predicate": "P", "object": "b",
+                            "valid_from": "tomorrow"}]},
         headers=hdr,
     )
     assert bad.status_code == 400 and "valid_from" in bad.json()["detail"]
     ok = client.post(
         "/triples",
-        json={
-            "triples": [
-                {
-                    "subject": "a",
-                    "predicate": "P",
-                    "object": "b",
-                    "valid_from": "2026-01-01",
-                    "valid_until": "current",
-                }
-            ]
-        },
+        json={"triples": [{"subject": "a", "predicate": "P", "object": "b",
+                            "valid_from": "2026-01-01", "valid_until": "current"}]},
         headers=hdr,
     )
     assert ok.status_code == 200 and added[0]["valid_until"] == "current"
@@ -1080,9 +1069,7 @@ def test_qdrant_bm25_mode_boots_without_a_collection(monkeypatch, tmp_path):
     monkeypatch.setattr(srv, "get_llm", _no_llm)
     app = build_app(
         ServerConfig(
-            provider_name="fake",
-            llm_name="fake",
-            graph_uri=None,
+            provider_name="fake", llm_name="fake", graph_uri=None,
             text_search="qdrant_bm25",
         )
     )
@@ -1098,29 +1085,29 @@ def test_qdrant_bm25_mode_boots_without_a_collection(monkeypatch, tmp_path):
 def test_metadata_validity_bounds_must_parse():
     """Bot-R3: valid_from/valid_until are allowed content but must parse —
     unparseable bounds degrade as_of recall to lexicographic comparison."""
-    assert "valid_from" in validate_remote_item("t", "s", None, [], {"valid_from": "tomorrow"})
-    assert "valid_until" in validate_remote_item("t", "s", None, [], {"valid_until": "not-a-date"})
-    assert (
-        validate_remote_item(
-            "t", "s", None, [], {"valid_from": "2026-01-01", "valid_until": "current"}
-        )
-        is None
+    assert "valid_from" in validate_remote_item(
+        "t", "s", None, [], {"valid_from": "tomorrow"}
     )
+    assert "valid_until" in validate_remote_item(
+        "t", "s", None, [], {"valid_until": "not-a-date"}
+    )
+    assert validate_remote_item(
+        "t", "s", None, [], {"valid_from": "2026-01-01", "valid_until": "current"}
+    ) is None
 
 
 def test_metadata_numbers_must_fit_the_store_domain():
     """Bot-R3: an int64-overflowing or non-finite number embeds first and
     only fails at upsert — reject before any provider cost, nested too."""
     assert "64-bit" in validate_remote_item("t", "s", None, [], {"priority": 2**100})
-    assert "64-bit" in validate_remote_item("t", "s", None, [], {"nested": {"deep": [1, 2, 2**80]}})
+    assert "64-bit" in validate_remote_item(
+        "t", "s", None, [], {"nested": {"deep": [1, 2, 2**80]}}
+    )
     assert "finite" in validate_remote_item("t", "s", None, [], {"score": float("inf")})
     assert "finite" in validate_remote_item("t", "s", None, [], {"score": float("nan")})
-    assert (
-        validate_remote_item(
-            "t", "s", None, [], {"priority": 2**62, "score": 0.5, "flags": [True, 1]}
-        )
-        is None
-    )
+    assert validate_remote_item(
+        "t", "s", None, [], {"priority": 2**62, "score": 0.5, "flags": [True, 1]}
+    ) is None
 
 
 def test_schema_mirror_is_structural_not_enrichment():
@@ -1255,12 +1242,8 @@ def test_reactivation_preserves_valid_until():
         tenant="a",
     )
     store.invalidate([first.id], tenant="a")  # no valid_until arg
-    ingest_remote_items(
-        emb,
-        store,
-        [IngestItem(text="promo", source="s", metadata={"valid_until": "2030-01-01"})],
-        tenant="a",
-    )
+    ingest_remote_items(emb, store, [IngestItem(text="promo", source="s",
+                                                 metadata={"valid_until": "2030-01-01"})], tenant="a")
     point = store.client.retrieve(store.collection, ids=[first.id], with_payload=True)[0]
     assert "invalidated_at" not in (point.payload or {})  # recallable again
     assert point.payload.get("valid_until") == "2030-01-01"  # content survives
@@ -1270,7 +1253,9 @@ def test_vanished_stale_point_is_failed_not_stored():
     """Agent-R10: apply_payload_patches silently skips vanished points — the
     ignored return value must not turn that into a reported 'stored'."""
     emb, store = _CountingEmbedding(), _mem_store()
-    (first,) = ingest_remote_items(emb, store, [IngestItem(text="gone", source="s")], tenant="a")
+    (first,) = ingest_remote_items(
+        emb, store, [IngestItem(text="gone", source="s")], tenant="a"
+    )
     store.invalidate([first.id], tenant="a")
 
     orig = store.apply_payload_patches
@@ -1281,7 +1266,9 @@ def test_vanished_stale_point_is_failed_not_stored():
         return 0
 
     store.apply_payload_patches = _skipping  # type: ignore[method-assign]
-    (res,) = ingest_remote_items(emb, store, [IngestItem(text="gone", source="s")], tenant="a")
+    (res,) = ingest_remote_items(
+        emb, store, [IngestItem(text="gone", source="s")], tenant="a"
+    )
     store.apply_payload_patches = orig  # type: ignore[method-assign]
     assert res.status == "failed"  # never a fabricated 'stored'/'duplicate'
 
@@ -1291,22 +1278,27 @@ def test_colliding_schema_keys_are_rejected_loudly():
     (metadata merges last in payload construction) — operator error, loud."""
     emb, store = _CountingEmbedding(), _mem_store()
     with pytest.raises(ValueError, match="pipeline"):
-        ingest_remote_items(emb, store, [IngestItem(text="x", source="s")], text_key="source")
+        ingest_remote_items(
+            emb, store, [IngestItem(text="x", source="s")], text_key="source"
+        )
     with pytest.raises(ValueError, match="pipeline"):
-        ingest_remote_items(emb, store, [IngestItem(text="x", source="s")], timestamp_key="offset")
+        ingest_remote_items(
+            emb, store, [IngestItem(text="x", source="s")], timestamp_key="offset"
+        )
     # Codex-R11: DOWNSTREAM pipeline keys too — timestamp_key="tags" would
     # feed the epoch float into the tag materializer and 500 every write.
     with pytest.raises(ValueError, match="pipeline"):
-        ingest_remote_items(emb, store, [IngestItem(text="x", source="s")], timestamp_key="tags")
+        ingest_remote_items(
+            emb, store, [IngestItem(text="x", source="s")], timestamp_key="tags"
+        )
     with pytest.raises(ValueError, match="pipeline"):
-        ingest_remote_items(emb, store, [IngestItem(text="x", source="s")], text_key="indexed_at")
+        ingest_remote_items(
+            emb, store, [IngestItem(text="x", source="s")], text_key="indexed_at"
+        )
     with pytest.raises(ValueError, match="differ"):
         ingest_remote_items(
-            emb,
-            store,
-            [IngestItem(text="x", source="s")],
-            text_key="content",
-            timestamp_key="content",
+            emb, store, [IngestItem(text="x", source="s")],
+            text_key="content", timestamp_key="content",
         )
 
 
@@ -1324,7 +1316,8 @@ def test_schema_key_misconfiguration_fails_at_boot(monkeypatch, tmp_path):
     monkeypatch.setattr(srv, "get_provider", _counting_provider)
     with pytest.raises(ValueError, match="pipeline"):
         build_app(
-            ServerConfig(provider_name="fake", llm_name="fake", graph_uri=None, text_key="source")
+            ServerConfig(provider_name="fake", llm_name="fake", graph_uri=None,
+                         text_key="source")
         )
     assert provider_calls == []  # fail-fast: no provider round trip paid
 
@@ -1339,9 +1332,13 @@ def test_lifecycle_keys_are_forbidden_schema_keys():
     emb, store = _CountingEmbedding(), _mem_store()
     for bad in ("invalidated_at", "valid_from", "valid_until"):
         with pytest.raises(ValueError, match="pipeline"):
-            ingest_remote_items(emb, store, [IngestItem(text="x", source="s")], text_key=bad)
+            ingest_remote_items(
+                emb, store, [IngestItem(text="x", source="s")], text_key=bad
+            )
         with pytest.raises(ValueError, match="pipeline"):
-            ingest_remote_items(emb, store, [IngestItem(text="x", source="s")], timestamp_key=bad)
+            ingest_remote_items(
+                emb, store, [IngestItem(text="x", source="s")], timestamp_key=bad
+            )
 
 
 def test_lone_surrogates_are_rejected_not_500(monkeypatch, tmp_path):
@@ -1374,9 +1371,13 @@ def test_underscore_schema_keys_are_reserved():
     emb, store = _CountingEmbedding(), _mem_store()
     for bad in ("_enrich_keys", "_md_keys", "_anything"):
         with pytest.raises(ValueError, match="underscore"):
-            ingest_remote_items(emb, store, [IngestItem(text="x", source="s")], text_key=bad)
+            ingest_remote_items(
+                emb, store, [IngestItem(text="x", source="s")], text_key=bad
+            )
         with pytest.raises(ValueError, match="underscore"):
-            ingest_remote_items(emb, store, [IngestItem(text="x", source="s")], timestamp_key=bad)
+            ingest_remote_items(
+                emb, store, [IngestItem(text="x", source="s")], timestamp_key=bad
+            )
 
 
 def test_blank_schema_keys_are_rejected():
@@ -1385,9 +1386,13 @@ def test_blank_schema_keys_are_rejected():
     emb, store = _CountingEmbedding(), _mem_store()
     for bad in ("", "  "):
         with pytest.raises(ValueError, match="non-blank"):
-            ingest_remote_items(emb, store, [IngestItem(text="x", source="s")], text_key=bad)
+            ingest_remote_items(
+                emb, store, [IngestItem(text="x", source="s")], text_key=bad
+            )
         with pytest.raises(ValueError, match="non-blank"):
-            ingest_remote_items(emb, store, [IngestItem(text="x", source="s")], timestamp_key=bad)
+            ingest_remote_items(
+                emb, store, [IngestItem(text="x", source="s")], timestamp_key=bad
+            )
 
 
 # --------------------------------------------------- bot round-4 batch pins
@@ -1397,29 +1402,17 @@ def test_metadata_validity_interval_must_be_increasing():
     """Bot-R4: valid_from >= valid_until is an empty [from, until) window —
     the memory would be stored but invisible to every as_of query."""
     assert "precede" in validate_remote_item(
-        "t",
-        "s",
-        None,
-        [],
+        "t", "s", None, [],
         {"valid_from": "2026-02-01", "valid_until": "2026-01-01"},
     )
     assert "precede" in validate_remote_item(
-        "t",
-        "s",
-        None,
-        [],
+        "t", "s", None, [],
         {"valid_from": "2026-01-01", "valid_until": "2026-01-01"},
     )
-    assert (
-        validate_remote_item(
-            "t",
-            "s",
-            None,
-            [],
-            {"valid_from": "2026-01-01", "valid_until": "2026-02-01"},
-        )
-        is None
-    )
+    assert validate_remote_item(
+        "t", "s", None, [],
+        {"valid_from": "2026-01-01", "valid_until": "2026-02-01"},
+    ) is None
 
 
 def _triples_app(monkeypatch, tmp_path):
@@ -1446,13 +1439,8 @@ def _triples_app(monkeypatch, tmp_path):
             return object()
 
     monkeypatch.setattr(srv, "_make_probe_client", lambda *_a, **_k: _Probe())
-    for name in (
-        "Recaller",
-        "VectorRetriever",
-        "BM25Retriever",
-        "MemgraphRetriever",
-        "TemporalRetriever",
-    ):
+    for name in ("Recaller", "VectorRetriever", "BM25Retriever", "MemgraphRetriever",
+                 "TemporalRetriever"):
         monkeypatch.setattr(srv, name, lambda **_: object())
     monkeypatch.setattr(srv, "build_full_pipeline", lambda **_: object())
     monkeypatch.setattr(srv, "FileStateStore", lambda path: object())
@@ -1467,11 +1455,9 @@ def _triples_app(monkeypatch, tmp_path):
     _, wk = ks.issue("alpha", ["write"])
     app = build_app(
         ServerConfig(
-            provider_name="fake",
-            llm_name="fake",
+            provider_name="fake", llm_name="fake",
             graph_uri="bolt://graph.invalid:7687",
-            auth_enabled=True,
-            keys_file=str(tmp_path / "k4.json"),
+            auth_enabled=True, keys_file=str(tmp_path / "k4.json"),
         )
     )
     return TestClient(app), {"X-API-Key": wk}, calls
@@ -1483,7 +1469,8 @@ def test_triples_reject_surrogates_and_noncanonical_predicates(monkeypatch, tmp_
     'works at' -> one WORKS_AT edge) — only canonical identifiers pass."""
     client, hdr, calls = _triples_app(monkeypatch, tmp_path)
     raw = b'{"triples": [{"subject": "a\\ud800", "predicate": "KNOWS", "object": "b"}]}'
-    r = client.post("/triples", content=raw, headers={**hdr, "Content-Type": "application/json"})
+    r = client.post("/triples", content=raw,
+                    headers={**hdr, "Content-Type": "application/json"})
     assert r.status_code in (400, 422)  # schema or endpoint layer, never 502
     r2 = client.post(
         "/triples",
@@ -1512,17 +1499,8 @@ def test_triples_reject_inverted_intervals(monkeypatch, tmp_path):
     client, hdr, _calls = _triples_app(monkeypatch, tmp_path)
     r = client.post(
         "/triples",
-        json={
-            "triples": [
-                {
-                    "subject": "a",
-                    "predicate": "KNOWS",
-                    "object": "b",
-                    "valid_from": "2026-02-01",
-                    "valid_until": "2026-01-01",
-                }
-            ]
-        },
+        json={"triples": [{"subject": "a", "predicate": "KNOWS", "object": "b",
+                            "valid_from": "2026-02-01", "valid_until": "2026-01-01"}]},
         headers=hdr,
     )
     assert r.status_code == 400 and "precede" in r.json()["detail"]
@@ -1536,9 +1514,9 @@ def test_predicate_rejects_unicode_number_characters():
     unchanged (isalnum) yet crash Memgraph's unescaped rel-type grammar.
     Reject them up front on both positions."""
     for bad in ("²abc", "Ⅳabc", "①abc", "a²bc", "aⅣ", "a①bc", "١abc"):
-        assert "relation identifier" in (validate_remote_triple("s", bad, "o", None, None) or ""), (
-            bad
-        )
+        assert "relation identifier" in (
+            validate_remote_triple("s", bad, "o", None, None) or ""
+        ), bad
     # Letters of any script + decimal digits + underscore stay valid.
     for good in ("works_on", "работает_в", "中文", "a9", "Éto_1"):
         assert validate_remote_triple("s", good, "o", None, None) is None, good
@@ -1665,7 +1643,9 @@ def test_duck_store_with_client_but_no_collection_keeps_duplicate_semantics():
             return set(ids)  # everything is a known duplicate
 
     emb = _CountingEmbedding()
-    (res,) = ingest_remote_items(emb, _DuckStore(), [IngestItem(text="x", source="s")], tenant="a")
+    (res,) = ingest_remote_items(
+        emb, _DuckStore(), [IngestItem(text="x", source="s")], tenant="a"
+    )
     assert res.status == "duplicate"  # graceful fallback, no AttributeError
 
 
@@ -1677,7 +1657,9 @@ def test_ingest_failure_leaves_retracted_memories_retracted(monkeypatch):
     import mnemostack.ingest as ingest_mod
 
     emb, store = _CountingEmbedding(), _mem_store()
-    (first,) = ingest_remote_items(emb, store, [IngestItem(text="fact", source="s")], tenant="a")
+    (first,) = ingest_remote_items(
+        emb, store, [IngestItem(text="fact", source="s")], tenant="a"
+    )
     store.invalidate([first.id], tenant="a")
 
     class _Boom(Exception):

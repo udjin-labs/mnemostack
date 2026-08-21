@@ -93,10 +93,9 @@ def test_invalidate_accepts_uppercase_uuid_spelling(monkeypatch, tmp_path):
     assert point.payload.get("invalidated_at")
     assert validate_remote_ids(["²"]) is not None  # isdigit() but int() crashes
     assert validate_remote_ids(["٧"]) is not None  # non-ASCII decimal
-    assert (
-        validate_remote_ids(["c7751834-6a7d-0516-5d84-032e6e92d50f", 7, "123", str(2**64 - 1)])
-        is None
-    )
+    assert validate_remote_ids(
+        ["c7751834-6a7d-0516-5d84-032e6e92d50f", 7, "123", str(2**64 - 1)]
+    ) is None
 
 
 def test_validate_remote_invalidate_contract():
@@ -140,7 +139,9 @@ def test_invalidate_requires_write_scope(monkeypatch, tmp_path):
     client = TestClient(app)
     r = client.post("/invalidate", json={"ids": ["x"]})
     assert r.status_code == 401
-    r = client.post("/invalidate", json={"ids": ["x"]}, headers={"X-API-Key": keys["read"]})
+    r = client.post(
+        "/invalidate", json={"ids": ["x"]}, headers={"X-API-Key": keys["read"]}
+    )
     assert r.status_code == 403
 
 
@@ -164,7 +165,9 @@ def test_invalidate_never_touches_foreign_tenant(monkeypatch, tmp_path):
     app, store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
     client = TestClient(app)
     pid = _stored_id(client, keys["write"])  # owned by alpha
-    r = client.post("/invalidate", json={"ids": [pid]}, headers={"X-API-Key": keys["beta_write"]})
+    r = client.post(
+        "/invalidate", json={"ids": [pid]}, headers={"X-API-Key": keys["beta_write"]}
+    )
     assert r.status_code == 200
     # Skipped indistinguishably from a missing id — no existence oracle.
     assert r.json() == {"requested": 1, "invalidated": 0, "complete": True}
@@ -176,11 +179,17 @@ def test_invalidate_rejects_bad_input(monkeypatch, tmp_path):
     app, _store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
     client = TestClient(app)
     hdr = {"X-API-Key": keys["write"]}
-    r = client.post("/invalidate", json={"ids": ["7"], "valid_until": "garbage"}, headers=hdr)
+    r = client.post(
+        "/invalidate", json={"ids": ["7"], "valid_until": "garbage"}, headers=hdr
+    )
     assert r.status_code == 400 and "valid_until" in r.json()["detail"]
-    r = client.post("/invalidate", json={"ids": ["7"], "invalidated_at": "garbage"}, headers=hdr)
+    r = client.post(
+        "/invalidate", json={"ids": ["7"], "invalidated_at": "garbage"}, headers=hdr
+    )
     assert r.status_code == 400 and "invalidated_at" in r.json()["detail"]
-    r = client.post("/invalidate", json={"ids": ["7"], "index_root": "  "}, headers=hdr)
+    r = client.post(
+        "/invalidate", json={"ids": ["7"], "index_root": "  "}, headers=hdr
+    )
     assert r.status_code == 400 and "index_root" in r.json()["detail"]
     r = client.post("/invalidate", json={"ids": ["not-a-uuid"]}, headers=hdr)
     assert r.status_code == 400 and "UUID" in r.json()["detail"]
@@ -188,7 +197,9 @@ def test_invalidate_rejects_bad_input(monkeypatch, tmp_path):
     assert r.status_code == 400  # digit string past the u64 domain
     r = client.post("/invalidate", json={"ids": ["9" * 5000]}, headers=hdr)
     assert r.status_code == 400  # past int()'s digit limit — 400, not 500
-    r = client.request("DELETE", "/memories", json={"ids": ["9" * 5000]}, headers=hdr)
+    r = client.request(
+        "DELETE", "/memories", json={"ids": ["9" * 5000]}, headers=hdr
+    )
     assert r.status_code == 400
     r = client.post(
         "/invalidate",
@@ -305,7 +316,9 @@ def test_lifecycle_unscoped_legacy_mode(monkeypatch, tmp_path):
     """Auth off = historical single-tenant service: no tenant guard."""
     app, store, _emb, _keys = _ingest_app(monkeypatch, tmp_path, auth=False)
     client = TestClient(app)
-    r = client.post("/memories", json={"items": [{"text": "legacy fact", "source": "s"}]})
+    r = client.post(
+        "/memories", json={"items": [{"text": "legacy fact", "source": "s"}]}
+    )
     pid = r.json()["results"][0]["id"]
     r = client.post("/invalidate", json={"ids": [pid]})
     assert r.status_code == 200 and r.json()["invalidated"] == 1
@@ -321,7 +334,9 @@ def test_invalidated_memory_hidden_from_default_recall_semantics(monkeypatch, tm
     app, store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
     client = TestClient(app)
     pid = _stored_id(client, keys["write"])
-    client.post("/invalidate", json={"ids": [pid]}, headers={"X-API-Key": keys["write"]})
+    client.post(
+        "/invalidate", json={"ids": [pid]}, headers={"X-API-Key": keys["write"]}
+    )
     point = store.client.retrieve(store.collection, ids=[pid], with_payload=True)[0]
     assert not is_current(point.payload)
 
@@ -357,7 +372,9 @@ def test_duplicate_ids_count_once(monkeypatch, tmp_path):
     pid = _stored_id(client, keys["write"])
     r = client.post("/invalidate", json={"ids": [pid, pid]}, headers=hdr)
     assert r.json() == {"requested": 2, "invalidated": 1, "complete": True}
-    r = client.request("DELETE", "/memories", json={"ids": [pid, pid]}, headers=hdr)
+    r = client.request(
+        "DELETE", "/memories", json={"ids": [pid, pid]}, headers=hdr
+    )
     assert r.json() == {"requested": 2, "deleted": 1, "complete": True}
 
 
@@ -366,7 +383,9 @@ def test_unscoped_delete_counts_actual_removals(monkeypatch, tmp_path):
     unknown ids / retries / duplicates would be reported as deleted."""
     app, store, _emb, _keys = _ingest_app(monkeypatch, tmp_path, auth=False)
     client = TestClient(app)
-    r = client.post("/memories", json={"items": [{"text": "legacy fact", "source": "s"}]})
+    r = client.post(
+        "/memories", json={"items": [{"text": "legacy fact", "source": "s"}]}
+    )
     pid = r.json()["results"][0]["id"]
     missing = "00000000-0000-0000-0000-000000000000"
     r = client.request("DELETE", "/memories", json={"ids": [pid, pid, missing]})

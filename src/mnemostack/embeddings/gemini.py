@@ -14,10 +14,10 @@ from .base import EmbeddingProvider
 
 logger = logging.getLogger(__name__)
 
-
 def _backoff(attempt: int, base: float = 1.0) -> float:
     """Exponential backoff with jitter so concurrent retries don't synchronize."""
     return base * (2**attempt) * (0.5 + random.random())
+
 
 
 class GeminiProvider(EmbeddingProvider):

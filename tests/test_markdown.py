@@ -183,9 +183,9 @@ def test_extract_links_escaped_wikilink_never_matches():
     # ignored region (code span/block, indented code, link label, or raw HTML).
     for ignored in (
         "code `[[Draft]]`",
-        "    [[Draft]]\n",  # indented code
-        "[see [[Draft]]](x.md)",  # link label
-        "<div>[[Draft]]</div>",  # raw HTML
+        "    [[Draft]]\n",          # indented code
+        "[see [[Draft]]](x.md)",    # link label
+        "<div>[[Draft]]</div>",     # raw HTML
     ):
         text = f"{ignored}\n\nescaped \\[[Draft]] and real [[Real]]"
         assert {link.target for link in extract_links(text)} == {"Real"} | (
@@ -302,7 +302,10 @@ def test_extract_links_skips_fenced_code_blocks():
 def test_extract_links_mixed_fence_delimiters_stay_excluded():
     # A ~~~ block containing an inner ``` line must stay one block: links after
     # the inner mismatched fence are still code samples, not references.
-    text = "real [[Live]]\n\n~~~\ncode ``` inner\n[[Fenced]] and [x](fenced.md)\n~~~\n"
+    text = (
+        "real [[Live]]\n\n"
+        "~~~\ncode ``` inner\n[[Fenced]] and [x](fenced.md)\n~~~\n"
+    )
     targets = {link.target for link in extract_links(text)}
     assert "Live" in targets
     assert "Fenced" not in targets and "fenced" not in targets
@@ -329,8 +332,8 @@ def test_extract_links_keeps_dotted_note_names():
     # is a real note; only known asset extensions are rejected.
     links = extract_links("daily [[2026.07.04]], asset [[paper.pdf]], ver [v](v1.2.0.md)")
     targets = [(link.target, link.is_wikilink) for link in links]
-    assert ("2026.07.04", True) in targets  # dotted note kept
-    assert ("v1.2.0", False) in targets  # dotted .md note kept
+    assert ("2026.07.04", True) in targets     # dotted note kept
+    assert ("v1.2.0", False) in targets        # dotted .md note kept
     assert all(t != "paper.pdf" for t, _ in targets)  # .pdf asset dropped
 
 
@@ -349,9 +352,7 @@ def test_extract_links_spaced_and_escaped_inline_targets():
 
 
 def _vault(tmp: Path) -> Path:
-    (tmp / "a.md").write_text(
-        "---\nauthor: X\ntopic: t1\n---\n# A\nlinks [[B]] and [c](sub/c.md)\n"
-    )
+    (tmp / "a.md").write_text("---\nauthor: X\ntopic: t1\n---\n# A\nlinks [[B]] and [c](sub/c.md)\n")
     (tmp / "sub").mkdir()
     (tmp / "sub" / "c.md").write_text("# C\ncontent here")
     (tmp / "b.md").write_text("# B\nrefers [[Missing Note]]")
@@ -372,8 +373,8 @@ def test_collect_protected_keys_win_over_frontmatter(tmp_path):
     (tmp_path / "x.md").write_text("---\nsource: HACKED\noffset: 999\n---\n# X\nbody")
     col = collect_markdown(tmp_path)
     p = col.chunks[0].payload
-    assert p["source"] == "x.md"  # not "HACKED"
-    assert p["offset"] == 0  # not 999
+    assert p["source"] == "x.md"   # not "HACKED"
+    assert p["offset"] == 0        # not 999
 
 
 def test_collect_link_resolution_case_insensitive_and_dangling(tmp_path):
@@ -615,7 +616,8 @@ def test_sync_file_links_sets_python_lowercased_name():
 
     store.sync_file_links("Ünïcöde.md", ["Tïtle.md"], index_root="/v")
     merge = next(
-        c for c in session.run.call_args_list if "MERGE (s)-[r:LINKS_TO]->(o)" in c.args[0]
+        c for c in session.run.call_args_list
+        if "MERGE (s)-[r:LINKS_TO]->(o)" in c.args[0]
     )
     assert "name_lower" in merge.args[0]
     assert merge.kwargs["src_lower"] == "ünïcöde.md"
@@ -697,22 +699,15 @@ def test_cmd_index_markdown_indexes_and_writes_edges(tmp_path, monkeypatch, caps
     import argparse
 
     args = argparse.Namespace(
-        path=str(v),
-        provider="fake",
-        embedding_model=None,
-        collection="c",
-        qdrant="http://localhost:6333",
-        chunk_size=1200,
-        memgraph_uri="bolt://localhost:7687",
-        graph_timeout=5.0,
-        recreate=False,
-        prune=False,
-        yes=True,
+        path=str(v), provider="fake", embedding_model=None,
+        collection="c", qdrant="http://localhost:6333",
+        chunk_size=1200, memgraph_uri="bolt://localhost:7687",
+        graph_timeout=5.0, recreate=False, prune=False, yes=True,
     )
     rc = cli.cmd_index_markdown(args)
     assert rc == 0
-    assert len(store.upserts) >= 3  # a, b, c chunks
-    assert _FakeGraph.instances  # graph opened
+    assert len(store.upserts) >= 3               # a, b, c chunks
+    assert _FakeGraph.instances                  # graph opened
     graph = _FakeGraph.instances[-1]
     assert graph.links["a.md"] == ["b.md", "sub/c.md"]  # edges written per source
     # every source is synced (even b.md/sub/c.md whose links stay empty) so a
@@ -753,17 +748,10 @@ def test_cmd_index_markdown_without_graph_skips_edges(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "VectorStore", lambda **_: _FakeStore())
     # no memgraph_uri -> graph path skipped (would fail if GraphStore imported)
     args = argparse.Namespace(
-        path=str(_vault(tmp_path)),
-        provider="fake",
-        embedding_model=None,
-        collection="c",
-        qdrant="http://localhost:6333",
-        chunk_size=1200,
-        memgraph_uri=None,
-        graph_timeout=5.0,
-        recreate=False,
-        prune=False,
-        yes=True,
+        path=str(_vault(tmp_path)), provider="fake", embedding_model=None,
+        collection="c", qdrant="http://localhost:6333",
+        chunk_size=1200, memgraph_uri=None,
+        graph_timeout=5.0, recreate=False, prune=False, yes=True,
     )
     assert cli.cmd_index_markdown(args) == 0
 
@@ -774,17 +762,10 @@ def test_cmd_index_markdown_rejects_non_positive_chunk_size(tmp_path, capsys):
     import mnemostack.cli as cli
 
     args = argparse.Namespace(
-        path=str(_vault(tmp_path)),
-        provider="fake",
-        embedding_model=None,
-        collection="c",
-        qdrant="http://localhost:6333",
-        chunk_size=0,
-        memgraph_uri=None,
-        graph_timeout=5.0,
-        recreate=False,
-        prune=False,
-        yes=True,
+        path=str(_vault(tmp_path)), provider="fake", embedding_model=None,
+        collection="c", qdrant="http://localhost:6333",
+        chunk_size=0, memgraph_uri=None,
+        graph_timeout=5.0, recreate=False, prune=False, yes=True,
     )
     # bad --chunk-size fails fast (exit 2) before touching the provider/store
     assert cli.cmd_index_markdown(args) == 2
@@ -797,19 +778,10 @@ def test_cmd_index_markdown_rejects_recreate_under_tenant(tmp_path, capsys):
     import mnemostack.cli as cli
 
     args = argparse.Namespace(
-        path=str(_vault(tmp_path)),
-        provider="fake",
-        embedding_model=None,
-        collection="c",
-        qdrant="http://localhost:6333",
-        chunk_size=1200,
-        memgraph_uri=None,
-        index_root=None,
-        graph_timeout=5.0,
-        recreate=True,
-        prune=False,
-        yes=True,
-        tenant="acme",
+        path=str(_vault(tmp_path)), provider="fake", embedding_model=None,
+        collection="c", qdrant="http://localhost:6333",
+        chunk_size=1200, memgraph_uri=None, index_root=None,
+        graph_timeout=5.0, recreate=True, prune=False, yes=True, tenant="acme",
     )
     # --recreate would drop the whole shared collection — refuse it under --tenant.
     assert cli.cmd_index_markdown(args) == 2
@@ -822,19 +794,10 @@ def test_cmd_index_markdown_rejects_empty_tenant(tmp_path, capsys):
     import mnemostack.cli as cli
 
     args = argparse.Namespace(
-        path=str(_vault(tmp_path)),
-        provider="fake",
-        embedding_model=None,
-        collection="c",
-        qdrant="http://localhost:6333",
-        chunk_size=1200,
-        memgraph_uri=None,
-        index_root=None,
-        graph_timeout=5.0,
-        recreate=True,
-        prune=False,
-        yes=True,
-        tenant="",
+        path=str(_vault(tmp_path)), provider="fake", embedding_model=None,
+        collection="c", qdrant="http://localhost:6333",
+        chunk_size=1200, memgraph_uri=None, index_root=None,
+        graph_timeout=5.0, recreate=True, prune=False, yes=True, tenant="",
     )
     # An empty --tenant must fail closed (not slip past the --recreate guard as
     # an unscoped destructive run).
@@ -842,7 +805,9 @@ def test_cmd_index_markdown_rejects_empty_tenant(tmp_path, capsys):
     assert "tenant" in capsys.readouterr().err.lower()
 
 
-def test_cmd_index_markdown_graph_write_failure_does_not_fail_run(tmp_path, monkeypatch, capsys):
+def test_cmd_index_markdown_graph_write_failure_does_not_fail_run(
+    tmp_path, monkeypatch, capsys
+):
     import argparse
 
     import mnemostack.cli as cli
@@ -888,21 +853,14 @@ def test_cmd_index_markdown_graph_write_failure_does_not_fail_run(tmp_path, monk
     monkeypatch.setattr("mnemostack.graph.store.GraphStore", _FlakyGraph)
 
     args = argparse.Namespace(
-        path=str(_vault(tmp_path)),
-        provider="fake",
-        embedding_model=None,
-        collection="c",
-        qdrant="http://localhost:6333",
-        chunk_size=1200,
-        memgraph_uri="bolt://localhost:7687",
-        graph_timeout=5.0,
-        recreate=False,
-        prune=False,
-        yes=True,
+        path=str(_vault(tmp_path)), provider="fake", embedding_model=None,
+        collection="c", qdrant="http://localhost:6333",
+        chunk_size=1200, memgraph_uri="bolt://localhost:7687",
+        graph_timeout=5.0, recreate=False, prune=False, yes=True,
     )
     # vectors already upserted, so a graph outage must warn, not fail the run
     assert cli.cmd_index_markdown(args) == 0
-    assert store.upserts  # vectors were written
+    assert store.upserts                      # vectors were written
     assert "graph write failed" in capsys.readouterr().err
 
 
@@ -966,17 +924,10 @@ def test_cmd_index_markdown_prune_removes_deleted_file_chunks(tmp_path, monkeypa
     monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
 
     args = argparse.Namespace(
-        path=str(v),
-        provider="fake",
-        embedding_model=None,
-        collection="c",
-        qdrant="http://localhost:6333",
-        chunk_size=1200,
-        memgraph_uri=None,
-        graph_timeout=5.0,
-        recreate=False,
-        prune=True,
-        yes=True,
+        path=str(v), provider="fake", embedding_model=None,
+        collection="c", qdrant="http://localhost:6333",
+        chunk_size=1200, memgraph_uri=None,
+        graph_timeout=5.0, recreate=False, prune=True, yes=True,
     )
     assert cli.cmd_index_markdown(args) == 0
     # the deleted file's stale point is pruned even though it isn't in the walk
@@ -1033,17 +984,10 @@ def test_cmd_index_markdown_clears_graph_links_for_deleted_file(tmp_path, monkey
     monkeypatch.setattr("mnemostack.graph.store.GraphStore", lambda **_: graph)
 
     args = argparse.Namespace(
-        path=str(v),
-        provider="fake",
-        embedding_model=None,
-        collection="c",
-        qdrant="http://localhost:6333",
-        chunk_size=1200,
-        memgraph_uri="bolt://localhost:7687",
-        graph_timeout=5.0,
-        recreate=False,
-        prune=False,
-        yes=True,
+        path=str(v), provider="fake", embedding_model=None,
+        collection="c", qdrant="http://localhost:6333",
+        chunk_size=1200, memgraph_uri="bolt://localhost:7687",
+        graph_timeout=5.0, recreate=False, prune=False, yes=True,
     )
     assert cli.cmd_index_markdown(args) == 0
     # gone.md is no longer on disk -> its LINKS_TO edges are cleared (synced [])
@@ -1090,17 +1034,10 @@ def test_cmd_index_markdown_recreate_validates_before_dropping(tmp_path, monkeyp
     monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
 
     args = argparse.Namespace(
-        path=str(empty),
-        provider="fake",
-        embedding_model=None,
-        collection="c",
-        qdrant="http://localhost:6333",
-        chunk_size=1200,
-        memgraph_uri=None,
-        graph_timeout=5.0,
-        recreate=True,
-        prune=False,
-        yes=True,
+        path=str(empty), provider="fake", embedding_model=None,
+        collection="c", qdrant="http://localhost:6333",
+        chunk_size=1200, memgraph_uri=None,
+        graph_timeout=5.0, recreate=True, prune=False, yes=True,
     )
     # no .md files -> exit 2 and the existing collection is NOT dropped
     assert cli.cmd_index_markdown(args) == 2
@@ -1161,20 +1098,13 @@ def test_cmd_index_markdown_refreshes_payload_on_frontmatter_change(tmp_path, mo
 
     def _args():
         return argparse.Namespace(
-            path=str(tmp_path),
-            provider="fake",
-            embedding_model=None,
-            collection="c",
-            qdrant="http://localhost:6333",
-            chunk_size=1200,
-            memgraph_uri=None,
-            graph_timeout=5.0,
-            recreate=False,
-            prune=False,
-            yes=True,
+            path=str(tmp_path), provider="fake", embedding_model=None,
+            collection="c", qdrant="http://localhost:6333",
+            chunk_size=1200, memgraph_uri=None,
+            graph_timeout=5.0, recreate=False, prune=False, yes=True,
         )
 
-    assert cli.cmd_index_markdown(_args()) == 0  # initial index
+    assert cli.cmd_index_markdown(_args()) == 0          # initial index
     assert any(pl.get("tag") == "old" for pl in _Store.points.values())
 
     # simulate `mnemostack invalidate` + an external enrichment step adding a
@@ -1271,17 +1201,10 @@ def test_cmd_index_markdown_single_file_does_not_reconcile_siblings(tmp_path, mo
     monkeypatch.setattr("mnemostack.graph.store.GraphStore", lambda **_: graph)
 
     args = argparse.Namespace(
-        path=str(tmp_path / "a.md"),
-        provider="fake",
-        embedding_model=None,
-        collection="c",
-        qdrant="http://localhost:6333",
-        chunk_size=1200,
-        memgraph_uri="bolt://localhost:7687",
-        graph_timeout=5.0,
-        recreate=False,
-        prune=True,
-        yes=True,
+        path=str(tmp_path / "a.md"), provider="fake", embedding_model=None,
+        collection="c", qdrant="http://localhost:6333",
+        chunk_size=1200, memgraph_uri="bolt://localhost:7687",
+        graph_timeout=5.0, recreate=False, prune=True, yes=True,
     )
     assert cli.cmd_index_markdown(args) == 0
     # single-file run must NOT prune the sibling's chunks or clear its links
@@ -1349,18 +1272,10 @@ def test_cmd_index_markdown_nested_dir_index_root_does_not_reconcile_siblings(
     monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
 
     args = argparse.Namespace(
-        path=str(tmp_path / "sub"),
-        index_root=root,
-        provider="fake",
-        embedding_model=None,
-        collection="c",
-        qdrant="http://localhost:6333",
-        chunk_size=1200,
-        memgraph_uri=None,
-        graph_timeout=5.0,
-        recreate=False,
-        prune=True,
-        yes=True,
+        path=str(tmp_path / "sub"), index_root=root, provider="fake",
+        embedding_model=None, collection="c", qdrant="http://localhost:6333",
+        chunk_size=1200, memgraph_uri=None,
+        graph_timeout=5.0, recreate=False, prune=True, yes=True,
     )
     assert cli.cmd_index_markdown(args) == 0
     # the sibling under the root but outside the refreshed subtree is untouched

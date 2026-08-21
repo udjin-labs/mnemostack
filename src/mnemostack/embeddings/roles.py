@@ -76,7 +76,10 @@ class SpaceGuard:
         self._checked_at: float | None = None
 
     def _stale(self) -> bool:
-        return self._checked_at is None or time.monotonic() - self._checked_at > self._recheck
+        return (
+            self._checked_at is None
+            or time.monotonic() - self._checked_at > self._recheck
+        )
 
     def ensure(self) -> str | None:
         """Raise :class:`EmbeddingSpaceError` when the pair is incompatible.
@@ -237,7 +240,9 @@ def document_space_fingerprint_via(provider: Any) -> str | None:
     try:
         return method()
     except Exception as exc:
-        raise EmbeddingSpaceError(f"document-space fingerprint unavailable: {exc}") from exc
+        raise EmbeddingSpaceError(
+            f"document-space fingerprint unavailable: {exc}"
+        ) from exc
 
 
 def recall_space_error(store: Any, provider: Any) -> str | None:

@@ -108,7 +108,9 @@ def collection_name():
     name = f"smoke_{uuid.uuid4().hex[:12]}"
     yield name
     try:
-        VectorStore(collection=name, dimension=4, host=SERVER_URL).client.delete_collection(name)
+        VectorStore(collection=name, dimension=4, host=SERVER_URL).client.delete_collection(
+            name
+        )
     except Exception:  # noqa: BLE001 - never fail a test on cleanup
         pass
 
@@ -189,12 +191,8 @@ def test_multi_field_gate_against_real_text_indexes(collection_name):
     s.upsert(31, _V2, {"title": "network map", "text": "postgres in body only"})
     s.ensure_text_index()  # body field ("text")
     s.ensure_text_index("title")
-    assert {h.id for h in s.search(_V1, limit=5, text_any=["postgres"], text_any_key="title")} == {
-        30
-    }
-    assert {h.id for h in s.search(_V1, limit=5, text_any=["postgres"], text_any_key="text")} == {
-        31
-    }
+    assert {h.id for h in s.search(_V1, limit=5, text_any=["postgres"], text_any_key="title")} == {30}
+    assert {h.id for h in s.search(_V1, limit=5, text_any=["postgres"], text_any_key="text")} == {31}
 
 
 def test_coverage_gap_and_backfill_flow(collection_name):

@@ -119,7 +119,9 @@ def test_ensure_text_index_is_idempotent():
 def test_qdrant_text_retriever_gates_and_ranks():
     s = _store(text_key="content")
     _seed(s, text_key="content")
-    r = QdrantTextRetriever(embedding=_FakeEmbedder(), vector_store=s, text_key="content")
+    r = QdrantTextRetriever(
+        embedding=_FakeEmbedder(), vector_store=s, text_key="content"
+    )
     hits = r.search("how do I restore the postgres backup", limit=5)
     assert hits and all("postgres" in h.text or "backup" in h.text for h in hits)
     assert all(h.sources == ["qdrant_text"] for h in hits)
@@ -157,16 +159,12 @@ def test_retrievers_declare_the_schema():
 
     s = _store(sparse=True, text_key="content")
     r = QdrantSparseRetriever(
-        vector_store=s,
-        text_key="content",
-        timestamp_key="updated_at",
+        vector_store=s, text_key="content", timestamp_key="updated_at",
         timestamp_format="epoch",
     )
     rec = Recaller(retrievers=[r])
     assert (rec.text_key, rec.timestamp_key, rec.timestamp_format) == (
-        "content",
-        "updated_at",
-        "epoch",
+        "content", "updated_at", "epoch",
     )
 
 
@@ -197,14 +195,9 @@ def test_doctor_flags_invalid_text_search(monkeypatch, capsys):
     monkeypatch.setenv("MNEMOSTACK_TEXT_SEARCH", "fulltext")
     rc = cli.cmd_doctor(
         argparse.Namespace(
-            json=True,
-            provider="gemini",
-            embedding_model=None,
-            qdrant="http://localhost:1",
-            collection="mt",
-            memgraph_uri=None,
-            graph_timeout=1.0,
-            timeout=1,
+            json=True, provider="gemini", embedding_model=None,
+            qdrant="http://localhost:1", collection="mt",
+            memgraph_uri=None, graph_timeout=1.0, timeout=1,
         )
     )
     out = capsys.readouterr().out
@@ -340,7 +333,9 @@ def test_indexing_store_is_sparse_under_sparse_mode(monkeypatch):
     monkeypatch.setenv("MNEMOSTACK_TEXT_SEARCH", "sparse")
     cli._text_search_mode.cache_clear()
     cli._payload_schema.cache_clear()
-    cli._indexing_store(argparse.Namespace(collection="ts", qdrant="http://x"), _FakeEmbedder())
+    cli._indexing_store(
+        argparse.Namespace(collection="ts", qdrant="http://x"), _FakeEmbedder()
+    )
     assert captured["sparse_text"] is True and captured["text_key"] == "text"
     cli._text_search_mode.cache_clear()
     cli._payload_schema.cache_clear()
@@ -369,14 +364,9 @@ def test_doctor_reports_sparse_readiness(monkeypatch, capsys):
     cli._payload_schema.cache_clear()
     cli.cmd_doctor(
         argparse.Namespace(
-            json=True,
-            provider="gemini",
-            embedding_model=None,
-            qdrant="http://x",
-            collection="ts",
-            memgraph_uri=None,
-            graph_timeout=1.0,
-            timeout=1,
+            json=True, provider="gemini", embedding_model=None,
+            qdrant="http://x", collection="ts",
+            memgraph_uri=None, graph_timeout=1.0, timeout=1,
         )
     )
     out = capsys.readouterr().out
@@ -420,7 +410,9 @@ def test_sparse_backfill_command_ignores_dense_dimension(monkeypatch, capsys):
 
 
 def test_gate_token_tiebreak_is_deterministic():
-    r = QdrantTextRetriever(embedding=_FakeEmbedder(), vector_store=_store(), max_gate_tokens=3)
+    r = QdrantTextRetriever(
+        embedding=_FakeEmbedder(), vector_store=_store(), max_gate_tokens=3
+    )
     toks = r._gate_tokens("zebra amber corgi delta")  # all len 5, no exacts
     assert toks == sorted(toks)  # lexicographic among equal lengths — no hash order
 
@@ -458,29 +450,13 @@ def test_cmd_serve_forwards_text_search(monkeypatch):
 
     monkeypatch.setattr("mnemostack.server.build_app", _fake_build_app)
     ns = argparse.Namespace(
-        provider="gemini",
-        embedding_model=None,
-        llm="gemini",
-        llm_model=None,
-        collection="mt",
-        qdrant="http://localhost:6333",
-        memgraph_uri=None,
-        graph_timeout=5.0,
-        graph_user=None,
-        graph_password=None,
-        graph_database=None,
-        bm25_path=[],
-        vector_floor=0,
-        rerank_mode="relevant_only",
-        token_budget=None,
-        state_path=None,
-        auto_record_ior=False,
-        host="127.0.0.1",
-        port=8000,
-        auth=False,
-        keys_file=None,
-        quotas_file=None,
-        qdrant_health_timeout=2,
+        provider="gemini", embedding_model=None, llm="gemini", llm_model=None,
+        collection="mt", qdrant="http://localhost:6333", memgraph_uri=None,
+        graph_timeout=5.0, graph_user=None, graph_password=None,
+        graph_database=None, bm25_path=[], vector_floor=0,
+        rerank_mode="relevant_only", token_budget=None, state_path=None,
+        auto_record_ior=False, host="127.0.0.1", port=8000, auth=False,
+        keys_file=None, quotas_file=None, qdrant_health_timeout=2,
     )
     with pytest.raises(SystemExit):
         cli.cmd_serve(ns)

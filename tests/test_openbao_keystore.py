@@ -50,10 +50,8 @@ def _store(bao, clock=None, **kw):
     kw.setdefault("token", "tok")
     kw.setdefault("cache_ttl", 5.0)
     return OpenBaoKeyStore(
-        "https://bao.example:8200",
-        transport=bao,
-        clock=clock or _Clock(),
-        **kw,
+        "https://bao.example:8200", transport=bao,
+        clock=clock or _Clock(), **kw,
     )
 
 
@@ -127,9 +125,8 @@ def test_unreachable_store_fails_closed():
 
 
 def test_non_200_response_fails_closed():
-    bao = _FakeBao(
-        {hash_key("k"): {"tenant": "t", "scopes": ["read"]}}, valid_tokens=("other",)
-    )  # our token -> 403, no approle to retry
+    bao = _FakeBao({hash_key("k"): {"tenant": "t", "scopes": ["read"]}},
+                   valid_tokens=("other",))  # our token -> 403, no approle to retry
     assert _store(bao).verify("k") is None
 
 
@@ -137,12 +134,8 @@ def test_approle_login_and_relogin_on_expiry():
     h = hash_key("k")
     bao = _FakeBao({h: {"tenant": "t", "scopes": ["read"]}}, valid_tokens=("tok",))
     store = OpenBaoKeyStore(
-        "https://bao.example:8200",
-        transport=bao,
-        clock=_Clock(),
-        role_id="rid",
-        secret_id="sid",
-        cache_ttl=0.0,  # no cache: every call reads
+        "https://bao.example:8200", transport=bao, clock=_Clock(),
+        role_id="rid", secret_id="sid", cache_ttl=0.0,  # no cache: every call reads
     )
     assert store.verify("k") is not None  # lazy login happened first
     assert any(u.endswith("/auth/approle/login") for _m, u in bao.calls)
@@ -228,10 +221,7 @@ def test_redirects_are_refused_by_the_real_transport():
                 self.wfile.write(b"{}")
                 return
             self.send_response(302)  # try to bounce the client (and its token)
-            self.send_header(
-                "Location",
-                f"http://{self.server.server_address[0]}:{self.server.server_address[1]}/leak",
-            )
+            self.send_header("Location", f"http://{self.server.server_address[0]}:{self.server.server_address[1]}/leak")
             self.end_headers()
 
         def log_message(self, *a):  # keep test output quiet

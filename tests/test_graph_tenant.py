@@ -298,16 +298,8 @@ def test_add_file_tags_legacy_adapter_falls_back_to_tenant_add_triple():
         def add_file_tags(self, name, path, indexed_date, tags):  # no tenant
             seen.append(("add_file_tags", None))
 
-        def add_triple(
-            self,
-            subject,
-            predicate,
-            obj,
-            subject_label="Entity",
-            obj_label="Entity",
-            properties=None,
-            tenant=None,
-        ):
+        def add_triple(self, subject, predicate, obj, subject_label="Entity",
+                       obj_label="Entity", properties=None, tenant=None):
             seen.append(("add_triple", tenant))
 
     item = IngestItem(source="a.txt", text="hi", metadata={"tags": ["x"]})
@@ -369,15 +361,8 @@ def test_ingest_fallback_adapter_without_tenant_kwarg():
 
     class _LegacyAdapter:
         # No .driver, no .add_file_tags → falls through to the add_triple path.
-        def add_triple(
-            self,
-            subject,
-            predicate,
-            obj,
-            subject_label="Entity",
-            obj_label="Entity",
-            properties=None,
-        ):  # NO tenant kwarg
+        def add_triple(self, subject, predicate, obj, subject_label="Entity",
+                       obj_label="Entity", properties=None):  # NO tenant kwarg
             calls.append({"subject": subject, "obj": obj})
 
     item = IngestItem(source="a.txt", text="hi", metadata={"tags": ["x"]})

@@ -147,7 +147,8 @@ def diff_payload(
     (``_md_keys``/``_enrich_keys``); values compare by normalized JSON form.
     """
     changed = any(
-        key not in old or _canonical(old[key]) != _canonical(value) for key, value in new.items()
+        key not in old or _canonical(old[key]) != _canonical(value)
+        for key, value in new.items()
     )
     delete = tuple(stale_keys)
     if not changed and not delete:
@@ -177,7 +178,11 @@ def carry_snapshot_capture_time(
     it is carried into the new payload — both for the comparison and for
     any write that happens for other reasons.
     """
-    if hash_key in old and old.get(hash_key) == new.get(hash_key) and captured_key in old:
+    if (
+        hash_key in old
+        and old.get(hash_key) == new.get(hash_key)
+        and captured_key in old
+    ):
         new[captured_key] = old[captured_key]
     return new
 

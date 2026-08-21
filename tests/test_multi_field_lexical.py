@@ -156,7 +156,8 @@ def test_config_load_rejects_exact_duplicate_yaml_keys(tmp_path):
     # rejects it at load, for text_search_fields and every other config key.
     p = tmp_path / "dup.yaml"
     p.write_text(
-        "recall:\n  text_search: lexical\n  text_search_fields:\n    title: 2.0\n    title: 3.0\n"
+        "recall:\n  text_search: lexical\n  text_search_fields:\n"
+        "    title: 2.0\n    title: 3.0\n"
     )
     with pytest.raises(ValueError, match="duplicate key 'title'"):
         Config.load(p)
@@ -172,7 +173,9 @@ def test_empty_env_value_clears_yaml_fields(monkeypatch, tmp_path):
     # the env also switches the mode away from lexical, where inherited
     # fields would refuse startup).
     p = tmp_path / "c.yaml"
-    p.write_text("recall:\n  text_search: lexical\n  text_search_fields:\n    title: 2.0\n")
+    p.write_text(
+        "recall:\n  text_search: lexical\n  text_search_fields:\n    title: 2.0\n"
+    )
     monkeypatch.setenv("MNEMOSTACK_TEXT_SEARCH_FIELDS", "")
     monkeypatch.setenv("MNEMOSTACK_TEXT_SEARCH", "sparse")
     cfg = Config.load(p)
@@ -324,7 +327,9 @@ def test_body_arm_unchanged_by_default():
 def test_title_gate_composes_with_tenant():
     s = _store()
     _seed_titled(s)
-    arm = QdrantTextRetriever(embedding=_FakeEmbedder(), vector_store=s, gate_key="title")
+    arm = QdrantTextRetriever(
+        embedding=_FakeEmbedder(), vector_store=s, gate_key="title"
+    )
     assert [h.id for h in arm.search("postgres", limit=10, tenant="acme")] == [1]
 
 
@@ -371,7 +376,9 @@ def test_factory_validates_weights_at_the_programmatic_boundary():
     s = _store()
     for bad in ({"title": 0.0}, {"title": -1.0}, {"title": float("nan")}):
         with pytest.raises(ValueError):
-            build_qdrant_text_arms(embedding=_FakeEmbedder(), vector_store=s, fields=bad)
+            build_qdrant_text_arms(
+                embedding=_FakeEmbedder(), vector_store=s, fields=bad
+            )
 
 
 def test_shared_embedding_is_single_flight_and_skips_failures():
@@ -390,7 +397,10 @@ def test_shared_embedding_is_single_flight_and_skips_failures():
 
     shared = _SharedQueryEmbedding(_SlowEmbedder())
     results = []
-    threads = [threading.Thread(target=lambda: results.append(shared.embed("q"))) for _ in range(4)]
+    threads = [
+        threading.Thread(target=lambda: results.append(shared.embed("q")))
+        for _ in range(4)
+    ]
     for t in threads:
         t.start()
     # All four are in flight before the provider returns — the race the
@@ -428,7 +438,9 @@ def test_sparse_and_bm25_sources_carry_the_instance_name():
 
     from mnemostack.recall.bm25 import BM25Doc
 
-    bm = BM25Retriever(docs=[BM25Doc(id=1, text="postgres backup", payload={})], name="bm25:aux")
+    bm = BM25Retriever(
+        docs=[BM25Doc(id=1, text="postgres backup", payload={})], name="bm25:aux"
+    )
     bhits = bm.search("postgres", limit=5)
     assert bhits and all(h.sources == ["bm25:aux"] for h in bhits)
 
@@ -474,11 +486,15 @@ def test_mcp_build_server_validates_fields_mode_eagerly():
     from mnemostack.mcp.server import build_server
 
     with pytest.raises(ValueError, match="text_search=lexical"):
-        build_server(text_search="sparse", text_search_fields={"title": 2.0})
+        build_server(
+            text_search="sparse", text_search_fields={"title": 2.0}
+        )
     # Invalid WEIGHTS must also fail at build time, before the server
     # advertises tools whose every recall would then error.
     with pytest.raises(ValueError, match="positive finite"):
-        build_server(text_search="lexical", text_search_fields={"title": 0.0})
+        build_server(
+            text_search="lexical", text_search_fields={"title": 0.0}
+        )
 
 
 def test_cli_text_index_refuses_fields_mode_mismatch(monkeypatch, capsys):
@@ -491,7 +507,9 @@ def test_cli_text_index_refuses_fields_mode_mismatch(monkeypatch, capsys):
     )
     store = _store()
     indexed: list[str] = []
-    monkeypatch.setattr(store, "ensure_text_index", lambda field=None: indexed.append(field))
+    monkeypatch.setattr(
+        store, "ensure_text_index", lambda field=None: indexed.append(field)
+    )
     monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
     rc = cli.cmd_text_index(argparse.Namespace(collection="mf", qdrant="http://x"))
     # Refused BEFORE mutating Qdrant — no index created, no false success.
@@ -673,7 +691,9 @@ def test_cli_text_index_covers_every_gate_field(monkeypatch, capsys):
     )
     store = _store()
     indexed: list[str] = []
-    monkeypatch.setattr(store, "ensure_text_index", lambda field=None: indexed.append(field))
+    monkeypatch.setattr(
+        store, "ensure_text_index", lambda field=None: indexed.append(field)
+    )
     monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
     rc = cli.cmd_text_index(argparse.Namespace(collection="mf", qdrant="http://x"))
     assert rc == 0

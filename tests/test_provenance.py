@@ -173,11 +173,7 @@ def test_legacy_point_without_snapshot_resolves_via_position(tmp_path):
     root = _corpus(tmp_path)
     store, chunks = _index(root)
     c = next(c for c in chunks if c.payload["source"] == "alpha.md")
-    legacy = {
-        k: v
-        for k, v in c.payload.items()
-        if k not in (SOURCE_HASH_KEY, SOURCE_CAPTURED_KEY, ID_SCHEME_KEY)
-    }
+    legacy = {k: v for k, v in c.payload.items() if k not in (SOURCE_HASH_KEY, SOURCE_CAPTURED_KEY, ID_SCHEME_KEY)}
     res = resolve_payload(c.id, legacy)
     assert res.verdict == "intact" and res.supported
     assert res.snapshot == "absent"
@@ -255,12 +251,7 @@ def test_authority_uris_stay_nonlocal_even_with_a_root(tmp_path):
     (decoy / "doc").write_text("decoy body")
     res = resolve_payload(
         "x",
-        {
-            "text": "decoy body",
-            "source": "https://example.com/doc",
-            "index_root": str(root),
-            "offset": 0,
-        },
+        {"text": "decoy body", "source": "https://example.com/doc", "index_root": str(root), "offset": 0},
     )
     assert res.verdict == "unresolvable" and "URI" in res.detail
 
@@ -329,9 +320,7 @@ def test_hash_match_does_not_launder_planted_text(tmp_path):
     # Foreign-shaped payload (no snapshot marker): the planted text is
     # searched for honestly and is simply not there.
     foreign = {
-        k: v
-        for k, v in planted.items()
-        if k not in (SOURCE_HASH_KEY, SOURCE_CAPTURED_KEY, ID_SCHEME_KEY)
+        k: v for k, v in planted.items() if k not in (SOURCE_HASH_KEY, SOURCE_CAPTURED_KEY, ID_SCHEME_KEY)
     }
     res2 = resolve_payload(chunks[0].id, foreign)
     assert res2.verdict == "changed" and not res2.supported
@@ -393,7 +382,11 @@ def test_moved_offset_is_body_relative_for_markdown(tmp_path):
     (root / "beta.md").write_text(
         _FM_DOC.replace("Body line one", "Inserted paragraph.\n\nBody line one")
     )
-    c = next(c for c in chunks if c.payload["source"] == "beta.md" and "Body line one" in c.text)
+    c = next(
+        c
+        for c in chunks
+        if c.payload["source"] == "beta.md" and "Body line one" in c.text
+    )
     res = resolve_citation(store, c.id)
     assert res.verdict == "moved"
     from mnemostack.markdown.parse import parse_frontmatter
@@ -443,7 +436,9 @@ def test_frontmatter_cannot_plant_index_root(tmp_path):
     root = _corpus(tmp_path)
     decoy = tmp_path / "decoy"
     decoy.mkdir()
-    (root / "redir.md").write_text(f"---\nindex_root: {decoy}\n---\nRedirect body text.\n")
+    (root / "redir.md").write_text(
+        f"---\nindex_root: {decoy}\n---\nRedirect body text.\n"
+    )
     col = collect_markdown(root)  # no index_root supplied
     redir = [c for c in col.chunks if c.payload["source"] == "redir.md"]
     assert redir
@@ -912,12 +907,7 @@ def test_traversal_source_is_refused(tmp_path):
     (tmp_path / "outside.md").write_text("secret contents")
     res = resolve_payload(
         "x",
-        {
-            "text": "secret contents",
-            "source": "../outside.md",
-            "index_root": str(root),
-            "offset": 0,
-        },
+        {"text": "secret contents", "source": "../outside.md", "index_root": str(root), "offset": 0},
     )
     assert res.verdict == "unresolvable" and "escapes" in res.detail
     assert res.fragment is None
@@ -1033,9 +1023,7 @@ def test_sliding_window_points_are_honest(tmp_path):
     # A genuine windowed point (no snapshot fields — cmd_index does not
     # stamp them on windows) is honestly unverifiable, hash or no hash.
     genuine = {
-        k: v
-        for k, v in windowed.items()
-        if k not in (SOURCE_HASH_KEY, SOURCE_CAPTURED_KEY, ID_SCHEME_KEY)
+        k: v for k, v in windowed.items() if k not in (SOURCE_HASH_KEY, SOURCE_CAPTURED_KEY, ID_SCHEME_KEY)
     }
     res = resolve_payload(c.id, genuine)
     assert res.verdict == "unresolvable" and "constituent" in res.detail
@@ -1133,12 +1121,8 @@ def test_cli_resolve_exit_codes(tmp_path, monkeypatch, capsys):
 
     def _args(chunk_id):
         return argparse.Namespace(
-            collection="prov",
-            qdrant="http://x",
-            chunk_id=chunk_id,
-            root=None,
-            tenant=None,
-            json=False,
+            collection="prov", qdrant="http://x", chunk_id=chunk_id,
+            root=None, tenant=None, json=False,
         )
 
     assert cli.cmd_resolve(_args(chunks[0].id)) == 0

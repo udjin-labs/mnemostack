@@ -193,9 +193,7 @@ def test_tail_returns_last_n_oldest_first_and_counts_corrupt(tmp_path):
         log.record("quota.set", tenant=f"t{i}")
     # a truncated line (copytruncate rotation) and a non-object line
     with open(p, "a", encoding="utf-8") as f:
-        f.write(
-            '{"ts": "2026-07-08T',
-        )
+        f.write('{"ts": "2026-07-08T', )
         f.write("\n[1, 2]\n")
     events, skipped = log.tail(3)
     assert [e["tenant"] for e in events] == ["t2", "t3", "t4"]
@@ -397,8 +395,7 @@ def test_cli_keys_add_audits_key_id_never_the_key(tmp_path, audit_file, capsys):
     assert FileKeyStore(tmp_path / "keys.json").list_keys()[0]["id"] == key_id
     # The plaintext key (printed once) and its hash must NEVER reach the log.
     plaintext = next(
-        line.strip()
-        for line in capsys.readouterr().out.splitlines()
+        line.strip() for line in capsys.readouterr().out.splitlines()
         if line.strip().startswith("msk_")
     )
     raw = audit_file.read_text()
@@ -422,12 +419,11 @@ def test_cli_keys_revoke_audits_success_and_not_found(tmp_path, audit_file):
 
 
 def test_cli_quota_set_and_rm_audit(tmp_path, audit_file):
-    ns = argparse.Namespace(quotas_file=str(tmp_path / "q.json"), tenant="acme", max_points=100)
-    assert cli.cmd_quota_set(ns) == 0
-    assert (
-        cli.cmd_quota_rm(argparse.Namespace(quotas_file=str(tmp_path / "q.json"), tenant="acme"))
-        == 0
+    ns = argparse.Namespace(
+        quotas_file=str(tmp_path / "q.json"), tenant="acme", max_points=100
     )
+    assert cli.cmd_quota_set(ns) == 0
+    assert cli.cmd_quota_rm(argparse.Namespace(quotas_file=str(tmp_path / "q.json"), tenant="acme")) == 0
     ev = _events(audit_file)
     assert ev[0]["action"] == "quota.set" and ev[0]["details"]["max_points"] == 100
     assert ev[1]["action"] == "quota.remove" and ev[1]["outcome"] == "success"
@@ -461,11 +457,8 @@ def test_cli_tenant_export_audits_points_and_destination(monkeypatch, tmp_path, 
     monkeypatch.setattr(cli, "VectorStore", lambda **_: _FakeExportStore())
     out = tmp_path / "dump.jsonl"
     ns = argparse.Namespace(
-        collection="mt",
-        qdrant="http://localhost:6333",
-        tenant="acme",
-        output=str(out),
-        no_vectors=True,
+        collection="mt", qdrant="http://localhost:6333",
+        tenant="acme", output=str(out), no_vectors=True,
     )
     assert cli.cmd_tenant_export(ns) == 0
     (ev,) = _events(audit_file)
@@ -475,14 +468,9 @@ def test_cli_tenant_export_audits_points_and_destination(monkeypatch, tmp_path, 
 
 def _migrate_ns(tmp_path, **kw):
     base = {
-        "collection": "mt",
-        "qdrant": "http://localhost:6333",
-        "tenant": "acme",
-        "all": False,
-        "yes": False,
-        "dry_run": False,
-        "memgraph_uri": None,
-        "graph_timeout": 5.0,
+        "collection": "mt", "qdrant": "http://localhost:6333",
+        "tenant": "acme", "all": False, "yes": False, "dry_run": False,
+        "memgraph_uri": None, "graph_timeout": 5.0,
     }
     base.update(kw)
     return argparse.Namespace(**base)
@@ -572,14 +560,9 @@ def test_cli_tenant_rm_audits_the_sweep_outcome(monkeypatch, tmp_path, audit_fil
     ks.issue("ops", ["admin"])  # another tenant's admin survives the sweep
     FileQuotaStore(tmp_path / "quotas.json").set("acme", max_points=5)
     ns = argparse.Namespace(
-        collection="mt",
-        qdrant="http://localhost:6333",
-        tenant="acme",
-        memgraph_uri=None,
-        no_graph=False,
-        graph_timeout=5.0,
-        dry_run=False,
-        yes=True,
+        collection="mt", qdrant="http://localhost:6333",
+        tenant="acme", memgraph_uri=None, no_graph=False, graph_timeout=5.0,
+        dry_run=False, yes=True,
         keys_file=str(tmp_path / "keys.json"),
         quotas_file=str(tmp_path / "quotas.json"),
         state_path=str(tmp_path / "state.json"),
@@ -597,6 +580,7 @@ def test_cli_tenant_rm_abort_audits_aborted(tmp_path, audit_file, capsys):
     (ev,) = _events(audit_file)
     assert ev["action"] == "tenant.rm" and ev["outcome"] == "aborted"
     assert ev["details"]["failed"] == ["service keys (last admin key)"]
+
 
 
 # ---------- Principal.key_id (audit attribution) ----------

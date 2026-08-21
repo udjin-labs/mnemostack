@@ -240,9 +240,7 @@ def test_cli_keys_add_list_revoke_roundtrip(tmp_path, capsys):
 def test_cli_keys_add_rejects_bad_scope(tmp_path, capsys):
     from mnemostack.cli import cmd_keys_add
 
-    rc = cmd_keys_add(
-        _ns(keys_file=str(tmp_path / "k.json"), tenant="acme", scopes="root", label="")
-    )
+    rc = cmd_keys_add(_ns(keys_file=str(tmp_path / "k.json"), tenant="acme", scopes="root", label=""))
     assert rc == 2
     assert "unknown scope" in capsys.readouterr().err
 
@@ -291,11 +289,7 @@ def test_verify_denies_non_list_scopes_no_privilege_escalation(tmp_path):
     # NOT grant admin; the record is denied.
     p.write_text(
         json.dumps(
-            {
-                "keys": [
-                    {"id": "x", "hash": hash_key(key), "tenant": "acme", "scopes": {"admin": False}}
-                ]
-            }
+            {"keys": [{"id": "x", "hash": hash_key(key), "tenant": "acme", "scopes": {"admin": False}}]}
         )
     )
     assert FileKeyStore(p).verify(key) is None
@@ -380,11 +374,7 @@ def test_list_keys_sanitizes_malformed_record(tmp_path):
     p = tmp_path / "keys.json"
     p.write_text(
         json.dumps(
-            {
-                "keys": [
-                    {"id": 5, "hash": "abc", "tenant": ["x"], "scopes": [1, 2], "created_at": None}
-                ]
-            }
+            {"keys": [{"id": 5, "hash": "abc", "tenant": ["x"], "scopes": [1, 2], "created_at": None}]}
         )
     )
     rows = FileKeyStore(p).list_keys()
@@ -414,7 +404,7 @@ def test_revoke_tenant_atomic_all_and_last_admin(tmp_path):
 
     # the tenant's key that is the only usable admin is KEPT and flagged
     ks2 = _store(tmp_path / "sub")
-    ks2.issue("ops", ["admin"])  # the only admin, owned by 'ops'
+    ks2.issue("ops", ["admin"])   # the only admin, owned by 'ops'
     ks2.issue("ops", ["write"])
     res2 = ks2.revoke_tenant("ops", protect_last_admin=True)
     assert res2["last_admin_kept"] is True and res2["revoked"] == 1  # write dropped
