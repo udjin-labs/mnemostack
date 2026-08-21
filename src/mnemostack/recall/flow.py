@@ -87,9 +87,7 @@ def recall_flow(
             results = [
                 r
                 for r in results
-                if result_passes_filters(
-                    r, filters, timestamp_key=_ts_key, numeric_unit=_unit
-                )
+                if result_passes_filters(r, filters, timestamp_key=_ts_key, numeric_unit=_unit)
             ]
         # Tenant backstop AFTER the pipeline: the graph-resurrection stage can
         # inject graph records that carry no tenant_id and never passed the

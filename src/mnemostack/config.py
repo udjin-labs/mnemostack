@@ -178,9 +178,7 @@ def resolve_text_search_mode(mode: str, bm25_paths: list[str] | None) -> str:
     (file-corpus BM25 when ``bm25_paths`` is configured, else no lexical arm);
     anything else passes through. Unknown modes fail loud at build time."""
     if mode not in TEXT_SEARCH_MODES:
-        raise ValueError(
-            f"text_search must be one of {TEXT_SEARCH_MODES}, got {mode!r}"
-        )
+        raise ValueError(f"text_search must be one of {TEXT_SEARCH_MODES}, got {mode!r}")
     if mode == "auto":
         return "bm25" if bm25_paths else "off"
     return mode
@@ -205,9 +203,7 @@ def parse_text_search_fields(value: Any) -> dict[str, float]:
             # ",title" / "title,," / "," are malformed template expansions,
             # not intent — only a genuinely BLANK string clears the mapping.
             if not all(p.strip() for p in value.split(",")):
-                raise ValueError(
-                    "text_search_fields has an empty comma-separated segment"
-                )
+                raise ValueError("text_search_fields has an empty comma-separated segment")
         for part in value.split(","):
             part = part.strip()
             if not part:
@@ -218,9 +214,7 @@ def parse_text_search_fields(value: Any) -> dict[str, float]:
                 # Last-wins would silently drop a weight — the very class of
                 # absorbed typo (e.g. an env var appended twice by templating)
                 # this parser exists to reject.
-                raise ValueError(
-                    f"text_search_fields lists field {key!r} more than once"
-                )
+                raise ValueError(f"text_search_fields lists field {key!r} more than once")
             fields[key] = _text_field_weight(key, w.strip() or "1.0")
     elif isinstance(value, dict):
         for key, w in value.items():
@@ -236,9 +230,7 @@ def parse_text_search_fields(value: Any) -> dict[str, float]:
             if norm in fields:
                 # Keys distinct only by whitespace collapse after trimming —
                 # last-wins would silently drop a weight, same as the env form.
-                raise ValueError(
-                    f"text_search_fields lists field {norm!r} more than once"
-                )
+                raise ValueError(f"text_search_fields lists field {norm!r} more than once")
             fields[norm] = _text_field_weight(norm, w)
     else:
         raise ValueError(
@@ -254,9 +246,7 @@ def _text_field_weight(key: str, raw: Any) -> float:
     if isinstance(raw, bool):
         # bool is a float subclass, so YAML `title: yes` would silently become
         # weight 1.0 — almost certainly a typo for a number, not an intent.
-        raise ValueError(
-            f"text_search_fields weight for {key!r} must be a number, got {raw!r}"
-        )
+        raise ValueError(f"text_search_fields weight for {key!r} must be a number, got {raw!r}")
     try:
         w = float(raw)
     except (TypeError, ValueError):
@@ -265,8 +255,7 @@ def _text_field_weight(key: str, raw: Any) -> float:
         ) from None
     if not math.isfinite(w) or w <= 0:
         raise ValueError(
-            f"text_search_fields weight for {key!r} must be a positive finite "
-            f"number, got {raw!r}"
+            f"text_search_fields weight for {key!r} must be a positive finite number, got {raw!r}"
         )
     return w
 
@@ -378,9 +367,7 @@ class Config:
 
         # Normalize whichever shape arrived (YAML mapping or env string) into
         # {field: weight}; malformed values fail here, at load, not at recall.
-        cfg.recall.text_search_fields = parse_text_search_fields(
-            cfg.recall.text_search_fields
-        )
+        cfg.recall.text_search_fields = parse_text_search_fields(cfg.recall.text_search_fields)
 
         # Same startup-rejection contract for every source (file AND env): a
         # malformed embedding timeout must fail the load, not surface later
@@ -394,9 +381,7 @@ class Config:
                 )
         batch = cfg.embedding.batch_size
         if isinstance(batch, bool) or not isinstance(batch, int) or batch < 1:
-            raise ValueError(
-                f"embedding.batch_size must be a positive integer, got {batch!r}"
-            )
+            raise ValueError(f"embedding.batch_size must be a positive integer, got {batch!r}")
 
         return cfg
 

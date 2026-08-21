@@ -404,9 +404,7 @@ def test_inference_retry_recall_honors_token_budget(monkeypatch, sample_memories
             return [big]
 
     # draft is low-confidence -> retry runs; retry answer is confident
-    llm = _PromptCapturingLLM(
-        ["draft\nCONFIDENCE: 0.1", "final\nCONFIDENCE: 0.9"]
-    )
+    llm = _PromptCapturingLLM(["draft\nCONFIDENCE: 0.1", "final\nCONFIDENCE: 0.9"])
     gen = AnswerGenerator(
         llm=llm,
         recaller=_StubRecaller(),
@@ -488,9 +486,7 @@ def test_duck_typed_llm_response_without_usage_field(sample_memories):
             # LLMResponse-like object: ok/text/error but no tokens_used
             return SimpleNamespace(ok=True, text="Postgres\nCONFIDENCE: 0.9", error=None)
 
-    gen = AnswerGenerator(
-        llm=_DuckLLM(), specificity_resolver=False, inference_retry=False
-    )
+    gen = AnswerGenerator(llm=_DuckLLM(), specificity_resolver=False, inference_retry=False)
     answer = gen.generate("what database did we migrate to", sample_memories)
     assert answer.ok
     assert answer.tokens_used is None
@@ -570,13 +566,17 @@ def test_inference_retry_threads_validity_into_sub_recall(monkeypatch, sample_me
     captured = {}
 
     class _StubRecaller:
-        def recall(self, query, limit=10, filters=None, include_invalidated=False,
-                   as_of=None, **_):
+        def recall(self, query, limit=10, filters=None, include_invalidated=False, as_of=None, **_):
             captured["include_invalidated"] = include_invalidated
             captured["as_of"] = as_of
             return [
-                RecallResult(id=5, text="fresh evidence", score=0.9,
-                             payload={"source": "s.md"}, sources=["vector"]),
+                RecallResult(
+                    id=5,
+                    text="fresh evidence",
+                    score=0.9,
+                    payload={"source": "s.md"},
+                    sources=["vector"],
+                ),
             ]
 
     llm = _PromptCapturingLLM(["draft\nCONFIDENCE: 0.1", "final\nCONFIDENCE: 0.9"])
@@ -603,8 +603,9 @@ def test_inference_retry_threads_validity_into_sub_recall(monkeypatch, sample_me
 
 
 def test_expansion_retry_filters_sub_recall_by_validity(sample_memories):
-    stale = RecallResult(id=9, text="stale", score=0.99,
-                         payload={"source": "x", "invalidated_at": "2026-07-04"})
+    stale = RecallResult(
+        id=9, text="stale", score=0.99, payload={"source": "x", "invalidated_at": "2026-07-04"}
+    )
     fresh = RecallResult(id=8, text="fresh", score=0.5, payload={"source": "y"})
 
     class _StubEmbedding:
@@ -614,8 +615,9 @@ def test_expansion_retry_filters_sub_recall_by_validity(sample_memories):
     class _StubRecaller:
         embedding = _StubEmbedding()
 
-        def search_many(self, vectors, limit, filters=None, *,
-                        include_invalidated=False, as_of=None):
+        def search_many(
+            self, vectors, limit, filters=None, *, include_invalidated=False, as_of=None
+        ):
             # search_many now filters for validity itself (per vector, before
             # RRF); mirror that so the retry pool matches the real behavior.
             from mnemostack.recall import filter_by_validity

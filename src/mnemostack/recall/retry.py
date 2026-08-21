@@ -186,6 +186,12 @@ def retry_weak_recall(
 
     from .fusion import reciprocal_rank_fusion
 
+    # The caller's own scores, before the fusion writes over them. The
+    # merge mutates the objects the caller already holds, so any path that
+    # decides to hand those objects back UNCHANGED has to hand back their
+    # numbers too — otherwise "we kept your results" would quietly mean
+    # "we kept your results with someone else's scores on them".
+    original_scores = [(r, r.score) for r in results]
     merged = []
     for item, fused_score in reciprocal_rank_fusion(ranked, limit=limit):
         # Carry the FUSED score, the way the query-expansion path does.
@@ -223,6 +229,20 @@ def retry_weak_recall(
         from .tokens import apply_token_budget
 
         merged, _tokens = apply_token_budget(merged, budget, counter_fn)
+    if len(merged) < original_count:
+        # A RETRY ADDS; IT NEVER SUBTRACTS. The budget is a hard cap on the
+        # response and the fusion reorders by rank, so the two together can
+        # cost the caller memories they already had safely: a corroborated
+        # newcomer takes the front, and the greedy trim — which stops at
+        # the first item that would overflow — then evicts the smaller
+        # memories that fitted perfectly well in the original order. The
+        # caller asked a question and got two answers; a feature whose
+        # entire premise is "that was too little" must not hand back one.
+        # So when the merge cannot carry at least what the caller arrived
+        # with, the retry is a no-op: original list, original scores.
+        for result, score in original_scores:
+            result.score = score
+        return results, True
     gained = len(merged) - original_count
     if gained <= 0:
         final = results if not merged else merged

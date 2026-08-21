@@ -113,9 +113,7 @@ class _Debouncer:
         """Pop (path, kind) whose quiet window elapsed (or everything if force)."""
         now = self.clock()
         with self._lock:
-            ready = [
-                (p, kd[0]) for p, kd in self._pending.items() if force or kd[1] <= now
-            ]
+            ready = [(p, kd[0]) for p, kd in self._pending.items() if force or kd[1] <= now]
             for p, _ in ready:
                 del self._pending[p]
         return ready

@@ -154,7 +154,9 @@ def test_cli_index_prune_deletes_stale_chunks(monkeypatch, tmp_path, store, caps
     assert "pruned 1 stale" in capsys.readouterr().out
 
 
-def test_cli_index_prune_spares_sources_with_failed_embeddings(monkeypatch, tmp_path, store, capsys):
+def test_cli_index_prune_spares_sources_with_failed_embeddings(
+    monkeypatch, tmp_path, store, capsys
+):
     """If the fresh chunk failed to embed, the old chunk is the only copy of
     that source's data — pruning must leave it alone."""
     doc = tmp_path / "note.md"
@@ -232,7 +234,9 @@ def test_cli_index_prune_ignores_other_roots(monkeypatch, tmp_path, store):
     doc.write_text("hello world", encoding="utf-8")
     root = str(tmp_path.resolve())
     stale_ours = _put(store, "note.md", 800, "our stale chunk", index_root=root)
-    same_name_other_root = _put(store, "note.md", 0, "other project's note", index_root="/elsewhere")
+    same_name_other_root = _put(
+        store, "note.md", 0, "other project's note", index_root="/elsewhere"
+    )
     _patch_stack(monkeypatch, store)
 
     rc = cli.cmd_index(_index_args(tmp_path))

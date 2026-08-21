@@ -220,7 +220,11 @@ def test_datetime_frontmatter_objects_compare_against_stored_iso_strings():
     naive = datetime.datetime(2026, 1, 1, 12, 30)
     utc = datetime.datetime(2026, 1, 1, 12, 30, tzinfo=datetime.timezone.utc)
     offset = datetime.datetime(
-        2026, 1, 1, 12, 30,
+        2026,
+        1,
+        1,
+        12,
+        30,
         tzinfo=datetime.timezone(datetime.timedelta(hours=3)),
     )
     # Exactly the strings the backend round-trip produces for those objects.
@@ -258,17 +262,17 @@ def test_datetime_payload_round_trip_through_qdrant_is_unchanged():
         "dt": datetime.datetime(2026, 1, 1, 12, 30),
         "dtz": datetime.datetime(2026, 1, 1, 12, 30, tzinfo=datetime.timezone.utc),
         "dtoff": datetime.datetime(
-            2026, 1, 1, 12, 30,
+            2026,
+            1,
+            1,
+            12,
+            30,
             tzinfo=datetime.timezone(datetime.timedelta(hours=3)),
         ),
     }
     client = QdrantClient(":memory:")
-    client.create_collection(
-        "t", vectors_config=VectorParams(size=2, distance=Distance.COSINE)
-    )
-    client.upsert(
-        "t", points=[PointStruct(id=1, vector=[0.1, 0.2], payload=dict(frontmatter))]
-    )
+    client.create_collection("t", vectors_config=VectorParams(size=2, distance=Distance.COSINE))
+    client.upsert("t", points=[PointStruct(id=1, vector=[0.1, 0.2], payload=dict(frontmatter))])
     stored = client.retrieve("t", ids=[1], with_payload=True)[0].payload or {}
     assert all(isinstance(v, str) for v in stored.values())  # round trip happened
 
@@ -341,9 +345,7 @@ def test_cmd_index_warm_second_run_issues_zero_payload_writes(tmp_path, monkeypa
         def scroll(self, *a, **kw):
             from types import SimpleNamespace
 
-            return iter(
-                SimpleNamespace(id=cid, payload=dict(p)) for cid, p in self.points.items()
-            )
+            return iter(SimpleNamespace(id=cid, payload=dict(p)) for cid, p in self.points.items())
 
         def upsert(self, cid, vec, payload, **kw):
             self.points[cid] = dict(payload)

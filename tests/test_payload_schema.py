@@ -185,9 +185,7 @@ def test_vector_retriever_reads_configured_text_key():
 
 def test_recaller_legacy_path_reads_configured_text_key():
     store = _foreign_store()
-    rec = Recaller(
-        embedding_provider=_FakeEmbedder(), vector_store=store, text_key="content"
-    )
+    rec = Recaller(embedding_provider=_FakeEmbedder(), vector_store=store, text_key="content")
     results = rec.recall("anything", limit=5)
     assert results and all(r.text for r in results)
     assert "april note" in {r.text for r in results}
@@ -246,9 +244,7 @@ def test_temporal_retriever_intersects_epoch_caller_bounds_with_iso_window():
         timestamp_key="updated_at",
         timestamp_format="epoch",
     )
-    hits = r.search(
-        "april", limit=5, filters={"updated_at": {"gte": _EPOCH - 86400}}
-    )
+    hits = r.search("april", limit=5, filters={"updated_at": {"gte": _EPOCH - 86400}})
     assert [h.text for h in hits] == ["april note"]
     # An out-of-window caller scope stays empty (intersection is honored).
     assert r.search("april", limit=5, filters={"updated_at": {"gte": _EPOCH + 86400}}) == []
@@ -386,19 +382,37 @@ def test_cmd_serve_threads_the_schema_into_server_config(monkeypatch, tmp_path):
 
     monkeypatch.setattr("mnemostack.server.build_app", _fake_build_app)
     ns = argparse.Namespace(
-        provider="gemini", embedding_model=None, llm="gemini", llm_model=None,
-        collection="mt", qdrant="http://localhost:6333", memgraph_uri=None,
-        graph_timeout=5.0, graph_user=None, graph_password=None,
-        graph_database=None, bm25_path=[], vector_floor=0,
-        rerank_mode="relevant_only", token_budget=None, state_path=None,
-        auto_record_ior=False, host="127.0.0.1", port=8000, auth=False,
-        keys_file=None, quotas_file=None, qdrant_health_timeout=2,
+        provider="gemini",
+        embedding_model=None,
+        llm="gemini",
+        llm_model=None,
+        collection="mt",
+        qdrant="http://localhost:6333",
+        memgraph_uri=None,
+        graph_timeout=5.0,
+        graph_user=None,
+        graph_password=None,
+        graph_database=None,
+        bm25_path=[],
+        vector_floor=0,
+        rerank_mode="relevant_only",
+        token_budget=None,
+        state_path=None,
+        auto_record_ior=False,
+        host="127.0.0.1",
+        port=8000,
+        auth=False,
+        keys_file=None,
+        quotas_file=None,
+        qdrant_health_timeout=2,
     )
     with pytest.raises(SystemExit):
         cli.cmd_serve(ns)
     cfg = captured["cfg"]
     assert (cfg.text_key, cfg.timestamp_key, cfg.timestamp_format) == (
-        "content", "updated_at", "epoch",
+        "content",
+        "updated_at",
+        "epoch",
     )
     cli._payload_schema.cache_clear()
 
@@ -450,7 +464,8 @@ def test_vector_retriever_converts_iso_bounds_for_epoch_field():
         timestamp_format="epoch",
     )
     hits = r.search(
-        "anything", limit=5,
+        "anything",
+        limit=5,
         filters={"updated_at": {"gte": "2026-04-01", "lte": "2026-04-30"}},
     )
     assert [h.text for h in hits] == ["april note"]
@@ -475,14 +490,12 @@ def test_convert_filter_leaves_same_domain_values_verbatim():
     # Exact ISO MatchValue is string equality: a same-domain value must pass
     # through untouched ("...Z" != a rewritten "...+00:00").
     f = {"timestamp": "2026-04-01T00:00:00Z"}
-    assert convert_timestamp_filter(
-        f, timestamp_key="timestamp", timestamp_format="iso"
-    ) == f
+    assert convert_timestamp_filter(f, timestamp_key="timestamp", timestamp_format="iso") == f
     # Same-domain numerics on an epoch collection stay verbatim (int stays int).
     f2 = {"updated_at": _EPOCH}
-    assert convert_timestamp_filter(
-        f2, timestamp_key="updated_at", timestamp_format="epoch"
-    ) == {"updated_at": _EPOCH}
+    assert convert_timestamp_filter(f2, timestamp_key="updated_at", timestamp_format="epoch") == {
+        "updated_at": _EPOCH
+    }
     # Cross-domain still converts — and an integral instant emits as int.
     out = convert_timestamp_filter(
         {"updated_at": {"gte": "2026-04-15T12:00:00Z"}},
@@ -497,7 +510,8 @@ def test_bm25_from_qdrant_converts_iso_window_for_epoch_collection():
 
     store = _foreign_store()
     docs = bm25_docs_from_qdrant(
-        store.client, "foreign",
+        store.client,
+        "foreign",
         text_key="content",
         timestamp_key="updated_at",
         timestamp_format="epoch",
@@ -518,8 +532,12 @@ def test_inspector_records_convert_timestamp_filters(monkeypatch):
     monkeypatch.setattr(insp, "_make_probe_client", lambda *a, **k: store.client)
     app = insp.build_inspector_app(
         ServerConfig(
-            provider_name="fake", collection="foreign", graph_uri=None,
-            text_key="content", timestamp_key="updated_at", timestamp_format="epoch",
+            provider_name="fake",
+            collection="foreign",
+            graph_uri=None,
+            text_key="content",
+            timestamp_key="updated_at",
+            timestamp_format="epoch",
         )
     )
     c = TestClient(app)
@@ -567,8 +585,11 @@ def test_convert_filter_exact_cross_domain_becomes_degenerate_range():
     # Vector e2e: exact ISO over the epoch field finds the point.
     store = _foreign_store()
     r = VectorRetriever(
-        embedding=_FakeEmbedder(), vector_store=store, text_key="content",
-        timestamp_key="updated_at", timestamp_format="epoch",
+        embedding=_FakeEmbedder(),
+        vector_store=store,
+        text_key="content",
+        timestamp_key="updated_at",
+        timestamp_format="epoch",
     )
     hits = r.search("x", limit=5, filters={"updated_at": "2026-04-15T12:00:00Z"})
     assert [h.text for h in hits] == ["april note"]
@@ -587,9 +608,7 @@ def test_convert_filter_numeric_string_on_iso_collection():
     assert cond["gte"].startswith("2026-04-15")
     # A native ISO string still passes verbatim.
     f = {"timestamp": "2026-04-15T12:00:00Z"}
-    assert convert_timestamp_filter(
-        f, timestamp_key="timestamp", timestamp_format="iso"
-    ) == f
+    assert convert_timestamp_filter(f, timestamp_key="timestamp", timestamp_format="iso") == f
 
 
 def test_synthesis_derives_schema_from_direct_retrievers():
@@ -599,8 +618,11 @@ def test_synthesis_derives_schema_from_direct_retrievers():
 
     store = _foreign_store()
     retr = VectorRetriever(
-        embedding=_FakeEmbedder(), vector_store=store, text_key="content",
-        timestamp_key="updated_at", timestamp_format="epoch",
+        embedding=_FakeEmbedder(),
+        vector_store=store,
+        text_key="content",
+        timestamp_key="updated_at",
+        timestamp_format="epoch",
     )
     result = synthesize("april", retrievers=[retr])
     assert result.facts
@@ -615,12 +637,17 @@ def test_recaller_derives_schema_from_its_retrievers():
     # caller repeating it.
     store = _foreign_store()
     inner = VectorRetriever(
-        embedding=_FakeEmbedder(), vector_store=store, text_key="content",
-        timestamp_key="updated_at", timestamp_format="epoch",
+        embedding=_FakeEmbedder(),
+        vector_store=store,
+        text_key="content",
+        timestamp_key="updated_at",
+        timestamp_format="epoch",
     )
     rec = Recaller(retrievers=[inner])
     assert (rec.text_key, rec.timestamp_key, rec.timestamp_format) == (
-        "content", "updated_at", "epoch",
+        "content",
+        "updated_at",
+        "epoch",
     )
     # explicit outer args still win
     rec2 = Recaller(retrievers=[inner], timestamp_key="ts")
@@ -629,7 +656,9 @@ def test_recaller_derives_schema_from_its_retrievers():
     from mnemostack.recall.flow import recall_flow
 
     results = recall_flow(
-        rec, "april", limit=5,
+        rec,
+        "april",
+        limit=5,
         filters={"updated_at": {"gte": "2026-04-01", "lte": "2026-04-30"}},
     )
     assert [r.text for r in results] == ["april note"]
@@ -644,12 +673,17 @@ def test_recaller_schema_derivation_is_per_field_not_first_wins():
     # retriever's foreign schema — defaults mean "not declared".
     bm25 = BM25Retriever(docs=[BM25Doc(id="1", text="x", payload={})])
     vec = VectorRetriever(
-        embedding=_FakeEmbedder(), vector_store=store, text_key="content",
-        timestamp_key="updated_at", timestamp_format="epoch",
+        embedding=_FakeEmbedder(),
+        vector_store=store,
+        text_key="content",
+        timestamp_key="updated_at",
+        timestamp_format="epoch",
     )
     rec = Recaller(retrievers=[bm25, vec])
     assert (rec.text_key, rec.timestamp_key, rec.timestamp_format) == (
-        "content", "updated_at", "epoch",
+        "content",
+        "updated_at",
+        "epoch",
     )
     # Conflicting declarations are ambiguous — loud, not order-dependent.
     vec2 = VectorRetriever(
@@ -694,9 +728,7 @@ def test_answer_generator_derives_schema_from_recaller():
     gen = AnswerGenerator(llm=_FakeLLM(), recaller=_SchemaRecaller())
     assert gen.timestamp_key == "updated_at" and gen.timestamp_format == "epoch"
     # explicit kwargs still win
-    gen2 = AnswerGenerator(
-        llm=_FakeLLM(), recaller=_SchemaRecaller(), timestamp_key="ts"
-    )
+    gen2 = AnswerGenerator(llm=_FakeLLM(), recaller=_SchemaRecaller(), timestamp_key="ts")
     assert gen2.timestamp_key == "ts"
     # no recaller: standard defaults
     gen3 = AnswerGenerator(llm=_FakeLLM())
@@ -806,7 +838,9 @@ def test_synthesis_source_filter_preserves_the_schema():
     rebuilt = _filter_recaller(rec, {"vector"})
     assert rebuilt is not rec
     assert (rebuilt.text_key, rebuilt.timestamp_key, rebuilt.timestamp_format) == (
-        "content", "updated_at", "epoch",
+        "content",
+        "updated_at",
+        "epoch",
     )
 
 
@@ -815,8 +849,11 @@ def test_bm25_from_qdrant_forwards_timestamp_format():
 
     store = _foreign_store()
     r = BM25Retriever.from_qdrant(
-        store.client, "foreign", text_key="content",
-        timestamp_key="updated_at", timestamp_format="epoch_ms",
+        store.client,
+        "foreign",
+        text_key="content",
+        timestamp_key="updated_at",
+        timestamp_format="epoch_ms",
     )
     assert r.timestamp_key == "updated_at" and r.timestamp_format == "epoch_ms"
 
@@ -827,9 +864,14 @@ def test_doctor_flags_invalid_timestamp_format(monkeypatch, capsys):
     monkeypatch.setenv("MNEMOSTACK_TIMESTAMP_FORMAT", "unixtime")
     rc = cli.cmd_doctor(
         argparse.Namespace(
-            json=True, provider="gemini", embedding_model=None,
-            qdrant="http://localhost:1", collection="mt",
-            memgraph_uri=None, graph_timeout=1.0, timeout=1,
+            json=True,
+            provider="gemini",
+            embedding_model=None,
+            qdrant="http://localhost:1",
+            collection="mt",
+            memgraph_uri=None,
+            graph_timeout=1.0,
+            timeout=1,
         )
     )
     out = capsys.readouterr().out

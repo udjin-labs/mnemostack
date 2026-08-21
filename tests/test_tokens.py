@@ -113,9 +113,7 @@ class _FakeRetriever:
     texts: tuple[str, ...] = ("aaaa" * 10, "bbbb" * 10, "cccc" * 10)
 
     def search(self, query: str, limit: int, filters: dict[str, Any] | None = None):
-        return [
-            _result(str(i), text) for i, text in enumerate(self.texts[:limit])
-        ]
+        return [_result(str(i), text) for i, text in enumerate(self.texts[:limit])]
 
 
 def test_recaller_recall_applies_token_budget():

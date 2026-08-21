@@ -85,9 +85,7 @@ CODE_EXTENSIONS: dict[str, str] = {
 # indent members — so column-0 definition keywords are a high-precision,
 # low-recall signal, which is exactly the right trade-off under the
 # "boundaries are hints" contract.
-_PY_BOUNDARY = re.compile(
-    r"^(?:@\w|(?:async\s+)?def\s+(?P<name>\w+)|class\s+(?P<cname>\w+))"
-)
+_PY_BOUNDARY = re.compile(r"^(?:@\w|(?:async\s+)?def\s+(?P<name>\w+)|class\s+(?P<cname>\w+))")
 _BRACE_BOUNDARY = re.compile(
     r"^(?:export\s+(?:default\s+)?)?"
     r"(?:pub(?:\([^)]*\))?\s+|public\s+|private\s+|protected\s+|internal\s+|"
@@ -111,9 +109,7 @@ _SHELL_BOUNDARY = re.compile(r"^(?:function\s+(?P<name>\w+)|(?P<fname>[\w.-]+)\s
 # tell them apart — splitting a CTE from its SELECT is strictly worse than
 # merging two statements (the hints contract prices merges in). WITH and
 # the DML/DDL keywords still open statements.
-_SQL_BOUNDARY = re.compile(
-    r"^(?:CREATE|ALTER|DROP|INSERT|UPDATE|DELETE|WITH)\b", re.IGNORECASE
-)
+_SQL_BOUNDARY = re.compile(r"^(?:CREATE|ALTER|DROP|INSERT|UPDATE|DELETE|WITH)\b", re.IGNORECASE)
 # C/C++ functions are TYPE-prefixed, not keyword-led: `static int parse(...)`.
 # One-or-more type tokens, then the name, then an open paren — on a line NOT
 # ending in `;` (optionally followed by a trailing comment): a terminating
@@ -124,9 +120,7 @@ _C_FUNC_PATTERN = (
     r"^(?:[A-Za-z_][\w:<>,\*&\[\]]*[ \t]+)+[\*&]*"
     r"(?P<cfn>[A-Za-z_]\w*(?:::~?\w+)*)\s*\((?!.*;\s*(?://.*|/\*.*)?$)"
 )
-_C_BOUNDARY = re.compile(
-    "(?:" + _BRACE_BOUNDARY.pattern + ")|(?:" + _C_FUNC_PATTERN + ")"
-)
+_C_BOUNDARY = re.compile("(?:" + _BRACE_BOUNDARY.pattern + ")|(?:" + _C_FUNC_PATTERN + ")")
 
 _BOUNDARIES: dict[str, re.Pattern[str]] = {
     "python": _PY_BOUNDARY,
@@ -190,6 +184,7 @@ def _is_carry_line(line: str, language: str) -> bool:
         or stripped.startswith("#[")  # Rust attributes: #[derive(...)], #[cfg(...)]
         or _TEMPLATE_PREFIX.match(stripped) is not None
     )
+
 
 #: Below this many characters a segment keeps accumulating even across a
 #: boundary line — one chunk per two-line helper would fragment retrieval
@@ -342,8 +337,12 @@ def chunk_code(
                 carried = seg_parts[carry_idx:]
                 if head:
                     segments.append(
-                        (seg_start, "".join(head), seg_symbol,
-                         [(o, s) for o, s, _t in seg_internal])
+                        (
+                            seg_start,
+                            "".join(head),
+                            seg_symbol,
+                            [(o, s) for o, s, _t in seg_internal],
+                        )
                     )
                     carried_len = sum(len(part) for part in carried)
                     seg_start = offset - carried_len
@@ -373,8 +372,7 @@ def chunk_code(
         offset += len(line)
     if seg_parts:
         segments.append(
-            (seg_start, "".join(seg_parts), seg_symbol,
-             [(o, s) for o, s, _t in seg_internal])
+            (seg_start, "".join(seg_parts), seg_symbol, [(o, s) for o, s, _t in seg_internal])
         )
 
     # Pass 2: enforce max size + drop whitespace-only chunks. An oversized

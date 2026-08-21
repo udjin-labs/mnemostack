@@ -25,7 +25,12 @@ class SequenceLLM(LLMProvider):
 
 def _memories(n=3):
     return [
-        RecallResult(id=str(i), text=f"Nachricht {i}: Teilnehmer A erstellte Eintrag {i}.", score=1.0, payload={})
+        RecallResult(
+            id=str(i),
+            text=f"Nachricht {i}: Teilnehmer A erstellte Eintrag {i}.",
+            score=1.0,
+            payload={},
+        )
         for i in range(1, n + 1)
     ]
 
@@ -65,7 +70,9 @@ def test_list_extract_and_finalize_overrides_are_used():
 
 def test_category_prompt_override_used():
     llm = SequenceLLM(["el 7 de mayo\nCONFIDENCE: 0.9"])
-    es_temporal = "Responde la pregunta temporal.\nMEMORIA:\n{context}\nPREGUNTA: {query}\nRESPUESTA:"
+    es_temporal = (
+        "Responde la pregunta temporal.\nMEMORIA:\n{context}\nPREGUNTA: {query}\nRESPUESTA:"
+    )
     gen = AnswerGenerator(
         llm=llm,
         category_aware_prompts=True,
@@ -93,7 +100,9 @@ def test_non_overridden_categories_keep_defaults():
 
 def test_unknown_override_name_raises():
     with pytest.raises(ValueError, match="unknown prompt override"):
-        AnswerGenerator(llm=SequenceLLM([]), prompt_overrides={"nonexistent": "x {context} {query}"})
+        AnswerGenerator(
+            llm=SequenceLLM([]), prompt_overrides={"nonexistent": "x {context} {query}"}
+        )
 
 
 def test_missing_placeholder_raises():

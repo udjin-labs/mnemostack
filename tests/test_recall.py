@@ -58,8 +58,7 @@ def test_bm25_unknown_term(sample_corpus):
 def test_bm25_custom_tokenizer_applies_to_corpus_and_query():
     def analyzer(text: str) -> list[str]:
         return [
-            {"forms": "form", "form": "form"}.get(token, token)
-            for token in text.lower().split()
+            {"forms": "form", "form": "form"}.get(token, token) for token in text.lower().split()
         ]
 
     bm25 = BM25([BM25Doc(id="doc", text="forms")], tokenizer=analyzer)

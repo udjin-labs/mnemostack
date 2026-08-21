@@ -112,6 +112,25 @@ from mnemostack.vector import VectorStore
 log = logging.getLogger(__name__)
 
 
+def _env_int(name: str, default: int) -> int:
+    """A positive integer from the environment, or the default.
+
+    Env deployment (`uvicorn mnemostack.server:app`) has to be able to
+    reach every knob the CLI can, or an operator who cannot run `serve`
+    gets a feature they can switch on but not configure. Unparseable and
+    non-positive values fall back to the default rather than failing
+    startup: a typo in one tuning knob must not take the service down.
+    """
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        parsed = int(value.strip())
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     value = os.environ.get(name)
     if value is None:
@@ -292,9 +311,7 @@ class MemoryResultOut(BaseModel):
 
 
 class MemoriesResponse(BaseModel):
-    results: list[MemoryResultOut] = Field(
-        description="Per-chunk outcome, in request order."
-    )
+    results: list[MemoryResultOut] = Field(description="Per-chunk outcome, in request order.")
     stored: int
     duplicates: int
     failed: int
@@ -326,9 +343,7 @@ class TriplesResponse(BaseModel):
 class InvalidateRequest(BaseModel):
     # StrictInt, not int: the lax union coerces JSON true/false to 1/0,
     # which would silently target numeric point ids 1/0 instead of a 422.
-    ids: list[str | StrictInt] | None = Field(
-        None, min_length=1, max_length=REMOTE_MAX_IDS
-    )
+    ids: list[str | StrictInt] | None = Field(None, min_length=1, max_length=REMOTE_MAX_IDS)
     source: str | None = Field(
         None,
         max_length=REMOTE_MAX_SOURCE_CHARS,
@@ -364,10 +379,7 @@ class InvalidateRequest(BaseModel):
 
 class InvalidateResponse(BaseModel):
     requested: int = Field(
-        description=(
-            "Ids submitted, or points matched in this batch for a "
-            "source-scoped call."
-        )
+        description=("Ids submitted, or points matched in this batch for a source-scoped call.")
     )
     complete: bool = Field(
         True,
@@ -388,15 +400,12 @@ class InvalidateResponse(BaseModel):
 
 class DeleteMemoriesRequest(BaseModel):
     # StrictInt: see InvalidateRequest.
-    ids: list[str | StrictInt] | None = Field(
-        None, min_length=1, max_length=REMOTE_MAX_IDS
-    )
+    ids: list[str | StrictInt] | None = Field(None, min_length=1, max_length=REMOTE_MAX_IDS)
     source: str | None = Field(
         None,
         max_length=REMOTE_MAX_SOURCE_CHARS,
         description=(
-            "Erase every memory from this source instead of listing ids. "
-            "Exactly one of ids/source."
+            "Erase every memory from this source instead of listing ids. Exactly one of ids/source."
         ),
     )
     index_root: str | None = Field(
@@ -412,10 +421,7 @@ class DeleteMemoriesRequest(BaseModel):
 
 class DeleteMemoriesResponse(BaseModel):
     requested: int = Field(
-        description=(
-            "Ids submitted, or points matched in this batch for a "
-            "source-scoped call."
-        )
+        description=("Ids submitted, or points matched in this batch for a source-scoped call.")
     )
     complete: bool = Field(
         True,
@@ -791,6 +797,7 @@ class ServerConfig:
             auto_record_ior=_env_bool("MNEMOSTACK_AUTO_RECORD_IOR"),
             record_access=_env_bool("MNEMOSTACK_RECORD_ACCESS"),
             retry_on_weak=_env_bool("MNEMOSTACK_RETRY_ON_WEAK"),
+            retry_weak_below=_env_int("MNEMOSTACK_RETRY_WEAK_BELOW", 1),
             auth_enabled=_env_bool("MNEMOSTACK_AUTH_ENABLED"),
             keys_file=os.environ.get("MNEMOSTACK_KEYS_FILE") or None,
             quotas_file=os.environ.get("MNEMOSTACK_QUOTAS_FILE") or None,
@@ -884,17 +891,13 @@ def _prometheus_dump(rec: InMemoryRecorder) -> str:
     def _fmt_labels(labels: dict[str, str] | None) -> str:
         if not labels:
             return ""
+
         # Label VALUES can carry operator-configured text (e.g. a multi-field
         # arm name inside a degraded reason). The Prometheus text format
         # requires backslash, double-quote and newline escaped — unescaped, a
         # newline would inject extra exposition lines and malform the scrape.
         def esc(v: Any) -> str:
-            return (
-                str(v)
-                .replace("\\", "\\\\")
-                .replace('"', '\\"')
-                .replace("\n", "\\n")
-            )
+            return str(v).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
         parts = [f'{k}="{esc(v)}"' for k, v in labels.items()]
         return "{" + ",".join(parts) + "}"
@@ -1348,8 +1351,10 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                     # inf, so guard/cap retry_after — never ceil(inf) → 500. A day is
                     # a sane ceiling for "come back later".
                     ra = exc.retry_after
-                    secs = _MAX_RETRY_AFTER if not math.isfinite(ra) else max(
-                        1, min(_MAX_RETRY_AFTER, math.ceil(ra))
+                    secs = (
+                        _MAX_RETRY_AFTER
+                        if not math.isfinite(ra)
+                        else max(1, min(_MAX_RETRY_AFTER, math.ceil(ra)))
                     )
                     raise HTTPException(
                         status_code=429,
@@ -1848,9 +1853,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             )
         return MemoriesResponse(
             results=[
-                MemoryResultOut(
-                    id=r.id, status=r.status, item=origin, offset=flat.offset
-                )
+                MemoryResultOut(id=r.id, status=r.status, item=origin, offset=flat.offset)
                 for r, origin, flat in zip(results, origins, flat_items, strict=True)
             ],
             stored=sum(r.status == "stored" for r in results),
@@ -1910,9 +1913,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                     results.append(TripleResultOut(status="added"))
                 except Exception as exc:  # noqa: BLE001 — per-triple isolation
                     log.warning("triples endpoint: add_triple failed: %s", exc)
-                    results.append(
-                        TripleResultOut(status="failed", error=type(exc).__name__)
-                    )
+                    results.append(TripleResultOut(status="failed", error=type(exc).__name__))
         finally:
             try:
                 gs.close()
@@ -1925,9 +1926,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             # Per-triple isolation is for PARTIAL failure; when every triple
             # failed the write path itself is broken — a 200 here would hide
             # a dead graph from any caller that checks only the status code.
-            raise HTTPException(
-                status_code=502, detail=f"all {failed} triple write(s) failed"
-            )
+            raise HTTPException(status_code=502, detail=f"all {failed} triple write(s) failed")
         return TriplesResponse(results=results, added=added, failed=failed)
 
     def _selector_problem(ids: Any, source: Any) -> str | None:
@@ -1981,9 +1980,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         if problem:
             raise HTTPException(status_code=400, detail=problem)
         if limit < 1 or limit > REMOTE_LIST_PAGE:
-            raise HTTPException(
-                status_code=400, detail=f"limit must be 1..{REMOTE_LIST_PAGE}"
-            )
+            raise HTTPException(status_code=400, detail=f"limit must be 1..{REMOTE_LIST_PAGE}")
         tenant = _tenant_of(principal)
         # The cursor comes back through JSON as the string this endpoint
         # printed, but a collection may use INTEGER point ids, and the store
@@ -2107,9 +2104,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 complete = not more
                 requested = len(ids)
                 if not ids:
-                    return InvalidateResponse(
-                        requested=0, invalidated=0, complete=complete
-                    )
+                    return InvalidateResponse(requested=0, invalidated=0, complete=complete)
             else:
                 ids = list(dict.fromkeys(coerce_point_ids(req.ids or [])))
                 requested = len(req.ids or [])
@@ -2124,9 +2119,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             log.exception("invalidate endpoint failed")
             raise HTTPException(status_code=500, detail="invalidate failed") from exc
         counter("mnemostack.server.invalidate", updated)
-        return InvalidateResponse(
-            requested=requested, invalidated=updated, complete=complete
-        )
+        return InvalidateResponse(requested=requested, invalidated=updated, complete=complete)
 
     @app.delete("/memories", response_model=DeleteMemoriesResponse)
     def delete_memories_endpoint(req: DeleteMemoriesRequest, principal=Depends(_require("write"))):  # noqa: B008 — FastAPI DI pattern
@@ -2171,9 +2164,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         try:
             if not store.collection_exists():
                 # See /invalidate: pre-bootstrap there is nothing to erase.
-                return DeleteMemoriesResponse(
-                    requested=requested, deleted=0, complete=True
-                )
+                return DeleteMemoriesResponse(requested=requested, deleted=0, complete=True)
             if source_scoped:
                 # The finder already re-validated payload ownership and the
                 # index_root guard, so no second precheck is needed here.
@@ -2209,8 +2200,6 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             log.exception("delete memories endpoint failed")
             raise HTTPException(status_code=500, detail="delete failed") from exc
         counter("mnemostack.server.deleted", deleted)
-        return DeleteMemoriesResponse(
-            requested=requested, deleted=deleted, complete=complete
-        )
+        return DeleteMemoriesResponse(requested=requested, deleted=deleted, complete=complete)
 
     return app

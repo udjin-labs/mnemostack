@@ -182,9 +182,7 @@ class EmbeddingProvider(ABC):
         """
         cls = type(self)
         overridden = [
-            n
-            for n in names
-            if getattr(cls, n, None) is not getattr(EmbeddingProvider, n)
+            n for n in names if getattr(cls, n, None) is not getattr(EmbeddingProvider, n)
         ]
         if not overridden:
             return None

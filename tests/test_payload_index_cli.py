@@ -121,9 +121,7 @@ def test_ensure_payload_index_falls_back_to_requested_name_locally():
 
 
 def _args(**overrides) -> argparse.Namespace:
-    defaults = dict(
-        collection="c", qdrant="http://localhost:6333", field=None, schema=None
-    )
+    defaults = dict(collection="c", qdrant="http://localhost:6333", field=None, schema=None)
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
 
@@ -149,9 +147,7 @@ def test_cmd_payload_index_creates_an_index(monkeypatch, capsys):
     client = MagicMock()
     client.get_collection.side_effect = [
         _info_with_schema({}),
-        _info_with_schema(
-            {"project": SimpleNamespace(data_type=PayloadSchemaType.KEYWORD)}
-        ),
+        _info_with_schema({"project": SimpleNamespace(data_type=PayloadSchemaType.KEYWORD)}),
     ]
     store = _store_with_client(client)
     monkeypatch.setattr(store, "collection_exists", lambda: True)
@@ -291,9 +287,7 @@ def test_lost_creation_race_is_reported_as_conflict():
         s.ensure_payload_index("project", "keyword")
 
 
-def test_store_construction_failure_is_a_cli_error_not_a_traceback(
-    monkeypatch, capsys
-):
+def test_store_construction_failure_is_a_cli_error_not_a_traceback(monkeypatch, capsys):
     def _bad_url(**_kw):
         raise ValueError("Unsupported scheme: ftp")
 

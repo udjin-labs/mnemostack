@@ -62,6 +62,7 @@ def _local_weights_signature(path: Path) -> str:
                     h.update(fh.read(_WEIGHT_SAMPLE_BYTES))
     return h.hexdigest()[:32]
 
+
 try:
     import torch
     from transformers import AutoModel, AutoTokenizer

@@ -204,9 +204,7 @@ def test_tenant_isolation_live(store):
     subj = f"{ns}-shared"
     obj = f"{ns}-thing"
     for t in (f"{ns}-A", f"{ns}-B"):
-        s.add_triple(
-            subj, "OWNS", obj, subject_label=TEST_LABEL, obj_label=TEST_LABEL, tenant=t
-        )
+        s.add_triple(subj, "OWNS", obj, subject_label=TEST_LABEL, obj_label=TEST_LABEL, tenant=t)
     # A scoped read sees only its own tenant's fact...
     a = s.query_triples(subject=subj, tenant=f"{ns}-A")
     assert len(a) == 1

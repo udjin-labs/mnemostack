@@ -58,7 +58,9 @@ def _admin_client(monkeypatch, tmp_path):
     _, read_key = ks.issue("acme", ["read"])
     app = insp.build_inspector_app(
         ServerConfig(
-            provider_name="fake", collection="mt", graph_uri=None,
+            provider_name="fake",
+            collection="mt",
+            graph_uri=None,
             auth_enabled=True,
             keys_file=str(tmp_path / "keys.json"),
             quotas_file=str(tmp_path / "quotas.json"),
@@ -114,8 +116,7 @@ def test_inspector_last_admin_revoke_audits_denied(monkeypatch, tmp_path, audit_
 def test_inspector_revoke_success_attributes_the_tenant(monkeypatch, tmp_path, audit_file):
     c, admin_key, _aid, _read = _admin_client(monkeypatch, tmp_path)
     read_id = next(
-        k["id"] for k in FileKeyStore(tmp_path / "keys.json").list_keys()
-        if k["tenant"] == "acme"
+        k["id"] for k in FileKeyStore(tmp_path / "keys.json").list_keys() if k["tenant"] == "acme"
     )
     assert c.delete(f"/api/keys/{read_id}", headers=_hdr(admin_key)).status_code == 200
     ev = [e for e in _events(audit_file) if e["action"] == "keys.revoke"]

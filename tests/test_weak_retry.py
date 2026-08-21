@@ -754,3 +754,61 @@ def test_the_budget_still_caps_a_floored_retry(monkeypatch):
     )
     assert [r.id for r in out] == ["A"]  # the floored extra did not fit
     assert sum_tokens(out, None) <= budget
+
+
+def test_a_retry_never_hands_back_less_than_it_was_given(monkeypatch):
+    """R11 (review P1): the budget is a hard cap and the fusion reorders by
+    rank, so together they can COST the caller memories they already had.
+    A corroborated newcomer takes the front, and the greedy trim — which
+    stops at the first item that would overflow — then evicts the smaller
+    memories that fitted perfectly well in the original order. A feature
+    whose entire premise is "that was too little" must not answer by
+    returning less: no shrinkage, and the caller's own scores survive."""
+    from mnemostack.recall.tokens import sum_tokens
+
+    small, large = _Hit("S", text="word " * 8), _Hit("H", text="word " * 100)
+    newcomer_text = "word " * 104
+    budget = sum_tokens([small, large], None) + 2
+    # The setup this defect needs: the caller's two memories fit with room
+    # to spare, the newcomer fits on its own, and the newcomer plus the
+    # smallest of theirs does not.
+    assert sum_tokens([small, large], None) < budget
+    assert sum_tokens([_Hit("N", text=newcomer_text)], None) <= budget
+    assert sum_tokens([_Hit("N", text=newcomer_text), small], None) > budget
+    _flow(
+        monkeypatch,
+        {  # both phrasings corroborate N, so RRF ranks it above S and H
+            "how did we decide auth": [_Hit("N", text=newcomer_text)],
+            "what was chosen for login": [_Hit("N", text=newcomer_text)],
+        },
+    )
+    out, retried = retry_weak_recall(
+        None,
+        "q",
+        10,
+        llm=_LLM(),
+        results=[small, large],
+        below=5,
+        token_budget=budget,
+    )
+    assert retried is True
+    assert [r.id for r in out] == ["S", "H"]  # not ["N"]
+    assert (small.score, large.score) == (0.9, 0.9)  # ...with their own scores
+
+
+def test_the_env_deployment_can_set_the_threshold_too(monkeypatch):
+    """R11 (review P3): `MNEMOSTACK_RETRY_ON_WEAK` let an env-configured
+    deployment (`uvicorn mnemostack.server:app`, no CLI) switch the feature
+    on while the threshold stayed pinned at the default — a knob you can
+    turn on but not tune. Bad values fall back rather than fail startup:
+    a typo in one tuning knob must not take the service down."""
+    from mnemostack.server import ServerConfig
+
+    monkeypatch.setenv("MNEMOSTACK_RETRY_ON_WEAK", "1")
+    monkeypatch.setenv("MNEMOSTACK_RETRY_WEAK_BELOW", "3")
+    cfg = ServerConfig.from_env()
+    assert cfg.retry_on_weak is True and cfg.retry_weak_below == 3
+
+    for bad in ("nonsense", "0", "-2", ""):
+        monkeypatch.setenv("MNEMOSTACK_RETRY_WEAK_BELOW", bad)
+        assert ServerConfig.from_env().retry_weak_below == 1

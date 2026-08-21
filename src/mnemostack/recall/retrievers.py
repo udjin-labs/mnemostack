@@ -478,11 +478,7 @@ class QdrantTextRetriever(Retriever):
         from .pipeline.stages import STOPWORDS
 
         exact = extract_exact_tokens(query)
-        words = [
-            t
-            for t in tokenize(query)
-            if len(t) >= self.min_token_len and t not in STOPWORDS
-        ]
+        words = [t for t in tokenize(query) if len(t) >= self.min_token_len and t not in STOPWORDS]
         # Deterministic across processes: length desc (rarity proxy), then
         # lexicographic — a set() sort keyed on length alone would let hash
         # seeds decide which same-length tokens make the capped gate.
@@ -1164,9 +1160,7 @@ _FILTERED_CANDIDATE_BUDGET = 500
 #: (`text` is "File: name", `source` is the arm marker) — letting a filter on
 #: such a field self-attribute would admit hits whose CHUNKS never satisfied
 #: the same condition. Unlisted keys always go through the chunk probe.
-_GRAPH_OWN_FILTER_KEYS = frozenset(
-    {"index_root", "name", "type", "memory_class", "tenant_id"}
-)
+_GRAPH_OWN_FILTER_KEYS = frozenset({"index_root", "name", "type", "memory_class", "tenant_id"})
 
 #: Cap on DISTINCT query tokens the graph retriever probes. Tokens drive
 #: per-word Cypher probes (up to four each), so an unbounded or repetitive
@@ -1462,9 +1456,7 @@ class MemgraphRetriever(Retriever):
                 or not payload_matches({"source": name}, {"source": filters["source"]})
             ):
                 return (False, False)
-        residual = {
-            k: v for k, v in filters.items() if k != "source" and k not in own
-        }
+        residual = {k: v for k, v in filters.items() if k != "source" and k not in own}
         # A satisfied `source` condition still needs CHUNK proof: the sync
         # creates :File nodes for every link target including DANGLING ones
         # (no such document, no chunks), so name equality alone would
@@ -1481,12 +1473,7 @@ class MemgraphRetriever(Retriever):
             # tier above already checked.
             return (False, False)
         root = payload.get("index_root")
-        if (
-            not name
-            or self.chunk_filter_probe is None
-            or payload.get("type") != "File"
-            or not root
-        ):
+        if not name or self.chunk_filter_probe is None or payload.get("type") != "File" or not root:
             return (False, False)
         probe_filters = dict(residual)
         probe_filters["source"] = name
@@ -1498,11 +1485,7 @@ class MemgraphRetriever(Retriever):
             return (False, False)
         try:
             return (
-                bool(
-                    self.chunk_filter_probe(
-                        probe_filters, tenant, include_invalidated, as_of
-                    )
-                ),
+                bool(self.chunk_filter_probe(probe_filters, tenant, include_invalidated, as_of)),
                 True,
             )
         except Exception:  # noqa: BLE001 — fail CLOSED: unattributable, not leaked
@@ -1606,9 +1589,7 @@ class MemgraphRetriever(Retriever):
                     max(_FILTERED_CANDIDATE_BUDGET, node_budget),
                 ),
             )
-            probe_cache = recall_scope.setdefault(
-                ("memgraph_probe_cache", id(self)), {}
-            )
+            probe_cache = recall_scope.setdefault(("memgraph_probe_cache", id(self)), {})
         else:
             graph_budget = _RecallGraphBudget(
                 _MAX_RECALL_NODE_PROBES,

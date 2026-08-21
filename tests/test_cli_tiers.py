@@ -638,8 +638,13 @@ def test_cmd_invalidate_missing_collection_exits_2(monkeypatch):
 
     monkeypatch.setattr(cli, "VectorStore", lambda **_: _FakeStore())
     args = argparse.Namespace(
-        collection="missing", qdrant="http://localhost:6333", ids=["a"],
-        invalidated_at=None, valid_until=None, index_root=None, json=False,
+        collection="missing",
+        qdrant="http://localhost:6333",
+        ids=["a"],
+        invalidated_at=None,
+        valid_until=None,
+        index_root=None,
+        json=False,
     )
     assert cli.cmd_invalidate(args) == 2
 
@@ -677,9 +682,13 @@ def test_cmd_invalidate_coerces_digit_ids(monkeypatch):
     store = _FakeStore()
     monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
     args = argparse.Namespace(
-        collection="t", qdrant="http://localhost:6333",
-        ids=["1", "abc", "a1b2"], invalidated_at=None, valid_until=None,
-        index_root=None, json=False,
+        collection="t",
+        qdrant="http://localhost:6333",
+        ids=["1", "abc", "a1b2"],
+        invalidated_at=None,
+        valid_until=None,
+        index_root=None,
+        json=False,
     )
     assert cli.cmd_invalidate(args) == 0
     # digit-only -> int; anything with non-digits stays a string

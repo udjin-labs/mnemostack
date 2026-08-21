@@ -56,7 +56,9 @@ def test_hide_invalidated_combines_with_payload_filter():
     store = _store()
     _seed(store)
     # payload filter (source=a) AND validity: only the current 'a' point.
-    got = {h.id for h in store.search(VEC, limit=10, filters={"source": "a"}, hide_invalidated=True)}
+    got = {
+        h.id for h in store.search(VEC, limit=10, filters={"source": "a"}, hide_invalidated=True)
+    }
     assert got == {1}
 
 

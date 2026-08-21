@@ -116,9 +116,7 @@ def test_array_payload_source_is_not_a_match(monkeypatch, tmp_path):
     source='a.md' (the rule the selective-prune fix established)."""
     app, store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
     client = TestClient(app)
-    (pid,) = _store_items(
-        client, keys["write"], [{"text": "multi-source chunk", "source": "a.md"}]
-    )
+    (pid,) = _store_items(client, keys["write"], [{"text": "multi-source chunk", "source": "a.md"}])
     store.client.set_payload(
         collection_name=store.collection,
         payload={"source": ["a.md", "b.md"]},
@@ -153,9 +151,7 @@ def test_source_batch_reports_incomplete(monkeypatch, tmp_path):
     monkeypatch.setattr(srv, "REMOTE_SOURCE_BATCH", 2)
     seen = 0
     for _ in range(5):
-        body = client.request(
-            "DELETE", "/memories", json={"source": "big.md"}, headers=hdr
-        ).json()
+        body = client.request("DELETE", "/memories", json={"source": "big.md"}, headers=hdr).json()
         seen += body["deleted"]
         if body["complete"]:
             break
@@ -181,9 +177,7 @@ def test_listing_returns_ids_and_hashes_never_text(monkeypatch, tmp_path):
         payload={SOURCE_HASH_KEY: "deadbeef"},
         points=[ids[0]],
     )
-    r = client.get(
-        "/memories", params={"source": "a.md"}, headers={"X-API-Key": keys["read"]}
-    )
+    r = client.get("/memories", params={"source": "a.md"}, headers={"X-API-Key": keys["read"]})
     assert r.status_code == 200
     body = r.json()
     assert body["complete"] is True
@@ -206,14 +200,10 @@ def test_listing_is_tenant_scoped_and_read_gated(monkeypatch, tmp_path):
     )
     assert r.status_code == 403
     # another tenant's read key sees nothing of alpha's
-    r = client.get(
-        "/memories", params={"source": "s.md"}, headers={"X-API-Key": keys["beta_read"]}
-    )
+    r = client.get("/memories", params={"source": "s.md"}, headers={"X-API-Key": keys["beta_read"]})
     assert r.status_code == 200 and r.json()["items"] == []
     # alpha's own read key sees it
-    r = client.get(
-        "/memories", params={"source": "s.md"}, headers={"X-API-Key": keys["read"]}
-    )
+    r = client.get("/memories", params={"source": "s.md"}, headers={"X-API-Key": keys["read"]})
     assert r.status_code == 200 and len(r.json()["items"]) == 1
 
 
@@ -223,10 +213,7 @@ def test_listing_paginates_by_id(monkeypatch, tmp_path):
     ids = _store_items(
         client,
         keys["write"],
-        [
-            {"text": f"paged chunk {i}", "source": "p.md", "offset": i}
-            for i in range(5)
-        ],
+        [{"text": f"paged chunk {i}", "source": "p.md", "offset": i} for i in range(5)],
     )
     hdr = {"X-API-Key": keys["read"]}
     seen: list[str] = []
@@ -327,9 +314,7 @@ def test_listing_page_costs_the_page_not_the_source(monkeypatch, tmp_path):
 
     store.client.scroll = _counting  # type: ignore[method-assign]
     hdr = {"X-API-Key": keys["read"]}
-    body = client.get(
-        "/memories", params={"source": "wide.md", "limit": 3}, headers=hdr
-    ).json()
+    body = client.get("/memories", params={"source": "wide.md", "limit": 3}, headers=hdr).json()
     assert len(body["items"]) == 3 and body["complete"] is False
     first_page_cost = seen_points
     assert first_page_cost < total, first_page_cost  # not a full scan
@@ -342,9 +327,7 @@ def test_listing_page_costs_the_page_not_the_source(monkeypatch, tmp_path):
         headers=hdr,
     ).json()
     assert len(body2["items"]) == 3
-    assert {r["id"] for r in body2["items"]}.isdisjoint(
-        {r["id"] for r in body["items"]}
-    )
+    assert {r["id"] for r in body2["items"]}.isdisjoint({r["id"] for r in body["items"]})
     assert seen_points < total, seen_points
 
 
@@ -421,9 +404,7 @@ def test_listing_rejects_a_malformed_cursor(monkeypatch, tmp_path):
     client = TestClient(app)
     hdr = {"X-API-Key": keys["read"]}
     for bad in ("not-a-point-id", "1" * 5000, "-3"):
-        r = client.get(
-            "/memories", params={"source": "a.md", "after": bad}, headers=hdr
-        )
+        r = client.get("/memories", params={"source": "a.md", "after": bad}, headers=hdr)
         assert r.status_code == 400, (bad, r.status_code)
 
 
@@ -446,9 +427,7 @@ def test_listing_takes_the_index_root_owner_guard(monkeypatch, tmp_path):
     assert sorted(row["id"] for row in body["items"]) == ["1", "3"]
     body = client.get("/memories", params={"source": "shared.md"}, headers=hdr).json()
     assert len(body["items"]) == 3  # no guard: everything
-    r = client.get(
-        "/memories", params={"source": "shared.md", "index_root": "  "}, headers=hdr
-    )
+    r = client.get("/memories", params={"source": "shared.md", "index_root": "  "}, headers=hdr)
     assert r.status_code == 400  # a blank guard matches no owner
 
 
@@ -468,9 +447,7 @@ def test_the_unix_epoch_is_a_timestamp_not_an_absence(monkeypatch, tmp_path):
         {"source": "epoch0.md", "event_time": 0, "timestamp": "1999-01-01T00:00:00+00:00"},
         tenant="alpha",
     )
-    r = client.get(
-        "/memories", params={"source": "epoch0.md"}, headers={"X-API-Key": keys["read"]}
-    )
+    r = client.get("/memories", params={"source": "epoch0.md"}, headers={"X-API-Key": keys["read"]})
     assert r.status_code == 200, r.text
     assert r.json()["items"][0]["timestamp"] == 0
 

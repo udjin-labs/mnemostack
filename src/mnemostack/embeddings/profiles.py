@@ -59,17 +59,13 @@ def apply_transform(spec: TransformSpec, text: str) -> str:
 def _validate_transform(spec: TransformSpec) -> dict[str, str]:
     kind = spec.get("kind")
     if kind not in _TRANSFORM_KINDS:
-        raise ValueError(
-            f"unknown transform kind: {kind!r} (known: {', '.join(_TRANSFORM_KINDS)})"
-        )
+        raise ValueError(f"unknown transform kind: {kind!r} (known: {', '.join(_TRANSFORM_KINDS)})")
     required = {"identity": (), "prefix": ("prefix",), "instruct": ("instruction",)}[kind]
     optional = {"identity": set(), "prefix": set(), "instruct": {"separator"}}[kind]
     unknown = set(spec) - {"kind"} - set(required) - optional
     if unknown:
         # A typoed field would otherwise silently participate in fingerprints.
-        raise ValueError(
-            f"transform kind {kind!r} does not accept field(s): {sorted(unknown)}"
-        )
+        raise ValueError(f"transform kind {kind!r} does not accept field(s): {sorted(unknown)}")
     for key in required:
         if not isinstance(spec.get(key), str):
             raise ValueError(f"transform kind {kind!r} requires a string {key!r} field")
@@ -108,18 +104,14 @@ class EmbeddingProfile:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "query_transform", _validate_transform(self.query_transform))
-        object.__setattr__(
-            self, "document_transform", _validate_transform(self.document_transform)
-        )
+        object.__setattr__(self, "document_transform", _validate_transform(self.document_transform))
         object.__setattr__(
             self, "known_dimensions", {k.lower(): int(v) for k, v in self.known_dimensions.items()}
         )
         # Patterns normalize like the model names they match — a canonical
         # mixed-case HF identifier pasted verbatim must not silently resolve
         # to the identity profile.
-        object.__setattr__(
-            self, "model_patterns", tuple(p.lower() for p in self.model_patterns)
-        )
+        object.__setattr__(self, "model_patterns", tuple(p.lower() for p in self.model_patterns))
 
     def apply_query(self, text: str) -> str:
         return apply_transform(self.query_transform, text)

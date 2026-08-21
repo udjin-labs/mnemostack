@@ -250,10 +250,7 @@ def _graph_instant_expr(field: str) -> str:
     ``datetime()`` rejects a date without a timezone (``"Timezone is not
     designated"``). Only reached for values matching :data:`_GRAPH_TS_RE`.
     """
-    return (
-        f"datetime(CASE WHEN {field} CONTAINS 'T' THEN {field} "
-        f"ELSE {field} + 'T00:00:00Z' END)"
-    )
+    return f"datetime(CASE WHEN {field} CONTAINS 'T' THEN {field} ELSE {field} + 'T00:00:00Z' END)"
 
 
 def _graph_bound_clause(field: str, op: str) -> str:

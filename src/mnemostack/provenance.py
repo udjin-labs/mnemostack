@@ -184,9 +184,7 @@ def _is_schemed_uri(source: str) -> bool:
 _SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 
 
-def _open_beneath(
-    base: Path, source: str, strict: bool = False, base_fd: int | None = None
-) -> int:
+def _open_beneath(base: Path, source: str, strict: bool = False, base_fd: int | None = None) -> int:
     """Open ``source`` beneath ``base`` with EVERY component refusing symlinks.
 
     ``O_NOFOLLOW`` on a single open only protects the final component — a
@@ -227,7 +225,9 @@ def _open_beneath(
     # A held descriptor for the operator-configured root survives a rename
     # of the root pathname mid-resolve — the walk stays anchored to the
     # ORIGINALLY approved directory, not to whatever the name points at now.
-    dfd = os.dup(base_fd) if base_fd is not None else os.open(str(base), os.O_RDONLY | os.O_DIRECTORY)
+    dfd = (
+        os.dup(base_fd) if base_fd is not None else os.open(str(base), os.O_RDONLY | os.O_DIRECTORY)
+    )
     try:
         for comp in parts[:-1]:
             ndfd = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dfd)
@@ -303,7 +303,11 @@ def _read_source(
                 # the same no-symlink treatment as relative sources.
                 target = path.resolve()
                 if not target.is_relative_to(resolved_base):
-                    return None, "source path escapes the corpus root — refusing to read it", "error"
+                    return (
+                        None,
+                        "source path escapes the corpus root — refusing to read it",
+                        "error",
+                    )
                 walk_source = target.relative_to(resolved_base).as_posix()
             else:
                 walk_source = source
@@ -331,7 +335,11 @@ def _read_source(
         if not stat_module.S_ISREG(st.st_mode):
             return None, "source is not a regular file", "error"
         if st.st_size > MAX_RESOLVE_BYTES:
-            return None, f"source larger than the {MAX_RESOLVE_BYTES}-byte verification cap", "error"
+            return (
+                None,
+                f"source larger than the {MAX_RESOLVE_BYTES}-byte verification cap",
+                "error",
+            )
         chunks: list[bytes] = []
         remaining = MAX_RESOLVE_BYTES + 1
         while remaining > 0:
@@ -342,7 +350,11 @@ def _read_source(
             remaining -= len(block)
         data = b"".join(chunks)
         if len(data) > MAX_RESOLVE_BYTES:
-            return None, f"source larger than the {MAX_RESOLVE_BYTES}-byte verification cap", "error"
+            return (
+                None,
+                f"source larger than the {MAX_RESOLVE_BYTES}-byte verification cap",
+                "error",
+            )
     except OSError as e:
         return None, f"source exists but cannot be read: {e}", "error"
     finally:
@@ -684,8 +696,7 @@ def resolve_payload(
             if anchor is None:
                 saw_error = True
                 failure_detail = (
-                    "the point's corpus root is not in the operator-configured "
-                    "resolution allowlist"
+                    "the point's corpus root is not in the operator-configured resolution allowlist"
                 )
                 continue
             try:
@@ -695,9 +706,7 @@ def resolve_payload(
                 # walk below is bounded by the freshly opened, symlink-
                 # verified anchor_fd and rejects ".." components, so escape
                 # stays impossible by construction.
-                prefix = (
-                    cand_base.resolve().relative_to(anchor_path.resolve()).as_posix()
-                )
+                prefix = cand_base.resolve().relative_to(anchor_path.resolve()).as_posix()
                 # Hold a descriptor for the APPROVED root for the duration of
                 # the read — acquired WITHOUT following symlinks on any
                 # component of the root path itself (a by-name open would

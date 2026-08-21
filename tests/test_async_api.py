@@ -104,9 +104,7 @@ async def _assert_loop_alive(coro):
 async def test_recall_flow_async_matches_sync():
     results = _results()
     sync_out = recall_flow(_FakeRecaller(results), "q", limit=3)
-    async_out = await _assert_loop_alive(
-        recall_flow_async(_FakeRecaller(results), "q", limit=3)
-    )
+    async_out = await _assert_loop_alive(recall_flow_async(_FakeRecaller(results), "q", limit=3))
     assert [r.id for r in async_out] == [r.id for r in sync_out]
 
 
@@ -188,9 +186,7 @@ async def test_synthesize_async_matches_sync():
     )
 
     sync_result = synthesize("Entity Alpha", recaller=recaller)
-    async_result = await _assert_loop_alive(
-        synthesize_async("Entity Alpha", recaller=recaller)
-    )
+    async_result = await _assert_loop_alive(synthesize_async("Entity Alpha", recaller=recaller))
 
     assert async_result.entity == sync_result.entity
     assert [f.text for f in async_result.facts] == [f.text for f in sync_result.facts]

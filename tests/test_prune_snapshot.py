@@ -114,9 +114,7 @@ def test_snapshot_prune_respects_index_root_and_unattributed(store):
     legacy = _put(store, "note.md", 200, "indexed before root tracking")
     snapshot = _snapshot(store)  # unfiltered: includes all three
 
-    removed = _prune_with_reads_forbidden(
-        store, {"note.md": set()}, snapshot, index_root="/data/a"
-    )
+    removed = _prune_with_reads_forbidden(store, {"note.md": set()}, snapshot, index_root="/data/a")
 
     assert removed == 1
     remaining = _remaining(store)
@@ -159,9 +157,7 @@ def test_tenant_ids_revalidated_at_delete(store):
     # A (buggy) snapshot claiming both points for acme's scope.
     snapshot = [(ours, {"source": "doc.md"}), (theirs, {"source": "doc.md"})]
 
-    removed = _prune_with_reads_forbidden(
-        store, {"doc.md": set()}, snapshot, tenant="acme"
-    )
+    removed = _prune_with_reads_forbidden(store, {"doc.md": set()}, snapshot, tenant="acme")
 
     assert removed == 1
     remaining = _remaining(store)
@@ -275,9 +271,7 @@ def test_fallback_keeps_working_for_stores_without_scroll():
     assert store.deleted == ["stale"]
 
 
-def test_fallback_bulk_map_uses_one_scroll_and_never_per_source_scans(
-    store, monkeypatch
-):
+def test_fallback_bulk_map_uses_one_scroll_and_never_per_source_scans(store, monkeypatch):
     root = "/data/a"
     fresh_map: dict[str, set[str]] = {}
     stale_ids = []
@@ -334,9 +328,7 @@ def test_fallback_small_map_keeps_narrow_per_source_scans(store, monkeypatch):
         ),
     )
 
-    removed = prune_stale_chunks_from_snapshot(
-        store, {"note.md": {fresh}}, index_root=root
-    )
+    removed = prune_stale_chunks_from_snapshot(store, {"note.md": {fresh}}, index_root=root)
 
     assert removed == 1
     # ONE narrow source-filtered scan — never a bare root page-through.
@@ -421,9 +413,7 @@ def test_selective_delete_batches_flush_across_sources(store, monkeypatch):
 
     monkeypatch.setattr(store, "delete_points", counting)
 
-    removed = prune_stale_chunks_from_snapshot(
-        store, fresh_map, delete_batch_size=2
-    )
+    removed = prune_stale_chunks_from_snapshot(store, fresh_map, delete_batch_size=2)
 
     assert removed == 3
     assert calls == [2, 1]  # 3 stale ids across 3 sources, flushed in 2s
@@ -498,9 +488,17 @@ def _patch_stack(monkeypatch, store):
 
 def _index_args(tmp_path, **overrides) -> argparse.Namespace:
     defaults = dict(
-        path=str(tmp_path), provider="fake", collection="test_collection",
-        qdrant="http://localhost:6333", recreate=False, yes=False, prune=True,
-        enrich=None, refresh_payloads=False, chunk_size=800, window_size=1,
+        path=str(tmp_path),
+        provider="fake",
+        collection="test_collection",
+        qdrant="http://localhost:6333",
+        recreate=False,
+        yes=False,
+        prune=True,
+        enrich=None,
+        refresh_payloads=False,
+        chunk_size=800,
+        window_size=1,
     )
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -564,24 +562,27 @@ def test_cmd_index_refresh_prune_reuses_snapshot(monkeypatch, tmp_path, store, c
     assert all(f is None for _m, f in reads)
 
 
-def test_cmd_index_markdown_full_root_walk_scans_root_exactly_once(
-    monkeypatch, tmp_path, store
-):
+def test_cmd_index_markdown_full_root_walk_scans_root_exactly_once(monkeypatch, tmp_path, store):
     (tmp_path / "a.md").write_text("alpha body", encoding="utf-8")
     root = str(tmp_path.resolve())
     # A point for a file deleted from disk — the full-root reconcile must
     # still find and prune it, now from the snapshot instead of a 2nd scroll.
     gone = stable_chunk_id("gone.md", 0, "vanished")
-    store.upsert(
-        gone, VEC, {"source": "gone.md", "index_root": root, "_md_keys": ["title"]}
-    )
+    store.upsert(gone, VEC, {"source": "gone.md", "index_root": root, "_md_keys": ["title"]})
     reads = _instrument(monkeypatch, store)
     _patch_stack(monkeypatch, store)
     args = argparse.Namespace(
-        path=str(tmp_path), provider="fake", embedding_model=None,
-        collection="test_collection", qdrant="http://localhost:6333",
-        chunk_size=1200, memgraph_uri=None, graph_timeout=5.0,
-        recreate=False, prune=True, yes=True,
+        path=str(tmp_path),
+        provider="fake",
+        embedding_model=None,
+        collection="test_collection",
+        qdrant="http://localhost:6333",
+        chunk_size=1200,
+        memgraph_uri=None,
+        graph_timeout=5.0,
+        recreate=False,
+        prune=True,
+        yes=True,
     )
 
     rc = cli.cmd_index_markdown(args)

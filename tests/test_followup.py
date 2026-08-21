@@ -110,9 +110,7 @@ def test_custom_prompt_template_validated():
     with pytest.raises(ValueError, match="prompt_template"):
         rewrite_followup("q?", HISTORY, llm, prompt_template="no placeholders here")
 
-    out = rewrite_followup(
-        "q?", HISTORY, llm, prompt_template="H:{history}\nQ:{query}\nOUT:"
-    )
+    out = rewrite_followup("q?", HISTORY, llm, prompt_template="H:{history}\nQ:{query}\nOUT:")
     assert out == "ok"
     assert "H:Q: Wer hat das Deployment freigegeben?" in llm.last_prompt
 

@@ -91,9 +91,7 @@ def test_scroll_is_tenant_scoped():
 
 def test_upsert_batch_stamps_tenant():
     store = _store()
-    store.upsert_batch(
-        [(1, _VEC, {"text": "a"}), (2, _VEC, {"text": "b"})], tenant="alpha"
-    )
+    store.upsert_batch([(1, _VEC, {"text": "a"}), (2, _VEC, {"text": "b"})], tenant="alpha")
     assert store.count(tenant="alpha") == 2
     assert store.search(_VEC, limit=10, tenant="beta") == []
 
@@ -109,9 +107,7 @@ def test_invalidate_will_not_touch_another_tenant():
     assert 3 in beta
     # Scoped to its own tenant, it invalidates.
     assert store.invalidate([3], tenant="beta") == 1
-    beta_after = {
-        h.id for h in store.search(_VEC, limit=10, tenant="beta", hide_invalidated=True)
-    }
+    beta_after = {h.id for h in store.search(_VEC, limit=10, tenant="beta", hide_invalidated=True)}
     assert 3 not in beta_after
 
 
@@ -583,7 +579,9 @@ def test_stamp_tenant_stamps_payload_only_preserving_ids():
     # ids are unchanged, and both points are now scoped to alpha.
     ids = {h.id for h in store.search(_VEC, limit=10, tenant="alpha")}
     assert ids == {1, 2}
-    assert all(h.payload[TENANT_ID_KEY] == "alpha" for h in store.search(_VEC, limit=10, tenant="alpha"))
+    assert all(
+        h.payload[TENANT_ID_KEY] == "alpha" for h in store.search(_VEC, limit=10, tenant="alpha")
+    )
 
 
 def test_stamp_tenant_only_missing_is_idempotent():

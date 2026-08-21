@@ -78,6 +78,7 @@ def _redact_line(line: str) -> str:
     the serialized text cannot corrupt the line's structure."""
     return _KEY_SHAPE_RE.sub(_REDACTED, line) if "msk_" in line else line
 
+
 #: Bounded wait for the append lock: ~2s total, then the write is reported
 #: failed. A blocking LOCK_EX would let a hung/hostile lock-holder stall key
 #: revocation or an offboarding forever — the exact hang the contract forbids.
@@ -179,6 +180,7 @@ def _open_trail_fd(path: Path, *, write: bool) -> int:
         return _require_regular(os.open(walk[-1], final_flags, 0o640, dir_fd=dfd), path)
     finally:
         os.close(dfd)
+
 
 #: Actions recorded today (call sites keep this in sync; the log itself does
 #: not validate — an old reader must tolerate actions added by a newer writer).

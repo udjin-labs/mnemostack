@@ -66,9 +66,7 @@ class _RecordingSession:
         root_key = params["root_key"]
         self.rel_calls.append((name, root_key))
         targets = self._files.get((name, root_key), [])
-        rows = [
-            {"from_n": name, "rel": "LINKS_TO", "to_n": t} for t in targets
-        ]
+        rows = [{"from_n": name, "rel": "LINKS_TO", "to_n": t} for t in targets]
         return _Result(rows)
 
 

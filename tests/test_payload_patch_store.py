@@ -69,14 +69,10 @@ def test_batch_size_bounds_round_trips(monkeypatch):
 
     def counting(collection_name, update_operations, **kw):
         calls.append(len(update_operations))
-        return real(
-            collection_name=collection_name, update_operations=update_operations, **kw
-        )
+        return real(collection_name=collection_name, update_operations=update_operations, **kw)
 
     monkeypatch.setattr(s.client, "batch_update_points", counting)
-    patches = [
-        PayloadPatch(id=cid, set_values={"v": "new"}) for cid in (CID_A, CID_B, CID_C)
-    ]
+    patches = [PayloadPatch(id=cid, set_values={"v": "new"}) for cid in (CID_A, CID_B, CID_C)]
     assert s.apply_payload_patches(patches, batch_size=2) == 3
     assert len(calls) == 2  # groups of 2 + 1
     assert all(_payload_of(s, cid)["v"] == "new" for cid in (CID_A, CID_B, CID_C))
@@ -195,9 +191,7 @@ def test_batch_retries_after_a_mid_flight_404_and_skips_the_vanished_point(monke
             # the whole batch the way a real one does.
             s.client.delete(collection_name, points_selector=[CID_B])
             raise UnexpectedResponse(404, "Not Found", b"", None)
-        return real(
-            collection_name=collection_name, update_operations=update_operations, **kw
-        )
+        return real(collection_name=collection_name, update_operations=update_operations, **kw)
 
     monkeypatch.setattr(s.client, "batch_update_points", racing)
 
@@ -258,12 +252,9 @@ def test_sync_flushes_bounded_groups_beyond_one_batch():
 
     n = PAYLOAD_PATCH_BATCH * 2 + 50
     chunks = [
-        (f"id{i}", "body", {"text": "body", "source": "a.md", "title": f"T{i}"})
-        for i in range(n)
+        (f"id{i}", "body", {"text": "body", "source": "a.md", "title": f"T{i}"}) for i in range(n)
     ]
-    existing = {
-        f"id{i}": {"text": "body", "source": "a.md", "title": "OLD"} for i in range(n)
-    }
+    existing = {f"id{i}": {"text": "body", "source": "a.md", "title": "OLD"} for i in range(n)}
     store = _HookedStore()
     res = upsert_markdown_chunks(store, _Prov(), chunks, existing_payloads=existing)
     assert res.refreshed == n
@@ -295,12 +286,9 @@ def test_refreshed_counts_only_patches_the_store_confirmed():
             pass
 
     chunks = [
-        (f"id{i}", "body", {"text": "body", "source": "a.md", "title": f"T{i}"})
-        for i in range(3)
+        (f"id{i}", "body", {"text": "body", "source": "a.md", "title": f"T{i}"}) for i in range(3)
     ]
-    existing = {
-        f"id{i}": {"text": "body", "source": "a.md", "title": "OLD"} for i in range(3)
-    }
+    existing = {f"id{i}": {"text": "body", "source": "a.md", "title": "OLD"} for i in range(3)}
     res = upsert_markdown_chunks(_SkippingStore(), _Prov(), chunks, existing_payloads=existing)
     assert res.compared == 3
     assert res.refreshed == 2  # 3 attempted, 2 confirmed by the store
@@ -339,8 +327,7 @@ def test_markdown_sync_patches_through_the_hook_in_bounded_groups():
 
     store = _HookedStore()
     chunks = [
-        (f"id{i}", "body", {"text": "body", "source": "a.md", "title": f"T{i}"})
-        for i in range(5)
+        (f"id{i}", "body", {"text": "body", "source": "a.md", "title": f"T{i}"}) for i in range(5)
     ]
     existing = {f"id{i}": {"text": "body", "source": "a.md", "title": "OLD"} for i in range(5)}
     res = upsert_markdown_chunks(store, _Prov(), chunks, existing_payloads=existing)

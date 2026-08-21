@@ -94,10 +94,12 @@ def test_rate_limiter_throttles_over_rate():
 
 def test_rate_limiter_isolates_tenants():
     clock = _Clock()
-    store = _Store({
-        "a": TenantQuota(max_rps=1.0, burst=1),
-        "b": TenantQuota(max_rps=1.0, burst=1),
-    })
+    store = _Store(
+        {
+            "a": TenantQuota(max_rps=1.0, burst=1),
+            "b": TenantQuota(max_rps=1.0, burst=1),
+        }
+    )
     lim = RateLimiter(store, clock=clock)
     lim.check("a")
     lim.check("b")  # b's bucket is independent of a's

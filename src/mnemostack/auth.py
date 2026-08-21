@@ -38,6 +38,7 @@ log = logging.getLogger(__name__)
 class KeyStoreError(RuntimeError):
     """The key store is unreadable/corrupt — management ops surface this loudly."""
 
+
 #: The full set of scopes. ``admin`` is a superset (see ``Principal.can``).
 SCOPES = frozenset({"read", "write", "admin"})
 
@@ -86,11 +87,7 @@ def _is_well_formed_hash(h: Any) -> bool:
     """Whether ``h`` has the shape ``hash_key`` produces — a 64-char lowercase hex
     SHA-256 digest. A record whose hash isn't this can never match any real key
     (so it can't authenticate), regardless of what ``compare_digest`` is handed."""
-    return (
-        isinstance(h, str)
-        and len(h) == 64
-        and all(c in "0123456789abcdef" for c in h)
-    )
+    return isinstance(h, str) and len(h) == 64 and all(c in "0123456789abcdef" for c in h)
 
 
 def _is_usable_admin(rec: dict[str, Any]) -> bool:
@@ -153,9 +150,7 @@ def make_key_store(keys_file: str | Path | None = None) -> KeyStore:
 
         url = os.environ.get("MNEMOSTACK_OPENBAO_URL")
         if not url:
-            raise KeyStoreError(
-                "MNEMOSTACK_KEYSTORE=openbao requires MNEMOSTACK_OPENBAO_URL"
-            )
+            raise KeyStoreError("MNEMOSTACK_KEYSTORE=openbao requires MNEMOSTACK_OPENBAO_URL")
         token = (
             os.environ.get("MNEMOSTACK_OPENBAO_TOKEN")
             or os.environ.get("BAO_TOKEN")
@@ -177,9 +172,7 @@ def make_key_store(keys_file: str | Path | None = None) -> KeyStore:
             cache_ttl=cache_ttl,
             timeout=timeout,
         )
-    raise KeyStoreError(
-        f"unknown MNEMOSTACK_KEYSTORE backend {backend!r} (valid: file, openbao)"
-    )
+    raise KeyStoreError(f"unknown MNEMOSTACK_KEYSTORE backend {backend!r} (valid: file, openbao)")
 
 
 class FileKeyStore:
@@ -272,9 +265,7 @@ class FileKeyStore:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
         except OSError as e:
-            raise KeyStoreError(
-                f"cannot create key store directory {self.path.parent}: {e}"
-            ) from e
+            raise KeyStoreError(f"cannot create key store directory {self.path.parent}: {e}") from e
         try:
             import fcntl
         except ImportError:  # pragma: no cover - non-POSIX
@@ -338,9 +329,7 @@ class FileKeyStore:
 
     # ---- management ----
 
-    def issue(
-        self, tenant: str, scopes: list[str] | str, label: str = ""
-    ) -> tuple[str, str]:
+    def issue(self, tenant: str, scopes: list[str] | str, label: str = "") -> tuple[str, str]:
         """Create a key for a tenant. Returns (key_id, plaintext_key).
 
         The plaintext is returned ONCE and never stored — only its hash is

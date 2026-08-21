@@ -145,8 +145,7 @@ def test_markdown_chunker_keeps_text_before_first_header():
     text = "Intro lead-in paragraph.\n\n# Section\n\nSection body."
     chunks = MarkdownChunker(chunk_size=10000).chunk(text)
     assert any(
-        c.metadata["heading_path"] == [] and "Intro lead-in paragraph" in c.text
-        for c in chunks
+        c.metadata["heading_path"] == [] and "Intro lead-in paragraph" in c.text for c in chunks
     )
     # the section content is still present too
     assert any(c.metadata["heading_path"] == ["Section"] for c in chunks)

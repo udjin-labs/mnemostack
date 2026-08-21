@@ -125,7 +125,9 @@ def test_graph_delete_tenant_cypher_is_tenant_confined():
     # dry_run only counts
     calls.clear()
     store.delete_tenant("acme", dry_run=True)
-    assert len(calls) == 3 and all("DETACH" not in c and not c.strip().endswith("DELETE r") for c, _ in calls)
+    assert len(calls) == 3 and all(
+        "DETACH" not in c and not c.strip().endswith("DELETE r") for c, _ in calls
+    )
 
     with pytest.raises(ValueError):
         store.delete_tenant("")
@@ -280,9 +282,7 @@ def test_tenant_rm_deletes_graph_when_uri_given(monkeypatch, tmp_path):
 
     fake = _FakeGraph()
     monkeypatch.setattr("mnemostack.graph.factory.make_graph_store", lambda *a, **k: fake)
-    rc = cli.cmd_tenant_rm(
-        _rm_ns(tmp_path, tenant="alpha", yes=True, memgraph_uri="bolt://x:7687")
-    )
+    rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", yes=True, memgraph_uri="bolt://x:7687"))
     assert rc == 0
     # counted (dry_run=True) then deleted (dry_run=False), tenant-confined
     assert fake.calls == [("alpha", True), ("alpha", False)]
@@ -301,9 +301,7 @@ def test_tenant_rm_external_keystore_requires_flag_then_sweeps(monkeypatch, tmp_
     assert "external store" in err and "--external-keys-revoked" in err
     assert store.count(tenant="alpha") == 2  # data untouched
     # WITH the flag (operator revoked the key in OpenBao first): sweep proceeds.
-    rc2 = cli.cmd_tenant_rm(
-        _rm_ns(tmp_path, tenant="alpha", yes=True, external_keys_revoked=True)
-    )
+    rc2 = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", yes=True, external_keys_revoked=True))
     assert rc2 == 0
     assert "treated as revoked" in capsys.readouterr().out
     assert store.count(tenant="alpha") == 0
@@ -399,9 +397,7 @@ def test_tenant_rm_continues_when_graph_down(monkeypatch, tmp_path, capsys):
         raise ConnectionError("memgraph down")
 
     monkeypatch.setattr("mnemostack.graph.factory.make_graph_store", _boom)
-    rc = cli.cmd_tenant_rm(
-        _rm_ns(tmp_path, tenant="alpha", yes=True, memgraph_uri="bolt://x:7687")
-    )
+    rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", yes=True, memgraph_uri="bolt://x:7687"))
     assert rc == 1
     assert "FAILED: graph" in capsys.readouterr().err
     # vector + keys still cleaned despite the graph outage
@@ -542,6 +538,7 @@ def test_tenant_rm_revokes_keys_before_data_deletion(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cli, "VectorStore", lambda **_: _OrderStore())
     ks, _fs = _seed_config(tmp_path)
+
     class _OrderKeys:
         def list_keys(self):
             return ks.list_keys()
@@ -581,10 +578,20 @@ def test_lifecycle_commands_tolerate_malformed_stack_config(monkeypatch, tmp_pat
     store = _seeded_store()
     monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
     out = tmp_path / "dump.jsonl"
-    rc = cli.main([
-        "tenant-export", "--tenant", "alpha", "-o", str(out), "--no-vectors",
-        "--qdrant", "http://localhost:6333", "--collection", "mt",
-    ])
+    rc = cli.main(
+        [
+            "tenant-export",
+            "--tenant",
+            "alpha",
+            "-o",
+            str(out),
+            "--no-vectors",
+            "--qdrant",
+            "http://localhost:6333",
+            "--collection",
+            "mt",
+        ]
+    )
     assert rc == 0
     captured = capsys.readouterr()
     assert "config failed to load" in captured.err  # warned, not aborted
@@ -703,6 +710,7 @@ def test_tenant_rm_revocation_write_failure_aborts_sweep(monkeypatch, tmp_path, 
 
         def revoke_tenant(self, tenant, **kw):
             from mnemostack.auth import KeyStoreError
+
             raise KeyStoreError("read-only file system")  # ...but not writable
 
     monkeypatch.setattr(cli, "_keys_store", lambda _a: _BrokenWrite())
@@ -718,10 +726,18 @@ def test_config_fallback_requires_graph_flag_when_env_graph_set(monkeypatch, tmp
     # not silently drop the graph from the sweep — require --memgraph-uri too.
     monkeypatch.setenv("MNEMOSTACK_TOKEN_BUDGET", "notint")
     monkeypatch.setenv("MNEMOSTACK_MEMGRAPH_URI", "bolt://prod-graph:7687")
-    rc = cli.main([
-        "tenant-rm", "--tenant", "alpha", "--yes",
-        "--qdrant", "http://localhost:6333", "--collection", "mt",
-    ])
+    rc = cli.main(
+        [
+            "tenant-rm",
+            "--tenant",
+            "alpha",
+            "--yes",
+            "--qdrant",
+            "http://localhost:6333",
+            "--collection",
+            "mt",
+        ]
+    )
     assert rc == 2
     assert "--memgraph-uri" in capsys.readouterr().err
 
@@ -753,11 +769,20 @@ def test_config_fallback_seeds_graph_auth_from_env(monkeypatch, tmp_path, capsys
     monkeypatch.setattr("mnemostack.graph.factory.make_graph_store", _capture)
     store = _seeded_store()
     monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
-    rc = cli.main([
-        "tenant-rm", "--tenant", "alpha", "--yes",
-        "--qdrant", "http://localhost:6333", "--collection", "mt",
-        "--memgraph-uri", "bolt://g:7687",
-    ])
+    rc = cli.main(
+        [
+            "tenant-rm",
+            "--tenant",
+            "alpha",
+            "--yes",
+            "--qdrant",
+            "http://localhost:6333",
+            "--collection",
+            "mt",
+            "--memgraph-uri",
+            "bolt://g:7687",
+        ]
+    )
     assert rc == 0
     assert seen == {"user": "neo4j", "password": "s3cret"}  # env creds threaded through
 
@@ -771,10 +796,18 @@ def test_config_fallback_requires_graph_flag_for_GRAPH_URI_alias(monkeypatch, tm
     # silently drops out of the sweep.
     monkeypatch.setenv("MNEMOSTACK_TOKEN_BUDGET", "notint")
     monkeypatch.setenv("MNEMOSTACK_GRAPH_URI", "bolt://prod-graph:7687")
-    rc = cli.main([
-        "tenant-rm", "--tenant", "alpha", "--yes",
-        "--qdrant", "http://localhost:6333", "--collection", "mt",
-    ])
+    rc = cli.main(
+        [
+            "tenant-rm",
+            "--tenant",
+            "alpha",
+            "--yes",
+            "--qdrant",
+            "http://localhost:6333",
+            "--collection",
+            "mt",
+        ]
+    )
     assert rc == 2
     assert "--memgraph-uri" in capsys.readouterr().err
 
@@ -862,9 +895,7 @@ def test_tenant_rm_external_warns_about_verify_cache(monkeypatch, tmp_path, caps
     monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
     _seed_config(tmp_path)
     monkeypatch.setenv("MNEMOSTACK_KEYSTORE", "openbao")
-    rc = cli.cmd_tenant_rm(
-        _rm_ns(tmp_path, tenant="alpha", yes=True, external_keys_revoked=True)
-    )
+    rc = cli.cmd_tenant_rm(_rm_ns(tmp_path, tenant="alpha", yes=True, external_keys_revoked=True))
     assert rc == 0
     assert "verify cache expires" in capsys.readouterr().err
 
@@ -899,10 +930,18 @@ def test_tenant_rm_primary_path_uses_configured_graph(monkeypatch, tmp_path, cap
 
     monkeypatch.setattr("mnemostack.graph.factory.make_graph_store", lambda *a, **k: _G())
     # no --memgraph-uri on the CLI, but the config has one -> it's swept
-    rc = cli.main([
-        "tenant-rm", "--tenant", "alpha", "--yes",
-        "--qdrant", "http://localhost:6333", "--collection", "mt",
-    ])
+    rc = cli.main(
+        [
+            "tenant-rm",
+            "--tenant",
+            "alpha",
+            "--yes",
+            "--qdrant",
+            "http://localhost:6333",
+            "--collection",
+            "mt",
+        ]
+    )
     assert rc == 0
     assert called.get("uri_used") is True  # the configured graph was actually swept
 
@@ -929,10 +968,18 @@ def test_tenant_rm_empty_config_graph_uri_is_disabled_not_rejected(monkeypatch, 
         raise AssertionError("make_graph_store called for an empty config graph.uri")
 
     monkeypatch.setattr("mnemostack.graph.factory.make_graph_store", _boom)
-    rc = cli.main([
-        "tenant-rm", "--tenant", "alpha", "--yes",
-        "--qdrant", "http://localhost:6333", "--collection", "mt",
-    ])
+    rc = cli.main(
+        [
+            "tenant-rm",
+            "--tenant",
+            "alpha",
+            "--yes",
+            "--qdrant",
+            "http://localhost:6333",
+            "--collection",
+            "mt",
+        ]
+    )
     assert rc == 0
     err = capsys.readouterr().err
     assert "empty value" not in err  # not rejected as an explicit-empty flag
@@ -1071,23 +1118,43 @@ def test_config_fallback_requires_explicit_graph_decision(monkeypatch, tmp_path,
     monkeypatch.setenv("MNEMOSTACK_TOKEN_BUDGET", "notint")  # unrelated bad value
     monkeypatch.delenv("MNEMOSTACK_GRAPH_URI", raising=False)
     monkeypatch.delenv("MNEMOSTACK_MEMGRAPH_URI", raising=False)
-    rc = cli.main([
-        "tenant-rm", "--tenant", "alpha", "--yes",
-        "--qdrant", "http://localhost:6333", "--collection", "mt",
-    ])
+    rc = cli.main(
+        [
+            "tenant-rm",
+            "--tenant",
+            "alpha",
+            "--yes",
+            "--qdrant",
+            "http://localhost:6333",
+            "--collection",
+            "mt",
+        ]
+    )
     assert rc == 2
     assert "--no-graph" in capsys.readouterr().err
 
     # --no-graph makes the vector-only intent explicit and lets it proceed
     store = _seeded_store()
     monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
-    rc2 = cli.main([
-        "tenant-rm", "--tenant", "alpha", "--yes", "--no-graph",
-        "--qdrant", "http://localhost:6333", "--collection", "mt",
-        "--keys-file", str(tmp_path / "k.json"),
-        "--quotas-file", str(tmp_path / "q.json"),
-        "--state-path", str(tmp_path / "s.json"),
-    ])
+    rc2 = cli.main(
+        [
+            "tenant-rm",
+            "--tenant",
+            "alpha",
+            "--yes",
+            "--no-graph",
+            "--qdrant",
+            "http://localhost:6333",
+            "--collection",
+            "mt",
+            "--keys-file",
+            str(tmp_path / "k.json"),
+            "--quotas-file",
+            str(tmp_path / "q.json"),
+            "--state-path",
+            str(tmp_path / "s.json"),
+        ]
+    )
     assert rc2 == 0
     assert store.count(tenant="alpha") == 0
 
@@ -1103,8 +1170,7 @@ def test_no_graph_flag_skips_configured_graph(monkeypatch, tmp_path, capsys):
         lambda *a, **k: called.__setitem__("graph", True),
     )
     rc = cli.cmd_tenant_rm(
-        _rm_ns(tmp_path, tenant="alpha", yes=True, no_graph=True,
-               memgraph_uri="bolt://x:7687")
+        _rm_ns(tmp_path, tenant="alpha", yes=True, no_graph=True, memgraph_uri="bolt://x:7687")
     )
     assert rc == 0
     assert called["graph"] is False  # graph store never even constructed
@@ -1119,8 +1185,9 @@ def test_state_path_tilde_expanded_in_preview(monkeypatch, tmp_path):
     fake_home = tmp_path / "home"
     (fake_home / ".local").mkdir(parents=True)
     monkeypatch.setenv("HOME", str(fake_home))
-    monkeypatch.setattr(os.path, "expanduser",
-                        lambda p: p.replace("~", str(fake_home)) if isinstance(p, str) else p)
+    monkeypatch.setattr(
+        os.path, "expanduser", lambda p: p.replace("~", str(fake_home)) if isinstance(p, str) else p
+    )
     store = _seeded_store()
     monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
     ks = FileKeyStore(tmp_path / "keys.json")

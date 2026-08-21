@@ -151,8 +151,13 @@ def markdown_quota_check(
 
     def _check(inserts: int, failed_sources: set[str]) -> None:
         removed = markdown_prune_count(
-            existing_payloads, chunks, visited_sources, prune=prune, full_root=full_root,
-            failed_sources=failed_sources, md_owned_only=md_owned_only,
+            existing_payloads,
+            chunks,
+            visited_sources,
+            prune=prune,
+            full_root=full_root,
+            failed_sources=failed_sources,
+            md_owned_only=md_owned_only,
         )
         enforce_points_quota(tenant, store.count(tenant=tenant), inserts - removed, max_points)
 
@@ -284,9 +289,7 @@ def upsert_markdown_chunks(
                 # final check (back at A) would never notice.
                 if start and not _fp_unchanged():
                     _raise_fp_changed()
-                group_embedded = _embed_group(
-                    new_chunks[start : start + embedding_batch_size]
-                )
+                group_embedded = _embed_group(new_chunks[start : start + embedding_batch_size])
                 if group_embedded and not _fp_unchanged():
                     _raise_fp_changed()
                 for cid, vec, payload in group_embedded:
@@ -368,17 +371,13 @@ def upsert_markdown_chunks(
     return res
 
 
-def build_link_map(
-    col: MarkdownCollection, failed_sources: set[str]
-) -> dict[str, list[str]]:
+def build_link_map(col: MarkdownCollection, failed_sources: set[str]) -> dict[str, list[str]]:
     """Map each (non-failed) source to its de-duplicated outgoing link targets.
 
     Every visited source is seeded (even with no links) so ``sync_file_links``
     clears stale ``LINKS_TO`` edges of a file whose links were all removed.
     """
-    by_source: dict[str, list[str]] = {
-        s: [] for s in col.sources if s not in failed_sources
-    }
+    by_source: dict[str, list[str]] = {s: [] for s in col.sources if s not in failed_sources}
     for edge in col.edges:
         if edge.source in failed_sources:
             continue
@@ -501,12 +500,23 @@ class MarkdownSyncer:
         # full_root=False since a single file can't observe corpus-wide deletions.
         mp = self.max_points_resolver() if self.max_points_resolver is not None else None
         check = markdown_quota_check(
-            self.store, self.tenant, mp, existing, chunks, set(col.sources),
-            prune=True, full_root=False, md_owned_only=True,  # _prune_markdown_stale filters _md_keys
+            self.store,
+            self.tenant,
+            mp,
+            existing,
+            chunks,
+            set(col.sources),
+            prune=True,
+            full_root=False,
+            md_owned_only=True,  # _prune_markdown_stale filters _md_keys
         )
         cs = upsert_markdown_chunks(
-            self.store, self.provider, chunks, existing,
-            tenant=self.tenant, before_upsert=check,
+            self.store,
+            self.provider,
+            chunks,
+            existing,
+            tenant=self.tenant,
+            before_upsert=check,
             embedding_batch_size=self.embedding_batch_size,
         )
 
@@ -605,9 +615,7 @@ class MarkdownSyncer:
             tenant=self.tenant,
         )
         for src, targets in build_link_map(col, set()).items():
-            self.graph.sync_file_links(
-                src, targets, index_root=self.index_root, **self._tkw
-            )
+            self.graph.sync_file_links(src, targets, index_root=self.index_root, **self._tkw)
 
     def remove_file(self, path: str | Path) -> FileSyncResult:
         """Drop a deleted file's chunks and clear its outgoing graph links."""
@@ -618,9 +626,7 @@ class MarkdownSyncer:
         # source again and retries — pruning the vector first would orphan the
         # graph edges with no record left to retry from.
         if self.graph is not None:
-            self.graph.sync_file_links(
-                source, [], index_root=self.index_root, **self._tkw
-            )
+            self.graph.sync_file_links(source, [], index_root=self.index_root, **self._tkw)
         pruned = self._prune_markdown_stale({source: set()})
         return FileSyncResult(source=source, pruned=pruned)
 
@@ -641,9 +647,7 @@ class MarkdownSyncer:
         # record) are eligible, so a markdown watcher never prunes chunks the
         # generic `index` command wrote under the same collection/root.
         sources: set[str] = set()
-        for hit in self.store.scroll(
-            filters={"index_root": self.index_root}, **self._tkw
-        ):
+        for hit in self.store.scroll(filters={"index_root": self.index_root}, **self._tkw):
             payload = hit.payload or {}
             source = payload.get("source")
             if source and payload.get("_md_keys"):

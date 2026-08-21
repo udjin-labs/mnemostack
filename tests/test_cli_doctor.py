@@ -41,7 +41,13 @@ class _FakeLLM:
 
 
 def _fake_qdrant_cls(
-    *, reachable=True, exists=True, count=5, size=8, created=None, coll_error=None,
+    *,
+    reachable=True,
+    exists=True,
+    count=5,
+    size=8,
+    created=None,
+    coll_error=None,
     payload_schema=None,
 ):
     """A QdrantClient stand-in. `created` (a list) records ensure_collection-style
@@ -298,7 +304,10 @@ def test_doctor_lists_payload_indexes(patched, capsys):
     patched(
         provider=_FakeProvider(dim=8, healthy=True),
         qdrant_cls=_fake_qdrant_cls(
-            reachable=True, exists=True, count=5, size=8,
+            reachable=True,
+            exists=True,
+            count=5,
+            size=8,
             payload_schema={
                 "tenant_id": SimpleNamespace(data_type=PayloadSchemaType.KEYWORD),
                 "captured": SimpleNamespace(data_type=PayloadSchemaType.DATETIME),

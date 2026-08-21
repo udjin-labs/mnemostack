@@ -39,7 +39,9 @@ def test_provider_kwargs_routes_knobs_only_to_known_providers():
 
 
 def test_ollama_kwargs_reach_the_provider():
-    p = get_provider("ollama", **provider_kwargs("ollama", ollama_host="http://198.51.100.7:11434", timeout=77))
+    p = get_provider(
+        "ollama", **provider_kwargs("ollama", ollama_host="http://198.51.100.7:11434", timeout=77)
+    )
     assert p.host == "http://198.51.100.7:11434"
     assert p.timeout == 77
 
@@ -254,14 +256,40 @@ def test_new_knobs_stay_at_the_positional_tail():
     # insertion pass as long as the newest knob was re-appended — and a
     # mid-insert is exactly the failure this guards (a positional caller's
     # graph_user landing in someone else's field).
-    settled_prefix = ["provider_name", "embedding_model", "llm_name", "llm_model",
-        "collection", "qdrant_url", "graph_uri", "graph_health_timeout", "graph_timeout",
-        "bm25_paths", "vector_floor", "rerank_mode", "token_budget", "state_path",
-        "auto_record_ior", "graph_user", "graph_password", "graph_database",
-        "qdrant_health_timeout", "auth_enabled", "keys_file", "quotas_file", "text_key",
-        "timestamp_key", "timestamp_format", "text_search", "text_search_fields",
-        "resolve_roots", "ollama_host", "embedding_timeout", "record_access",
-        "retry_on_weak", "retry_weak_below",
+    settled_prefix = [
+        "provider_name",
+        "embedding_model",
+        "llm_name",
+        "llm_model",
+        "collection",
+        "qdrant_url",
+        "graph_uri",
+        "graph_health_timeout",
+        "graph_timeout",
+        "bm25_paths",
+        "vector_floor",
+        "rerank_mode",
+        "token_budget",
+        "state_path",
+        "auto_record_ior",
+        "graph_user",
+        "graph_password",
+        "graph_database",
+        "qdrant_health_timeout",
+        "auth_enabled",
+        "keys_file",
+        "quotas_file",
+        "text_key",
+        "timestamp_key",
+        "timestamp_format",
+        "text_search",
+        "text_search_fields",
+        "resolve_roots",
+        "ollama_host",
+        "embedding_timeout",
+        "record_access",
+        "retry_on_weak",
+        "retry_weak_below",
     ]
     assert field_names[: len(settled_prefix)] == settled_prefix, (
         "a field was inserted or reordered inside the settled prefix; append instead"
@@ -441,6 +469,7 @@ def test_resilient_ladder_retries_per_item_on_wholesale_batch_failure():
         [0.1, 0.2],
         [0.1, 0.2],
     ]
+
     # A single failed item inside an otherwise good batch stays a single
     # failure — no wholesale retry.
     class _OneBad(_BatchCountingProvider):
@@ -641,9 +670,7 @@ def test_proxy_json_404_still_engages_legacy_fallback(monkeypatch):
 def test_ollama_embed_batch_accepts_and_ignores_max_workers(monkeypatch):
     def fake_urlopen(req, timeout=None):
         payload = jsonlib.loads(req.data.decode())
-        return _Resp(
-            jsonlib.dumps({"embeddings": [[0.1] for _ in payload["input"]]}).encode()
-        )
+        return _Resp(jsonlib.dumps({"embeddings": [[0.1] for _ in payload["input"]]}).encode())
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     provider = get_provider("ollama")

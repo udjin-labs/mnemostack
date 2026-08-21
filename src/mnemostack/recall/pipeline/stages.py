@@ -538,9 +538,7 @@ class CuriosityBoost(Stage):
             # including epoch 0, which is a REAL very-old instant, not
             # missing data (hence no truthiness test on the value itself).
             ts = (
-                parse_payload_instant(
-                    created, numeric_unit=numeric_unit_for(self.timestamp_format)
-                )
+                parse_payload_instant(created, numeric_unit=numeric_unit_for(self.timestamp_format))
                 if created is not None
                 else None
             )

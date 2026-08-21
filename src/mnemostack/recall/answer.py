@@ -42,6 +42,7 @@ def _display_ts(ts: Any, numeric_unit: str = "auto") -> str:
         return dt.strftime("%Y-%m-%d")
     return dt.strftime("%Y-%m-%d %H:%M")
 
+
 if TYPE_CHECKING:
     from .recaller import Recaller
 
@@ -492,9 +493,7 @@ class AnswerGenerator:
                 )
             missing = [ph for ph in placeholders if ph not in template]
             if missing:
-                raise ValueError(
-                    f"prompt override {name!r} must contain {missing} placeholders"
-                )
+                raise ValueError(f"prompt override {name!r} must contain {missing} placeholders")
 
     def _localize_abstention(self, template: str) -> str:
         """Swap the literal English abstention marker for the configured one."""
@@ -558,9 +557,7 @@ class AnswerGenerator:
         memories = self._cap_memories(memories, token_budget, token_counter)
 
         if category is not None and category not in _PROMPT_BY_CATEGORY:
-            raise ValueError(
-                f"unknown category {category!r}; valid: {sorted(_PROMPT_BY_CATEGORY)}"
-            )
+            raise ValueError(f"unknown category {category!r}; valid: {sorted(_PROMPT_BY_CATEGORY)}")
 
         prompt_template = self.prompt_template
         explicit_category = category
@@ -738,9 +735,7 @@ class AnswerGenerator:
         # HyDE-style synthetic DOCUMENT — it must be embedded in the document
         # space or an asymmetric profile would put it on the wrong side.
         try:
-            vectors = embed_queries_via(
-                self.recaller.embedding, [query, *expanded_texts[:2]]
-            )
+            vectors = embed_queries_via(self.recaller.embedding, [query, *expanded_texts[:2]])
             # Batch-of-one on purpose: this path has always been batch-only,
             # so a provider implementing just embed_batch keeps working.
             vectors.extend(embed_documents_via(self.recaller.embedding, [expanded_texts[2]]))
@@ -970,9 +965,7 @@ class AnswerGenerator:
             context_tokens_estimate=pool_tokens,
         )
 
-    def _sources_for_items(
-        self, items: list[str], contributing: list[RecallResult]
-    ) -> list[str]:
+    def _sources_for_items(self, items: list[str], contributing: list[RecallResult]) -> list[str]:
         """Source attribution for extracted items.
 
         The extract output carries no item→memory mapping, so provenance is

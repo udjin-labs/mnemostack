@@ -17,7 +17,9 @@ class _ListRetriever(Retriever):
 
     def search(self, query, limit=10, filters=None):
         return [
-            RecallResult(id=r.id, text=r.text, score=r.score, payload=dict(r.payload), sources=[self.name])
+            RecallResult(
+                id=r.id, text=r.text, score=r.score, payload=dict(r.payload), sources=[self.name]
+            )
             for r in self._results[:limit]
         ]
 

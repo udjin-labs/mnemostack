@@ -415,9 +415,7 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
         # hides the Keys panel (quotas remain manageable either way).
         key_store = make_key_store(cfg.keys_file)
         quota_store = FileQuotaStore(cfg.quotas_file)
-    keys_manageable = all(
-        hasattr(key_store, m) for m in ("issue", "revoke_guarded", "list_keys")
-    )
+    keys_manageable = all(hasattr(key_store, m) for m in ("issue", "revoke_guarded", "list_keys"))
     # Browse views (tenants / overview / records scroll) use count / scroll / facet
     # and need no embeddings, so don't construct the provider eagerly — that would
     # make `mnemostack inspect` require GEMINI_API_KEY (or the HF model/deps) just to
@@ -662,7 +660,12 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
             # older Qdrant can still browse.
             if not _qdrant_ok():
                 log.info("tenant facet failed, qdrant unreachable: %s", e)
-                return {"tenants": [], "ok": False, "error": "Qdrant unreachable", "version": __version__}
+                return {
+                    "tenants": [],
+                    "ok": False,
+                    "error": "Qdrant unreachable",
+                    "version": __version__,
+                }
             log.info("tenant facet unavailable, falling back to scroll: %s", e)
             try:
                 return {
@@ -766,7 +769,9 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
                 vec = _embed(q)
                 if scoped:
                     for hit in store.search(vec, limit=limit, filters=parsed, tenant=scoped):
-                        rows.append(_row(hit.id, hit.payload, score=hit.score, text_key=cfg.text_key))
+                        rows.append(
+                            _row(hit.id, hit.payload, score=hit.score, text_key=cfg.text_key)
+                        )
                 else:  # unscoped = legacy points only (no tenant_id)
                     res = store.client.query_points(
                         collection_name=cfg.collection,
@@ -776,7 +781,9 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
                         with_payload=True,
                     )
                     for pt in res.points:
-                        rows.append(_row(pt.id, pt.payload or {}, score=pt.score, text_key=cfg.text_key))
+                        rows.append(
+                            _row(pt.id, pt.payload or {}, score=pt.score, text_key=cfg.text_key)
+                        )
                 mode = "vector search"
             else:
                 if scoped:
@@ -846,9 +853,7 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
                 detail=f"unknown scope(s) {bad}; valid: {sorted(SCOPES)}",
             )
         try:
-            key_id, plaintext = ks.issue(
-                body.tenant.strip(), body.scopes, label=body.label
-            )
+            key_id, plaintext = ks.issue(body.tenant.strip(), body.scopes, label=body.label)
         except ValueError as e:  # bad tenant/scope input → client error
             raise HTTPException(status_code=400, detail=str(e)) from e
         except KeyStoreError as e:  # unreadable/corrupt store → server error (like the rest)
@@ -869,8 +874,13 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
             scopes=body.scopes,
             label=body.label,
         )
-        return {"id": key_id, "key": plaintext, "tenant": body.tenant.strip(),
-                "scopes": body.scopes, "label": body.label}
+        return {
+            "id": key_id,
+            "key": plaintext,
+            "tenant": body.tenant.strip(),
+            "scopes": body.scopes,
+            "label": body.label,
+        }
 
     @app.delete("/api/keys/{key_id}")
     def revoke_key(key_id: str, _p=_admin) -> dict[str, Any]:

@@ -145,8 +145,7 @@ def test_bm25_retriever_from_qdrant_finds_exact_token():
 def test_bm25_retriever_from_qdrant_uses_custom_tokenizer():
     def analyzer(text: str) -> list[str]:
         return [
-            {"forms": "form", "form": "form"}.get(token, token)
-            for token in text.lower().split()
+            {"forms": "form", "form": "form"}.get(token, token) for token in text.lower().split()
         ]
 
     client = FakeQdrantClient([point("a", {"text": "forms"})])
@@ -163,8 +162,7 @@ def test_bm25_retriever_from_qdrant_does_not_retokenize_custom_corpus():
     def analyzer(text: str) -> list[str]:
         calls.append(text)
         return [
-            {"forms": "form", "form": "form"}.get(token, token)
-            for token in text.lower().split()
+            {"forms": "form", "form": "form"}.get(token, token) for token in text.lower().split()
         ]
 
     client = FakeQdrantClient([point("a", {"text": "forms"})])

@@ -156,15 +156,21 @@ def test_instruct_separator_is_part_of_the_spec():
 
 def test_implicit_and_explicit_default_separator_fingerprint_identically():
     implicit = EmbeddingProfile(
-        name="p", version=1, model_patterns=(),
+        name="p",
+        version=1,
+        model_patterns=(),
         query_transform={"kind": "instruct", "instruction": "I"},
     )
     explicit = EmbeddingProfile(
-        name="p", version=1, model_patterns=(),
+        name="p",
+        version=1,
+        model_patterns=(),
         query_transform={"kind": "instruct", "instruction": "I", "separator": "\nQuery:"},
     )
     spaced = EmbeddingProfile(
-        name="p", version=1, model_patterns=(),
+        name="p",
+        version=1,
+        model_patterns=(),
         query_transform={"kind": "instruct", "instruction": "I", "separator": "\nQuery: "},
     )
     qi = query_profile_fingerprint("h", "m", implicit, 768)
@@ -227,10 +233,18 @@ def test_role_methods_are_bit_identical_for_symmetric_models():
     assert provider.embed_documents(["a", "b"]) == provider.embed_batch(["a", "b"])
     # And the primitives received the raw text, unmodified.
     assert provider.seen == [
-        "some question", "some question",
-        "some chunk", "some chunk",
-        "a", "b", "a", "b",
-        "a", "b", "a", "b",
+        "some question",
+        "some question",
+        "some chunk",
+        "some chunk",
+        "a",
+        "b",
+        "a",
+        "b",
+        "a",
+        "b",
+        "a",
+        "b",
     ]
 
 
@@ -304,7 +318,9 @@ def test_document_fingerprint_is_content_based_not_profile_identity():
 
 def test_document_fingerprint_ignores_query_transform():
     with_query = EmbeddingProfile(
-        name="p", version=1, model_patterns=(),
+        name="p",
+        version=1,
+        model_patterns=(),
         query_transform={"kind": "prefix", "prefix": "query: "},
     )
     without_query = EmbeddingProfile(name="p", version=1, model_patterns=())
@@ -319,7 +335,9 @@ def test_document_fingerprint_ignores_query_transform():
 def test_document_transform_change_changes_document_fingerprint():
     plain = EmbeddingProfile(name="p", version=1, model_patterns=())
     prefixed = EmbeddingProfile(
-        name="p", version=1, model_patterns=(),
+        name="p",
+        version=1,
+        model_patterns=(),
         document_transform={"kind": "prefix", "prefix": "passage: "},
     )
     assert document_space_fingerprint("h", "m", plain, 768) != document_space_fingerprint(

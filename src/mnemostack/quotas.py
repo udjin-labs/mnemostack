@@ -159,14 +159,14 @@ def _coerce_quota(rec: Any) -> TenantQuota:
         rps = None
     burst = d.get("burst")
     if burst is not None and (
-        isinstance(burst, bool) or not isinstance(burst, int) or burst < 1
+        isinstance(burst, bool)
+        or not isinstance(burst, int)
+        or burst < 1
         or not _usable_number(burst)
     ):
         log.warning("ignoring malformed burst %r in quota store", burst)
         burst = None
-    return TenantQuota(
-        max_points=mp, max_rps=float(rps) if rps is not None else None, burst=burst
-    )
+    return TenantQuota(max_points=mp, max_rps=float(rps) if rps is not None else None, burst=burst)
 
 
 class FileQuotaStore:
@@ -305,17 +305,27 @@ class FileQuotaStore:
         """
         if not tenant:
             raise ValueError("tenant is required")
-        if not isinstance(max_points, _Unset) and max_points is not None and (
-            not isinstance(max_points, int) or isinstance(max_points, bool) or max_points < 0
+        if (
+            not isinstance(max_points, _Unset)
+            and max_points is not None
+            and (not isinstance(max_points, int) or isinstance(max_points, bool) or max_points < 0)
         ):
             raise ValueError("max_points must be a non-negative integer")
-        if not isinstance(max_rps, _Unset) and max_rps is not None and (
-            not _usable_number(max_rps) or max_rps <= 0
+        if (
+            not isinstance(max_rps, _Unset)
+            and max_rps is not None
+            and (not _usable_number(max_rps) or max_rps <= 0)
         ):
             raise ValueError("max_rps must be a positive, finite number")
-        if not isinstance(burst, _Unset) and burst is not None and (
-            isinstance(burst, bool) or not isinstance(burst, int) or burst < 1
-            or not _usable_number(burst)
+        if (
+            not isinstance(burst, _Unset)
+            and burst is not None
+            and (
+                isinstance(burst, bool)
+                or not isinstance(burst, int)
+                or burst < 1
+                or not _usable_number(burst)
+            )
         ):
             raise ValueError("burst must be a positive integer the bucket can represent")
         with self._locked():
@@ -324,7 +334,8 @@ class FileQuotaStore:
             quota = TenantQuota(
                 max_points=cur.max_points if isinstance(max_points, _Unset) else max_points,
                 max_rps=(
-                    cur.max_rps if isinstance(max_rps, _Unset)
+                    cur.max_rps
+                    if isinstance(max_rps, _Unset)
                     else (float(max_rps) if max_rps is not None else None)
                 ),
                 burst=cur.burst if isinstance(burst, _Unset) else burst,
@@ -349,12 +360,14 @@ class FileQuotaStore:
         out: list[dict[str, Any]] = []
         for tenant in sorted(quotas):
             q = _coerce_quota(quotas[tenant])
-            out.append({
-                "tenant": tenant,
-                "max_points": q.max_points,
-                "max_rps": q.max_rps,
-                "burst": q.burst,
-            })
+            out.append(
+                {
+                    "tenant": tenant,
+                    "max_points": q.max_points,
+                    "max_rps": q.max_rps,
+                    "burst": q.burst,
+                }
+            )
         return out
 
 

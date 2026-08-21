@@ -310,7 +310,9 @@ def test_expansion_retry_splits_roles_between_queries_and_hypothetical():
         category_aware_prompts=False,
     )
     memory = type(
-        "R", (), {"id": "m", "text": "some memory", "score": 0.5, "payload": {}, "sources": ["vector"]}
+        "R",
+        (),
+        {"id": "m", "text": "some memory", "score": 0.5, "payload": {}, "sources": ["vector"]},
     )()
     gen.generate("a question", [memory])
 
@@ -459,6 +461,7 @@ def test_guard_refuses_legacy_when_provider_defaults_changed():
     err = recall_space_error(legacy_store, _RepooledProvider())
     assert err is not None and "does not reproduce" in err
     assert _guard_document_space(legacy_store, _RepooledProvider())[0] == 1
+
     # Same model with legacy-compatible settings still adopts.
     class _MeanProvider(_RepooledProvider):
         def _legacy_space_compatible(self) -> bool:
@@ -476,9 +479,7 @@ def test_registered_patterns_are_case_normalized():
 
     register_embedding_profile(
         "testprov-case",
-        EmbeddingProfile(
-            name="acme", version=1, model_patterns=("Acme/MyEmbed-*",)
-        ),
+        EmbeddingProfile(name="acme", version=1, model_patterns=("Acme/MyEmbed-*",)),
     )
     assert resolve_profile("testprov-case", "acme/myembed-v2").name == "acme"
     assert resolve_profile("testprov-case", "Acme/MyEmbed-v2").name == "acme"
@@ -579,9 +580,7 @@ def test_ingestor_stamps_the_guard_validated_fingerprint():
 
     emb = _Counting()
     store = _Store([])
-    Ingestor(embedding=emb, vector_store=store).ingest(
-        [IngestItem(text="hello", source="a.md")]
-    )
+    Ingestor(embedding=emb, vector_store=store).ingest([IngestItem(text="hello", source="a.md")])
     # guard + sandwich comparison + post-commit revalidation = 3, никакого
     # отдельного резолва под штамп.
     assert emb.resolutions == 3
@@ -674,10 +673,7 @@ def test_profile_override_without_dimensions_keeps_builtin_table():
                 model_patterns=("qwen3-embedding:0.6b",),
             ),
         )
-        assert (
-            resolve_profile("ollama", "qwen3-embedding:0.6b").name
-            == "qwen3-identity-override"
-        )
+        assert resolve_profile("ollama", "qwen3-embedding:0.6b").name == "qwen3-identity-override"
         assert known_dimension("ollama", "qwen3-embedding:0.6b") == 1024
     finally:
         profiles._PROFILES.clear()
@@ -1244,7 +1240,9 @@ def test_shared_query_embedding_with_instance_profile_override():
 
     inner = _AsymmetricProvider()
     inner.profile = EmbeddingProfile(
-        name="custom", version=1, model_patterns=(),
+        name="custom",
+        version=1,
+        model_patterns=(),
         query_transform={"kind": "prefix", "prefix": "X>"},
     )
     shim = _SharedQueryEmbedding(inner)
