@@ -592,11 +592,13 @@ class _WatchedLLM(LLMProvider):
     ) -> Any:
         response = self.llm.generate(prompt, max_tokens=max_tokens, temperature=temperature)
         # Read `ok` directly, like every other consumer in this codebase. A
-        # `getattr` hedge was tried and removed: a response without `ok`
-        # cannot reach a default here anyway, because `generate_variants`
-        # reads `resp.ok` itself a moment later and raises — landing on the
-        # failure path regardless. A guard that cannot fire is not defence,
-        # it is a claim the tests cannot check.
+        # `getattr` hedge was tried and removed: a response that cannot
+        # report `ok` raises HERE, on this line, before any default could
+        # be consulted — and even if this line were gone, `generate_variants`
+        # reads `resp.ok` itself a moment later and raises identically. The
+        # failure path is reached either way, so the hedge could not change
+        # an outcome. A guard that cannot fire is not defence, it is a claim
+        # the tests cannot check.
         if not response.ok:
             self.failed = True
         return response

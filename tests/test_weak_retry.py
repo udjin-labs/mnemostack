@@ -1625,11 +1625,14 @@ def test_an_empty_paraphrase_is_counted_but_not_as_a_degradation():
 
 
 def test_a_provider_that_cannot_report_at_all_takes_the_failure_path():
-    """A response with no `ok` never reaches a default in `_WatchedLLM`:
-    `generate_variants` reads `resp.ok` itself and raises, so the retry
-    lands on the failure path through the exception branch. Pinned because
-    it is the reason the wrapper reads `.ok` directly instead of hedging —
-    a guard that cannot fire is a claim no test can check."""
+    """End to end: a provider whose response cannot report `ok` leaves the
+    retry fail-open, counted, and tagged as a fault.
+
+    Deliberately NOT credited with pinning `_WatchedLLM`'s own `.ok` read —
+    a reviewer showed it passes with that read deleted, because
+    `generate_variants` reads `resp.ok` independently and raises the same
+    `AttributeError` into the same handler. Two independent reads guarantee
+    this behaviour; the wrapper's own is pinned separately below."""
     from mnemostack.observability.recorder import (
         InMemoryRecorder,
         NullRecorder,
@@ -1652,3 +1655,32 @@ def test_a_provider_that_cannot_report_at_all_takes_the_failure_path():
     assert "weak_retry:paraphrase_failed" in trace.degraded
     assert "weak_retry:no_variants" not in trace.notes  # not a healthy shrug
     assert rec.counters.get(("mnemostack.recall.weak_retry_failed",)) == 1.0
+
+
+def test_the_watcher_itself_refuses_a_verdict_it_cannot_read():
+    """The wrapper's OWN contract, unit-level, with the expander out of the
+    picture — because the end-to-end test above cannot see it: two
+    independent `.ok` reads produce the same outcome, so it passes with
+    this one deleted. What is pinned here is that `_WatchedLLM` never hands
+    back a response it could not judge, and never records such a response
+    as a success."""
+    import pytest as _pytest
+
+    from mnemostack.recall.retry import _WatchedLLM
+
+    class _Malformed:
+        def generate(self, *_a, **_k):
+            return type("R", (), {"text": "", "tokens_used": 0})()  # no `ok`
+
+    watched = _WatchedLLM(_Malformed())
+    with _pytest.raises(AttributeError):
+        watched.generate("prompt")
+    assert watched.failed is False  # never reached "failed", never claimed "fine"
+
+    class _Down:
+        def generate(self, *_a, **_k):
+            return type("R", (), {"ok": False, "text": "", "error": "503"})()
+
+    watched = _WatchedLLM(_Down())
+    watched.generate("prompt")
+    assert watched.failed is True  # the verdict it CAN read is recorded
