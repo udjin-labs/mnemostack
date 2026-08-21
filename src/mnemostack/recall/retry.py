@@ -43,6 +43,7 @@ from typing import Any
 from ..llm.base import LLMProvider
 from ..observability.recorder import counter
 from .flow import recall_flow
+from .recaller import is_floor_extra, memory_key
 
 #: Paraphrases per retry. Two is enough to change the wording materially;
 #: more multiplies retrieval cost for a query that has already failed.
@@ -205,7 +206,7 @@ def retry_weak_recall(
     # was on them, or "we kept your results" quietly means "we kept your
     # results with someone else's numbers and arms on them".
     original_state = [
-        (r, r.score, list(r.sources), dict(r.payload or {}), getattr(r, "from_vector_floor", False))
+        (r, r.score, list(r.sources), dict(r.payload or {}), getattr(r, "floor_score", None))
         for r in results
     ]
     by_id: dict[str, Any] = {}
@@ -301,7 +302,14 @@ def retry_weak_recall(
         # union is what makes it the pool the floor actually weighs. When
         # no pass carried one, nothing is prepended and the helper keeps
         # its own fallback (derive candidates from the results themselves).
-        pool: list[Any] = [_FloorPool(_as_canonical_ids(by_id, floor_pool))] if floor_pool else []
+        #
+        # The ids go over as they are. This used to rewrite them into the
+        # representation the survivors carried, because the floor deduped
+        # against the page by NATIVE id and could not see that `"1"` was
+        # the `1` already there. The floor keys through `memory_key` now
+        # (#168), so establishing agreement from this side is work whose
+        # effect nothing can observe.
+        pool: list[Any] = [_FloorPool(floor_pool)] if floor_pool else []
         merged = apply_floor(merged, pool + results + merged)
 
     if budget:
@@ -338,7 +346,7 @@ def retry_weak_recall(
         # and then drops one of the newcomers on an arbitrary tie-break
         # instead. What the caller is protected from is ending up with less
         # than they had, not from a re-ranking they opted into.
-        for result, score, sources, payload, from_floor in original_state:
+        for result, score, sources, payload, floor in original_state:
             result.score = score
             result.sources = sources
             result.payload = payload
@@ -346,7 +354,7 @@ def retry_weak_recall(
             # added: a restore that covers all but the newest channel is
             # how "we kept your results" starts quietly meaning something
             # else again.
-            result.from_vector_floor = from_floor
+            result.floor_score = floor
         return results, True
     gained = len(merged) - original_count
     if gained <= 0:
@@ -401,7 +409,7 @@ def _one_pass(by_id: dict[str, Any], hits: list[Any]) -> list[tuple[Any, float]]
             continue
         seen.add(key)
         item = _canonical(by_id, hit)
-        if not getattr(hit, "from_vector_floor", False):
+        if not is_floor_extra(hit):
             ranking.append((item, hit.score))
     return ranking
 
@@ -411,48 +419,17 @@ _FLOOR_CANDIDATES = "_vector_floor_candidates"
 
 
 def _memory_key(value: Any) -> str:
-    """THE identity rule of this module. Every id it keys on comes here.
+    """This module's handle on the stack's ONE identity rule.
 
-    A memory can come back as `1` from one pass and `"1"` from another, so
-    anything that asks "are these the same memory" has to ask it the same
-    way. Three separate places learned that lesson separately — the
-    "found something new" dict, a pass's own ranking, and the floor's
-    candidate pool — each after shipping a bug where one memory occupied
-    two slots of the caller's page. This function exists so a fourth place
-    cannot be added with a fresh answer: key through here, or you are
-    inventing a second notion of identity.
-
-    Two DISTINCT memories cannot collide under it. A string point id must
-    be a UUID in Qdrant (`Point id 1 is not a valid UUID`), ingest mints
-    ids as `str(uuid.UUID(...))`, and graph hits are namespaced by
-    `graph_result_id()`.
+    The rule itself lives beside `RecallResult` in `recaller.py`, where
+    every other keyer reaches it too — the vector floor learned the same
+    lesson this module did, in its own three places, and a rule stated
+    twice is a rule that drifts. Kept as a named function here so the AST
+    guard in the tests still has one exemption to point at: an id
+    stringified anywhere else in this module is a second notion of
+    identity, and that is what the guard exists to catch.
     """
-    return str(value)
-
-
-def _as_canonical_ids(by_id: dict[str, Any], candidates: Any) -> Any:
-    """The pool, speaking the survivors' id representation.
-
-    `Recaller._apply_vector_floor` dedupes against the results by NATIVE
-    id, so a candidate carrying `"1"` for a survivor carrying `1` is a
-    memory the floor cannot recognise as already present — it appends it,
-    and the caller's page shows one memory twice. Agreement cannot be
-    asked of the floor here (that blind spot is its own, tracked as
-    udjin-labs/mnemostack#168); it can be established BEFORE it runs, by
-    handing it the representation this retry settled on. Copied, not
-    mutated: these dicts live in the callers' payloads.
-    """
-    if not isinstance(candidates, list):
-        return candidates
-    spoken = []
-    for candidate in candidates:
-        if not isinstance(candidate, dict) or "id" not in candidate:
-            continue
-        canonical = by_id.get(_memory_key(candidate["id"]))
-        if canonical is not None and canonical.id != candidate["id"]:
-            candidate = {**candidate, "id": canonical.id}
-        spoken.append(candidate)
-    return spoken
+    return memory_key(value)
 
 
 class _FloorPool:
@@ -568,12 +545,12 @@ def _canonical(by_id: dict[str, Any], result: Any) -> Any:
         by_id[key] = result
         return result
     if incumbent is not result:
-        if not getattr(result, "from_vector_floor", False):
+        if not is_floor_extra(result):
             # This pass RANKED it. The incumbent may have reached the page
             # only because the floor guaranteed it, and that is exactly the
             # evidence a paraphrase can overturn — a memory the ranking
             # picks is not a floor extra, whichever pass picked it.
-            incumbent.from_vector_floor = False
+            incumbent.floor_score = None
         for source in getattr(result, "sources", []) or []:
             if source not in incumbent.sources:
                 incumbent.sources.append(source)

@@ -98,6 +98,49 @@ def _fetch_limit(base: int, include_invalidated: bool, as_of: str | None) -> int
     return base
 
 
+def is_floor_extra(result: Any) -> bool:
+    """Whether this result is on the page only because the floor put it there.
+
+    True while the score the floor stamped is still the score the result
+    carries. Anything that rescores it — a pipeline stage, a reranker, a
+    cross-query fusion — makes the two disagree, and the claim retires
+    without anyone having to notice that a re-ranking happened. That was
+    the unanswerable question (#169): a flag needs clearing, and the two
+    available proxies for "was this re-ranked" both lie. "A pipeline
+    object exists" lies because a pipeline can be composed entirely of
+    non-scoring stages; "a reranker exists" lies because
+    `apply_rerank_safe` is fail-open, so a reranker that raised leaves one
+    configured and nothing reranked.
+
+    Errs conservative: a stage that re-ranks without changing this result's
+    score leaves the claim standing, which costs the result a vote in a
+    weak-recall merge but never lets a guaranteed extra outrank a genuine
+    hit.
+    """
+    stamped = getattr(result, "floor_score", None)
+    return stamped is not None and stamped == getattr(result, "score", None)
+
+
+def memory_key(value: Any) -> str:
+    """THE identity rule for a memory. Every id this stack keys on comes here.
+
+    One memory can come back as `1` from one retriever and `"1"` from
+    another, so anything asking "are these the same memory" has to ask it
+    the same way. Four places learned that separately — the weak-retry's
+    "found something new" dict, a retry pass's own ranking, the vector
+    floor's candidate pool, and the floor's dedup against the page it is
+    given — and each was found the same way: one memory occupying two
+    slots of a caller's page. The rule lives beside `RecallResult` so a
+    fifth place cannot be added with a fresh answer.
+
+    Two DISTINCT memories cannot collide under it. A string point id must
+    be a UUID in Qdrant (`Point id 1 is not a valid UUID`), ingest mints
+    ids as `str(uuid.UUID(...))`, and graph hits are namespaced by
+    `graph_result_id()`.
+    """
+    return str(value)
+
+
 @dataclass
 class RecallResult:
     """Unified result from hybrid recall.
@@ -111,11 +154,13 @@ class RecallResult:
     use it as a citation handle (``[id:<...>]``) and later resolve it back to
     the full record via storage-specific helpers.
 
-    ``from_vector_floor`` is set on a result the vector floor APPENDED —
-    one that reaches the caller because the floor guarantees it, not
-    because the ranking chose it. Absent (falsy) on everything else, and
-    deliberately an attribute rather than payload: consumers that treat a
-    result list as a ranking need it, clients do not.
+    ``floor_score`` records what the vector floor stamped on a result it
+    APPENDED — one that reaches the caller because the floor guarantees
+    it, not because the ranking chose it. Ask ``is_floor_extra`` rather
+    than reading the field: the answer is "the floor put it here AND
+    nothing has rescored it since", which is a fact about the pair, not
+    about a flag. Deliberately an attribute rather than payload: consumers
+    that treat a result list as a ranking need it, clients do not.
 
     The ``sources`` list records which retrievers contributed this result
     (e.g. ``['bm25', 'vector']``) and is useful for observability and for
@@ -127,11 +172,18 @@ class RecallResult:
     score: float
     payload: dict[str, Any] = field(default_factory=dict)
     sources: list[str] = field(default_factory=list)  # ['bm25', 'vector']
-    #: Appended by the vector floor rather than chosen by the ranking.
-    #: Appended at the TAIL of this dataclass on purpose: positional
-    #: construction of a RecallResult is common, so a field inserted above
-    #: would silently land someone's `sources` in a boolean.
-    from_vector_floor: bool = False
+    #: The score the vector floor stamped when it APPENDED this result,
+    #: or None if the floor never did. Read it through `is_floor_extra`,
+    #: never on its own: the pair (this, `score`) is what carries the
+    #: meaning, because the moment anything rescores the result the two
+    #: stop matching and the claim expires by itself. That is the whole
+    #: point — a plain flag has to be cleared by someone who knows a
+    #: re-ranking happened, and nothing on the recall path knows that.
+    #:
+    #: At the TAIL of this dataclass on purpose: positional construction
+    #: of a RecallResult is common, so a field inserted above would
+    #: silently land someone's `sources` in a float.
+    floor_score: float | None = None
 
 
 _SCHEMA_FIELD_DEFAULTS = (
@@ -1174,12 +1226,12 @@ class Recaller:
             return results
 
         output: list[RecallResult] = []
-        seen_ids: set[Any] = set()
+        seen_ids: set[str] = set()
         for result in results:
-            if result.id in seen_ids:
+            if memory_key(result.id) in seen_ids:
                 continue
             output.append(result)
-            seen_ids.add(result.id)
+            seen_ids.add(memory_key(result.id))
 
         def _raw_score(result: RecallResult) -> float:
             try:
@@ -1187,16 +1239,17 @@ class Recaller:
             except (TypeError, ValueError):
                 return result.score
 
-        best_by_id: dict[Any, RecallResult] = {}
+        best_by_id: dict[str, RecallResult] = {}
         for candidate in vector_candidates:
-            existing = best_by_id.get(candidate.id)
+            key = memory_key(candidate.id)
+            existing = best_by_id.get(key)
             if existing is None or _raw_score(candidate) > _raw_score(existing):
-                best_by_id[candidate.id] = candidate
+                best_by_id[key] = candidate
 
         strongest = sorted(best_by_id.values(), key=_raw_score, reverse=True)
         floor_score = min((result.score for result in output), default=None)
         for candidate in strongest[: self.vector_floor]:
-            if candidate.id in seen_ids:
+            if memory_key(candidate.id) in seen_ids:
                 continue
             if floor_score is not None:
                 candidate.score = floor_score * 0.999
@@ -1210,9 +1263,16 @@ class Recaller:
             # serializer's exclusion list. Only SET here — clearing needs
             # to know whether anything re-ranked the page in between, which
             # `recall_flow` knows and this method cannot.
-            candidate.from_vector_floor = True
+            # Remember the score we just stamped, not a bare flag. A flag
+            # would have to be cleared by whoever re-ranks the page later,
+            # and no one on this path can tell "a stage promoted this" from
+            # "nothing touched it" — a pipeline can be all non-scoring
+            # stages, and `apply_rerank_safe` is fail-open, so both proxies
+            # for "was this re-ranked" are wrong (#169). A score does not
+            # need clearing: rescoring the result IS the clearing.
+            candidate.floor_score = candidate.score
             output.append(candidate)
-            seen_ids.add(candidate.id)
+            seen_ids.add(memory_key(candidate.id))
         return output
 
     def apply_vector_floor_after_rerank(
