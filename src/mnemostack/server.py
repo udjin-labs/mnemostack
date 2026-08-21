@@ -658,6 +658,14 @@ class StatusResponse(BaseModel):
 # `temporal.no_parse` is deliberately excluded — a query with no parseable date
 # is routine, not a degradation.
 #
+# The weak-retry counters follow the two rules above rather than a new one:
+# `weak_retry_failed` is a paraphrase or a retry recall that raised, the same
+# class as `followup_rewrite_failed` and `query_expansion.errors` beside it, and
+# `weak_retry_unavailable` is the policy being enabled on a deployment with no
+# LLM to paraphrase with — the same "you asked for this and it cannot run"
+# signal as `answer.unavailable`. Neither is routine: they only fire at all on a
+# deployment that switched the feature on.
+#
 # `mnemostack.recall.degraded` is the counter the recall trace mirrors its
 # per-call degradation tags into (reranker unavailable/fallback, retriever
 # failures) — those live only on the trace and have no other counter, so
@@ -668,6 +676,8 @@ _DEGRADED_METRICS = frozenset(
         DEGRADED_COUNTER,
         "mnemostack.recall.fallback_triggered",
         "mnemostack.recall.followup_rewrite_failed",
+        "mnemostack.recall.weak_retry_failed",
+        "mnemostack.recall.weak_retry_unavailable",
         "mnemostack.query_expansion.errors",
         "mnemostack.answer.errors",
         "mnemostack.answer.unavailable",

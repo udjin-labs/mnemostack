@@ -931,3 +931,87 @@ def test_one_pass_gets_one_vote(monkeypatch):
     )
     assert retried is True and len(seen) == MAX_VARIANTS
     assert [str(r.id) for r in out] == ["C", "1", "A"]  # not ["1", "C", "A"]
+
+
+def test_a_later_pass_contributes_its_metadata_to_the_shared_memory(monkeypatch):
+    """PR #167 (bot P2): keeping the first arrival must not mean discarding
+    what later passes learned about that memory. A paraphrase may reach it
+    through a different arm, and may be the pass whose results carry the
+    vector floor's candidate list — dropping either under-credits the
+    documented `sources` field (so feedback reinforces the wrong arms) or
+    loses the floor's pool when only the later pass held it."""
+    first = _Hit("A")
+    first.sources = ["bm25"]
+    later = _with_candidates(_Hit("A"), "F")
+    later.sources = ["vector"]
+    later.payload["raw_vector_score"] = 0.77
+    _flow(
+        monkeypatch,
+        {"how did we decide auth": [first], "what was chosen for login": [later]},
+    )
+    out, _retried = retry_weak_recall(_floor_recaller(), "q", 1, llm=_LLM(), results=[])
+    kept = out[0]
+    assert kept is first  # the first arrival is still the object returned...
+    assert kept.sources == ["bm25", "vector"]  # ...credited with both arms
+    assert kept.payload["raw_vector_score"] == 0.77  # ...and the later payload
+    assert [r.id for r in out] == ["A", "F"]  # the floor's pool survived too
+
+
+def test_the_caller_s_objects_come_back_as_they_arrived(monkeypatch):
+    """The merge mutates the caller's own objects in place — score, and now
+    arms and payload — so the no-op path has to undo all three, not just
+    the score it used to."""
+    from mnemostack.recall.tokens import sum_tokens
+
+    small, large = _Hit("S", text="word " * 8), _Hit("H", text="word " * 100)
+    small.sources = ["bm25"]
+    budget = sum_tokens([small, large], None) + 2
+    newcomer_text = "word " * 104
+    _flow(
+        monkeypatch,
+        {
+            "how did we decide auth": [_Hit("N", text=newcomer_text)],
+            "what was chosen for login": [_with_candidates(_Hit("S"), "F")],
+        },
+    )
+    out, retried = retry_weak_recall(
+        None, "q", 10, llm=_LLM(), results=[small, large], below=5, token_budget=budget
+    )
+    assert retried is True and [r.id for r in out] == ["S", "H"]
+    assert small.score == 0.9  # score restored...
+    assert small.sources == ["bm25"]  # ...arms restored...
+    assert "_vector_floor_candidates" not in small.payload  # ...payload restored
+
+
+def test_a_failing_retry_shows_up_as_degraded_service(monkeypatch):
+    """PR #167 (bot P2): `/status.degraded_events` sums an explicit
+    allowlist, so an enabled retry policy could fail on every single
+    request while `/metrics` counted the failures and `/status` reported
+    healthy — next to `followup_rewrite_failed`, which is the same class of
+    failure and was already covered."""
+    from mnemostack.server import _DEGRADED_METRICS
+
+    assert "mnemostack.recall.weak_retry_failed" in _DEGRADED_METRICS
+    assert "mnemostack.recall.weak_retry_unavailable" in _DEGRADED_METRICS
+
+    from mnemostack.observability.recorder import (
+        InMemoryRecorder,
+        NullRecorder,
+        set_recorder,
+    )
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("paraphrase arm down")
+
+    import mnemostack.recall.retry as retry_mod
+
+    monkeypatch.setattr(retry_mod, "recall_flow", _boom)
+    rec = InMemoryRecorder()
+    set_recorder(rec)
+    try:
+        out, retried = retry_weak_recall(None, "q", 10, llm=_LLM(), results=[])
+    finally:
+        set_recorder(NullRecorder())
+    assert out == [] and retried is True  # fail-open: still not an error
+    failed = rec.counters.get(("mnemostack.recall.weak_retry_failed",))
+    assert failed == float(MAX_VARIANTS)  # once per arm that raised

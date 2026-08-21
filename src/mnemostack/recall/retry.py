@@ -143,6 +143,12 @@ def retry_weak_recall(
     # standing for that id, and every list handed to the fusion is built
     # from those, so the fusion's own key cannot split what this dict
     # joined.
+    # The caller's own objects as they arrived. The merge mutates them in
+    # place — score, and now the metadata a later pass contributed — so any
+    # path that decides to hand them back UNCHANGED has to hand back what
+    # was on them, or "we kept your results" quietly means "we kept your
+    # results with someone else's numbers and arms on them".
+    original_state = [(r, r.score, list(r.sources), dict(r.payload or {})) for r in results]
     by_id: dict[str, Any] = {}
     ranked: list[list[tuple[Any, float]]] = [_one_pass(by_id, results)]
     #: What the caller already had, counted the way the merge counts —
@@ -186,12 +192,6 @@ def retry_weak_recall(
 
     from .fusion import reciprocal_rank_fusion
 
-    # The caller's own scores, before the fusion writes over them. The
-    # merge mutates the objects the caller already holds, so any path that
-    # decides to hand those objects back UNCHANGED has to hand back their
-    # numbers too — otherwise "we kept your results" would quietly mean
-    # "we kept your results with someone else's scores on them".
-    original_scores = [(r, r.score) for r in results]
     merged = []
     for item, fused_score in reciprocal_rank_fusion(ranked, limit=limit):
         # Carry the FUSED score, the way the query-expansion path does.
@@ -254,8 +254,10 @@ def retry_weak_recall(
         # and then drops one of the newcomers on an arbitrary tie-break
         # instead. What the caller is protected from is ending up with less
         # than they had, not from a re-ranking they opted into.
-        for result, score in original_scores:
+        for result, score, sources, payload in original_state:
             result.score = score
+            result.sources = sources
+            result.payload = payload
         return results, True
     gained = len(merged) - original_count
     if gained <= 0:
@@ -289,16 +291,40 @@ def _one_pass(by_id: dict[str, Any], hits: list[Any]) -> list[tuple[Any, float]]
 
 
 def _canonical(by_id: dict[str, Any], result: Any) -> Any:
-    """The one object standing for this memory, first arrival wins.
+    """The one object standing for this memory, richer for each pass.
 
     Passes disagree about the TYPE of an id, never about the id: a store
     that returns `1` here and `"1"` there is describing one memory both
     times. Everything downstream — the "found nothing new" test and the
     fusion's own deduplication — is fed the object this returns, so both
-    see the same memory as one thing. Keeping the first arrival also keeps
-    the original results' objects, whose scores the caller already saw.
+    see the same memory as one thing. The first arrival is the one kept,
+    which keeps the caller's own objects and the scores they already saw.
+
+    But keeping the first object must not mean discarding what the later
+    passes learned about that memory. A paraphrase may reach it through a
+    different arm, and it may be the pass whose results carry the vector
+    floor's candidate list. Dropping that would under-credit the
+    retrievers in the documented `sources` field — feedback would then
+    reinforce the wrong arms — and could lose the floor's pool entirely
+    when the later pass was the only one holding it. So the arms are
+    unioned and payload keys the incumbent lacks are filled in. Nothing is
+    overwritten: where both passes have an opinion, the first one stands,
+    and both are describing the same memory under the same tenant and
+    filters anyway, because the retry forwards the caller's scope
+    unchanged.
     """
-    return by_id.setdefault(str(result.id), result)
+    key = str(result.id)
+    incumbent = by_id.get(key)
+    if incumbent is None:
+        by_id[key] = result
+        return result
+    if incumbent is not result:
+        for source in getattr(result, "sources", []) or []:
+            if source not in incumbent.sources:
+                incumbent.sources.append(source)
+        for field, value in (getattr(result, "payload", None) or {}).items():
+            incumbent.payload.setdefault(field, value)
+    return incumbent
 
 
 def _fresh_trace(caller_trace: Any) -> Any:
