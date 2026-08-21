@@ -318,6 +318,38 @@ def _one_pass(by_id: dict[str, Any], hits: list[Any], limit: int) -> list[tuple[
     return ranking
 
 
+#: Payload key under which a pass carries its vector-floor candidate pool.
+_FLOOR_CANDIDATES = "_vector_floor_candidates"
+
+
+def _merged_candidates(first: Any, later: Any) -> Any:
+    """Both passes' floor pools, one entry per memory, strongest kept.
+
+    `Recaller._apply_vector_floor` picks the strongest candidates it is
+    shown, so shipping it the union is what lets a later paraphrase's
+    better vector hit win a floor slot. Malformed input is left alone
+    rather than guessed at: this runs inside a retry that must not fail
+    the recall.
+    """
+    if not isinstance(first, list) or not isinstance(later, list):
+        return first
+    merged: dict[Any, Any] = {}
+    for candidate in [*first, *later]:
+        if not isinstance(candidate, dict) or "id" not in candidate:
+            continue
+        seated = merged.get(candidate["id"])
+        if seated is None or _candidate_score(candidate) > _candidate_score(seated):
+            merged[candidate["id"]] = candidate
+    return list(merged.values())
+
+
+def _candidate_score(candidate: dict[str, Any]) -> float:
+    try:
+        return float(candidate.get("score", 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _canonical(by_id: dict[str, Any], result: Any) -> Any:
     """The one object standing for this memory, richer for each pass.
 
@@ -351,6 +383,17 @@ def _canonical(by_id: dict[str, Any], result: Any) -> Any:
             if source not in incumbent.sources:
                 incumbent.sources.append(source)
         for field, value in (getattr(result, "payload", None) or {}).items():
+            if field == _FLOOR_CANDIDATES and field in incumbent.payload:
+                # The one payload key where BOTH passes having an opinion
+                # is the normal case, not a collision to resolve by
+                # seniority: with the floor on, every result of a pass
+                # carries that pass's whole candidate pool. Keeping the
+                # incumbent's alone would strand a stronger vector hit
+                # that only a later paraphrase saw — it cannot vote (a
+                # floor extra is not a ranking) and it would no longer be
+                # re-addable either, which is the one route it had left.
+                incumbent.payload[field] = _merged_candidates(incumbent.payload[field], value)
+                continue
             incumbent.payload.setdefault(field, value)
     return incumbent
 
@@ -410,14 +453,20 @@ def _retrace(caller_trace: Any, final: list[Any]) -> None:
     """Make the trace's order describe the order actually returned.
 
     `fused` is documented as the order recall returned, and after a merge
-    no single pass produced it. Rewriting it here keeps that invariant
-    true; `post_rerank`, when a reranker ran, is rewritten to the same
-    order for the same reason — leaving either describing one paraphrase
-    while the response carries a merge is worse than either.
+    no single pass produced it, so it is rewritten here to keep that
+    invariant true.
+
+    `post_rerank` is NOT, and must not be. It means "the reranker's order
+    when a reranker ran", a claim about one component's output on one set
+    of candidates — and the field's own contract already allows it to
+    differ from the response ("the final response list may still differ if
+    vector-floor re-appends items after rerank"). No reranker was ever
+    shown the cross-query merge, so copying the fused order into it would
+    attribute to the reranker an ordering it never produced and make its
+    diagnostics lie exactly when a retry succeeded. It keeps whatever the
+    caller's own pass recorded; each paraphrase's reranker reports in its
+    own trace.
     """
     if caller_trace is None:
         return
-    order = [(str(r.id), float(getattr(r, "score", 0.0))) for r in final]
-    caller_trace.fused = order
-    if getattr(caller_trace, "post_rerank", None) is not None:
-        caller_trace.post_rerank = list(order)
+    caller_trace.fused = [(str(r.id), float(getattr(r, "score", 0.0))) for r in final]

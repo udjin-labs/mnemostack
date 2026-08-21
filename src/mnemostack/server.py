@@ -1459,7 +1459,17 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 tenant=tenant,
             )
             if retried:
-                counter("mnemostack.server.recall_retried", 1)
+                # Labelled with the tenant: this is the only server counter
+                # that marks a request which actually paid for a paraphrase
+                # and a second retrieval, and `tenant.requests` cannot
+                # recover the attribution because it counts healthy recalls
+                # and per-request opt-outs alike. Without the label an
+                # operator can see the retry spend but not whose it is —
+                # while the feature is documented as per-tenant visible.
+                if tenant is not None:
+                    counter("mnemostack.server.recall_retried", 1, labels={"tenant": tenant})
+                else:
+                    counter("mnemostack.server.recall_retried", 1)
         if cfg.auto_record_ior:
             # Record into the caller's tenant partition so auto-IoR is per-tenant.
             record_recall_events(pipeline, results, tenant)

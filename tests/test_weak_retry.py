@@ -1068,3 +1068,68 @@ def test_a_pass_that_dies_still_reports_what_it_saw(monkeypatch):
         "what was chosen for login",
     ]
     assert "bm25:down" in trace.degraded  # the fault the pass actually hit
+
+
+def test_both_passes_floor_pools_reach_the_floor(monkeypatch):
+    """PR #167 (bot P2): with the floor on, EVERY result of a pass carries
+    that pass's whole candidate pool, so two passes both holding the key is
+    the normal case — not a collision to settle by seniority. Keeping only
+    the incumbent's stranded a stronger vector hit that a later paraphrase
+    alone saw: a floor extra is not a ranking, so it cannot vote, and the
+    pool was the one route it had left."""
+    first = _with_candidates(_Hit("A"), "F1")
+    later = _Hit("A")
+    later.payload["_vector_floor_candidates"] = [
+        {"id": "F2", "text": "stronger", "score": 0.995, "payload": {}, "sources": ["vector"]}
+    ]
+    _flow(
+        monkeypatch,
+        {"how did we decide auth": [first], "what was chosen for login": [later]},
+    )
+    out, _retried = retry_weak_recall(_floor_recaller(n=2), "q", 1, llm=_LLM(), results=[])
+    assert [r.id for r in out] == ["A", "F2", "F1"]  # strongest of the union first
+
+
+def test_the_reranker_is_not_credited_with_the_merge(monkeypatch):
+    """PR #167 (bot P2): `post_rerank` means "the reranker's order when a
+    reranker ran" — a claim about one component's output on the candidates
+    it was given, and its contract already allows differing from the
+    response. No reranker ever saw the cross-query merge, so copying the
+    fused order into it credited the reranker with an ordering it never
+    produced, precisely when a retry succeeded."""
+    from mnemostack.recall.trace import RecallTrace
+
+    trace = RecallTrace()
+    trace.post_rerank = []  # the caller's own pass reranked nothing
+    _flow(monkeypatch, {"how did we decide auth": [_Hit("N"), _Hit("M")]})
+    out, retried = retry_weak_recall(None, "q", 5, llm=_LLM(), results=[], trace=trace)
+    assert retried is True and [r.id for r in out] == ["N", "M"]
+    assert trace.fused == [(str(r.id), r.score) for r in out]  # the response order
+    assert trace.post_rerank == []  # ...and the reranker keeps its own truth
+
+
+def test_the_retry_spend_names_the_tenant(monkeypatch, tmp_path):
+    """PR #167 (bot P2): the only server counter marking a request that
+    actually paid for a paraphrase and a second retrieval carried no tenant
+    label, and `tenant.requests` cannot recover the attribution — it counts
+    healthy recalls and per-request opt-outs alike. An operator could see
+    the retry spend but not whose it was."""
+    import mnemostack.server as srv
+    from mnemostack.observability.recorder import (
+        InMemoryRecorder,
+        NullRecorder,
+        set_recorder,
+    )
+
+    app, _store, _emb, keys = _ingest_app(monkeypatch, tmp_path, cfg_extra={"retry_on_weak": True})
+    monkeypatch.setattr(srv, "recall_flow", lambda *_a, **_k: [])
+    monkeypatch.setattr(srv, "retry_weak_recall", lambda *a, **k: ([_Hit(3)], True))
+    rec = InMemoryRecorder()
+    set_recorder(rec)
+    try:
+        assert _recall(TestClient(app), keys).status_code == 200
+    finally:
+        set_recorder(NullRecorder())
+    retried = [k for k in rec.counters if k[0] == "mnemostack.server.recall_retried"]
+    assert retried, "the retry counter was never recorded"
+    assert ("tenant", "alpha") in retried[0], retried[0]  # the key's tenant
