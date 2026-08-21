@@ -23,6 +23,7 @@ from ..llm.base import LLMProvider
 from ..observability import counter, histogram
 from .fusion import reciprocal_rank_fusion
 from .recaller import Recaller, RecallResult
+from .trace import RecallTrace
 
 _EXPANSION_PROMPT = """Given a user question, produce {n} short paraphrases that
 are likely to match different wordings in a memory store. Keep them diverse.
@@ -31,6 +32,41 @@ Output ONE paraphrase per line, no numbering, no quotes, no commentary.
 Question: {query}
 
 Paraphrases:"""
+
+
+def _fresh_trace(caller_trace: RecallTrace | None) -> RecallTrace | None:
+    """A trace of the caller's own type, or None when it asked for none."""
+    if caller_trace is None:
+        return None
+    return type(caller_trace)()
+
+
+def _absorb_expansion(
+    caller_trace: RecallTrace | None, pass_trace: RecallTrace | None, variant: str
+) -> None:
+    """Fold one paraphrase's work into the caller's trace.
+
+    Its retriever entries are the extra retrieval this expansion paid for,
+    which is exactly what an operator reading a trace wants to see, so they
+    carry over labelled `:expansion` and stamped with the paraphrase that
+    produced them. Degradations and notes carry over verbatim and are NOT
+    re-`mark()`ed: the paraphrase's own trace already emitted the
+    process-wide counter for them, and marking again would count one
+    failure twice in `/status.degraded_events`.
+    """
+    if caller_trace is None or pass_trace is None:
+        return
+    for entry in list(pass_trace.retrievers):
+        entry.name = f"{entry.name}:expansion"
+        if getattr(entry, "query", None) is None:
+            entry.query = variant
+        caller_trace.retrievers.append(entry)
+    for tag in pass_trace.degraded:
+        if tag not in caller_trace.degraded:
+            caller_trace.degraded.append(tag)
+    for tag in pass_trace.notes:
+        if tag not in caller_trace.notes:
+            caller_trace.notes.append(tag)
 
 
 class QueryExpander:
@@ -100,10 +136,31 @@ class QueryExpander:
         vector_limit: int = 20,
         bm25_limit: int = 20,
         filters: dict[str, Any] | None = None,
+        *,
+        trace: RecallTrace | None = None,
+        include_invalidated: bool = False,
+        as_of: str | None = None,
+        tenant: str | None = None,
     ) -> list[RecallResult]:
         """Fused recall across original query + paraphrases.
 
         If `apply_to(query)` is False, falls back to plain Recaller.recall.
+
+        The scoping keywords are forwarded to EVERY recall this makes, the
+        original and each paraphrase alike. They were absent once, and the
+        failure mode was silent: this class is a public export, so a
+        multi-tenant caller reaching for it got an unscoped read — no
+        tenant on the retrievers, no tenant backstop after fusion,
+        retracted facts visible — with no error and nothing on a trace to
+        show it (udjin-labs/mnemostack#166). A paraphrase is the same
+        question asked differently; it must not be a wider one.
+
+        `trace` records the whole expansion: the original query's recall
+        writes into the caller's trace directly, and each paraphrase gets
+        its own, folded back with its retriever entries labelled
+        `:expansion` and carrying the paraphrase in `query`. Sharing one
+        trace across passes would leave `fused` describing whichever pass
+        ran last while the caller holds a merge of all of them.
         """
         counter("mnemostack.query_expansion.calls", 1)
         if not self.apply_to(query):
@@ -114,6 +171,10 @@ class QueryExpander:
                 vector_limit=vector_limit,
                 bm25_limit=bm25_limit,
                 filters=filters,
+                trace=trace,
+                include_invalidated=include_invalidated,
+                as_of=as_of,
+                tenant=tenant,
             )
 
         queries = [query] if self.include_original else []
@@ -125,18 +186,29 @@ class QueryExpander:
                 vector_limit=vector_limit,
                 bm25_limit=bm25_limit,
                 filters=filters,
+                trace=trace,
+                include_invalidated=include_invalidated,
+                as_of=as_of,
+                tenant=tenant,
             )
 
         # Recall for each query, merge via RRF across queries
         ranked_lists: list[list[tuple[RecallResult, float]]] = []
         for q in queries:
+            pass_trace = trace if q == query else _fresh_trace(trace)
             res = self.recaller.recall(
                 q,
                 limit=limit * 2,
                 vector_limit=vector_limit,
                 bm25_limit=bm25_limit,
                 filters=filters,
+                trace=pass_trace,
+                include_invalidated=include_invalidated,
+                as_of=as_of,
+                tenant=tenant,
             )
+            if pass_trace is not None and pass_trace is not trace:
+                _absorb_expansion(trace, pass_trace, q)
             ranked_lists.append([(r, r.score) for r in res])
 
         fused = reciprocal_rank_fusion(ranked_lists, k=self.rrf_k, limit=limit)
@@ -145,5 +217,15 @@ class QueryExpander:
         for item, rrf_score in fused:
             item.score = rrf_score
             out.append(item)
+        if trace is not None:
+            # `fused` is documented as the order recall RETURNED, and after
+            # a cross-query merge no single pass produced it — the caller's
+            # trace holds whatever the original query's pass wrote, or
+            # nothing at all when `include_original=False`. `post_rerank`
+            # is deliberately left alone: it means "the reranker's order
+            # when a reranker ran", a claim about one component on the
+            # candidates it was given, and no reranker was shown this
+            # merge.
+            trace.fused = [(str(r.id), float(r.score)) for r in out]
         counter("mnemostack.query_expansion.used_expansion", 1)
         return out

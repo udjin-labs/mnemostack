@@ -238,9 +238,12 @@ def retry_weak_recall(
         try:
             # The SAME call in other words: every scoping keyword the
             # caller gave is forwarded unchanged. `QueryExpander.recall`
-            # is deliberately not used here — it takes no tenant, so on an
-            # authenticated deployment it would read across the boundary
-            # (tracked as udjin-labs/mnemostack#166).
+            # is still not used here, though #166 has since taught it the
+            # caller's scope: it fuses its own passes with its own RRF and
+            # its own limits, so routing through it would put a second,
+            # differently-parameterised merge inside this one. Only
+            # `generate_variants` is borrowed — the paraphrasing, not the
+            # retrieval.
             extra = recall_flow(recaller, variant, limit, **flow_kwargs)
         except Exception:  # noqa: BLE001 — same rule, per variant
             counter("mnemostack.recall.weak_retry_failed", 1)
