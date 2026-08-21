@@ -43,6 +43,7 @@ from mnemostack.access import record_access
 from mnemostack.config import (
     Config,
     ensure_text_fields_mode,
+    env_float,
     model_kwargs,
     provider_kwargs,
     resolve_text_search_mode,
@@ -89,7 +90,6 @@ from mnemostack.quotas import QuotaExceededError
 from mnemostack.recall import (
     DEFAULT_ACCESS_BONUS_MAX,
     DEGRADED_COUNTER,
-    MAX_ACCESS_BONUS_MAX,
     RERANK_MODES,
     AnswerGenerator,
     BM25Retriever,
@@ -104,6 +104,7 @@ from mnemostack.recall import (
     build_full_pipeline,
     build_qdrant_text_arms,
     chunk_filter_probe_via,
+    normalize_access_bonus_max,
     recall_flow,
     sum_tokens,
 )
@@ -131,27 +132,6 @@ def _env_int(name: str, default: int) -> int:
     except ValueError:
         return default
     return parsed if parsed > 0 else default
-
-
-def _env_float(name: str, default: float) -> float:
-    """A non-negative float from the environment, or the default.
-
-    Same contract as `_env_int` — env deployment must reach every knob the
-    CLI can — with the same refusal to fail startup over one bad tuning
-    value. Bounding what the value MEANS is not this reader's job: the
-    config's `__post_init__` owns that, so every construction path gets it
-    and not just the two that happen to come through here.
-    """
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    try:
-        parsed = float(value.strip())
-    except ValueError:
-        return default
-    if parsed != parsed or parsed in (float("inf"), float("-inf")):
-        return default
-    return parsed
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -824,15 +804,11 @@ class ServerConfig:
         # and a bad value here would 500 every request.
         if self.token_budget is not None and self.token_budget <= 0:
             self.token_budget = None
-        # Clamped here rather than at each entry point so the bound holds for
-        # library callers too. A negative reads as "off" instead of inverting
-        # into a penalty — the one direction this term must never have — and
-        # NaN, which compares false against every bound, would otherwise reach
-        # the multiplier and erase the score of whatever it touched.
-        bonus = float(self.access_bonus_max)
-        if bonus != bonus:
-            bonus = DEFAULT_ACCESS_BONUS_MAX
-        self.access_bonus_max = min(max(0.0, bonus), MAX_ACCESS_BONUS_MAX)
+        # Through the same helper the multiplier and the stage use, so what
+        # this config REPORTS is what ranking actually applies. The bound is
+        # not restated here: a rule copied per entry point is a rule that
+        # drifts, and the copy that is forgotten is the one that matters.
+        self.access_bonus_max = normalize_access_bonus_max(self.access_bonus_max)
 
     @classmethod
     def from_env(cls) -> ServerConfig:
@@ -859,7 +835,7 @@ class ServerConfig:
             token_budget=cfg.recall.token_budget,
             auto_record_ior=_env_bool("MNEMOSTACK_AUTO_RECORD_IOR"),
             record_access=_env_bool("MNEMOSTACK_RECORD_ACCESS"),
-            access_bonus_max=_env_float(
+            access_bonus_max=env_float(
                 "MNEMOSTACK_ACCESS_BONUS_MAX", DEFAULT_ACCESS_BONUS_MAX
             ),
             retry_on_weak=_env_bool("MNEMOSTACK_RETRY_ON_WEAK"),

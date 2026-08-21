@@ -26,7 +26,7 @@ except ImportError:  # pragma: no cover
     StrictInt = int  # type: ignore[assignment, misc]
     _FASTMCP_AVAILABLE = False
 
-from ..config import Config, model_kwargs, provider_kwargs
+from ..config import Config, env_float, model_kwargs, provider_kwargs
 from ..embeddings import get_provider
 from ..embeddings.roles import EmbeddingSpaceError
 from ..feedback import apply_feedback
@@ -47,6 +47,7 @@ from ..ingest import (
 from ..llm import get_llm
 from ..quotas import QuotaExceededError
 from ..recall import (
+    DEFAULT_ACCESS_BONUS_MAX,
     RERANK_MODES,
     AnswerGenerator,
     BM25Retriever,
@@ -126,6 +127,15 @@ def build_server(
     # configures quotas anywhere non-default MUST pass this (or the env var)
     # to keep MCP writes under the same caps as HTTP writes.
     quotas_file: str | None = None,
+    #: Ceiling on the freshness stage's access bonus; 0 removes the access
+    #: signal from ranking. At the very TAIL, like every knob above it —
+    #: this signature is positionally stable and a mid-insert would land a
+    #: caller's `reranker` in someone else's parameter. This surface needs
+    #: the knob for the same reason the HTTP one does: an MCP deployment
+    #: whose CLIENTS stamp `last_accessed` cannot escape the term by
+    #: leaving access recording off, because the stage reads those keys
+    #: whoever wrote them.
+    access_bonus_max: float = DEFAULT_ACCESS_BONUS_MAX,
 ) -> Any:
     """Build and return a configured FastMCP server.
 
@@ -416,6 +426,7 @@ def build_server(
             "pipeline",
             lambda: build_full_pipeline(
                 state_store=FileStateStore(resolved_state_path),
+                access_bonus_max=access_bonus_max,
                 graph_uri=memgraph_uri,
                 graph_user=graph_user,
                 graph_password=graph_password,
@@ -487,6 +498,7 @@ def build_server(
         if "feedback_pipeline" not in _components:
             _components["feedback_pipeline"] = build_full_pipeline(
                 state_store=FileStateStore(resolved_state_path),
+                access_bonus_max=access_bonus_max,
                 graph_uri=None,
                 text_key=text_key,
                 timestamp_key=timestamp_key,
@@ -1256,6 +1268,7 @@ def main() -> None:
                                      falling back to ~/.local/state/mnemostack/server-state.json)
         MNEMOSTACK_RERANK_MODE      (default: relevant_only)
         MNEMOSTACK_TOKEN_BUDGET     (default: none — no recall token budget)
+        MNEMOSTACK_ACCESS_BONUS_MAX (default: 0.25; 0 = no access bonus)
     """
     cfg = Config.load()
     auth_enabled = os.environ.get("MNEMOSTACK_AUTH_ENABLED", "").strip().lower() in {
@@ -1294,6 +1307,9 @@ def main() -> None:
         auth_enabled=auth_enabled,
         api_key=os.environ.get("MNEMOSTACK_API_KEY") or None,
         keys_file=os.environ.get("MNEMOSTACK_KEYS_FILE") or None,
+        access_bonus_max=env_float(
+            "MNEMOSTACK_ACCESS_BONUS_MAX", DEFAULT_ACCESS_BONUS_MAX
+        ),
     )
     mcp.run()
 

@@ -35,6 +35,7 @@ from .stages import (
     InhibitionOfReturn,
     QLearningReranker,
     is_exact_token_query,
+    normalize_access_bonus_max,
 )
 from .state import FileStateStore, InMemoryStateStore, StateStore, default_state_path
 
@@ -53,6 +54,7 @@ __all__ = [
     "HubDampen",
     "DEFAULT_ACCESS_BONUS_MAX",
     "MAX_ACCESS_BONUS_MAX",
+    "normalize_access_bonus_max",
     "FreshnessBlend",
     "InhibitionOfReturn",
     "CuriosityBoost",

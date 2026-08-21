@@ -294,6 +294,33 @@ _ACCESS_BONUS_FULL_AT = 10.0
 _ACCESS_BONUS_KNEE = 3.0
 
 
+def normalize_access_bonus_max(value: float) -> float:
+    """The configured ceiling, bounded — the one place that decides.
+
+    Every path that can set this bound calls through here: the multiplier
+    itself, the stage that holds it, and the server config that reports it.
+    Two enforcement points and one rule, rather than a clamp copied to each
+    entry point where the copy that is forgotten is the one that matters —
+    which is exactly what happened when this lived in `ServerConfig` alone
+    and the public builders, the MCP surface and library callers all sailed
+    past it.
+
+    NaN reads as OFF, not as the default. It compares false against every
+    bound, so a plain clamp passes it straight through to a multiplier that
+    would erase the score of everything it touched; and a ceiling nobody
+    can interpret must not be resolved into a ranking effect nobody asked
+    for. A negative reads as off too — never as an inverted penalty, the
+    one direction this term must not have.
+    """
+    try:
+        bonus = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if bonus != bonus:  # NaN
+        return 0.0
+    return min(max(0.0, bonus), MAX_ACCESS_BONUS_MAX)
+
+
 def compute_access_boost(
     last_accessed: str | None,
     access_count: int = 0,
@@ -336,7 +363,7 @@ def compute_access_boost(
     except (ValueError, AttributeError):
         return 1.0
 
-    safe_max = max(0.0, max_bonus)
+    safe_max = normalize_access_bonus_max(max_bonus)
     if safe_max == 0.0:
         return 1.0
 
@@ -404,8 +431,11 @@ class FreshnessBlend(Stage):
         if confidence_half_life_days is not None:
             self.half_life_days = confidence_half_life_days
         #: Ceiling on the reinforcement bonus; 0 removes the access signal
-        #: from ranking without a second code path.
-        self.access_bonus_max = access_bonus_max
+        #: from ranking without a second code path. Normalised on assignment
+        #: so the value the stage REPORTS is the value it applies — a public
+        #: builder handing this straight through must not leave an operator
+        #: reading a ceiling that is not the one in force.
+        self.access_bonus_max = normalize_access_bonus_max(access_bonus_max)
         self.echo_window_minutes = echo_window_minutes
         self.echo_penalty = echo_penalty
         self.always_current_files = always_current_files

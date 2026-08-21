@@ -289,9 +289,10 @@ def test_the_configured_ceiling_is_bounded_on_every_construction_path():
     assert ServerConfig(access_bonus_max=99.0).access_bonus_max == MAX_ACCESS_BONUS_MAX
     # NaN compares false against every bound, so a naive clamp lets it
     # through — and it would erase the score of every result it multiplied.
-    assert ServerConfig(access_bonus_max=float("nan")).access_bonus_max == (
-        DEFAULT_ACCESS_BONUS_MAX
-    )
+    # It reads as OFF rather than as the default: a ceiling nobody can
+    # interpret must not be resolved into a ranking effect nobody asked for.
+    assert ServerConfig(access_bonus_max=float("nan")).access_bonus_max == 0.0
+    assert ServerConfig(access_bonus_max=float("inf")).access_bonus_max == (MAX_ACCESS_BONUS_MAX)
 
 
 def test_a_configured_ceiling_actually_reaches_the_stage():

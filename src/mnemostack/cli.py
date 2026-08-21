@@ -24,6 +24,7 @@ from . import __version__
 from .config import (
     DEFAULT_CONFIG_PATHS,
     Config,
+    env_float,
     generate_example_config,
     model_kwargs,
     provider_kwargs,
@@ -4522,7 +4523,6 @@ def cmd_serve(args: argparse.Namespace) -> int:
         from mnemostack.server import (
             ServerConfig,
             _env_bool,
-            _env_float,
             _env_int,
             build_app,
         )
@@ -4545,7 +4545,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     # times, and library callers would get none of them.
     _bonus = getattr(args, "access_bonus_max", None)
     _access_bonus_max = (
-        _env_float("MNEMOSTACK_ACCESS_BONUS_MAX", DEFAULT_ACCESS_BONUS_MAX)
+        env_float("MNEMOSTACK_ACCESS_BONUS_MAX", DEFAULT_ACCESS_BONUS_MAX)
         if _bonus is None
         else float(_bonus)
     )

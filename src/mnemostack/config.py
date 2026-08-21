@@ -615,3 +615,29 @@ recall:
   #   title: 2.0
   #   text: 1.0
 """
+
+
+def env_float(name: str, default: float) -> float:
+    """A non-negative float from the environment, or the default.
+
+    Public, and here rather than beside `server._env_int`, because BOTH
+    serving surfaces need it and the MCP one must not import the HTTP
+    module (that would pull a web framework into a stdio server).
+
+    Same contract as `server._env_int` — env deployment has to reach every
+    knob the CLI can — with the same refusal to fail startup over one bad
+    tuning value: an unparseable, infinite or NaN setting falls back to the
+    default rather than taking the service down or, worse, silently meaning
+    something else. Bounding what the value MEANS is not this reader's job;
+    whoever consumes it owns that.
+    """
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        parsed = float(value.strip())
+    except ValueError:
+        return default
+    if parsed != parsed or parsed in (float("inf"), float("-inf")):
+        return default
+    return parsed
