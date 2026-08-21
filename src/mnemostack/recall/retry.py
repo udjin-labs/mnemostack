@@ -56,17 +56,17 @@ def has_room(
     token_budget: int | None = None,
     token_counter: Any = None,
 ) -> bool:
-    """Whether another pass could still change what the caller receives.
+    """Whether the caller's page still has space a retry could fill.
 
     ONE question asked in both of the response's dimensions, because the
-    answer is cut to both: a page already holding `limit` results, or
-    already spending the whole token budget, cannot take anything a
-    further paraphrase finds — the extras are appended past the cut and
-    trimmed away again. Spend that cannot change the response is spend not
-    worth making, and this is the only place that judgement is made, so it
-    cannot be applied in one dimension and forgotten in the other (it was,
-    twice: the item limit before the first retry, then again inside the
-    variant loop).
+    response is cut to both: a page already holding `limit` results, or
+    already spending the whole token budget, is full, and this feature
+    exists to FIND memories a phrasing missed — not to spend an LLM call
+    and a second retrieval reshuffling a page that is already as long as
+    the caller asked for. Asking in one dimension and forgetting the other
+    is the bug this consolidates (it was missed in the item dimension
+    first, then in the budget dimension), so both live here, in the single
+    gate the retry consults.
     """
     if len(results) >= limit:
         return False
@@ -130,8 +130,20 @@ def retry_weak_recall(
     # that order as the one recall returned. RRF is what the stack
     # already uses to combine rankings of the SAME items from different
     # queries, and it is what makes a second phrasing able to win.
-    ranked: list[list[tuple[Any, float]]] = [[(r, r.score) for r in results]]
-    by_id: dict[str, Any] = {str(r.id): r for r in results}
+    #
+    # ONE notion of identity, `str(id)`, decides both questions asked
+    # below — "did this pass find anything new" and "are these two hits
+    # the same memory" — because a vector store may hand back `1` where
+    # another pass got `"1"` (Qdrant point ids are `str | int`). Two
+    # notions disagreeing is not a cosmetic difference: RRF dedupes on
+    # whatever object it is given, so the same memory would occupy two
+    # slots of the caller's page. `_canonical` therefore returns the
+    # object already standing for that id, and every list handed to the
+    # fusion is built from those, so the fusion's own key cannot split
+    # what this dict joined.
+    by_id: dict[str, Any] = {}
+    ranked: list[list[tuple[Any, float]]] = [[(_canonical(by_id, r), r.score) for r in results]]
+    known = len(by_id)
     for variant in variants:
         variant_trace = _fresh_trace(caller_trace)
         if variant_trace is not None:
@@ -146,15 +158,13 @@ def retry_weak_recall(
         except Exception:  # noqa: BLE001 — same rule, per variant
             counter("mnemostack.recall.weak_retry_failed", 1)
             continue
-        ranked.append([(r, r.score) for r in extra])
-        for result in extra:
-            by_id.setdefault(str(result.id), result)
+        ranked.append([(_canonical(by_id, r), r.score) for r in extra])
         _absorb(caller_trace, variant_trace, variant)
     flow_kwargs.pop("trace", None)
     if caller_trace is not None:
         flow_kwargs["trace"] = caller_trace
 
-    if len(by_id) == len(results):
+    if len(by_id) == known:
         return results, True  # asked again, still nothing: an answer too
 
     from .fusion import reciprocal_rank_fusion
@@ -186,6 +196,19 @@ def retry_weak_recall(
     counter("mnemostack.recall.weak_retry_recovered", gained)
     _retrace(caller_trace, merged)
     return merged, True
+
+
+def _canonical(by_id: dict[str, Any], result: Any) -> Any:
+    """The one object standing for this memory, first arrival wins.
+
+    Passes disagree about the TYPE of an id, never about the id: a store
+    that returns `1` here and `"1"` there is describing one memory both
+    times. Everything downstream — the "found nothing new" test and the
+    fusion's own deduplication — is fed the object this returns, so both
+    see the same memory as one thing. Keeping the first arrival also keeps
+    the original results' objects, whose scores the caller already saw.
+    """
+    return by_id.setdefault(str(result.id), result)
 
 
 def _fresh_trace(caller_trace: Any) -> Any:

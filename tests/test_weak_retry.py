@@ -190,9 +190,7 @@ def test_the_server_does_not_retry_unless_asked(monkeypatch, tmp_path):
     import mnemostack.server as srv
 
     calls: list = []
-    monkeypatch.setattr(
-        srv, "retry_weak_recall", lambda *a, **k: calls.append(k) or ([], False)
-    )
+    monkeypatch.setattr(srv, "retry_weak_recall", lambda *a, **k: calls.append(k) or ([], False))
     app, _store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
     monkeypatch.setattr(srv, "recall_flow", lambda *_a, **_k: [])
     assert _recall(TestClient(app), keys).status_code == 200
@@ -206,9 +204,7 @@ def test_the_operator_switch_turns_it_on(monkeypatch, tmp_path):
     monkeypatch.setattr(
         srv, "retry_weak_recall", lambda *a, **k: calls.append(k) or ([_Hit(3)], True)
     )
-    app, _store, _emb, keys = _ingest_app(
-        monkeypatch, tmp_path, cfg_extra={"retry_on_weak": True}
-    )
+    app, _store, _emb, keys = _ingest_app(monkeypatch, tmp_path, cfg_extra={"retry_on_weak": True})
     monkeypatch.setattr(srv, "recall_flow", lambda *_a, **_k: [])
     r = _recall(TestClient(app), keys)
     assert r.status_code == 200
@@ -221,12 +217,8 @@ def test_a_request_can_opt_out_where_the_operator_opted_in(monkeypatch, tmp_path
     import mnemostack.server as srv
 
     calls: list = []
-    monkeypatch.setattr(
-        srv, "retry_weak_recall", lambda *a, **k: calls.append(k) or ([], False)
-    )
-    app, _store, _emb, keys = _ingest_app(
-        monkeypatch, tmp_path, cfg_extra={"retry_on_weak": True}
-    )
+    monkeypatch.setattr(srv, "retry_weak_recall", lambda *a, **k: calls.append(k) or ([], False))
+    app, _store, _emb, keys = _ingest_app(monkeypatch, tmp_path, cfg_extra={"retry_on_weak": True})
     monkeypatch.setattr(srv, "recall_flow", lambda *_a, **_k: [])
     assert _recall(TestClient(app), keys, retry_on_weak=False).status_code == 200
     assert calls == []
@@ -238,9 +230,7 @@ def test_a_request_cannot_turn_it_on_where_the_operator_did_not(monkeypatch, tmp
     import mnemostack.server as srv
 
     calls: list = []
-    monkeypatch.setattr(
-        srv, "retry_weak_recall", lambda *a, **k: calls.append(k) or ([], False)
-    )
+    monkeypatch.setattr(srv, "retry_weak_recall", lambda *a, **k: calls.append(k) or ([], False))
     app, _store, _emb, keys = _ingest_app(monkeypatch, tmp_path)
     monkeypatch.setattr(srv, "recall_flow", lambda *_a, **_k: [])
     assert _recall(TestClient(app), keys, retry_on_weak=True).status_code == 200
@@ -280,9 +270,7 @@ def test_the_token_budget_holds_after_the_merge(monkeypatch):
     )
     from mnemostack.recall.tokens import sum_tokens
 
-    out, retried = retry_weak_recall(
-        None, "q", 10, llm=_LLM(), results=[], token_budget=120
-    )
+    out, retried = retry_weak_recall(None, "q", 10, llm=_LLM(), results=[], token_budget=120)
     assert retried is True
     assert sum_tokens(out, None) <= 120, [r.id for r in out]
 
@@ -295,9 +283,7 @@ def test_answer_does_not_pay_for_a_paraphrase_round(monkeypatch, tmp_path):
     import mnemostack.server as srv
 
     calls: list = []
-    monkeypatch.setattr(
-        srv, "retry_weak_recall", lambda *a, **k: calls.append(k) or ([], False)
-    )
+    monkeypatch.setattr(srv, "retry_weak_recall", lambda *a, **k: calls.append(k) or ([], False))
 
     class _Gen:
         def generate(self, *_a, **_k):
@@ -340,9 +326,7 @@ def test_the_trace_describes_what_was_returned(monkeypatch):
     trace.fused = [("original", 0.1)]
     first_pass = type("RT", (), {"name": "vector", "ranked": [], "to_dict": dict})()
     trace.retrievers.append(first_pass)  # what the ORIGINAL recall recorded
-    out, retried = retry_weak_recall(
-        None, "q", 10, llm=_LLM(), results=[], trace=trace
-    )
+    out, retried = retry_weak_recall(None, "q", 10, llm=_LLM(), results=[], trace=trace)
     assert retried is True and [r.id for r in out] == [9]
     # The order actually returned, carrying the FUSED score rather than
     # the one the pass happened to assign before fusion.
@@ -437,9 +421,7 @@ def test_the_loop_stops_when_the_budget_fills_mid_retry(monkeypatch):
         monkeypatch,
         {"how did we decide auth": [big], "what was chosen for login": [_Hit(2)]},
     )
-    out, retried = retry_weak_recall(
-        None, "q", 10, llm=_LLM(), results=[], token_budget=budget
-    )
+    out, retried = retry_weak_recall(None, "q", 10, llm=_LLM(), results=[], token_budget=budget)
     assert retried is True
     assert len(seen) == MAX_VARIANTS  # both phrasings compete for the budget
     assert sum_tokens(out, None) <= budget  # ...and the cap still holds
@@ -576,7 +558,50 @@ def test_the_trace_scores_match_the_result_scores(monkeypatch):
         {"how did we decide auth": [_Hit(1)], "what was chosen for login": [_Hit(2)]},
     )
     trace = RecallTrace()
-    out, _retried = retry_weak_recall(
-        None, "q", 10, llm=_LLM(), results=[], trace=trace
-    )
+    out, _retried = retry_weak_recall(None, "q", 10, llm=_LLM(), results=[], trace=trace)
     assert trace.fused == [(str(r.id), r.score) for r in out]
+
+
+def test_one_memory_stays_one_memory_across_id_types(monkeypatch):
+    """R8 (review P2): a store may hand back `1` in one pass and `"1"` in
+    the next — Qdrant point ids are `str | int` — and both times it means
+    the same memory. Two notions of identity (a str-keyed "is this new"
+    dict beside RRF's raw-id deduplication) split that memory in two: it
+    takes two slots of the caller's page, so the page carries the same
+    text twice and the trace reports the duplicate as the order recall
+    returned."""
+    seen = _flow(
+        monkeypatch,
+        {
+            "how did we decide auth": [_Hit("1"), _Hit("2")],
+            "what was chosen for login": [],
+        },
+    )
+    from mnemostack.recall.trace import RecallTrace
+
+    trace = RecallTrace()
+    out, retried = retry_weak_recall(
+        None, "q", 10, llm=_LLM(), results=[_Hit(1)], below=5, trace=trace
+    )
+    assert retried is True and len(seen) == MAX_VARIANTS
+    assert [str(r.id) for r in out] == ["1", "2"]  # not ["1", "1", "2"]
+    assert trace.fused == [(str(r.id), r.score) for r in out]
+
+
+def test_a_second_phrasing_of_a_known_memory_is_not_new(monkeypatch):
+    """The same disagreement in its other direction: when the ONLY thing a
+    paraphrase returns is a memory the caller already has under the other
+    id type, the retry found nothing — and must say so by returning the
+    caller's own results, not a fusion that lists that memory twice."""
+    _flow(
+        monkeypatch,
+        {
+            "how did we decide auth": [_Hit(1)],
+            "what was chosen for login": [_Hit("1")],
+        },
+    )
+    original = _Hit("1")
+    out, retried = retry_weak_recall(None, "q", 10, llm=_LLM(), results=[original], below=5)
+    assert retried is True
+    assert out == [original]  # the caller's own list, untouched
+    assert original.score == 0.9  # no fused score written over it
