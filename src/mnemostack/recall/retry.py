@@ -243,13 +243,16 @@ def retry_weak_recall(
         # a no-op: original list, original scores.
         #
         # This is a rule about the SIZE of the response, and deliberately
-        # not about its membership. At a fixed `limit` a better-evidenced
-        # memory does take a weaker one's slot — a hit both phrasings
-        # found outranking one the original pass ranked last is the entire
-        # point of fusing the rounds, and demanding that every original
-        # survive would either pin the caller's weakest hits ahead of
-        # better ones or make room by overrunning the limit they asked
-        # for. What the caller is protected from is ending up with less
+        # not about its membership. At a fixed `limit` a better-ranked
+        # memory does take a weaker one's slot, and it takes less than
+        # corroboration to do it: RRF scores a rank-1 hit the same
+        # wherever it was found, so ONE paraphrase's single hit already
+        # ties the original's best and outranks whatever the original pass
+        # put last. That is the entire point of fusing the rounds — and
+        # demanding that every original survive would be no kinder, since
+        # it protects the caller's weakest hit purely for being incumbent
+        # and then drops one of the newcomers on an arbitrary tie-break
+        # instead. What the caller is protected from is ending up with less
         # than they had, not from a re-ranking they opted into.
         for result, score in original_scores:
             result.score = score
