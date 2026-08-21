@@ -228,3 +228,18 @@ def test_a_zero_ceiling_is_exactly_the_no_access_signal_score():
     with_signal = FreshnessBlend(weight=0.0, access_bonus_max=0.0).apply(ctx, [used])
     without = FreshnessBlend(weight=0.0).apply(ctx, [unused])
     assert with_signal[0].score == without[0].score
+
+
+def test_without_a_stamp_no_counter_can_buy_a_bonus():
+    """The paired opposite of the rule above, and the half that has teeth.
+
+    A stamp is what proves use, and the counter only shapes how much the
+    proof is worth — so the gate has to be the stamp alone. Reading the
+    counter first, or falling back to it when the stamp is missing, would
+    let a payload claiming a thousand accesses and no access time collect
+    the ceiling: the counter is caller-supplied metadata, and this term is
+    the one a recall's own output feeds back into.
+    """
+    for count in (0, 1, 10, 10**9, -5):
+        for stamp in (None, "", "not-a-date", "2026-13-45T99:99:99"):
+            assert compute_access_boost(stamp, access_count=count) == 1.0, (stamp, count)
