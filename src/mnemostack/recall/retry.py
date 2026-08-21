@@ -7,9 +7,15 @@ after all". The stack has always had the paraphrasing machinery
 already retries its own sub-recalls, but `/recall` itself had no policy
 for "this returned nothing, try saying it differently".
 
-Opt-in, and deliberately so: a second pass costs an LLM call plus another
-round of retrieval, and that is a bill the operator has to agree to. It
-is off by default and per-tenant metering makes it visible when on.
+Opt-in, and deliberately so, because the bill is bigger than it first
+looks. One LLM call paraphrases the query, and then EACH variant is the
+caller's own recall repeated — the same pipeline, the same reranker — so
+with a reranker configured (the `serve` default, when an LLM is present)
+a weak recall costs up to THREE LLM calls and two extra retrieval rounds:
+one paraphrase, plus a rerank per variant. That is the price of the retry
+being the same question rather than a cheaper one, and it is a bill the
+operator has to agree to. Off by default, and per-tenant metering makes
+it visible when on.
 
 **What counts as weak is a COUNT, not a score.** Fused scores are RRF
 values — `1/(k+rank)` — so they encode position in a list, not
@@ -73,9 +79,9 @@ def has_room(
     ONE question asked in both of the response's dimensions, because the
     response is cut to both: a page already holding `limit` results, or
     already spending the whole token budget, is full, and this feature
-    exists to FIND memories a phrasing missed — not to spend an LLM call
-    and a second retrieval reshuffling a page that is already as long as
-    the caller asked for. Asking in one dimension and forgetting the other
+    exists to FIND memories a phrasing missed — not to spend a paraphrase
+    call, two retrievals and a rerank per variant reshuffling a page that
+    is already as long as the caller asked for. Asking in one dimension and forgetting the other
     is the bug this consolidates (it was missed in the item dimension
     first, then in the budget dimension), so both live here, in the single
     gate the retry consults.

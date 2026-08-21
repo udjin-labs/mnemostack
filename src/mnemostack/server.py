@@ -153,7 +153,8 @@ class RecallRequest(BaseModel):
         description=(
             "Ask again in other words when this recall comes back nearly "
             "empty: paraphrase the query with the answer LLM and merge a "
-            "second round. Costs an LLM call and another retrieval round, "
+            "second round. Each variant repeats this recall in full, reranker "
+            "included: up to 3 LLM calls and 2 extra retrieval rounds, "
             "so it is off unless the operator enabled it (`serve "
             "--retry-on-weak`); null keeps the server default."
         ),
@@ -777,7 +778,8 @@ class ServerConfig:
     #: silently ENABLES writes on a deployment that never asked for them.
     record_access: bool = False
     #: Ask a nearly-empty recall again, in other words. Off by default:
-    #: the second pass costs an LLM call plus another retrieval round.
+    #: each variant repeats the caller's recall in full, reranker included,
+    #: so a weak recall costs up to 3 LLM calls and 2 retrieval rounds.
     #: Appended, like every knob above — see the note on positional
     #: stability, and add new fields to the prefix pin in the same change.
     retry_on_weak: bool = False

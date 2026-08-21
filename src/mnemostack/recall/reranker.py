@@ -188,7 +188,16 @@ class Reranker:
                 reordered.append(r)
         reordered.extend(tail)
 
-        self.cache.put(query, candidate_ids, reordered)
+        # Copies on the way IN as well as out. `reordered` is the list this
+        # call is about to return, and the caller writes to results — so
+        # storing it directly hands the cache to the first caller's edits
+        # and every later hit reads them, however carefully the hit path
+        # copies afterwards.
+        self.cache.put(
+            query,
+            candidate_ids,
+            [replace(r, payload=dict(r.payload or {}), sources=list(r.sources)) for r in reordered],
+        )
         logger.debug(
             "reranker cache MISS (rate: %.1f%%, misses: %d)",
             self.cache.stats.hit_rate,

@@ -4360,8 +4360,10 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Ask a nearly-empty recall again in other words: paraphrase with "
-            "the answer LLM and merge one more round. Costs an LLM call plus "
-            "another retrieval round per weak recall. Env: MNEMOSTACK_RETRY_ON_WEAK"
+            "the answer LLM and merge one more round. Each variant repeats the "
+            "caller's own recall, reranker included, so a weak recall costs up "
+            "to 3 LLM calls (1 paraphrase + 1 rerank per variant) and 2 extra "
+            "retrieval rounds. Env: MNEMOSTACK_RETRY_ON_WEAK"
         ),
     )
     p_serve.add_argument(

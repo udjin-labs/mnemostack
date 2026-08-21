@@ -386,3 +386,26 @@ def test_a_cache_hit_hands_out_copies_not_the_entry_itself():
     assert stored[0].score == 0.9  # the entry a later request will read...
     assert stored[0].sources == ["vector"]  # ...is untouched by that write
     assert "injected" not in stored[0].payload
+
+
+def test_the_cache_entry_is_isolated_from_the_first_caller_too():
+    """Copying on the way out is only half of it: `put` stores the very
+    list this call returns, so the FIRST caller's writes land in the entry
+    before any hit happens — and every later hit then faithfully copies
+    already-corrupted data."""
+    # "R0" is the ordinal id `_ordinal_ids` gives the first candidate, so
+    # the rerank SUCCEEDS and actually reaches `cache.put` — with a reply it
+    # cannot parse it falls back and caches nothing, and this test would
+    # pass without testing anything.
+    reranker = Reranker(FakeLLM(response="R0"))
+    handed_out = reranker.rerank(
+        "q", [RecallResult(id="A", text="a", score=0.9, payload={}, sources=["vector"])]
+    )
+    handed_out[0].score = 0.0123  # the caller writes, as the weak-retry does
+    handed_out[0].sources.append("retry-arm")
+
+    again = reranker.rerank(
+        "q", [RecallResult(id="A", text="a", score=0.9, payload={}, sources=["vector"])]
+    )
+    assert again[0].score == 0.9  # the next request reads the cached recall...
+    assert again[0].sources == ["vector"]  # ...not the last caller's edits

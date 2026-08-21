@@ -1443,3 +1443,41 @@ def test_an_unreadable_raw_score_falls_back_the_way_the_floor_does():
     }
     assert _candidate_score(unreadable) == 0.9  # not 0.0
     assert _merged_candidates([weaker], [unreadable])[0]["text"] == "strong"
+
+
+def test_the_documented_cost_is_the_cost_actually_paid(monkeypatch):
+    """PR #167 (bot P2): the CLI help, the request field, the README and
+    the CHANGELOG all quoted the retry's price, and all quoted it wrong —
+    "an LLM call plus another retrieval round". Each variant repeats the
+    caller's recall in FULL, reranker included, so the real bill is one
+    paraphrase call plus a rerank per variant. A spend knob whose stated
+    price is a third of the real one is not an informed opt-in, so the
+    number is pinned here and the docs are written from it."""
+    calls = {"paraphrase": 0, "rerank": 0, "retrieval": 0}
+
+    class _CountingLLM(_LLM):
+        def generate(self, prompt, max_tokens=200, temperature=0.0):
+            calls["paraphrase"] += 1
+            return super().generate(prompt, max_tokens, temperature)
+
+    class _Reranker:
+        def rerank(self, _query, results):
+            calls["rerank"] += 1
+            return results
+
+    def _fake(_recaller, query, _limit, **kwargs):
+        calls["retrieval"] += 1
+        reranker = kwargs.get("reranker")
+        if reranker is not None:  # what recall_flow does with it
+            reranker.rerank(query, [])
+        return []
+
+    import mnemostack.recall.retry as retry_mod
+
+    monkeypatch.setattr(retry_mod, "recall_flow", _fake)
+    retry_weak_recall(None, "q", 5, llm=_CountingLLM(), results=[], reranker=_Reranker())
+
+    assert calls["paraphrase"] == 1  # one call generates both variants
+    assert calls["rerank"] == MAX_VARIANTS  # ...but each variant reranks
+    assert calls["retrieval"] == MAX_VARIANTS
+    assert calls["paraphrase"] + calls["rerank"] == 3  # the number the docs quote
