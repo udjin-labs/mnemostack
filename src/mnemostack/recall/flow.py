@@ -99,20 +99,14 @@ def recall_flow(
     if reranker is not None:
         results = apply_rerank_safe(reranker, query, results, trace)
     results = results[:limit]
-    # `from_vector_floor` is deliberately NOT cleared here. It would need
-    # to mean "no stage has re-ranked this since the floor appended it",
-    # and nothing on this path can say that: a pipeline may be composed
-    # entirely of stages that do not score (`ClassifyQuery` alone is a
-    # legal pipeline), and `apply_rerank_safe` is fail-open, so a
-    # configured reranker that raised or kept the input order leaves a
-    # reranker present and nothing reranked. Both were tried as proxies
-    # and both were wrong. Between the two possible errors the choice is
-    # not symmetric: a stale marker costs a promoted item its RRF vote in
-    # a weak-recall retry, while a wrongly cleared one lets a floor-only
-    # item outvote a paraphrase's genuine winner — the failure the marker
-    # exists to prevent. So the marker persists, and the retry clears it
-    # the moment a pass genuinely ranks that memory (`_canonical`).
-    # udjin-labs/mnemostack#169 tracks the exact signal.
+    # Nothing to clear here any more. The floor's claim is the score it
+    # stamped (`floor_score`), so a stage that rescores a result retires
+    # the claim by doing its own job — no one has to detect that a
+    # re-ranking happened. This line used to try, twice, and both proxies
+    # were wrong: a pipeline can be composed entirely of stages that do
+    # not score (`ClassifyQuery` alone is a legal pipeline), and
+    # `apply_rerank_safe` is fail-open, so a configured reranker that
+    # raised leaves one present with nothing reranked (#169).
     apply_floor = getattr(recaller, "apply_vector_floor_after_rerank", None)
     if apply_floor is not None:
         results = apply_floor(results, recalled)
