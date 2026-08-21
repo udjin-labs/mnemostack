@@ -1015,3 +1015,56 @@ def test_a_failing_retry_shows_up_as_degraded_service(monkeypatch):
     assert out == [] and retried is True  # fail-open: still not an error
     failed = rec.counters.get(("mnemostack.recall.weak_retry_failed",))
     assert failed == float(MAX_VARIANTS)  # once per arm that raised
+
+
+def test_a_floor_extra_does_not_vote_in_the_fusion(monkeypatch):
+    """PR #167 (bot P2): `recall_flow` returns the ranked page AND, past
+    it, the vector floor's guaranteed candidates — items placed there
+    precisely BECAUSE the ranking did not choose them. Letting them vote
+    inverts the floor: the same candidate appended to both passes collects
+    two RRF contributions, out-votes each pass's actual rank-one winner,
+    and at `limit=1` becomes the sole survivor — after which the final
+    floor step has nothing left to add and BOTH real winners are gone."""
+    floored = _floor_recaller()
+
+    def _pass(winner):
+        # what recall_flow returns: the ranked page, then the floor's extra
+        return [_with_candidates(_Hit(winner), "F"), _Hit("F", text="floored F")]
+
+    _flow(
+        monkeypatch,
+        {"how did we decide auth": _pass("A"), "what was chosen for login": _pass("B")},
+    )
+    out, retried = retry_weak_recall(floored, "q", 1, llm=_LLM(), results=[])
+    assert retried is True
+    assert [r.id for r in out] == ["A", "F"]  # not ["F"]
+    assert out[0].score > out[1].score  # the floor rides behind the winner
+
+
+def test_a_pass_that_dies_still_reports_what_it_saw(monkeypatch):
+    """PR #167 (bot P2): a variant that records retriever entries or marks
+    a degradation and THEN raises had all of it discarded by `continue`.
+    The request returned success with a trace and a `degraded` field that
+    mentioned nothing, leaving a process-wide counter as the only evidence
+    that a whole pass had collapsed."""
+    from mnemostack.recall.trace import RecallTrace, RetrieverTrace
+
+    def _fake(_recaller, query, _limit, **kwargs):
+        trace = kwargs.get("trace")
+        if trace is not None:
+            trace.retrievers.append(RetrieverTrace(name="vector"))
+            trace.mark("bm25:down")
+        raise RuntimeError("pipeline stage exploded")
+
+    import mnemostack.recall.retry as retry_mod
+
+    monkeypatch.setattr(retry_mod, "recall_flow", _fake)
+    trace = RecallTrace()
+    out, retried = retry_weak_recall(None, "q", 10, llm=_LLM(), results=[], trace=trace)
+    assert out == [] and retried is True  # still fail-open
+    assert [e.name for e in trace.retrievers] == ["vector:retry"] * MAX_VARIANTS
+    assert [e.query for e in trace.retrievers] == [
+        "how did we decide auth",
+        "what was chosen for login",
+    ]
+    assert "bm25:down" in trace.degraded  # the fault the pass actually hit
