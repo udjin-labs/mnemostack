@@ -44,6 +44,15 @@ def test_docs_do_not_advertise_file_keystore_revocation_for_every_backend():
     # than the file keystore's semantics being claimed for both.
     assert "the OpenBao adapter's positive cache instead bounds" in deployment
 
+    # Scoped to the entry that RECORDED the correction, not the whole file:
+    # the constant appears in older entries too, so a whole-file search
+    # would keep passing while 2.2.0's own note quietly lost the
+    # distinction — the very regression this guards.
     changelog = Path("CHANGELOG.md").read_text()
-    assert "file-keystore revocation takes effect on the caller's next call" in changelog
-    assert "MNEMOSTACK_OPENBAO_CACHE_TTL" in changelog
+    recorded_in = re.search(
+        r"^## \[2\.2\.0\].*?(?=^## \[)", changelog, re.MULTILINE | re.DOTALL
+    )
+    assert recorded_in is not None, "the 2.2.0 entry is where this correction lives"
+    entry = recorded_in.group(0)
+    assert "file-keystore revocation takes effect on the caller's next call" in entry
+    assert "MNEMOSTACK_OPENBAO_CACHE_TTL" in entry
