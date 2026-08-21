@@ -1133,3 +1133,23 @@ def test_the_retry_spend_names_the_tenant(monkeypatch, tmp_path):
     retried = [k for k in rec.counters if k[0] == "mnemostack.server.recall_retried"]
     assert retried, "the retry counter was never recorded"
     assert ("tenant", "alpha") in retried[0], retried[0]  # the key's tenant
+
+
+def test_the_floor_weighs_every_pass_that_ran_not_only_the_winners(monkeypatch):
+    """PR #167 (bot P2): a pass's floor pool travels on its hits, so when
+    fusion cuts that pass's hit the pool goes with it — and the strongest
+    raw vector candidate of the whole retry could be discarded because the
+    paraphrase that found it lost a tie. Disjoint ids never meet in
+    `_merged_candidates`, so the same-id union fixed the other half of this
+    and left this half: what the floor is owed is what the retry SAW."""
+    a = _with_candidates(_Hit("A"), "F1")  # F1 scores 0.99
+    b = _Hit("B")
+    b.payload["_vector_floor_candidates"] = [
+        {"id": "F2", "text": "strongest", "score": 0.999, "payload": {}, "sources": ["vector"]}
+    ]
+    _flow(monkeypatch, {"how did we decide auth": [a], "what was chosen for login": [b]})
+    out, retried = retry_weak_recall(_floor_recaller(), "q", 1, llm=_LLM(), results=[])
+    assert retried is True
+    # A wins the single slot on the RRF tie; the floor still owes the
+    # caller the strongest candidate the retry saw, which B's pass found.
+    assert [r.id for r in out] == ["A", "F2"]

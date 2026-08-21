@@ -165,6 +165,13 @@ def retry_weak_recall(
     #: — reachable as soon as `--retry-weak-below` is above 1, where the
     #: original list is not empty.
     retrieved = False
+    #: Every pass's vector-floor candidates, unioned as the passes finish.
+    #: Gathered from the PASS, not from the survivors: fusion cuts to
+    #: `limit`, and a hit that loses the cut takes its pool with it — so
+    #: the strongest raw vector candidate of the whole retry could be
+    #: discarded because the paraphrase that found it lost a tie. What the
+    #: floor is owed is the union of what the retry SAW.
+    floor_pool = _pass_pool(results)
     for variant in variants:
         variant_trace = _fresh_trace(caller_trace)
         if variant_trace is not None:
@@ -189,6 +196,7 @@ def retry_weak_recall(
             continue
         if extra:
             retrieved = True
+        floor_pool = _merged_candidates(floor_pool, _pass_pool(extra))
         ranked.append(_one_pass(by_id, extra, limit))
         _absorb(caller_trace, variant_trace, variant)
     flow_kwargs.pop("trace", None)
@@ -226,7 +234,13 @@ def retry_weak_recall(
         # payload, so the merged list is a pool covering each pass that
         # contributed a survivor; the original pass, when it returned
         # anything, is first and its candidates are the ones that win.
-        merged = apply_floor(merged, results + merged)
+        # The pool goes in FRONT: `_vector_floor_candidates_from_results`
+        # takes the first carrier it meets and stops, so leading with the
+        # union is what makes it the pool the floor actually weighs. When
+        # no pass carried one, nothing is prepended and the helper keeps
+        # its own fallback (derive candidates from the results themselves).
+        pool: list[Any] = [_FloorPool(floor_pool)] if floor_pool else []
+        merged = apply_floor(merged, pool + results + merged)
 
     if budget:
         # Re-applied to the MERGED list: each variant's own flow capped
@@ -322,6 +336,35 @@ def _one_pass(by_id: dict[str, Any], hits: list[Any], limit: int) -> list[tuple[
 _FLOOR_CANDIDATES = "_vector_floor_candidates"
 
 
+class _FloorPool:
+    """A carrier for the retry's unioned floor candidates.
+
+    `Recaller.apply_vector_floor_after_rerank` reads its pool out of a
+    result's payload, so handing it the union means handing it something
+    payload-shaped. Deliberately not a `RecallResult`: it is never ranked,
+    never returned, and never counted — it exists only to be read.
+    """
+
+    __slots__ = ("payload", "sources")
+
+    def __init__(self, candidates: Any) -> None:
+        self.payload = {_FLOOR_CANDIDATES: candidates}
+        self.sources: list[str] = []
+
+
+def _pass_pool(hits: list[Any]) -> Any:
+    """One pass's floor candidates: the first carrier wins, as upstream.
+
+    Every result of a pass carries the same pool, so the first one holding
+    it speaks for the pass.
+    """
+    for hit in hits:
+        candidates = (getattr(hit, "payload", None) or {}).get(_FLOOR_CANDIDATES)
+        if isinstance(candidates, list):
+            return candidates
+    return None
+
+
 def _merged_candidates(first: Any, later: Any) -> Any:
     """Both passes' floor pools, one entry per memory, strongest kept.
 
@@ -331,8 +374,10 @@ def _merged_candidates(first: Any, later: Any) -> Any:
     rather than guessed at: this runs inside a retry that must not fail
     the recall.
     """
-    if not isinstance(first, list) or not isinstance(later, list):
+    if not isinstance(later, list):
         return first
+    if not isinstance(first, list):
+        return later
     merged: dict[Any, Any] = {}
     for candidate in [*first, *later]:
         if not isinstance(candidate, dict) or "id" not in candidate:
