@@ -201,8 +201,18 @@ def _absorb(caller_trace: Any, variant_trace: Any, variant: str) -> None:
     for entry in list(getattr(variant_trace, "retrievers", [])):
         entry.name = f"{entry.name}:retry"
         caller_trace.retrievers.append(entry)
+    # Copied, not re-`mark`ed: the variant's own trace already emitted the
+    # process-wide degradation counter for these tags, and marking them
+    # again would count one retry-time failure twice in
+    # `/status.degraded_events` and `/metrics`. Copying both lists also
+    # preserves the classification the variant made — routine signals stay
+    # notes — without this module re-deciding what is routine.
     for tag in getattr(variant_trace, "degraded", []):
-        caller_trace.mark(tag)
+        if tag not in caller_trace.degraded:
+            caller_trace.degraded.append(tag)
+    for tag in getattr(variant_trace, "notes", []):
+        if tag not in caller_trace.notes:
+            caller_trace.notes.append(tag)
     del variant  # named for readability at the call site
 
 

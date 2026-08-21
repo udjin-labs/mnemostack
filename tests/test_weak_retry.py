@@ -435,3 +435,55 @@ def test_the_loop_stops_when_the_budget_fills_mid_retry(monkeypatch):
     assert retried is True
     assert [q for q, _ in seen] == ["how did we decide auth"]  # second never ran
     assert sum_tokens(out, None) <= budget
+
+
+def test_a_retry_degradation_is_counted_once(monkeypatch):
+    """R5 (codex P2): the variant's own trace already emitted the
+    process-wide degradation counter, and folding the tag back with
+    `mark()` emitted it a second time — `/status.degraded_events` and
+    `/metrics` overreporting every retry-time failure."""
+    from mnemostack.observability.recorder import (
+        InMemoryRecorder,
+        NullRecorder,
+        set_recorder,
+    )
+    from mnemostack.recall.trace import DEGRADED_COUNTER, RecallTrace
+
+    def _fake(_recaller, _query, _limit, **kwargs):
+        trace = kwargs.get("trace")
+        if trace is not None:
+            trace.mark("bm25:down")  # a real fault, in the second pass
+        return []
+
+    import mnemostack.recall.retry as retry_mod
+
+    monkeypatch.setattr(retry_mod, "recall_flow", _fake)
+    rec = InMemoryRecorder()
+    set_recorder(rec)
+    try:
+        trace = RecallTrace()
+        retry_weak_recall(None, "q", 10, llm=_LLM(), results=[], trace=trace)
+        emitted = rec.counter_value(DEGRADED_COUNTER, labels={"reason": "bm25:down"})
+    finally:
+        set_recorder(NullRecorder())
+    assert "bm25:down" in trace.degraded  # still reported to the caller...
+    assert emitted == MAX_VARIANTS  # ...and counted once per pass, not twice
+
+
+def test_a_routine_note_from_a_retry_stays_a_note(monkeypatch):
+    """Copying both lists keeps the variant's own classification, so this
+    module never re-decides what counts as routine."""
+    from mnemostack.recall.trace import RecallTrace
+
+    def _fake(_recaller, _query, _limit, **kwargs):
+        trace = kwargs.get("trace")
+        if trace is not None:
+            trace.mark("temporal:no_parse")  # routine, not a fault
+        return []
+
+    import mnemostack.recall.retry as retry_mod
+
+    monkeypatch.setattr(retry_mod, "recall_flow", _fake)
+    trace = RecallTrace()
+    retry_weak_recall(None, "q", 10, llm=_LLM(), results=[], trace=trace)
+    assert "temporal:no_parse" in trace.notes
