@@ -1192,17 +1192,34 @@ def test_every_id_this_module_keys_on_goes_through_one_rule(monkeypatch):
 
     import mnemostack.recall.retry as retry_mod
 
+    def _converts_to_str(node):
+        """Python's string-conversion forms — a closed set, so it CAN be
+        named exhaustively, where a set of *values* could not be."""
+        if isinstance(node, ast.JoinedStr):  # f"{x}"
+            return True
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):  # "%s" % x
+            return isinstance(node.left, ast.Constant) and isinstance(node.left.value, str)
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id in {"str", "repr", "format"}:
+                return True
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "format":
+                return True
+        return False
+
+    def _stringifies(node):
+        """...applied to an id. A label built from a retriever's NAME is
+        not a second notion of identity; `str(some.id)` is."""
+        return _converts_to_str(node) and any(
+            isinstance(part, ast.Attribute) and part.attr == "id" for part in ast.walk(node)
+        )
+
     tree = ast.parse(inspect.getsource(retry_mod))
     offenders = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef) or node.name == "_memory_key":
             continue
         for inner in ast.walk(node):
-            if (
-                isinstance(inner, ast.Call)
-                and isinstance(inner.func, ast.Name)
-                and inner.func.id == "str"
-            ):
+            if _stringifies(inner):
                 offenders.append(f"{node.name}:{inner.lineno}")
     assert not offenders, (
         f"an id is stringified outside `_memory_key`: {offenders} — key through it instead"
@@ -1257,3 +1274,172 @@ def test_the_floor_marks_what_it_appended():
     assert [r.id for r in out] == ["A", "F"]
     assert not getattr(out[0], "from_vector_floor", False)  # the ranking chose A
     assert out[1].from_vector_floor is True  # the floor appended F
+
+
+def test_the_pool_merge_weighs_what_the_floor_weighs():
+    """Local review P1: `_apply_vector_floor` OVERWRITES `.score` on the
+    candidates it appends (`floor_score * 0.999`, seeded by that pass's own
+    ranked page) and orders by `payload["raw_vector_score"]` for exactly
+    that reason. Deduping the pool by the top-level score compared a real
+    similarity in one pass against a rank artefact in another — and could
+    drop the stronger observation while promising "strongest kept"."""
+    from mnemostack.recall.retry import _merged_candidates
+
+    artefact = {  # weak hit whose .score was inflated by its pass's floor
+        "id": "M",
+        "text": "weak",
+        "score": 0.9,
+        "payload": {"raw_vector_score": 0.3},
+        "sources": ["vector"],
+    }
+    genuine = {  # the real, stronger observation of the same memory
+        "id": "M",
+        "text": "strong",
+        "score": 0.4,
+        "payload": {"raw_vector_score": 0.95},
+        "sources": ["vector"],
+    }
+    assert _merged_candidates([artefact], [genuine])[0]["text"] == "strong"
+    assert _merged_candidates([genuine], [artefact])[0]["text"] == "strong"
+
+
+def _floor_flow(with_pipeline):
+    """Run the real `recall_flow` over a recall whose floor appended one
+    item, with and without a stage that re-evaluates the page."""
+    from mnemostack.recall.flow import recall_flow
+    from mnemostack.recall.recaller import RecallResult
+
+    floored = _floor_recaller()
+
+    class _Recaller:
+        vector_floor = 1
+        apply_vector_floor_after_rerank = staticmethod(floored.apply_vector_floor_after_rerank)
+
+        def recall(self, _query, limit=10, **_kw):
+            ranked = RecallResult(
+                id="A",
+                text="a",
+                score=0.9,
+                payload={
+                    "_vector_floor_candidates": [
+                        {"id": "C", "text": "c", "score": 0.4, "payload": {}, "sources": ["vector"]}
+                    ]
+                },
+                sources=["bm25"],
+            )
+            # what `recall` really hands back: its OWN floor already ran
+            return floored.apply_vector_floor_after_rerank([ranked], [ranked])
+
+    pipeline = None
+    if with_pipeline:
+
+        class _Pipeline:
+            def apply(self, _q, results, **_kw):
+                return results  # scored and placed every candidate it saw
+
+        pipeline = _Pipeline()
+    return recall_flow(_Recaller(), "q", 5, pipeline=pipeline)
+
+
+def test_the_floor_marker_outlives_a_recall_that_did_not_rerank_it():
+    """PR #167 (local review P1 + codex P2): the marker may only be cleared
+    by something that actually RE-RANKED the item, and nothing on the
+    recall path can say that. A pipeline can be composed entirely of
+    non-scoring stages (`ClassifyQuery` alone is legal), and
+    `apply_rerank_safe` is fail-open — a configured reranker that raised or
+    kept the input order leaves a reranker present and nothing reranked.
+    Both were tried as proxies for "this was ranked" and both were wrong,
+    so the marker now simply persists: a floor-only item stays labelled
+    whether or not stages were configured, and the retry clears it the
+    moment a pass genuinely ranks that memory."""
+    for with_pipeline in (True, False):
+        page = {r.id: r for r in _floor_flow(with_pipeline=with_pipeline)}
+        assert page["A"].from_vector_floor is False  # the ranking chose A
+        assert page["C"].from_vector_floor is True, (
+            f"floor-only item lost its marker (pipeline={with_pipeline}); it would "
+            "then vote in pass 0 as a ranked hit"
+        )
+
+
+def test_corroboration_clears_the_floor_marker(monkeypatch):
+    """Local review P1: a memory that reached the page only because the
+    floor guaranteed it is exactly what a paraphrase can overturn. When a
+    pass RANKS it, it is not a floor extra any more — whichever pass
+    ranked it."""
+    floor_only = _Hit("F")
+    floor_only.from_vector_floor = True
+    floor_only.score = 0.3
+    ranked_by_paraphrase = _Hit("F")  # same memory, genuinely ranked
+    _flow(monkeypatch, {"how did we decide auth": [ranked_by_paraphrase]})
+    out, retried = retry_weak_recall(None, "q", 5, llm=_LLM(), results=[floor_only], below=3)
+    assert retried is True
+    assert out[0] is floor_only  # the incumbent object is what comes back...
+    assert out[0].from_vector_floor is False  # ...no longer calling itself an extra
+
+
+def test_the_restore_covers_every_field_the_merge_touches(monkeypatch):
+    """Local review P1: round 1 promised the no-op path hands back the
+    caller's objects as they arrived, then round 6 added a mutable field
+    without extending that promise. A restore that covers all but the
+    newest channel is how the promise starts quietly meaning something
+    else again."""
+    from mnemostack.recall.tokens import sum_tokens
+
+    small, large = _Hit("S", text="word " * 8), _Hit("H", text="word " * 100)
+    small.from_vector_floor = True  # the caller's own floor-guaranteed row
+    budget = sum_tokens([small, large], None) + 2
+    # The paraphrase re-finds S as a RANKED hit — which clears the marker
+    # mid-merge — behind a newcomer big enough to make the trim shrink the
+    # page below what the caller arrived with, so the no-op path runs and
+    # has to put back a field something really did change.
+    _flow(
+        monkeypatch,
+        {"how did we decide auth": [_Hit("N", text="word " * 104), _Hit("S")]},
+    )
+    out, _retried = retry_weak_recall(
+        None, "q", 10, llm=_LLM(), results=[small, large], below=5, token_budget=budget
+    )
+    assert [r.id for r in out] == ["S", "H"]  # the no-op path ran
+    assert small.from_vector_floor is True  # ...and gave the field back too
+
+
+def test_weakness_is_counted_in_memories():
+    """Local review P2 / bot P2: the gate deciding whether to ask again was
+    the last place counting rows. One memory under two id representations
+    is one memory found — reading it as two calls a genuinely weak recall
+    healthy and skips the retry entirely."""
+    assert is_weak([_Hit(1), _Hit("1")], below=2) is True
+    assert is_weak([_Hit(1), _Hit("2")], below=2) is False
+
+
+def test_the_room_question_still_counts_rows():
+    """...and the neighbouring gate is NOT the same oversight: it asks
+    whether the RESPONSE has space left, and a response is made of rows.
+    Pinned so the next reader does not "fix" it into agreement."""
+    assert has_room([_Hit(1), _Hit("1")], limit=2) is False
+
+
+def test_an_unreadable_raw_score_falls_back_the_way_the_floor_does():
+    """PR #167 (codex P2): `Recaller._raw_score` falls back to the
+    candidate's own score when `raw_vector_score` will not parse. Returning
+    zero here instead made the pool disagree with the floor about which
+    observation of a memory is stronger — and the disagreement, not the bad
+    value, is what picks a different memory than the floor would."""
+    from mnemostack.recall.retry import _candidate_score, _merged_candidates
+
+    unreadable = {
+        "id": "M",
+        "text": "strong",
+        "score": 0.9,
+        "payload": {"raw_vector_score": "not-a-number"},
+        "sources": ["vector"],
+    }
+    weaker = {
+        "id": "M",
+        "text": "weak",
+        "score": 0.4,
+        "payload": {"raw_vector_score": 0.4},
+        "sources": ["vector"],
+    }
+    assert _candidate_score(unreadable) == 0.9  # not 0.0
+    assert _merged_candidates([weaker], [unreadable])[0]["text"] == "strong"

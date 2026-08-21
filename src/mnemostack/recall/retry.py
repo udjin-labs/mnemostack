@@ -46,8 +46,20 @@ DEFAULT_WEAK_BELOW = 1
 
 
 def is_weak(results: list[Any], below: int = DEFAULT_WEAK_BELOW) -> bool:
-    """Whether this recall returned too little to leave alone."""
-    return len(results) < max(1, below)
+    """Whether this recall returned too little to leave alone.
+
+    Counted in MEMORIES, not rows — the same question `_memory_key`
+    answers everywhere else in this module. A recall that returned one
+    memory under two id representations found one thing, and reading that
+    as two would call a genuinely weak recall healthy and skip the retry
+    entirely: the gate that decides whether to ask again was the last
+    place still counting rows.
+
+    `has_room` below deliberately still counts rows, and that is not the
+    same oversight: it asks whether the RESPONSE has space left, and a
+    response is made of rows.
+    """
+    return len({_memory_key(r.id) for r in results}) < max(1, below)
 
 
 def has_room(
@@ -148,7 +160,10 @@ def retry_weak_recall(
     # path that decides to hand them back UNCHANGED has to hand back what
     # was on them, or "we kept your results" quietly means "we kept your
     # results with someone else's numbers and arms on them".
-    original_state = [(r, r.score, list(r.sources), dict(r.payload or {})) for r in results]
+    original_state = [
+        (r, r.score, list(r.sources), dict(r.payload or {}), getattr(r, "from_vector_floor", False))
+        for r in results
+    ]
     by_id: dict[str, Any] = {}
     ranked: list[list[tuple[Any, float]]] = [_one_pass(by_id, results)]
     #: What the caller already had, counted the way the merge counts —
@@ -276,10 +291,15 @@ def retry_weak_recall(
         # and then drops one of the newcomers on an arbitrary tie-break
         # instead. What the caller is protected from is ending up with less
         # than they had, not from a re-ranking they opted into.
-        for result, score, sources, payload in original_state:
+        for result, score, sources, payload, from_floor in original_state:
             result.score = score
             result.sources = sources
             result.payload = payload
+            # Every field the merge can touch, including the one round 6
+            # added: a restore that covers all but the newest channel is
+            # how "we kept your results" starts quietly meaning something
+            # else again.
+            result.from_vector_floor = from_floor
         return results, True
     gained = len(merged) - original_count
     if gained <= 0:
@@ -442,10 +462,34 @@ def _merged_candidates(first: Any, later: Any) -> Any:
 
 
 def _candidate_score(candidate: dict[str, Any]) -> float:
+    """A candidate's vector similarity, read the way the floor reads it.
+
+    `Recaller._apply_vector_floor` OVERWRITES `.score` on the candidates
+    it appends (`floor_score * 0.999`) — a synthetic value seeded by that
+    pass's own ranked page, unrelated to similarity — and orders by
+    `payload["raw_vector_score"]` for exactly that reason. Deduping this
+    pool by the top-level score therefore compared a real similarity in
+    one pass against a rank artefact in another, and could drop the
+    stronger observation of a memory while promising "strongest kept".
+    Same field, same fallback, same answer as `Recaller._raw_score`.
+    """
+    payload = candidate.get("payload")
+    if isinstance(payload, dict) and "raw_vector_score" in payload:
+        raw = payload["raw_vector_score"]
+    else:
+        raw = candidate.get("score", 0.0)
     try:
-        return float(candidate.get("score", 0.0))
+        return float(raw)
     except (TypeError, ValueError):
-        return 0.0
+        # The same fallback `Recaller._raw_score` takes, for the same
+        # reason: a custom retriever's unparseable `raw_vector_score` must
+        # not read as zero here while the floor reads it as the candidate's
+        # own score — that disagreement picks a different memory than the
+        # floor would have.
+        try:
+            return float(candidate.get("score", 0.0))
+        except (TypeError, ValueError):
+            return 0.0
 
 
 def _canonical(by_id: dict[str, Any], result: Any) -> Any:
@@ -477,21 +521,16 @@ def _canonical(by_id: dict[str, Any], result: Any) -> Any:
         by_id[key] = result
         return result
     if incumbent is not result:
+        if not getattr(result, "from_vector_floor", False):
+            # This pass RANKED it. The incumbent may have reached the page
+            # only because the floor guaranteed it, and that is exactly the
+            # evidence a paraphrase can overturn — a memory the ranking
+            # picks is not a floor extra, whichever pass picked it.
+            incumbent.from_vector_floor = False
         for source in getattr(result, "sources", []) or []:
             if source not in incumbent.sources:
                 incumbent.sources.append(source)
         for field, value in (getattr(result, "payload", None) or {}).items():
-            if field == _FLOOR_CANDIDATES and field in incumbent.payload:
-                # The one payload key where BOTH passes having an opinion
-                # is the normal case, not a collision to resolve by
-                # seniority: with the floor on, every result of a pass
-                # carries that pass's whole candidate pool. Keeping the
-                # incumbent's alone would strand a stronger vector hit
-                # that only a later paraphrase saw — it cannot vote (a
-                # floor extra is not a ranking) and it would no longer be
-                # re-addable either, which is the one route it had left.
-                incumbent.payload[field] = _merged_candidates(incumbent.payload[field], value)
-                continue
             incumbent.payload.setdefault(field, value)
     return incumbent
 

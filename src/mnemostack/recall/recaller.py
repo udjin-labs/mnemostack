@@ -1207,7 +1207,9 @@ class Recaller:
             # short the appended items sit at ordinary indices. An object
             # marker rather than a payload key, so it stays out of the
             # client's metadata without another name in the response
-            # serializer's exclusion list.
+            # serializer's exclusion list. Only SET here — clearing needs
+            # to know whether anything re-ranked the page in between, which
+            # `recall_flow` knows and this method cannot.
             candidate.from_vector_floor = True
             output.append(candidate)
             seen_ids.add(candidate.id)
