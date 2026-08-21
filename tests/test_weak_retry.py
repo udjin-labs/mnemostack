@@ -374,3 +374,21 @@ def test_the_caller_trace_is_restored_for_later_stages(monkeypatch):
     kwargs = {"trace": trace, "tenant": "acme"}
     retry_weak_recall(None, "q", 10, llm=_LLM(), results=[], **kwargs)
     assert kwargs["trace"] is trace
+
+
+def test_the_retry_stops_once_the_page_is_full(monkeypatch):
+    """R3 (codex P2): when the first paraphrase already fills `limit`, a
+    second one's hits land past the cut and are discarded — a whole
+    retrieval, pipeline and rerank pass for nothing. It is the same rule
+    `is_weak` applies before the first retry; it just was not applied
+    inside the loop."""
+    seen = _flow(
+        monkeypatch,
+        {
+            "how did we decide auth": [_Hit(1), _Hit(2)],
+            "what was chosen for login": [_Hit(3)],
+        },
+    )
+    out, retried = retry_weak_recall(None, "q", 2, llm=_LLM(), results=[])
+    assert retried is True and [r.id for r in out] == [1, 2]
+    assert [q for q, _ in seen] == ["how did we decide auth"]  # second never ran

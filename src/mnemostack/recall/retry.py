@@ -104,6 +104,14 @@ def retry_weak_recall(
     seen = {str(r.id) for r in results}
     merged = list(results)
     for variant in variants:
+        if len(merged) >= limit:
+            # The page is full: anything a further paraphrase found would
+            # be appended past the cut and thrown away. This is the same
+            # rule `is_weak` applies before the first retry — spend that
+            # cannot change the response is spend not worth making — and
+            # leaving it out of the loop meant applying it once and then
+            # ignoring it.
+            break
         variant_trace = _fresh_trace(caller_trace)
         if variant_trace is not None:
             flow_kwargs["trace"] = variant_trace
