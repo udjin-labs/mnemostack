@@ -1,9 +1,9 @@
 """Server-side access accounting — `access_count` / `last_accessed`.
 
 The recall pipeline's freshness stage already reads these two payload keys:
-each recorded access extends a memory's effective half-life, so a fact that
-keeps being retrieved decays more slowly than one that never is
-(:func:`mnemostack.recall.pipeline.stages.compute_decay`). Until now nothing
+each recorded access earns a memory a bounded ranking bonus, so a fact that
+keeps being retrieved outranks an equally similar one that never is
+(:func:`mnemostack.recall.pipeline.stages.compute_access_boost`). Until now nothing
 in the stack ever WROTE them — a deployment that wanted reinforcement had to
 have every client stamp the payloads itself, which means each client
 reimplements the same read-modify-write, and a client that forgets silently
@@ -14,17 +14,30 @@ access where the retrieval happens. It is opt-in (`serve --record-access`):
 it turns reads into writes, which is a cost and a data change an operator
 must choose.
 
-**What turning it on changes about RANKING.** Not just a counter: because
-``compute_decay`` returns 1.0 when ``last_accessed`` is missing, and nothing
-in the stack wrote that key before, confidence decay has been inert on every
-deployment that did not stamp the keys itself. Recording it makes the stage
-live, and the effect is asymmetric in a way the "reinforcement" framing
-hides — a point recalled ONCE and then left cold starts decaying from that
-moment, while a point NEVER recalled keeps the undecayed ceiling forever. At
-the preset 30-day half-life, one access and then silence scores 0.87 after a
-week, 0.56 after a month, and floors at 0.10 after roughly half a year,
-against a flat 1.0 for a memory nothing ever found. The factor multiplies the
-whole blended score, so ``freshness_weight`` does not scale it down.
+**What turning it on changes about RANKING.** Not just a counter. The
+freshness stage multiplies each blended score by a bounded reinforcement
+bonus computed from these two keys
+(:func:`mnemostack.recall.pipeline.stages.compute_access_boost`), so
+recording them makes that term live. The bonus can only RAISE a used
+memory's rank — never lower it — and it decays back to exactly 1.0 with
+time since the last access, so a memory nothing has retrieved lately ends
+up where it would have been with no access signal at all. A deployment
+that leaves this flag off sees no ranking change whatsoever.
+
+That direction is deliberate and was not always so. This term used to be
+a DECAY measured from ``last_accessed``, which made being used strictly
+punishing: recalled once and then left cold, a memory fell to 0.56 within
+a month and hit a 0.1 floor within four, while a memory nothing had ever
+found kept a flat 1.0 forever — junk nobody wanted outranked a useful
+fact nobody had needed lately. Ageing by AGE is not lost as a result: it
+is the same stage's ``freshness`` term, computed from the memory's own
+timestamp. Folding age in here as well would count it twice.
+
+The one thing to weigh before turning it on is that this is the only term
+in the pipeline that a recall's own output feeds back into. Three things
+bound it: the ceiling (``access_bonus_max``, 0.25 by default, and 0
+removes the signal from ranking entirely), saturation in the counter, and
+the fact that only points actually handed to the caller are recorded.
 
 **Where it does not take effect.** Under ``text_search=qdrant_bm25`` the
 lexical arm serves each point's payload from the corpus snapshot taken at
@@ -39,12 +52,8 @@ the snapshot is what makes that arm cheap. A deployment that wants
 reinforcement to steer a purely lexical recall has to restart to pick it
 up.
 
-That is the deliberate trade of an Ebbinghaus model — recency of USE is the
-signal, and a memory nobody has retrieved has no use to be recent — but it
-is a real change in what the ranking means, and an operator should turn the
-flag on knowing it. It only bites recalls that run the pipeline
-(``full_pipeline``, the default on `/recall` and `/answer`); raw RRF output
-is unaffected.
+It only affects recalls that run the pipeline (``full_pipeline``, the
+default on `/recall` and `/answer`); raw RRF output is unaffected.
 
 Contract:
 
@@ -65,9 +74,9 @@ Contract:
   per point.
 - **Best-effort counting.** Qdrant has no atomic increment, so read and
   write are still two steps: two concurrent recalls of the same point can
-  record one increment instead of two. The reader clamps the reinforcement
-  at 10 accesses, so a lost increment changes a half-life by at most a few
-  percent — a lock per hit would cost far more than it buys.
+  record one increment instead of two. The reader saturates the bonus at 10
+  accesses, so a lost increment moves the multiplier by at most a fraction
+  of a percent — a lock per hit would cost far more than it buys.
 - **Tenant-scoped.** Patches go through the store's tenant-aware batch hook,
   so a foreign-owned point is skipped by the store itself, not by trust.
 - **Point ids only.** A recall's results can include hits that are not
