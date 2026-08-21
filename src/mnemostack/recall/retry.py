@@ -45,18 +45,37 @@ MAX_VARIANTS = 2
 DEFAULT_WEAK_BELOW = 1
 
 
-def is_weak(results: list[Any], below: int = DEFAULT_WEAK_BELOW, limit: int | None = None) -> bool:
-    """Whether this recall is weak enough to be worth asking again.
-
-    Weak means BOTH too few results and room to add some: with a
-    threshold above the caller's limit, a full page still counts as
-    "below the threshold", and every hit the retry found would then be
-    appended past the limit and cut away again — real spend, no change to
-    the answer, and a recovery counter that lied about it.
-    """
-    if limit is not None and len(results) >= limit:
-        return False
+def is_weak(results: list[Any], below: int = DEFAULT_WEAK_BELOW) -> bool:
+    """Whether this recall returned too little to leave alone."""
     return len(results) < max(1, below)
+
+
+def has_room(
+    results: list[Any],
+    limit: int,
+    token_budget: int | None = None,
+    token_counter: Any = None,
+) -> bool:
+    """Whether another pass could still change what the caller receives.
+
+    ONE question asked in both of the response's dimensions, because the
+    answer is cut to both: a page already holding `limit` results, or
+    already spending the whole token budget, cannot take anything a
+    further paraphrase finds — the extras are appended past the cut and
+    trimmed away again. Spend that cannot change the response is spend not
+    worth making, and this is the only place that judgement is made, so it
+    cannot be applied in one dimension and forgotten in the other (it was,
+    twice: the item limit before the first retry, then again inside the
+    variant loop).
+    """
+    if len(results) >= limit:
+        return False
+    if token_budget:
+        from .tokens import sum_tokens
+
+        if sum_tokens(results, token_counter) >= token_budget:
+            return False
+    return True
 
 
 def retry_weak_recall(
@@ -76,7 +95,9 @@ def retry_weak_recall(
     Never raises: a failed retry is a recall that did not improve, not a
     failed request.
     """
-    if not is_weak(results, below, limit):
+    budget = flow_kwargs.get("token_budget")
+    counter_fn = flow_kwargs.get("token_counter")
+    if not is_weak(results, below) or not has_room(results, limit, budget, counter_fn):
         return results, False
     if llm is None:
         counter("mnemostack.recall.weak_retry_unavailable", 1)
@@ -104,13 +125,10 @@ def retry_weak_recall(
     seen = {str(r.id) for r in results}
     merged = list(results)
     for variant in variants:
-        if len(merged) >= limit:
-            # The page is full: anything a further paraphrase found would
-            # be appended past the cut and thrown away. This is the same
-            # rule `is_weak` applies before the first retry — spend that
-            # cannot change the response is spend not worth making — and
-            # leaving it out of the loop meant applying it once and then
-            # ignoring it.
+        if not has_room(merged, limit, budget, counter_fn):
+            # Nothing a further paraphrase found could survive the cut —
+            # by count or by budget. Same question as before the first
+            # retry, same answer, one place asking it.
             break
         variant_trace = _fresh_trace(caller_trace)
         if variant_trace is not None:
@@ -138,7 +156,6 @@ def retry_weak_recall(
         return results, True  # asked again, still nothing: an answer too
 
     merged = merged[:limit]
-    budget = flow_kwargs.get("token_budget")
     if budget:
         # Re-applied to the MERGED list: each variant's own flow capped
         # its own results, and concatenating two lists that each fit the
@@ -147,9 +164,7 @@ def retry_weak_recall(
         # before it.
         from .tokens import apply_token_budget
 
-        merged, _tokens = apply_token_budget(
-            merged, budget, flow_kwargs.get("token_counter")
-        )
+        merged, _tokens = apply_token_budget(merged, budget, counter_fn)
     gained = len(merged) - len(results)
     if gained <= 0:
         final = results if not merged else merged

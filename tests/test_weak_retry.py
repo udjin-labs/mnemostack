@@ -19,6 +19,7 @@ from test_remote_ingest import _ingest_app
 from mnemostack.recall.retry import (
     DEFAULT_WEAK_BELOW,
     MAX_VARIANTS,
+    has_room,
     is_weak,
     retry_weak_recall,
 )
@@ -392,3 +393,45 @@ def test_the_retry_stops_once_the_page_is_full(monkeypatch):
     out, retried = retry_weak_recall(None, "q", 2, llm=_LLM(), results=[])
     assert retried is True and [r.id for r in out] == [1, 2]
     assert [q for q, _ in seen] == ["how did we decide auth"]  # second never ran
+
+
+def test_a_full_token_budget_leaves_no_room(monkeypatch):
+    """R4 (codex P2): the room question has TWO dimensions, because the
+    response is cut by both. A page under the item limit can still be
+    spending the whole token budget, and every hit a paraphrase found
+    would then be trimmed away — the same guaranteed-useless spend the
+    count rule already refused."""
+    long_hit = _Hit(1, text="word " * 200)
+    from mnemostack.recall.tokens import sum_tokens
+
+    used = sum_tokens([long_hit], None)
+    assert has_room([long_hit], limit=10) is True  # room by count...
+    assert has_room([long_hit], limit=10, token_budget=used) is False  # ...not by budget
+    assert has_room([long_hit], limit=10, token_budget=used * 3) is True
+
+    llm = _LLM()
+    seen = _flow(monkeypatch, {"how did we decide auth": [_Hit(2)]})
+    out, retried = retry_weak_recall(
+        None, "q", 10, llm=llm, results=[long_hit], below=5, token_budget=used
+    )
+    assert out == [long_hit] and retried is False
+    assert llm.calls == 0 and seen == []
+
+
+def test_the_loop_stops_when_the_budget_fills_mid_retry(monkeypatch):
+    """Same question inside the loop: the first paraphrase can fill the
+    budget without filling the page."""
+    from mnemostack.recall.tokens import sum_tokens
+
+    big = _Hit(1, text="word " * 200)
+    budget = sum_tokens([big], None)
+    seen = _flow(
+        monkeypatch,
+        {"how did we decide auth": [big], "what was chosen for login": [_Hit(2)]},
+    )
+    out, retried = retry_weak_recall(
+        None, "q", 10, llm=_LLM(), results=[], token_budget=budget
+    )
+    assert retried is True
+    assert [q for q, _ in seen] == ["how did we decide auth"]  # second never ran
+    assert sum_tokens(out, None) <= budget
