@@ -4356,6 +4356,24 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         help="Record returned recall ids for inhibition-of-return state",
     )
     p_serve.add_argument(
+        "--retry-on-weak",
+        action="store_true",
+        help=(
+            "Ask a nearly-empty recall again in other words: paraphrase with "
+            "the answer LLM and merge one more round. Costs an LLM call plus "
+            "another retrieval round per weak recall. Env: MNEMOSTACK_RETRY_ON_WEAK"
+        ),
+    )
+    p_serve.add_argument(
+        "--retry-weak-below",
+        type=int,
+        default=1,
+        help=(
+            "How few results count as weak (default 1: only a recall that "
+            "returned nothing at all)"
+        ),
+    )
+    p_serve.add_argument(
         "--record-access",
         action="store_true",
         help=(
@@ -4517,6 +4535,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
         record_access=(
             getattr(args, "record_access", False) or _env_bool("MNEMOSTACK_RECORD_ACCESS")
         ),
+        retry_on_weak=(
+            getattr(args, "retry_on_weak", False) or _env_bool("MNEMOSTACK_RETRY_ON_WEAK")
+        ),
+        retry_weak_below=max(1, int(getattr(args, "retry_weak_below", 1) or 1)),
         # Honor MNEMOSTACK_AUTH_ENABLED too: cmd_serve builds ServerConfig
         # explicitly (never from_env), so without this the documented env toggle
         # would silently leave the endpoints unauthenticated.
@@ -4552,6 +4574,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     print(f"  state:      {cfg.state_path}")
     print(f"  auto IoR:   {cfg.auto_record_ior}")
     print(f"  access rec: {cfg.record_access}")
+    print(f"  weak retry: {cfg.retry_on_weak} (below {cfg.retry_weak_below})")
     print(f"  docs:       http://{args.host}:{args.port}/docs")
     uvicorn.run(app, host=args.host, port=args.port, reload=args.reload)
     return 0

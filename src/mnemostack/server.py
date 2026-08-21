@@ -106,6 +106,7 @@ from mnemostack.recall import (
     sum_tokens,
 )
 from mnemostack.recall.pipeline import FileStateStore, default_state_path
+from mnemostack.recall.retry import retry_weak_recall
 from mnemostack.vector import VectorStore
 
 log = logging.getLogger(__name__)
@@ -127,6 +128,16 @@ class RecallRequest(BaseModel):
     full_pipeline: bool = Field(
         True,
         description="Apply the 8-stage recall pipeline. Set to False for raw RRF output.",
+    )
+    retry_on_weak: bool | None = Field(
+        None,
+        description=(
+            "Ask again in other words when this recall comes back nearly "
+            "empty: paraphrase the query with the answer LLM and merge a "
+            "second round. Costs an LLM call and another retrieval round, "
+            "so it is off unless the operator enabled it (`serve "
+            "--retry-on-weak`); null keeps the server default."
+        ),
     )
     include_trace: bool = Field(
         False,
@@ -736,6 +747,14 @@ class ServerConfig:
     #: shifted `graph_user` into this flag for any positional caller, which
     #: silently ENABLES writes on a deployment that never asked for them.
     record_access: bool = False
+    #: Ask a nearly-empty recall again, in other words. Off by default:
+    #: the second pass costs an LLM call plus another retrieval round.
+    #: Appended, like every knob above — see the note on positional
+    #: stability, and add new fields to the prefix pin in the same change.
+    retry_on_weak: bool = False
+    #: How few results count as "weak". 1 = only a recall that returned
+    #: nothing at all, which is the least ambiguous case and the default.
+    retry_weak_below: int = 1
 
     def __post_init__(self) -> None:
         if self.rerank_mode not in RERANK_MODES:
@@ -771,6 +790,7 @@ class ServerConfig:
             token_budget=cfg.recall.token_budget,
             auto_record_ior=_env_bool("MNEMOSTACK_AUTO_RECORD_IOR"),
             record_access=_env_bool("MNEMOSTACK_RECORD_ACCESS"),
+            retry_on_weak=_env_bool("MNEMOSTACK_RETRY_ON_WEAK"),
             auth_enabled=_env_bool("MNEMOSTACK_AUTH_ENABLED"),
             keys_file=os.environ.get("MNEMOSTACK_KEYS_FILE") or None,
             quotas_file=os.environ.get("MNEMOSTACK_QUOTAS_FILE") or None,
@@ -1167,6 +1187,11 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         )
     except Exception as exc:  # pragma: no cover - missing provider key
         log.warning("LLM init failed (%s); /answer and reranker disabled.", exc)
+        # Bound explicitly: the weak-recall retry reads `llm` from this
+        # scope, and get_llm raising here would otherwise leave the name
+        # unbound — a NameError inside the recall path, on a deployment
+        # whose only sin is having no LLM configured.
+        llm = None
         answer_gen = None
         reranker = None
 
@@ -1348,6 +1373,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         as_of: str | None = None,
         tenant: str | None = None,
         record: bool = True,
+        retry_on_weak: bool | None = None,
     ):
         trace = RecallTrace()
         # Reranking is part of the full pipeline; if it was requested but the
@@ -1370,6 +1396,35 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             as_of=as_of,
             tenant=tenant,
         )
+        # Asymmetric on purpose: the request can only opt OUT. The client
+        # pays nothing for this, while the SERVER pays for the LLM call
+        # and the second retrieval round — so switching it on is the
+        # operator's decision, exactly like the other spend knobs, and a
+        # caller who does not want it can still decline.
+        if cfg.retry_on_weak and retry_on_weak is not False:
+            # Ask the same question in other words. Every scoping keyword
+            # goes through unchanged — a retry that widened the scope
+            # would be a tenant leak wearing a feature's clothes — and the
+            # policy is bounded to one extra round, so a query that fails
+            # twice costs a known amount rather than an escalating one.
+            results, retried = retry_weak_recall(
+                recaller,
+                query,
+                limit,
+                llm=llm,
+                results=results,
+                below=cfg.retry_weak_below,
+                pipeline=pipeline if full_pipeline else None,
+                reranker=reranker if full_pipeline else None,
+                filters=filters,
+                trace=trace,
+                token_budget=token_budget if token_budget is not None else cfg.token_budget,
+                include_invalidated=include_invalidated,
+                as_of=as_of,
+                tenant=tenant,
+            )
+            if retried:
+                counter("mnemostack.server.recall_retried", 1)
         if cfg.auto_record_ior:
             # Record into the caller's tenant partition so auto-IoR is per-tenant.
             record_recall_events(pipeline, results, tenant)
@@ -1396,6 +1451,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         as_of: str | None = None,
         tenant: str | None = None,
         record: bool = True,
+        retry_on_weak: bool | None = None,
     ):
         """Offload the blocking recall stack to a worker thread.
 
@@ -1414,6 +1470,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             as_of,
             tenant,
             record,
+            retry_on_weak,
         )
 
     @app.get("/", include_in_schema=False)
@@ -1523,6 +1580,8 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 req.include_invalidated,
                 req.as_of,
                 _tenant_of(principal),
+                True,  # record access here; /answer defers until it answers
+                req.retry_on_weak,
             )
         except Exception as exc:
             log.exception("recall endpoint failed")
