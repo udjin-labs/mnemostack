@@ -111,6 +111,12 @@ class RecallResult:
     use it as a citation handle (``[id:<...>]``) and later resolve it back to
     the full record via storage-specific helpers.
 
+    ``from_vector_floor`` is set on a result the vector floor APPENDED —
+    one that reaches the caller because the floor guarantees it, not
+    because the ranking chose it. Absent (falsy) on everything else, and
+    deliberately an attribute rather than payload: consumers that treat a
+    result list as a ranking need it, clients do not.
+
     The ``sources`` list records which retrievers contributed this result
     (e.g. ``['bm25', 'vector']``) and is useful for observability and for
     rendering compact result indexes.
@@ -121,6 +127,11 @@ class RecallResult:
     score: float
     payload: dict[str, Any] = field(default_factory=dict)
     sources: list[str] = field(default_factory=list)  # ['bm25', 'vector']
+    #: Appended by the vector floor rather than chosen by the ranking.
+    #: Appended at the TAIL of this dataclass on purpose: positional
+    #: construction of a RecallResult is common, so a field inserted above
+    #: would silently land someone's `sources` in a boolean.
+    from_vector_floor: bool = False
 
 
 _SCHEMA_FIELD_DEFAULTS = (
@@ -1190,6 +1201,16 @@ class Recaller:
             if floor_score is not None:
                 candidate.score = floor_score * 0.999
                 floor_score = candidate.score
+            # This one is here BECAUSE the ranking did not choose it, and
+            # anything that later treats the list as a ranking needs to be
+            # able to tell. Position cannot say it: when the ranked page is
+            # short the appended items sit at ordinary indices. An object
+            # marker rather than a payload key, so it stays out of the
+            # client's metadata without another name in the response
+            # serializer's exclusion list. Only SET here — clearing needs
+            # to know whether anything re-ranked the page in between, which
+            # `recall_flow` knows and this method cannot.
+            candidate.from_vector_floor = True
             output.append(candidate)
             seen_ids.add(candidate.id)
         return output
