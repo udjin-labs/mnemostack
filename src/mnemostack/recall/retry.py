@@ -40,6 +40,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..llm.base import LLMProvider
 from ..observability.recorder import counter
 from .flow import recall_flow
 
@@ -125,15 +126,37 @@ def retry_weak_recall(
         return results, False
 
     counter("mnemostack.recall.weak_retry", 1)
+    # The paraphrase call is watched rather than guessed at. `ok=False` is
+    # how a provider in this stack reports an outage — it does not raise —
+    # and `generate_variants` turns that into an empty list, identical from
+    # the outside to a healthy model that simply echoed the query (the
+    # expander drops a paraphrase equal to the original). Classifying on
+    # "did it raise" or "is the list empty" therefore cannot tell an outage
+    # from a shrug, and this module spent two rounds proving it: first
+    # filing outages as routine, then filing healthy shrugs as faults.
+    # Reading the response is the only answer that is true in both cases.
+    watched = _WatchedLLM(llm)
     try:
         from .expansion import QueryExpander
 
-        expander = QueryExpander(recaller, llm, n_variants=MAX_VARIANTS)
+        expander = QueryExpander(recaller, watched, n_variants=MAX_VARIANTS)
         variants = expander.generate_variants(query)[:MAX_VARIANTS]
     except Exception:  # noqa: BLE001 — a retry must not fail the recall
         counter("mnemostack.recall.weak_retry_failed", 1)
+        _note(flow_kwargs.get("trace"), "weak_retry:paraphrase_failed")
         return results, False
     if not variants:
+        # Counted either way, and visible in /metrics — but only a provider
+        # that actually reported failure reaches `/status.degraded_events`,
+        # through the expander's own `query_expansion.errors`. A healthy
+        # shrug is a routine signal, marked so that `notes` (the
+        # authoritative list) says what it is.
+        counter("mnemostack.recall.weak_retry_no_variants", 1)
+        trace = flow_kwargs.get("trace")
+        if watched.failed:
+            _note(trace, "weak_retry:paraphrase_failed")
+        elif trace is not None:
+            trace.mark("weak_retry:no_variants")
         return results, False
 
     # Each variant recalls into its OWN trace. Sharing the caller's would
@@ -539,6 +562,70 @@ def _canonical(by_id: dict[str, Any], result: Any) -> Any:
         for field, value in (getattr(result, "payload", None) or {}).items():
             incumbent.payload.setdefault(field, value)
     return incumbent
+
+
+class _WatchedLLM(LLMProvider):
+    """The caller's LLM, remembering whether it reported a failure.
+
+    `LLMProvider`'s own contract is that providers "handle their own errors
+    gracefully — set `error` field in LLMResponse rather than raising", so
+    the verdict this records is the one the interface says to look at.
+
+    Per call, never shared: `retry_weak_recall` builds one and drops it, so
+    there is no cross-request state to race — the mistake this repo already
+    made once with a reranker's `last_fallback_reason`.
+    """
+
+    def __init__(self, llm: Any) -> None:
+        self.llm = llm
+        self.failed = False
+
+    @property
+    def name(self) -> str:
+        return str(getattr(self.llm, "name", "unknown"))
+
+    def generate(
+        self,
+        prompt: str,
+        max_tokens: int = 200,
+        temperature: float = 0.0,
+    ) -> Any:
+        response = self.llm.generate(prompt, max_tokens=max_tokens, temperature=temperature)
+        # Read `ok` directly, like every other consumer in this codebase. A
+        # `getattr` hedge was tried and removed: a response without `ok`
+        # cannot reach a default here anyway, because `generate_variants`
+        # reads `resp.ok` itself a moment later and raises — landing on the
+        # failure path regardless. A guard that cannot fire is not defence,
+        # it is a claim the tests cannot check.
+        if not response.ok:
+            self.failed = True
+        return response
+
+
+def _note(trace: Any, tag: str) -> None:
+    """Record a degradation on the caller's trace, WITHOUT the counter.
+
+    `RecallTrace.mark` emits the process-wide degradation counter, and
+    this module's failures already have their own — a raise emits
+    `weak_retry_failed`, and a provider reporting `ok=False` emits
+    `query_expansion.errors` from inside the expander. Both are in
+    `/status`'s allowlist, so marking here would count one failure twice,
+    the same double-count an earlier round removed from the variant path.
+    The tag is therefore appended directly: the trace gains the evidence,
+    the metric keeps its arithmetic. Which counter belongs to which
+    failure is decided at the call sites, not here — see the comment on
+    the empty-variants branch for why one of the three cases is counted
+    but deliberately not as a degradation.
+
+    Degradations only. `mark()` guarantees that a routine tag written to
+    `notes` is ALSO mirrored into `degraded` for back-compat until the
+    next major, and this helper cannot honour that contract, so it does
+    not offer the choice — anything routine belongs in `mark()`.
+    """
+    if trace is None:
+        return
+    if tag not in trace.degraded:
+        trace.degraded.append(tag)
 
 
 def _fresh_trace(caller_trace: Any) -> Any:

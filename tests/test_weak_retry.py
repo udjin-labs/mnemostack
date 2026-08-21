@@ -1481,3 +1481,174 @@ def test_the_documented_cost_is_the_cost_actually_paid(monkeypatch):
     assert calls["rerank"] == MAX_VARIANTS  # ...but each variant reranks
     assert calls["retrieval"] == MAX_VARIANTS
     assert calls["paraphrase"] + calls["rerank"] == 3  # the number the docs quote
+
+
+def test_a_paraphrase_that_never_happened_is_visible_in_the_trace(monkeypatch):
+    """PR #167 (bot P2): round 2 taught the trace to survive a variant that
+    raised, but the path where PARAPHRASING itself fails stayed mute —
+    `/recall` returned success with an empty `degraded` field and an opt-in
+    trace showing nothing, on a retry the operator enabled and was charged
+    for. The tag goes on without `mark()`, because `weak_retry_failed` is
+    already in `/status`'s allowlist and marking would count it twice."""
+    from mnemostack.observability.recorder import (
+        InMemoryRecorder,
+        NullRecorder,
+        set_recorder,
+    )
+    from mnemostack.recall.trace import DEGRADED_COUNTER, RecallTrace
+
+    class _AngryLLM:
+        def generate(self, *_a, **_k):
+            raise RuntimeError("paraphrase model down")
+
+    trace = RecallTrace()
+    rec = InMemoryRecorder()
+    set_recorder(rec)
+    try:
+        out, retried = retry_weak_recall(None, "q", 10, llm=_AngryLLM(), results=[], trace=trace)
+    finally:
+        set_recorder(NullRecorder())
+    assert out == [] and retried is False  # still fail-open
+    assert "weak_retry:paraphrase_failed" in trace.degraded
+    # Keyed WITH labels by the recorder, so match on the counter name, not
+    # on a bare tuple — the first version of this assertion checked a key
+    # that never exists and so caught nothing.
+    assert [k for k in rec.counters if k[0] == DEGRADED_COUNTER] == []
+    assert rec.counters.get(("mnemostack.recall.weak_retry_failed",)) == 1.0
+
+
+def _down_llm():
+    class _DownLLM:
+        def generate(self, *_a, **_k):
+            return type("R", (), {"ok": False, "text": "", "error": "503", "tokens_used": 0})()
+
+    return _DownLLM()
+
+
+def test_a_provider_outage_is_not_filed_as_a_quiet_empty_answer():
+    """PR #167 (codex P2): providers in this stack report an outage by
+    RETURNING `LLMResponse(ok=False)`, not by raising, and
+    `generate_variants` turns that into an empty list. Classifying on "did
+    it raise" filed a real outage as routine and left `degraded` empty for
+    exactly as long as the outage lasted."""
+    from mnemostack.recall.trace import RecallTrace
+
+    trace = RecallTrace()
+    out, retried = retry_weak_recall(None, "q", 10, llm=_down_llm(), results=[], trace=trace)
+    assert out == [] and retried is False
+    assert "weak_retry:paraphrase_failed" in trace.degraded
+    assert trace.notes == []  # a fault, not a routine signal
+
+
+def test_a_healthy_model_with_nothing_to_add_is_a_note_not_a_fault():
+    """PR #167 (codex P2, the other direction): the same empty list also
+    comes back when a HEALTHY model answers with the query itself — the
+    expander drops a paraphrase identical to the original. `RecallTrace`
+    defines a `degraded` entry absent from `notes` as a real fault, so
+    filing this there reported a working deployment as broken. Only the
+    provider's own verdict can tell the two apart, so that is what the
+    retry now reads."""
+    from mnemostack.recall.trace import RecallTrace
+
+    class _Echo:
+        def generate(self, *_a, **_k):
+            return type("R", (), {"ok": True, "text": "q", "tokens_used": 5})()
+
+    for llm, why in ((_Echo(), "echoed the query"), (_LLM(text="   \n  "), "answered blank")):
+        trace = RecallTrace()
+        out, retried = retry_weak_recall(None, "q", 10, llm=llm, results=[], trace=trace)
+        assert out == [] and retried is False, why
+        assert "weak_retry:no_variants" in trace.notes, why  # authoritative...
+        assert "weak_retry:paraphrase_failed" not in trace.degraded, why
+        # ...and mirrored into `degraded` by `mark()`, the documented
+        # back-compat duplication for routine tags, not a fault claim.
+        assert trace.degraded == ["weak_retry:no_variants"], why
+
+
+def test_the_paraphrase_failure_is_still_counted_only_once():
+    """The tag goes on without `mark()` for real faults: an `ok=False`
+    already emits `query_expansion.errors` from inside the expander, and
+    marking would add `DEGRADED_COUNTER` on top — one failure counted twice
+    in `/status.degraded_events`, the double-count an earlier round removed
+    from the variant path."""
+    from mnemostack.observability.recorder import (
+        InMemoryRecorder,
+        NullRecorder,
+        set_recorder,
+    )
+    from mnemostack.recall.trace import DEGRADED_COUNTER, RecallTrace
+
+    trace = RecallTrace()
+    rec = InMemoryRecorder()
+    set_recorder(rec)
+    try:
+        retry_weak_recall(None, "q", 10, llm=_down_llm(), results=[], trace=trace)
+    finally:
+        set_recorder(NullRecorder())
+    assert "weak_retry:paraphrase_failed" in trace.degraded
+    # Keyed WITH labels by the recorder, so match on the counter name.
+    assert [k for k in rec.counters if k[0] == DEGRADED_COUNTER] == []
+    assert rec.counters.get(("mnemostack.query_expansion.errors",)) == 1.0
+    assert rec.counters.get(("mnemostack.recall.weak_retry_failed",)) is None
+    # "Counted either way" is a claim the docs make, so the OUTAGE path has
+    # to prove it too — the healthy-shrug test alone left it free to fire
+    # for shrugs only.
+    assert rec.counters.get(("mnemostack.recall.weak_retry_no_variants",)) == 1.0
+
+
+def test_an_empty_paraphrase_is_counted_but_not_as_a_degradation():
+    """Visible in `/metrics` either way, so the case that used to emit no
+    signal anywhere is countable — but only a provider that actually
+    reported failure reaches `/status.degraded_events`, through the
+    expander's own counter. A healthy shrug must not move it."""
+    from mnemostack.observability.recorder import (
+        InMemoryRecorder,
+        NullRecorder,
+        set_recorder,
+    )
+    from mnemostack.recall.trace import DEGRADED_COUNTER, RecallTrace
+
+    class _Echo:
+        def generate(self, *_a, **_k):
+            return type("R", (), {"ok": True, "text": "q", "tokens_used": 5})()
+
+    trace = RecallTrace()
+    rec = InMemoryRecorder()
+    set_recorder(rec)
+    try:
+        retry_weak_recall(None, "q", 10, llm=_Echo(), results=[], trace=trace)
+    finally:
+        set_recorder(NullRecorder())
+    assert rec.counters.get(("mnemostack.recall.weak_retry_no_variants",)) == 1.0
+    degrading = {"mnemostack.recall.weak_retry_failed", "mnemostack.query_expansion.errors"}
+    assert [k for k in rec.counters if k[0] in degrading or k[0] == DEGRADED_COUNTER] == []
+
+
+def test_a_provider_that_cannot_report_at_all_takes_the_failure_path():
+    """A response with no `ok` never reaches a default in `_WatchedLLM`:
+    `generate_variants` reads `resp.ok` itself and raises, so the retry
+    lands on the failure path through the exception branch. Pinned because
+    it is the reason the wrapper reads `.ok` directly instead of hedging —
+    a guard that cannot fire is a claim no test can check."""
+    from mnemostack.observability.recorder import (
+        InMemoryRecorder,
+        NullRecorder,
+        set_recorder,
+    )
+    from mnemostack.recall.trace import RecallTrace
+
+    class _Malformed:
+        def generate(self, *_a, **_k):
+            return type("R", (), {"text": "", "tokens_used": 0})()  # no `ok` at all
+
+    trace = RecallTrace()
+    rec = InMemoryRecorder()
+    set_recorder(rec)
+    try:
+        out, retried = retry_weak_recall(None, "q", 10, llm=_Malformed(), results=[], trace=trace)
+    finally:
+        set_recorder(NullRecorder())
+    assert out == [] and retried is False  # fail-open, as always
+    assert "weak_retry:paraphrase_failed" in trace.degraded
+    assert "weak_retry:no_variants" not in trace.notes  # not a healthy shrug
+    assert rec.counters.get(("mnemostack.recall.weak_retry_failed",)) == 1.0
