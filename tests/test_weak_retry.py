@@ -881,3 +881,27 @@ def test_serve_honors_the_weak_threshold_env(monkeypatch):
     monkeypatch.delenv("MNEMOSTACK_RETRY_WEAK_BELOW")
     cfg = _serve_cfg(monkeypatch, retry_on_weak=True, retry_weak_below=None)
     assert cfg.retry_weak_below == 1  # neither: the conservative default
+
+
+def test_a_better_evidenced_hit_takes_a_weak_one_s_slot(monkeypatch):
+    """R13 (review P1): the never-shrink rule is about the SIZE of the
+    response, not its membership, and this pins the difference so nobody
+    later "fixes" it into strict containment. A memory the original pass
+    ranked LAST can lose its slot to hits that each rank first in their own
+    pass — that is RRF doing exactly what fusing the rounds is for. The
+    alternative rules are both worse: pinning every original would seat the
+    caller's weakest hits ahead of better ones, and making room for them
+    would overrun the `limit` they asked for."""
+    early, weak = _Hit("E"), _Hit("W")
+    early.score, weak.score = 0.95, 0.5
+    _flow(
+        monkeypatch,
+        {
+            "how did we decide auth": [_Hit("N")],  # each new hit ranks
+            "what was chosen for login": [_Hit("M")],  # first in its own pass
+        },
+    )
+    out, retried = retry_weak_recall(None, "q", 3, llm=_LLM(), results=[early, weak], below=3)
+    assert retried is True
+    assert [r.id for r in out] == ["E", "N", "M"]  # W displaced, not lost to a bug
+    assert len(out) > len([early, weak])  # ...and the caller ends up with MORE

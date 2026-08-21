@@ -230,16 +230,27 @@ def retry_weak_recall(
 
         merged, _tokens = apply_token_budget(merged, budget, counter_fn)
     if len(merged) < original_count:
-        # A RETRY ADDS; IT NEVER SUBTRACTS. The budget is a hard cap on the
-        # response and the fusion reorders by rank, so the two together can
-        # cost the caller memories they already had safely: a corroborated
-        # newcomer takes the front, and the greedy trim — which stops at
-        # the first item that would overflow — then evicts the smaller
-        # memories that fitted perfectly well in the original order. The
-        # caller asked a question and got two answers; a feature whose
-        # entire premise is "that was too little" must not hand back one.
-        # So when the merge cannot carry at least what the caller arrived
-        # with, the retry is a no-op: original list, original scores.
+        # A RETRY NEVER RETURNS LESS THAN IT WAS GIVEN. The budget is a
+        # hard cap on the response and the fusion reorders by rank, so the
+        # two together can leave the caller holding FEWER memories than
+        # they arrived with: a corroborated newcomer takes the front, and
+        # the greedy trim — which stops at the first item that would
+        # overflow — then evicts the smaller memories that fitted
+        # perfectly well in the original order. The caller asked a
+        # question and got two answers; a feature whose entire premise is
+        # "that was too little" must not hand back one. So when the merge
+        # cannot carry at least what the caller arrived with, the retry is
+        # a no-op: original list, original scores.
+        #
+        # This is a rule about the SIZE of the response, and deliberately
+        # not about its membership. At a fixed `limit` a better-evidenced
+        # memory does take a weaker one's slot — a hit both phrasings
+        # found outranking one the original pass ranked last is the entire
+        # point of fusing the rounds, and demanding that every original
+        # survive would either pin the caller's weakest hits ahead of
+        # better ones or make room by overrunning the limit they asked
+        # for. What the caller is protected from is ending up with less
+        # than they had, not from a re-ranking they opted into.
         for result, score in original_scores:
             result.score = score
         return results, True
