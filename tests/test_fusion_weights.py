@@ -216,3 +216,20 @@ def test_an_immutable_item_is_fused_rather_than_refused():
 
     assert len(fused) == 1  # still fused, still deduped by the rule
     assert fused[0][0] is a  # ...and handed back untouched
+
+
+def test_dictionary_items_keep_both_copies_arms_too():
+    """`_get_key` explicitly supports a mapping with an `id`, so the
+    pooling has to support that shape as well — handling only objects meant
+    two dicts collapsed under the identity rule and the second one's arms
+    vanished, in a shape the key function documents as supported."""
+    first = {"id": 1, "sources": ["vector"], "payload": {"k": "orig"}}
+    second = {"id": "1", "sources": ["bm25"], "payload": {"k": "orig"}}
+
+    kept = reciprocal_rank_fusion([[(first, 0.9)], [(second, 0.8)]])[0][0]
+
+    assert sorted(kept["sources"]) == ["bm25", "vector"], kept["sources"]
+    assert first["sources"] == ["vector"]  # the caller's own dicts, untouched
+    assert second["sources"] == ["bm25"]
+    kept["payload"]["written"] = True
+    assert first["payload"] == {"k": "orig"}

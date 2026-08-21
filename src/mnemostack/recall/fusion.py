@@ -136,10 +136,18 @@ def _pool_sources(keeper: Any, dropped: Any) -> Any:
     the vector floor, and neither caller this exists for — query expansion
     and inference retry — ever applies the floor to a fused list.
     """
-    keeper_sources = getattr(keeper, "sources", None)
+    # Both item shapes `_get_key` accepts: an object with attributes, and
+    # a mapping with an "id". Handling only the first meant a pair of dicts
+    # collapsed under the identity rule and silently lost the second one's
+    # arms — the same defect as for objects, in the shape the key function
+    # explicitly supports.
+    as_mapping = isinstance(keeper, dict)
+    keeper_sources = keeper.get("sources") if as_mapping else getattr(keeper, "sources", None)
     if not isinstance(keeper_sources, list):
         return keeper
-    dropped_sources = getattr(dropped, "sources", None)
+    dropped_sources = (
+        dropped.get("sources") if isinstance(dropped, dict) else getattr(dropped, "sources", None)
+    )
     if not isinstance(dropped_sources, list):
         return keeper
     added = [source for source in dropped_sources if source not in keeper_sources]
@@ -147,6 +155,13 @@ def _pool_sources(keeper: Any, dropped: Any) -> Any:
         return keeper
     try:
         merged = copy.copy(keeper)
+        if as_mapping:
+            # A copied dict is already the caller's data left alone; the
+            # nested payload still needs its own copy, same as below.
+            merged["sources"] = [*keeper_sources, *added]
+            if isinstance(merged.get("payload"), dict):
+                merged["payload"] = dict(merged["payload"])
+            return merged
         merged.sources = [*keeper_sources, *added]
         payload = getattr(merged, "payload", None)
         if isinstance(payload, dict):

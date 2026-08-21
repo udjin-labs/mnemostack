@@ -572,9 +572,7 @@ class Recaller:
         # facts can't crowd out current ones in the top-K, and vector-floor
         # candidates stay clean). This is a cheap idempotent safety net for any
         # path that might inject records after fusion.
-        results = filter_by_validity(
-            results, include_invalidated=include_invalidated, as_of=as_of
-        )
+        results = filter_by_validity(results, include_invalidated=include_invalidated, as_of=as_of)
         # Tenant isolation backstop: when a tenant is scoped, keep only its own
         # records regardless of which retriever produced them. Guarantees no
         # cross-tenant leak even if a retriever path forgot the tenant filter,
@@ -1075,6 +1073,8 @@ class Recaller:
         with histogram("mnemostack.recall.latency_ms"):
             all_lists: list[list[tuple[Any, float]]] = []
             per_list_weights: list[float] = []
+            #: Keys whose representative came from an arm with no vote.
+            muted_keys: set[str] = set()
             # One key shape for a mixed list: the MCA arm below appends
             # OBJECTS while the retriever arms append bare ids, so the
             # fusion keys the first through `memory_key` and the second
@@ -1097,10 +1097,19 @@ class Recaller:
                     if keep_payload(h.payload, include_invalidated=include_invalidated, as_of=as_of)
                 ][:per_source_limit]
                 if mca_hits:
+                    mca_weight = self._weight_for("mca", query)
                     all_lists.append([(hit, hit.score) for hit in mca_hits])
-                    per_list_weights.append(self._weight_for("mca", query))
-                    for hit in mca_hits:
-                        id_to_result[memory_key(hit.id)] = hit
+                    per_list_weights.append(mca_weight)
+                    if mca_weight > 0:
+                        # A zero-weight arm casts no vote, so it must not
+                        # claim the representative either. It used to be
+                        # spared that by accident: keyed raw, its `7` and a
+                        # vector arm's `"7"` were two entries and the fused
+                        # key found the enabled arm's. Now they are one
+                        # memory, and whoever registers first is what the
+                        # caller receives — text, payload and all.
+                        for hit in mca_hits:
+                            id_to_result[memory_key(hit.id)] = hit
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=max(len(self.retrievers), 1)
             ) as ex:
@@ -1127,6 +1136,10 @@ class Recaller:
                             trace.mark(reason)
                 if retr.name == "vector" and hits:
                     has_vector_results = True
+                # Needed BEFORE the loop below, not only when the list is
+                # appended: a zero-weight arm casts no vote and must not
+                # claim the representative for a memory either.
+                weight = self._weight_for(retr.name, query)
                 ranked: list[tuple[Any, float]] = []
                 for r in hits:
                     if retr.name == "vector":
@@ -1153,11 +1166,29 @@ class Recaller:
                                 existing.payload["raw_vector_score"] = max(
                                     existing_raw, incoming_raw
                                 )
+                        if weight > 0 and key in muted_keys:
+                            # A voting arm takes the representative slot
+                            # from a muted one, carrying what was pooled
+                            # above: the caller must not be handed the text
+                            # and payload of an arm that cast no vote.
+                            r.sources = list(existing.sources)
+                            if "raw_vector_score" in existing.payload:
+                                r.payload["raw_vector_score"] = existing.payload["raw_vector_score"]
+                            id_to_result[key] = r
+                            muted_keys.discard(key)
                     else:
+                        # Registered whatever its weight: this dict is also
+                        # where the non-expansion path finds the vector
+                        # floor's candidates, so skipping a muted arm here
+                        # silently switched off a guarantee the operator
+                        # configured. Muted entries are marked instead, and
+                        # yield the slot to the first arm that votes.
                         id_to_result[key] = r
+                        if weight <= 0:
+                            muted_keys.add(key)
                     ranked.append((key, r.score))
                 all_lists.append(ranked)
-                per_list_weights.append(self._weight_for(retr.name, query))
+                per_list_weights.append(weight)
             fused = reciprocal_rank_fusion(
                 all_lists, k=self.rrf_k, limit=limit, weights=per_list_weights
             )

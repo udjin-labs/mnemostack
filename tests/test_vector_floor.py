@@ -647,3 +647,90 @@ def test_search_many_merges_one_memory_across_its_vectors():
 
     ids = sorted(str(r.id) for r in out)
     assert ids == ["3", "other"], ids
+
+
+def test_a_disabled_arm_does_not_represent_a_memory_it_did_not_vote_for():
+    """PR #173 (bot P2): an arm with weight 0 casts no vote, and must not
+    supply the object the caller receives either. Keyed raw it was spared
+    that by accident — its `7` and another arm's `"7"` were two entries, so
+    the fused key found the enabled arm's object. Under one identity rule
+    they are one memory, and whoever registered first is what comes back:
+    text, payload, sources and all."""
+    from mnemostack.recall import RecallResult
+
+    class _Muted:
+        name = "muted"
+
+        def search(self, query, limit=20, filters=None):
+            return [
+                RecallResult(
+                    id=7, text="from the muted arm", score=0.9, payload={}, sources=["muted"]
+                )
+            ]
+
+    class _Vector:
+        name = "vector"
+
+        def search(self, query, limit=20, filters=None):
+            return [
+                RecallResult(
+                    id="7", text="from the vector arm", score=0.8, payload={}, sources=["vector"]
+                )
+            ]
+
+    recaller = Recaller(
+        embedding_provider=FakeEmbedding(),
+        vector_store=FakeVectorStore([]),
+        retrievers=[_Muted(), _Vector()],
+    )
+    recaller._weight_for = lambda name, query: 0.0 if name == "muted" else 1.0
+
+    results = recaller.recall("one memory", limit=3)
+
+    assert [str(r.id) for r in results] == ["7"], [r.id for r in results]
+    assert results[0].text == "from the vector arm", results[0].text
+
+
+def test_a_muted_vector_arm_still_feeds_the_floor():
+    """PR #173 (codex P2), a regression from the fix above: keeping a
+    zero-weight arm out of the merge dict also kept its hits out of the
+    dict the non-expansion path derives FLOOR CANDIDATES from — so
+    `--vector-floor` silently stopped working whenever the vector arm's
+    weight was 0. Registering is not the same as representing."""
+    from mnemostack.recall import RecallResult
+
+    class _MutedVector:
+        name = "vector"
+
+        def search(self, query, limit=20, filters=None):
+            return [
+                RecallResult(
+                    id="floor-only",
+                    text="a strong vector hit nothing else found",
+                    score=0.95,
+                    payload={"raw_vector_score": 0.95},
+                    sources=["vector"],
+                )
+            ]
+
+    class _Lexical:
+        name = "bm25"
+
+        def search(self, query, limit=20, filters=None):
+            return [
+                RecallResult(
+                    id="lex", text="a lexical hit", score=0.7, payload={}, sources=["bm25"]
+                )
+            ]
+
+    recaller = Recaller(
+        embedding_provider=FakeEmbedding(),
+        vector_store=FakeVectorStore([]),
+        retrievers=[_MutedVector(), _Lexical()],
+        vector_floor=1,
+    )
+    recaller._weight_for = lambda name, query: 0.0 if name == "vector" else 1.0
+
+    ids = [str(r.id) for r in recaller.recall("something", limit=1)]
+
+    assert "floor-only" in ids, ids  # the guarantee still holds
