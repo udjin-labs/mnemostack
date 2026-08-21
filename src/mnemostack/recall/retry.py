@@ -122,14 +122,17 @@ def retry_weak_recall(
     # per-pass `restrict_to_ids` would additionally drop entries earlier
     # passes had recorded.
     caller_trace = flow_kwargs.pop("trace", None)
-    seen = {str(r.id) for r in results}
-    merged = list(results)
+    # One ranked list per pass, fused at the end. Appending each pass's
+    # hits to the previous ones would make the response arrival-ordered:
+    # a worse hit from the first paraphrase would hold a slot ahead of a
+    # better hit from the second, the budget trim would cut "the ranked
+    # prefix" of a list that was never ranked, and the trace would report
+    # that order as the one recall returned. RRF is what the stack
+    # already uses to combine rankings of the SAME items from different
+    # queries, and it is what makes a second phrasing able to win.
+    ranked: list[list[tuple[Any, float]]] = [[(r, r.score) for r in results]]
+    by_id: dict[str, Any] = {str(r.id): r for r in results}
     for variant in variants:
-        if not has_room(merged, limit, budget, counter_fn):
-            # Nothing a further paraphrase found could survive the cut —
-            # by count or by budget. Same question as before the first
-            # retry, same answer, one place asking it.
-            break
         variant_trace = _fresh_trace(caller_trace)
         if variant_trace is not None:
             flow_kwargs["trace"] = variant_trace
@@ -143,19 +146,21 @@ def retry_weak_recall(
         except Exception:  # noqa: BLE001 — same rule, per variant
             counter("mnemostack.recall.weak_retry_failed", 1)
             continue
+        ranked.append([(r, r.score) for r in extra])
         for result in extra:
-            if str(result.id) not in seen:
-                seen.add(str(result.id))
-                merged.append(result)
+            by_id.setdefault(str(result.id), result)
         _absorb(caller_trace, variant_trace, variant)
     flow_kwargs.pop("trace", None)
     if caller_trace is not None:
         flow_kwargs["trace"] = caller_trace
 
-    if len(merged) == len(results):
+    if len(by_id) == len(results):
         return results, True  # asked again, still nothing: an answer too
 
-    merged = merged[:limit]
+    from .fusion import reciprocal_rank_fusion
+
+    merged = [item for item, _score in reciprocal_rank_fusion(ranked, limit=limit)]
+
     if budget:
         # Re-applied to the MERGED list: each variant's own flow capped
         # its own results, and concatenating two lists that each fit the

@@ -122,13 +122,16 @@ def test_the_retry_is_bounded_to_one_round(monkeypatch):
     assert len(seen) == MAX_VARIANTS
 
 
-def test_duplicates_across_variants_are_merged_once(monkeypatch):
+def test_a_memory_two_phrasings_agree_on_ranks_first(monkeypatch):
+    """The passes are fused, not concatenated — so a hit both paraphrases
+    found outranks one only a single phrasing did, and it still appears
+    exactly once."""
     _flow(
         monkeypatch,
         {"how did we decide auth": [_Hit(1), _Hit(2)], "what was chosen for login": [_Hit(2)]},
     )
     out, retried = retry_weak_recall(None, "q", 10, llm=_LLM(), results=[])
-    assert retried and [r.id for r in out] == [1, 2]
+    assert retried and [r.id for r in out] == [2, 1]
 
 
 def test_the_merged_result_respects_the_limit(monkeypatch):
@@ -257,7 +260,10 @@ def test_no_room_means_no_retry(monkeypatch):
     assert llm.calls == 0 and seen == []
     # ...but a page that is short DOES get asked again.
     out, retried = retry_weak_recall(None, "q", 5, llm=llm, results=full_page, below=5)
-    assert retried is True and [r.id for r in out] == [1, 2, 9]
+    # Fused, so the retry's top hit ties with the original's top hit and
+    # the original's second falls below both.
+    assert retried is True and sorted(r.id for r in out) == [1, 2, 9]
+    assert [r.id for r in out][:2] == [1, 9]
 
 
 def test_the_token_budget_holds_after_the_merge(monkeypatch):
@@ -377,12 +383,11 @@ def test_the_caller_trace_is_restored_for_later_stages(monkeypatch):
     assert kwargs["trace"] is trace
 
 
-def test_the_retry_stops_once_the_page_is_full(monkeypatch):
-    """R3 (codex P2): when the first paraphrase already fills `limit`, a
-    second one's hits land past the cut and are discarded — a whole
-    retrieval, pipeline and rerank pass for nothing. It is the same rule
-    `is_weak` applies before the first retry; it just was not applied
-    inside the loop."""
+def test_every_paraphrase_gets_to_compete(monkeypatch):
+    """R6 (review agent P2): once the passes are FUSED, a later paraphrase
+    can outrank an earlier one — so stopping the loop when the page looks
+    full (which rounds 3 and 4 did, correctly, while the merge was
+    first-fit) would discard the better answer unread."""
     seen = _flow(
         monkeypatch,
         {
@@ -391,8 +396,9 @@ def test_the_retry_stops_once_the_page_is_full(monkeypatch):
         },
     )
     out, retried = retry_weak_recall(None, "q", 2, llm=_LLM(), results=[])
-    assert retried is True and [r.id for r in out] == [1, 2]
-    assert [q for q, _ in seen] == ["how did we decide auth"]  # second never ran
+    assert retried is True
+    assert len(seen) == MAX_VARIANTS  # both phrasings were asked
+    assert [r.id for r in out] == [1, 3]  # each list's top hit outranks a second
 
 
 def test_a_full_token_budget_leaves_no_room(monkeypatch):
@@ -433,8 +439,8 @@ def test_the_loop_stops_when_the_budget_fills_mid_retry(monkeypatch):
         None, "q", 10, llm=_LLM(), results=[], token_budget=budget
     )
     assert retried is True
-    assert [q for q, _ in seen] == ["how did we decide auth"]  # second never ran
-    assert sum_tokens(out, None) <= budget
+    assert len(seen) == MAX_VARIANTS  # both phrasings compete for the budget
+    assert sum_tokens(out, None) <= budget  # ...and the cap still holds
 
 
 def test_a_retry_degradation_is_counted_once(monkeypatch):
@@ -487,3 +493,54 @@ def test_a_routine_note_from_a_retry_stays_a_note(monkeypatch):
     trace = RecallTrace()
     retry_weak_recall(None, "q", 10, llm=_LLM(), results=[], trace=trace)
     assert "temporal:no_parse" in trace.notes
+
+
+def test_a_better_hit_from_a_later_phrasing_wins(monkeypatch):
+    """R6 (review agent P2), the case that named the defect: the merge was
+    arrival-ordered, so a poor hit from the first paraphrase held the only
+    slot and the far better hit from the second was never even fetched."""
+    _flow(
+        monkeypatch,
+        {
+            "how did we decide auth": [_Hit("low", text="barely related")],
+            "what was chosen for login": [_Hit("high", text="exactly the answer")],
+        },
+    )
+    seen_ids = []
+    for limit in (1, 2):
+        out, retried = retry_weak_recall(None, "q", limit, llm=_LLM(), results=[])
+        assert retried is True
+        seen_ids.append([r.id for r in out])
+    # With one slot the two tie at rank 1 and the first is kept; with two
+    # slots BOTH are returned — the point is that the later phrasing is
+    # fetched and competes, instead of being cut off unread.
+    assert seen_ids[0] == ["low"]
+    assert sorted(seen_ids[1]) == ["high", "low"]
+
+
+def test_an_empty_paraphrase_list_is_not_a_retry(monkeypatch):
+    """R6 (review agent P3): an LLM that answers with nothing usable left
+    this branch untested — no test double ever returned an empty variant
+    list without raising."""
+
+    class _Silent:
+        def generate(self, *_a, **_k):
+            return type("R", (), {"ok": True, "text": "   \n\n  ", "tokens_used": 1})()
+
+    seen = _flow(monkeypatch, {})
+    out, retried = retry_weak_recall(None, "q", 10, llm=_Silent(), results=[])
+    assert out == [] and retried is False
+    assert seen == []  # nothing recalled on the strength of no paraphrase
+
+
+def test_a_paraphrase_identical_to_the_query_is_not_asked_again(monkeypatch):
+    """The expander dedups against the original, so a model that just
+    echoes the question costs one LLM call and no extra retrieval."""
+
+    class _Echo:
+        def generate(self, *_a, **_k):
+            return type("R", (), {"ok": True, "text": "q", "tokens_used": 1})()
+
+    seen = _flow(monkeypatch, {})
+    out, retried = retry_weak_recall(None, "q", 10, llm=_Echo(), results=[])
+    assert out == [] and retried is False and seen == []
