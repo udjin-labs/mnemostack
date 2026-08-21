@@ -474,3 +474,176 @@ def test_a_floor_stamp_from_an_earlier_page_does_not_carry_over():
 
     assert not is_floor_extra(again[0]), "a stale stamp survived a re-ranking"
     assert str(again[0].id) == "P"
+
+
+def test_the_arms_merge_one_memory_into_one_result(tmp_path=None):
+    """#172: the recaller's own merge dictionaries keyed the RAW id, and
+    the lists they feed the fusion carry bare ids — so a memory the vector
+    arm calls `7` and the lexical arm calls `"7"` was merged as two, took
+    two of the caller's slots, and pushed a genuinely different memory off
+    the page. The arms also stopped pooling their `sources` for it."""
+    recaller = Recaller(
+        embedding_provider=FakeEmbedding(),
+        vector_store=FakeVectorStore([Hit(7, 0.95, {"text": "one memory"})]),
+        bm25_docs=[
+            BM25Doc(id="7", text="one memory", payload={"text": "one memory"}),
+            BM25Doc(id="other", text="one memory too", payload={"text": "another memory"}),
+        ],
+    )
+
+    results = recaller.recall("one memory", limit=2, vector_limit=3)
+
+    ids = [str(r.id) for r in results]
+    assert sorted(ids) == ["7", "other"], ids  # not ["7", "7"]
+    merged = next(r for r in results if str(r.id) == "7")
+    assert sorted(merged.sources) == ["bm25", "vector"], merged.sources
+
+
+def test_the_retriever_arms_merge_one_memory_into_one_result():
+    """#172, on the retriever path: those merge dicts keyed the raw id and
+    the lists they hand the fusion carry bare ids, so one memory reported
+    under two id types became two entries — two of the caller's slots, and
+    a different memory pushed off the page — with the arms' `sources`
+    never pooled onto it."""
+    from mnemostack.recall import RecallResult
+
+    class _VectorArm:
+        name = "vector"
+
+        def search(self, query, limit=20, filters=None):
+            return [
+                RecallResult(id=7, text="one memory", score=0.9, payload={}, sources=["vector"])
+            ]
+
+    class _LexicalArm:
+        name = "bm25"
+
+        def search(self, query, limit=20, filters=None):
+            return [
+                RecallResult(id="7", text="one memory", score=0.8, payload={}, sources=["bm25"]),
+                RecallResult(id="other", text="another", score=0.7, payload={}, sources=["bm25"]),
+            ]
+
+    recaller = Recaller(
+        embedding_provider=FakeEmbedding(),
+        vector_store=FakeVectorStore([]),
+        retrievers=[_VectorArm(), _LexicalArm()],
+    )
+    results = recaller.recall("one memory", limit=2)
+
+    ids = [str(r.id) for r in results]
+    assert sorted(ids) == ["7", "other"], ids
+    merged = next(r for r in results if str(r.id) == "7")
+    assert sorted(merged.sources) == ["bm25", "vector"], merged.sources
+
+
+def test_the_vector_score_lookup_matches_across_id_types():
+    """`raw_vector_score` is what the floor ranks candidates by, and it is
+    found by matching a fused item against the vector arm's own hits.
+    Raw comparison lost that match when the arms disagreed about the id's
+    type, so a memory the vector arm HAD scored looked to the floor like
+    one it never saw.
+
+    Pinned at the helper rather than through a recall: on the legacy path
+    the vector arm's list is fused first, so its own object wins and takes
+    the score directly — the lookup only runs for an item another arm
+    contributed, which needs the MCA prefilter to be the one that won."""
+    hits = [Hit(9, 0.93, {"text": "shared memory"})]
+
+    assert Recaller._raw_vector_score_for("9", hits) == 0.93  # str against int
+    assert Recaller._raw_vector_score_for(9, hits) == 0.93  # and the way it came
+    assert Recaller._raw_vector_score_for("absent", hits) is None
+
+
+def test_query_expansion_merges_one_memory_across_its_variants():
+    """#172 on the expansion path: each variant recalls separately and the
+    results are merged by id before fusing. Keyed raw, a memory one variant
+    reported as `5` and another as `"5"` merged as two — two slots, and the
+    variants' `sources` never pooled onto it."""
+    from mnemostack.llm.base import LLMResponse
+    from mnemostack.recall import RecallResult
+
+    class _TwoVariants:
+        @property
+        def name(self):
+            return "fake"
+
+        def generate(self, prompt, max_tokens=120, temperature=0.0):
+            return LLMResponse(text="say it again\nask it differently", tokens_used=5)
+
+    class _ByQuery:
+        name = "vector"
+
+        def search(self, query, limit=20, filters=None):
+            # the same memory, reported with a different id type per phrasing
+            pid = 5 if query == "what are the options" else "5"
+            src = "vector" if isinstance(pid, int) else "bm25"
+            return [RecallResult(id=pid, text="one memory", score=0.9, payload={}, sources=[src])]
+
+    recaller = Recaller(
+        embedding_provider=FakeEmbedding(),
+        vector_store=FakeVectorStore([]),
+        retrievers=[_ByQuery()],
+        query_expansion=True,
+        expansion_llm=_TwoVariants(),
+    )
+    results = recaller.recall("what are the options", limit=5)
+
+    ids = [str(r.id) for r in results]
+    assert ids == ["5"], ids
+    assert sorted(results[0].sources) == ["bm25", "vector"], results[0].sources
+
+
+def test_the_low_confidence_fallback_merges_onto_the_memory_it_found():
+    """#172, seventh site: the fallback is a SEPARATE vector call, so it is
+    exactly the kind of second opinion that reports one memory under the
+    other id representation. Keyed raw, it merged onto nothing — the same
+    memory came back twice and the `vector` arm never joined the entry the
+    caller already had."""
+    from mnemostack.recall import RecallResult
+
+    recaller = Recaller(
+        embedding_provider=FakeEmbedding(),
+        vector_store=FakeVectorStore([Hit(4, 0.88, {"text": "one memory"})]),
+    )
+    already_had = RecallResult(id="4", text="one memory", score=0.20, payload={}, sources=["bm25"])
+
+    merged = recaller._maybe_apply_fallback(
+        "one memory",
+        [already_had],
+        limit=5,
+        vector_limit=5,
+        filters=None,
+    )
+
+    assert [str(r.id) for r in merged] == ["4"], [r.id for r in merged]
+    assert sorted(merged[0].sources) == ["bm25", "vector"], merged[0].sources
+
+
+def test_search_many_merges_one_memory_across_its_vectors():
+    """#172: `search_many` fuses one ranked list per vector and keys its
+    own merge dict — a public method the answer path uses. The lists it
+    hands the fusion carry BARE IDS, so the fusion's key falls through to
+    the value: normalising the dict alone would leave the two disagreeing.
+    A memory one vector reports as `3` and another as `"3"` was two
+    entries, taking two of the caller's slots."""
+    from mnemostack.recall.recaller import Recaller
+
+    class _PerVectorStore:
+        def search(self, vector, limit, filters=None, *, hide_invalidated=False):
+            # the same memory, a different id type per vector
+            pid = 3 if vector == [0.1] else "3"
+            return [
+                Hit(id=pid, score=0.9, payload={"text": "one memory"}),
+                Hit(id="other", score=0.4, payload={"text": "another memory"}),
+            ][:limit]
+
+    recaller = Recaller.__new__(Recaller)
+    recaller.vector = _PerVectorStore()
+    recaller.rrf_k = 60
+    recaller.text_key = "text"
+
+    out = recaller.search_many([[0.1], [0.2]], limit=5)
+
+    ids = sorted(str(r.id) for r in out)
+    assert ids == ["3", "other"], ids
