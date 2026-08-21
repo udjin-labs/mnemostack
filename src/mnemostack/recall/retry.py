@@ -196,6 +196,24 @@ def retry_weak_recall(
         item.score = fused_score
         merged.append(item)
 
+    # The floor, re-applied to the merge, in the order `recall_flow` uses:
+    # cut to `limit`, THEN guarantee the vector candidates, THEN the budget.
+    # `vector_floor` is a promise that a configured number of raw vector
+    # hits reach the caller even when the ranking stages would not have
+    # kept them, and each pass keeps that promise by returning MORE than
+    # `limit` — extras appended past the cut. Fusing those lists back down
+    # to `limit` silently revoked the guarantee, so a recall that was
+    # retried honoured a weaker contract than the same recall left alone,
+    # for a floor the operator configured elsewhere and for a reason this
+    # feature knows nothing about.
+    apply_floor = getattr(recaller, "apply_vector_floor_after_rerank", None)
+    if apply_floor is not None:
+        # Every result of a pass carries that pass's candidate set in its
+        # payload, so the merged list is a pool covering each pass that
+        # contributed a survivor; the original pass, when it returned
+        # anything, is first and its candidates are the ones that win.
+        merged = apply_floor(merged, results + merged)
+
     if budget:
         # Re-applied to the MERGED list: each variant's own flow capped
         # its own results, and concatenating two lists that each fit the

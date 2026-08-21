@@ -689,3 +689,68 @@ def test_recovery_counts_memories_not_rows(monkeypatch):
         set_recorder(NullRecorder())
     assert [str(r.id) for r in out] == ["1", "N"]  # one memory, plus the new one
     assert rec.counters.get(("mnemostack.recall.weak_retry_recovered",)) == 1.0
+
+
+def _floor_recaller(n=1):
+    """A recaller exposing the REAL vector-floor logic and nothing else."""
+    from mnemostack.recall.recaller import Recaller
+
+    class _R:
+        vector_floor = n
+        _apply_vector_floor = Recaller._apply_vector_floor
+        _vector_floor_candidates_from_results = staticmethod(
+            Recaller._vector_floor_candidates_from_results
+        )
+        apply_vector_floor_after_rerank = Recaller.apply_vector_floor_after_rerank
+
+    return _R()
+
+
+def _with_candidates(hit, *candidates):
+    hit.payload["_vector_floor_candidates"] = [
+        {"id": c, "text": f"floored {c}", "score": 0.99, "payload": {}, "sources": ["vector"]}
+        for c in candidates
+    ]
+    return hit
+
+
+def test_the_vector_floor_survives_the_fusion(monkeypatch):
+    """R10 (codex P2): `vector_floor` is a promise that N raw vector hits
+    reach the caller even when the ranking stages would drop them, and
+    each pass keeps it by returning MORE than `limit` — the extras are
+    appended past the cut. Fusing those lists back down to `limit` revoked
+    a guarantee the operator configured, so a retried recall honoured a
+    weaker contract than the same recall left alone."""
+    _flow(
+        monkeypatch,
+        {
+            "how did we decide auth": [_with_candidates(_Hit("A"), "F")],
+            "what was chosen for login": [_with_candidates(_Hit("B"), "F")],
+        },
+    )
+    out, retried = retry_weak_recall(_floor_recaller(), "q", 1, llm=_LLM(), results=[])
+    assert retried is True
+    assert [r.id for r in out] == ["A", "F"]  # past `limit`, exactly as the floor intends
+    assert out[0].score > out[1].score  # ...and still descending
+
+
+def test_the_budget_still_caps_a_floored_retry(monkeypatch):
+    """The floor is applied BEFORE the budget, the same order `recall_flow`
+    uses: a guarantee about which memories reach the caller does not get to
+    overrun the hard cap on how many tokens do."""
+    from mnemostack.recall.tokens import sum_tokens
+
+    one = _Hit("A", text="word " * 50)
+    budget = sum_tokens([one], None)
+    _flow(
+        monkeypatch,
+        {
+            "how did we decide auth": [_with_candidates(_Hit("A", "word " * 50), "F")],
+            "what was chosen for login": [],
+        },
+    )
+    out, _retried = retry_weak_recall(
+        _floor_recaller(), "q", 1, llm=_LLM(), results=[], token_budget=budget
+    )
+    assert [r.id for r in out] == ["A"]  # the floored extra did not fit
+    assert sum_tokens(out, None) <= budget
