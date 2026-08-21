@@ -38,7 +38,12 @@ DEGRADED_COUNTER = "mnemostack.recall.degraded"
 #: Trace tags that are routine signals, not service degradations, and so must
 #: NOT count toward the operator's degraded-events total. `temporal:no_parse`
 #: fires on any non-temporal query (a parallel vector retriever still answers).
-_NON_DEGRADED_TAGS = frozenset({"temporal:no_parse"})
+#: `weak_retry:no_variants` joins it: the weak-recall retry asked a healthy
+#: model to paraphrase and got nothing distinct back — an echo of the query,
+#: which the expander drops as a duplicate. The retry cannot proceed, but
+#: nothing failed, and calling it a fault would report a working deployment
+#: as broken.
+_NON_DEGRADED_TAGS = frozenset({"temporal:no_parse", "weak_retry:no_variants"})
 
 #: Same classification for tags with a DYNAMIC prefix — each multi-field
 #: lexical arm reports its own gate verdict ("qdrant_text:title:no_tokens"),
