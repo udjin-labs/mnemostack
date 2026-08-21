@@ -1031,7 +1031,7 @@ def test_a_floor_extra_does_not_vote_in_the_fusion(monkeypatch):
         # what recall_flow returns: the ranked page, then the floor's
         # extra — marked, as the floor marks what it appends
         extra = _Hit("F", text="floored F")
-        extra.from_vector_floor = True
+        extra.floor_score = extra.score  # what the floor stamps on an append
         return [_with_candidates(_Hit(winner), "F"), extra]
 
     _flow(
@@ -1249,7 +1249,7 @@ def test_a_floor_extra_does_not_vote_on_a_short_page_either(monkeypatch):
 
     def _pass(winner):
         extra = _Hit("F", text="floored F")
-        extra.from_vector_floor = True
+        extra.floor_score = extra.score  # what the floor stamps on an append
         return [_with_candidates(_Hit(winner), "F"), extra]  # one ranked hit, one extra
 
     _flow(
@@ -1272,8 +1272,11 @@ def test_the_floor_marks_what_it_appended():
     ]
     out = _floor_recaller().apply_vector_floor_after_rerank([ranked], [ranked])
     assert [r.id for r in out] == ["A", "F"]
-    assert not getattr(out[0], "from_vector_floor", False)  # the ranking chose A
-    assert out[1].from_vector_floor is True  # the floor appended F
+    from mnemostack.recall.recaller import is_floor_extra
+
+    assert not is_floor_extra(out[0])  # the ranking chose A
+    assert is_floor_extra(out[1])  # the floor appended F
+    assert out[1].floor_score == out[1].score  # ...and said so by stamping it
 
 
 def test_the_pool_merge_weighs_what_the_floor_weighs():
@@ -1352,10 +1355,12 @@ def test_the_floor_marker_outlives_a_recall_that_did_not_rerank_it():
     so the marker now simply persists: a floor-only item stays labelled
     whether or not stages were configured, and the retry clears it the
     moment a pass genuinely ranks that memory."""
+    from mnemostack.recall.recaller import is_floor_extra
+
     for with_pipeline in (True, False):
         page = {r.id: r for r in _floor_flow(with_pipeline=with_pipeline)}
-        assert page["A"].from_vector_floor is False  # the ranking chose A
-        assert page["C"].from_vector_floor is True, (
+        assert not is_floor_extra(page["A"])  # the ranking chose A
+        assert is_floor_extra(page["C"]), (
             f"floor-only item lost its marker (pipeline={with_pipeline}); it would "
             "then vote in pass 0 as a ranked hit"
         )
@@ -1367,14 +1372,16 @@ def test_corroboration_clears_the_floor_marker(monkeypatch):
     pass RANKS it, it is not a floor extra any more — whichever pass
     ranked it."""
     floor_only = _Hit("F")
-    floor_only.from_vector_floor = True
     floor_only.score = 0.3
+    floor_only.floor_score = 0.3  # the floor put it here and stamped it
     ranked_by_paraphrase = _Hit("F")  # same memory, genuinely ranked
     _flow(monkeypatch, {"how did we decide auth": [ranked_by_paraphrase]})
     out, retried = retry_weak_recall(None, "q", 5, llm=_LLM(), results=[floor_only], below=3)
     assert retried is True
+    from mnemostack.recall.recaller import is_floor_extra
+
     assert out[0] is floor_only  # the incumbent object is what comes back...
-    assert out[0].from_vector_floor is False  # ...no longer calling itself an extra
+    assert not is_floor_extra(out[0])  # ...no longer calling itself an extra
 
 
 def test_the_restore_covers_every_field_the_merge_touches(monkeypatch):
@@ -1386,7 +1393,7 @@ def test_the_restore_covers_every_field_the_merge_touches(monkeypatch):
     from mnemostack.recall.tokens import sum_tokens
 
     small, large = _Hit("S", text="word " * 8), _Hit("H", text="word " * 100)
-    small.from_vector_floor = True  # the caller's own floor-guaranteed row
+    small.floor_score = small.score  # the caller's own floor-guaranteed row
     budget = sum_tokens([small, large], None) + 2
     # The paraphrase re-finds S as a RANKED hit — which clears the marker
     # mid-merge — behind a newcomer big enough to make the trim shrink the
@@ -1400,7 +1407,7 @@ def test_the_restore_covers_every_field_the_merge_touches(monkeypatch):
         None, "q", 10, llm=_LLM(), results=[small, large], below=5, token_budget=budget
     )
     assert [r.id for r in out] == ["S", "H"]  # the no-op path ran
-    assert small.from_vector_floor is True  # ...and gave the field back too
+    assert small.floor_score == 0.9  # ...and gave the field back too
 
 
 def test_weakness_is_counted_in_memories():

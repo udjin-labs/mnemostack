@@ -365,3 +365,112 @@ def test_vector_floor_metadata_replaces_stale_partial_candidates():
 
     ids = [item.id for item in final]
     assert "v-tail" in ids
+
+
+def _floor_recaller(n=1):
+    """A recaller exposing the REAL floor logic and nothing else."""
+
+    class _R:
+        vector_floor = n
+        _apply_vector_floor = Recaller._apply_vector_floor
+        _vector_floor_candidates_from_results = staticmethod(
+            Recaller._vector_floor_candidates_from_results
+        )
+        apply_vector_floor_after_rerank = Recaller.apply_vector_floor_after_rerank
+
+    return _R()
+
+
+def _hit(pid, score=0.9, raw=None, text="a memory"):
+    payload = {"text": text}
+    if raw is not None:
+        payload["raw_vector_score"] = raw
+    return RecallResult(id=pid, text=text, score=score, payload=payload, sources=["vector"])
+
+
+def test_the_floor_does_not_seat_one_memory_twice(tmp_path=None):
+    """#168: the floor's dedup against the page compared RAW ids, so a
+    guaranteed candidate carrying `"1"` was invisible to it when the page
+    already held `1` — it appended the same memory a second time, and the
+    caller's page showed one memory twice. A point id is `str | int` in
+    Qdrant, and one memory's representation can differ between the arm
+    that ranked it and the arm that offered it as a floor candidate."""
+    ranked = _hit(1, score=0.8)
+    candidate = _hit("1", score=0.4, raw=0.99)  # same memory, other type
+
+    out = _floor_recaller()._apply_vector_floor([ranked], [candidate])
+
+    assert [str(r.id) for r in out] == ["1"], [r.id for r in out]
+    assert out[0] is ranked  # the page keeps the object it already had
+
+
+def test_duplicates_of_one_memory_do_not_crowd_the_floors_slots():
+    """The pool's own keying, isolated. "It keeps the strongest view" reads
+    like the property to test here, but it is not observable on its own:
+    the dedup on the way out drops the second view whichever one it is, so
+    a test asserting it passes with the pool keyed raw. What raw keying
+    really costs is a SLOT — it spends the
+    floor's slots on one memory twice, so a DIFFERENT memory that the
+    guarantee was meant to seat never gets considered at all. That is the
+    consequence the dedup on the way out cannot undo: by then the other
+    candidate has already been sliced away."""
+    view_a = _hit("3", score=0.5, raw=0.90, text="memory A")
+    view_a_again = _hit(3, score=0.5, raw=0.85, text="memory A, other id type")
+    memory_b = _hit("4", score=0.5, raw=0.80, text="memory B")
+
+    out = _floor_recaller(n=2)._apply_vector_floor(
+        [_hit("keeper")], [view_a, view_a_again, memory_b]
+    )
+
+    seated = sorted(str(r.id) for r in out if str(r.id) != "keeper")
+    assert seated == ["3", "4"], [r.id for r in out]
+
+
+def test_the_page_check_holds_whichever_way_the_types_run():
+    """The dedup against the page has to normalise BOTH sides. Comparing a
+    raw candidate id against normalised keys only misses when the types run
+    this way round — an int candidate against a page that holds the string
+    — which is exactly the case a test using the other order cannot see."""
+    ranked = _hit("5", score=0.8)
+    candidate = _hit(5, score=0.4, raw=0.99)  # same memory, int this time
+
+    out = _floor_recaller()._apply_vector_floor([ranked], [candidate])
+
+    assert [str(r.id) for r in out] == ["5"], [r.id for r in out]
+
+
+def test_a_rescored_extra_stops_claiming_the_floor_put_it_there():
+    """#169: the claim expires by itself. A flag would have to be cleared
+    by whoever re-ranked the page, and nothing on the recall path can tell
+    "a stage promoted this" from "nothing touched it" — a pipeline can be
+    all non-scoring stages, and `apply_rerank_safe` is fail-open, so a
+    reranker that raised leaves one configured and nothing reranked. Both
+    proxies were tried and both were wrong. A score needs no clearing:
+    rescoring the result IS the clearing."""
+    from mnemostack.recall.recaller import is_floor_extra
+
+    out = _floor_recaller()._apply_vector_floor([_hit("ranked", score=0.8)], [_hit("F", raw=0.9)])
+    appended = out[-1]
+    assert str(appended.id) == "F"
+    assert is_floor_extra(appended)  # straight out of the floor
+
+    appended.score = 0.42  # any stage that rescores it, by any route
+    assert not is_floor_extra(appended)
+
+
+def test_a_floor_stamp_from_an_earlier_page_does_not_carry_over():
+    """The other half: the claim is about THIS page. An object the floor
+    appended once, then a later ranking placed on its own merits, must not
+    keep saying a floor put it there — and it does not, because that
+    ranking gave it a score of its own."""
+    from mnemostack.recall.recaller import is_floor_extra
+
+    earlier = _floor_recaller()._apply_vector_floor([_hit("x", score=0.8)], [_hit("P", raw=0.9)])
+    promoted = earlier[-1]
+    assert is_floor_extra(promoted)
+
+    promoted.score = 0.95  # a pipeline stage ranks it top on the next pass
+    again = _floor_recaller()._apply_vector_floor([promoted], [_hit("Q", raw=0.7)])
+
+    assert not is_floor_extra(again[0]), "a stale stamp survived a re-ranking"
+    assert str(again[0].id) == "P"
