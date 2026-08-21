@@ -123,9 +123,24 @@ def retry_weak_recall(
         return results, False
     if llm is None:
         counter("mnemostack.recall.weak_retry_unavailable", 1)
+        # Said on the trace too, not only in the counter. An operator who
+        # switched the policy on and has no LLM to paraphrase with gets a
+        # perfectly successful `/recall` — and with `full_pipeline=false`
+        # not even a reranker warning to hint at it. No `mark()`: the
+        # counter above is already in `/status`'s allowlist.
+        _note(flow_kwargs.get("trace"), "weak_retry:unavailable")
         return results, False
 
-    counter("mnemostack.recall.weak_retry", 1)
+    # Labelled with the tenant, because this is the ATTEMPT — the point
+    # where the bill is incurred. `recall_retried` marks only attempts that
+    # improved something, so a tenant whose retries keep failing, or whose
+    # model keeps echoing the query, would pay on every weak recall while
+    # showing up in no per-tenant series at all.
+    tenant = flow_kwargs.get("tenant")
+    if tenant is not None:
+        counter("mnemostack.recall.weak_retry", 1, labels={"tenant": tenant})
+    else:
+        counter("mnemostack.recall.weak_retry", 1)
     # The paraphrase call is watched rather than guessed at. `ok=False` is
     # how a provider in this stack reports an outage — it does not raise —
     # and `generate_variants` turns that into an empty list, identical from

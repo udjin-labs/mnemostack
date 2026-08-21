@@ -1684,3 +1684,75 @@ def test_the_watcher_itself_refuses_a_verdict_it_cannot_read():
     watched = _WatchedLLM(_Down())
     watched.generate("prompt")
     assert watched.failed is True  # the verdict it CAN read is recorded
+
+
+def test_a_policy_that_cannot_run_says_so_on_the_trace():
+    """PR #167 (codex P2): with the policy on and no LLM configured, a weak
+    `/recall` returned success with an empty `degraded` field — and under
+    `full_pipeline=false` there is not even a reranker warning to hint at
+    it. The operator switched something on that cannot run."""
+    from mnemostack.observability.recorder import (
+        InMemoryRecorder,
+        NullRecorder,
+        set_recorder,
+    )
+    from mnemostack.recall.trace import DEGRADED_COUNTER, RecallTrace
+
+    trace = RecallTrace()
+    rec = InMemoryRecorder()
+    set_recorder(rec)
+    try:
+        out, retried = retry_weak_recall(None, "q", 10, llm=None, results=[], trace=trace)
+    finally:
+        set_recorder(NullRecorder())
+    assert out == [] and retried is False
+    assert "weak_retry:unavailable" in trace.degraded
+    assert rec.counters.get(("mnemostack.recall.weak_retry_unavailable",)) == 1.0
+    # Counted once: the counter above is already allowlisted by /status.
+    assert [k for k in rec.counters if k[0] == DEGRADED_COUNTER] == []
+
+
+def test_the_attempt_names_the_tenant_even_when_it_fails(monkeypatch):
+    """PR #167 (codex P2): `recall_retried` marks only attempts that
+    improved something, so a tenant whose paraphrases keep failing — or
+    whose model keeps echoing the query — paid for an LLM call on every
+    weak recall while appearing in no per-tenant series at all."""
+    from mnemostack.observability.recorder import (
+        InMemoryRecorder,
+        NullRecorder,
+        set_recorder,
+    )
+
+    _flow(monkeypatch, {})  # every paraphrase comes back empty: retried=False
+    rec = InMemoryRecorder()
+    set_recorder(rec)
+    try:
+        _out, retried = retry_weak_recall(None, "q", 10, llm=_LLM(), results=[], tenant="acme")
+    finally:
+        set_recorder(NullRecorder())
+    attempts = [k for k in rec.counters if k[0] == "mnemostack.recall.weak_retry"]
+    assert attempts, "the attempt was never counted"
+    assert ("tenant", "acme") in attempts[0], attempts[0]
+
+
+def test_the_attempt_is_counted_with_no_tenant_at_all(monkeypatch):
+    """Local review P2: the label is an ADDITION, not a condition. Auth off
+    is the default deployment shape and has no tenant to name, and a
+    counter that fires only when one exists would leave those deployments
+    with no attempt metric at all — silently, since the labelled branch is
+    the one every other test drives."""
+    from mnemostack.observability.recorder import (
+        InMemoryRecorder,
+        NullRecorder,
+        set_recorder,
+    )
+
+    _flow(monkeypatch, {})
+    rec = InMemoryRecorder()
+    set_recorder(rec)
+    try:
+        retry_weak_recall(None, "q", 10, llm=_LLM(), results=[])  # no tenant kwarg
+    finally:
+        set_recorder(NullRecorder())
+    # A bare key is right here: this call really carries no labels.
+    assert rec.counters.get(("mnemostack.recall.weak_retry",)) == 1.0
