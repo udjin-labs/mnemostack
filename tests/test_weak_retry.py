@@ -344,7 +344,9 @@ def test_the_trace_describes_what_was_returned(monkeypatch):
         None, "q", 10, llm=_LLM(), results=[], trace=trace
     )
     assert retried is True and [r.id for r in out] == [9]
-    assert trace.fused == [("9", 0.9)]  # the order actually returned
+    # The order actually returned, carrying the FUSED score rather than
+    # the one the pass happened to assign before fusion.
+    assert trace.fused == [("9", out[0].score)]
     # the retry's retrieval work is visible, labelled as such...
     assert sum(rt.name.endswith(":retry") for rt in trace.retrievers) == MAX_VARIANTS
     # ...and the first pass's own entry is untouched, which only holds if
@@ -544,3 +546,37 @@ def test_a_paraphrase_identical_to_the_query_is_not_asked_again(monkeypatch):
     seen = _flow(monkeypatch, {})
     out, retried = retry_weak_recall(None, "q", 10, llm=_Echo(), results=[])
     assert out == [] and retried is False and seen == []
+
+
+def test_the_returned_scores_describe_the_returned_order(monkeypatch):
+    """R7 (codex P2): the fused score was computed and then thrown away,
+    so results came back carrying their pre-fusion scores — numbers that
+    do not describe the order they are printed in, and that a client
+    sorting by score would use to undo the ranking."""
+    _flow(
+        monkeypatch,
+        {
+            "how did we decide auth": [_Hit(1), _Hit(2)],
+            "what was chosen for login": [_Hit(2), _Hit(3)],
+        },
+    )
+    out, retried = retry_weak_recall(None, "q", 10, llm=_LLM(), results=[])
+    assert retried is True
+    scores = [r.score for r in out]
+    assert scores == sorted(scores, reverse=True), scores
+    assert out[0].id == 2  # found by both phrasings, and it says so in its score
+    assert scores[0] > scores[1]
+
+
+def test_the_trace_scores_match_the_result_scores(monkeypatch):
+    from mnemostack.recall.trace import RecallTrace
+
+    _flow(
+        monkeypatch,
+        {"how did we decide auth": [_Hit(1)], "what was chosen for login": [_Hit(2)]},
+    )
+    trace = RecallTrace()
+    out, _retried = retry_weak_recall(
+        None, "q", 10, llm=_LLM(), results=[], trace=trace
+    )
+    assert trace.fused == [(str(r.id), r.score) for r in out]

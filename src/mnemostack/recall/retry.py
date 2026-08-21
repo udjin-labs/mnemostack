@@ -159,7 +159,15 @@ def retry_weak_recall(
 
     from .fusion import reciprocal_rank_fusion
 
-    merged = [item for item, _score in reciprocal_rank_fusion(ranked, limit=limit)]
+    merged = []
+    for item, fused_score in reciprocal_rank_fusion(ranked, limit=limit):
+        # Carry the FUSED score, the way the query-expansion path does.
+        # Leaving each object's pre-fusion score on it would publish
+        # numbers that do not describe the order they are printed in —
+        # not even descending — so a client that sorts by score would
+        # undo the ranking this function just computed.
+        item.score = fused_score
+        merged.append(item)
 
     if budget:
         # Re-applied to the MERGED list: each variant's own flow capped
