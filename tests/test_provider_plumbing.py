@@ -261,7 +261,7 @@ def test_new_knobs_stay_at_the_positional_tail():
         "qdrant_health_timeout", "auth_enabled", "keys_file", "quotas_file", "text_key",
         "timestamp_key", "timestamp_format", "text_search", "text_search_fields",
         "resolve_roots", "ollama_host", "embedding_timeout", "record_access",
-        "retry_on_weak", "retry_weak_below",
+        "retry_on_weak", "retry_weak_below", "access_bonus_max",
     ]
     assert field_names[: len(settled_prefix)] == settled_prefix, (
         "a field was inserted or reordered inside the settled prefix; append instead"

@@ -87,7 +87,9 @@ from mnemostack.observability.recorder import (
 from mnemostack.provenance import SOURCE_HASH_KEY
 from mnemostack.quotas import QuotaExceededError
 from mnemostack.recall import (
+    DEFAULT_ACCESS_BONUS_MAX,
     DEGRADED_COUNTER,
+    MAX_ACCESS_BONUS_MAX,
     RERANK_MODES,
     AnswerGenerator,
     BM25Retriever,
@@ -129,6 +131,27 @@ def _env_int(name: str, default: int) -> int:
     except ValueError:
         return default
     return parsed if parsed > 0 else default
+
+
+def _env_float(name: str, default: float) -> float:
+    """A non-negative float from the environment, or the default.
+
+    Same contract as `_env_int` — env deployment must reach every knob the
+    CLI can — with the same refusal to fail startup over one bad tuning
+    value. Bounding what the value MEANS is not this reader's job: the
+    config's `__post_init__` owns that, so every construction path gets it
+    and not just the two that happen to come through here.
+    """
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        parsed = float(value.strip())
+    except ValueError:
+        return default
+    if parsed != parsed or parsed in (float("inf"), float("-inf")):
+        return default
+    return parsed
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -786,6 +809,12 @@ class ServerConfig:
     #: How few results count as "weak". 1 = only a recall that returned
     #: nothing at all, which is the least ambiguous case and the default.
     retry_weak_below: int = 1
+    #: Ceiling on the freshness stage's access bonus. 0 removes the access
+    #: signal from ranking entirely — the switch for a deployment whose
+    #: clients stamp `last_accessed` themselves and do not want it steering
+    #: rank. Turning `record_access` off does NOT help them: the stage reads
+    #: those keys whoever wrote them. Appended, like every knob above.
+    access_bonus_max: float = DEFAULT_ACCESS_BONUS_MAX
 
     def __post_init__(self) -> None:
         if self.rerank_mode not in RERANK_MODES:
@@ -795,6 +824,15 @@ class ServerConfig:
         # and a bad value here would 500 every request.
         if self.token_budget is not None and self.token_budget <= 0:
             self.token_budget = None
+        # Clamped here rather than at each entry point so the bound holds for
+        # library callers too. A negative reads as "off" instead of inverting
+        # into a penalty — the one direction this term must never have — and
+        # NaN, which compares false against every bound, would otherwise reach
+        # the multiplier and erase the score of whatever it touched.
+        bonus = float(self.access_bonus_max)
+        if bonus != bonus:
+            bonus = DEFAULT_ACCESS_BONUS_MAX
+        self.access_bonus_max = min(max(0.0, bonus), MAX_ACCESS_BONUS_MAX)
 
     @classmethod
     def from_env(cls) -> ServerConfig:
@@ -821,6 +859,9 @@ class ServerConfig:
             token_budget=cfg.recall.token_budget,
             auto_record_ior=_env_bool("MNEMOSTACK_AUTO_RECORD_IOR"),
             record_access=_env_bool("MNEMOSTACK_RECORD_ACCESS"),
+            access_bonus_max=_env_float(
+                "MNEMOSTACK_ACCESS_BONUS_MAX", DEFAULT_ACCESS_BONUS_MAX
+            ),
             retry_on_weak=_env_bool("MNEMOSTACK_RETRY_ON_WEAK"),
             retry_weak_below=_env_int("MNEMOSTACK_RETRY_WEAK_BELOW", 1),
             auth_enabled=_env_bool("MNEMOSTACK_AUTH_ENABLED"),
@@ -1194,6 +1235,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     state_path.parent.mkdir(parents=True, exist_ok=True)
     pipeline = build_full_pipeline(
         state_store=FileStateStore(state_path),
+        access_bonus_max=cfg.access_bonus_max,
         graph_uri=cfg.graph_uri,
         graph_user=cfg.graph_user,
         graph_password=cfg.graph_password,

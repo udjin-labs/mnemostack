@@ -23,6 +23,8 @@ from .base import Pipeline, PipelineContext, Stage
 from .presets import build_full_pipeline, build_stateless_pipeline
 from .resurrection import GraphResurrection
 from .stages import (
+    DEFAULT_ACCESS_BONUS_MAX,
+    MAX_ACCESS_BONUS_MAX,
     ClassifyQuery,
     CuriosityBoost,
     ExactTokenProtection,
@@ -49,6 +51,8 @@ __all__ = [
     "GraphResurrection",
     "GravityDampen",
     "HubDampen",
+    "DEFAULT_ACCESS_BONUS_MAX",
+    "MAX_ACCESS_BONUS_MAX",
     "FreshnessBlend",
     "InhibitionOfReturn",
     "CuriosityBoost",

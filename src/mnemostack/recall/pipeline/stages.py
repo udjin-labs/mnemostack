@@ -278,6 +278,13 @@ class HubDampen(Stage):
 #: take the access signal out of ranking entirely.
 DEFAULT_ACCESS_BONUS_MAX = 0.25
 
+#: Hard cap an operator's configured ceiling is clamped to. The safety of
+#: this term rests on it being SMALL relative to similarity: it is the one
+#: signal the service's own output feeds back into, so a bonus that could
+#: double a score would let what is already being found decide what gets
+#: found next.
+MAX_ACCESS_BONUS_MAX = 1.0
+
 #: Access count at which the bonus reaches its ceiling. Saturating rather
 #: than linear, and clamped, so a hot memory cannot keep buying rank.
 _ACCESS_BONUS_FULL_AT = 10.0

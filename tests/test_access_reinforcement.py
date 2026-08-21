@@ -243,3 +243,67 @@ def test_without_a_stamp_no_counter_can_buy_a_bonus():
     for count in (0, 1, 10, 10**9, -5):
         for stamp in (None, "", "not-a-date", "2026-13-45T99:99:99"):
             assert compute_access_boost(stamp, access_count=count) == 1.0, (stamp, count)
+
+
+# ------------------------------------------------- the operator-facing knob
+
+
+def test_the_off_switch_reaches_an_operator_who_only_has_the_server():
+    """The compatibility promise is only true if it is REACHABLE. The knob
+    was defensible as an argument against keeping the old model behind a
+    legacy flag precisely because it turns the signal off — but a knob only
+    a library caller can set is no answer for the deployment that needs it:
+    a server whose CLIENTS stamp `last_accessed` cannot escape the term by
+    leaving `--record-access` off, because the stage reads those keys
+    whoever wrote them.
+    """
+    import inspect
+
+    from mnemostack.recall.pipeline import build_full_pipeline, build_stateless_pipeline
+
+    for builder in (build_full_pipeline, build_stateless_pipeline):
+        assert "access_bonus_max" in inspect.signature(builder).parameters, builder
+
+    pytest.importorskip("fastapi")
+    from mnemostack.server import ServerConfig
+
+    assert ServerConfig().access_bonus_max == DEFAULT_ACCESS_BONUS_MAX
+    assert ServerConfig(access_bonus_max=0.0).access_bonus_max == 0.0
+
+    parser = pytest.importorskip("mnemostack.cli").build_parser()
+    assert parser.parse_args(["serve", "--access-bonus-max", "0"]).access_bonus_max == 0.0
+
+
+def test_the_configured_ceiling_is_bounded_on_every_construction_path():
+    """A knob fed by the service's own output cannot be left to whatever a
+    config file says. The bound lives in `__post_init__` so the library
+    caller, the env reader and the flag all inherit it — a rule applied at
+    each entry point instead would be three rules, and the one path that
+    forgot would be the one that mattered."""
+    pytest.importorskip("fastapi")
+    from mnemostack.recall.pipeline import MAX_ACCESS_BONUS_MAX
+    from mnemostack.server import ServerConfig
+
+    # A negative reads as "off", never as an inverted penalty.
+    assert ServerConfig(access_bonus_max=-5.0).access_bonus_max == 0.0
+    assert ServerConfig(access_bonus_max=99.0).access_bonus_max == MAX_ACCESS_BONUS_MAX
+    # NaN compares false against every bound, so a naive clamp lets it
+    # through — and it would erase the score of every result it multiplied.
+    assert ServerConfig(access_bonus_max=float("nan")).access_bonus_max == (
+        DEFAULT_ACCESS_BONUS_MAX
+    )
+
+
+def test_a_configured_ceiling_actually_reaches_the_stage():
+    """Threading a knob through a signature is not the same as it arriving:
+    a preset that accepted the argument and dropped it would satisfy every
+    check above and change nothing about ranking."""
+    from mnemostack.recall.pipeline import FreshnessBlend, build_stateless_pipeline
+
+    off = build_stateless_pipeline(access_bonus_max=0.0)
+    stage = next(s for s in off.stages if isinstance(s, FreshnessBlend))
+    assert stage.access_bonus_max == 0.0
+
+    used = _result(score=1.0, last_accessed=_iso_days_ago(0), access_count=10)
+    out = stage.apply(PipelineContext(query="memory"), [used])
+    assert out[0].payload["access_boost"] == 1.0

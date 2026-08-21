@@ -53,7 +53,13 @@ from .recall import (
     recall_flow,
     sum_tokens,
 )
-from .recall.pipeline import FileStateStore, build_full_pipeline, default_state_path
+from .recall.pipeline import (
+    DEFAULT_ACCESS_BONUS_MAX,
+    MAX_ACCESS_BONUS_MAX,
+    FileStateStore,
+    build_full_pipeline,
+    default_state_path,
+)
 from .synthesis import synthesize
 from .vector import VectorStore
 from .vector.patch import (
@@ -4385,6 +4391,18 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         ),
     )
     p_serve.add_argument(
+        "--access-bonus-max",
+        type=float,
+        default=None,
+        help=(
+            "Ceiling on the freshness stage's access bonus (default 0.25, "
+            f"clamped to {MAX_ACCESS_BONUS_MAX}). 0 removes the access signal from "
+            "ranking entirely — use it if your clients stamp last_accessed "
+            "themselves and you do not want it steering rank. "
+            "Env: MNEMOSTACK_ACCESS_BONUS_MAX"
+        ),
+    )
+    p_serve.add_argument(
         "--auth",
         action="store_true",
         help=(
@@ -4501,7 +4519,13 @@ def cmd_serve(args: argparse.Namespace) -> int:
     try:
         import uvicorn
 
-        from mnemostack.server import ServerConfig, _env_bool, _env_int, build_app
+        from mnemostack.server import (
+            ServerConfig,
+            _env_bool,
+            _env_float,
+            _env_int,
+            build_app,
+        )
     except ImportError as exc:
         print(
             f"error: server extra not installed ({exc}). Install with: "
@@ -4516,6 +4540,15 @@ def cmd_serve(args: argparse.Namespace) -> int:
     # Without this, `MNEMOSTACK_RETRY_WEAK_BELOW` worked only for the
     # programmatic-ASGI deployment and was silently ignored by `serve`,
     # which is the entry point the documentation points at first.
+    # Explicit flag beats env. Bounds are ServerConfig's to apply, not this
+    # call site's — a knob clamped at each entry point is a rule stated three
+    # times, and library callers would get none of them.
+    _bonus = getattr(args, "access_bonus_max", None)
+    _access_bonus_max = (
+        _env_float("MNEMOSTACK_ACCESS_BONUS_MAX", DEFAULT_ACCESS_BONUS_MAX)
+        if _bonus is None
+        else float(_bonus)
+    )
     _weak_below = getattr(args, "retry_weak_below", None)
     _weak_below = (
         max(1, int(_weak_below))
@@ -4548,6 +4581,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         record_access=(
             getattr(args, "record_access", False) or _env_bool("MNEMOSTACK_RECORD_ACCESS")
         ),
+        access_bonus_max=_access_bonus_max,
         retry_on_weak=(
             getattr(args, "retry_on_weak", False) or _env_bool("MNEMOSTACK_RETRY_ON_WEAK")
         ),
@@ -4587,6 +4621,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     print(f"  state:      {cfg.state_path}")
     print(f"  auto IoR:   {cfg.auto_record_ior}")
     print(f"  access rec: {cfg.record_access}")
+    print(f"  access bonus max: {cfg.access_bonus_max}")
     print(f"  weak retry: {cfg.retry_on_weak} (below {cfg.retry_weak_below})")
     print(f"  docs:       http://{args.host}:{args.port}/docs")
     uvicorn.run(app, host=args.host, port=args.port, reload=args.reload)
