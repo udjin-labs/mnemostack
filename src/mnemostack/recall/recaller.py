@@ -16,6 +16,7 @@ from ..vector.qdrant import Hit, VectorStore
 from .bm25 import BM25, BM25Doc
 from .filters import payload_matches
 from .fusion import reciprocal_rank_fusion
+from .identity import memory_key
 from .mca_prefilter import mca_prefilter as run_mca_prefilter
 from .query_expansion import expand_query
 from .tokens import TokenCounter, apply_token_budget
@@ -98,6 +99,12 @@ def _fetch_limit(base: int, include_invalidated: bool, as_of: str | None) -> int
     return base
 
 
+# `memory_key` is imported above and re-exported by that import alone: the
+# rule lives in a leaf module because `recaller` imports `fusion`, so a rule
+# in either would make the other a cycle. Every existing
+# `from .recaller import memory_key` keeps working.
+
+
 def is_floor_extra(result: Any) -> bool:
     """Whether this result is on the page only because the floor put it there.
 
@@ -119,26 +126,6 @@ def is_floor_extra(result: Any) -> bool:
     """
     stamped = getattr(result, "floor_score", None)
     return stamped is not None and stamped == getattr(result, "score", None)
-
-
-def memory_key(value: Any) -> str:
-    """THE identity rule for a memory. Every id this stack keys on comes here.
-
-    One memory can come back as `1` from one retriever and `"1"` from
-    another, so anything asking "are these the same memory" has to ask it
-    the same way. Four places learned that separately — the weak-retry's
-    "found something new" dict, a retry pass's own ranking, the vector
-    floor's candidate pool, and the floor's dedup against the page it is
-    given — and each was found the same way: one memory occupying two
-    slots of a caller's page. The rule lives beside `RecallResult` so a
-    fifth place cannot be added with a fresh answer.
-
-    Two DISTINCT memories cannot collide under it. A string point id must
-    be a UUID in Qdrant (`Point id 1 is not a valid UUID`), ingest mints
-    ids as `str(uuid.UUID(...))`, and graph hits are namespaced by
-    `graph_result_id()`.
-    """
-    return str(value)
 
 
 @dataclass
@@ -585,9 +572,7 @@ class Recaller:
         # facts can't crowd out current ones in the top-K, and vector-floor
         # candidates stay clean). This is a cheap idempotent safety net for any
         # path that might inject records after fusion.
-        results = filter_by_validity(
-            results, include_invalidated=include_invalidated, as_of=as_of
-        )
+        results = filter_by_validity(results, include_invalidated=include_invalidated, as_of=as_of)
         # Tenant isolation backstop: when a tenant is scoped, keep only its own
         # records regardless of which retriever produced them. Guarantees no
         # cross-tenant leak even if a retriever path forgot the tenant filter,
@@ -642,6 +627,7 @@ class Recaller:
                 "legacy recall path requires embedding_provider and vector_store "
                 "(or pass retrievers=[...])"
             )
+
         # Drop stale hits at the source — before fusion's top-K cut and before
         # vector-floor candidates are built — so invalidated facts can neither
         # crowd out current ones nor be re-appended by the floor.
@@ -726,7 +712,6 @@ class Recaller:
                 else []
             )
             mca_hits = [h for h in mca_hits if _keep(h.payload)][:bm25_limit]
-            mca_by_id = {hit.id: hit for hit in mca_hits}
             ranked_lists: list[list[tuple[Any, float]]] = [vector_list, bm25_list]
             if mca_hits:
                 ranked_lists.insert(0, [(hit, hit.score) for hit in mca_hits])
@@ -776,11 +761,6 @@ class Recaller:
                         item.payload["raw_vector_score"] = raw_vector_score
                     item.score = rrf_score
                     results.append(item)
-                else:
-                    mca_result = mca_by_id.get(item)
-                    if mca_result is not None:
-                        mca_result.score = rrf_score
-                        results.append(mca_result)
             if not vector_hits:
                 results = self._maybe_apply_fallback(
                     query,
@@ -826,7 +806,11 @@ class Recaller:
         fetch = _fetch_limit(limit, include_invalidated, as_of)
         tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
         ranked_lists: list[list[tuple[Any, float]]] = []
-        id_to_hit: dict[Any, Hit] = {}
+        # Keyed — and RANKED — by the identity rule, not by the raw id.
+        # These lists carry bare ids rather than objects, so the fusion's
+        # own key falls through to the value itself: normalising the dict
+        # alone would leave the two disagreeing again.
+        id_to_hit: dict[str, Hit] = {}
         for vector in vectors:
             if not vector:
                 continue
@@ -847,8 +831,8 @@ class Recaller:
             ][:limit]
             ranked: list[tuple[Any, float]] = []
             for hit in hits:
-                id_to_hit.setdefault(hit.id, hit)
-                ranked.append((hit.id, hit.score))
+                id_to_hit.setdefault(memory_key(hit.id), hit)
+                ranked.append((memory_key(hit.id), hit.score))
             ranked_lists.append(ranked)
 
         fused = reciprocal_rank_fusion(ranked_lists, k=self.rrf_k, limit=limit)
@@ -927,14 +911,15 @@ class Recaller:
                     rt.query = expanded_query
             ranked: list[tuple[Any, float]] = []
             for result in results:
-                if result.id in id_to_result:
-                    existing = id_to_result[result.id]
+                key = memory_key(result.id)
+                if key in id_to_result:
+                    existing = id_to_result[key]
                     for source in result.sources:
                         if source not in existing.sources:
                             existing.sources.append(source)
                 else:
-                    id_to_result[result.id] = result
-                ranked.append((result.id, result.score))
+                    id_to_result[key] = result
+                ranked.append((key, result.score))
             ranked_lists.append(ranked)
 
         fused = reciprocal_rank_fusion(ranked_lists, k=self.rrf_k, limit=limit)
@@ -959,8 +944,11 @@ class Recaller:
 
     @staticmethod
     def _raw_vector_score_for(item_id: Any, vector_hits: list[Hit]) -> float | None:
+        # Through the rule: the item was fused from several arms and may
+        # carry a different arm's representation of the same id.
+        wanted = memory_key(item_id)
         for hit in vector_hits:
-            if hit.id == item_id:
+            if memory_key(hit.id) == wanted:
                 return hit.score
         return None
 
@@ -970,11 +958,17 @@ class Recaller:
         vector_hits: list[Hit],
         bm25_hits: list[tuple[BM25Doc, float]],
     ) -> list[str]:
-        item_id = getattr(item, "id", item)
+        # Compared through the rule, ACROSS arms: this asks which arms
+        # found one memory, and the arms are exactly what can disagree
+        # about the type of its id. Raw comparison reported a memory both
+        # arms found as found by one — a wrong answer in the response's
+        # `sources`, and wrong evidence for the reinforcement that reads
+        # it.
+        item_id = memory_key(getattr(item, "id", item))
         sources = []
-        if any(h.id == item_id for h in vector_hits):
+        if any(memory_key(h.id) == item_id for h in vector_hits):
             sources.append("vector")
-        if any(d.id == item_id for d, _ in bm25_hits):
+        if any(memory_key(d.id) == item_id for d, _ in bm25_hits):
             sources.append("bm25")
         return sources
 
@@ -1034,9 +1028,7 @@ class Recaller:
                     search_kwargs["include_invalidated"] = include_invalidated
                 if tenant is not None and getattr(retr, "accepts_tenant", False):
                     search_kwargs["tenant"] = tenant
-                if recall_scope is not None and getattr(
-                    retr, "accepts_recall_scope", False
-                ):
+                if recall_scope is not None and getattr(retr, "accepts_recall_scope", False):
                     # Per-recall shared state (e.g. the graph arm's probe
                     # budget must span expanded-query variants, not reset
                     # per variant).
@@ -1052,9 +1044,7 @@ class Recaller:
                 hits = [
                     h
                     for h in hits
-                    if keep_payload(
-                        h.payload, include_invalidated=include_invalidated, as_of=as_of
-                    )
+                    if keep_payload(h.payload, include_invalidated=include_invalidated, as_of=as_of)
                 ][:per_source_limit]
             except EmbeddingSpaceError:
                 # An arm refusing to cross embedding spaces is not a broken
@@ -1083,7 +1073,14 @@ class Recaller:
         with histogram("mnemostack.recall.latency_ms"):
             all_lists: list[list[tuple[Any, float]]] = []
             per_list_weights: list[float] = []
-            id_to_result: dict[Any, RecallResult] = {}
+            #: Keys whose representative came from an arm with no vote.
+            muted_keys: set[str] = set()
+            # One key shape for a mixed list: the MCA arm below appends
+            # OBJECTS while the retriever arms append bare ids, so the
+            # fusion keys the first through `memory_key` and the second
+            # through its own fall-through. They only agree if the ids are
+            # normalised here as well.
+            id_to_result: dict[str, RecallResult] = {}
             has_vector_results = False
             # Skip MCA under a tenant — it prefilters the BM25 index, which
             # can't be tenant-scoped (same reasoning as the skipped BM25/graph
@@ -1097,15 +1094,22 @@ class Recaller:
                 mca_hits = [
                     h
                     for h in mca_hits
-                    if keep_payload(
-                        h.payload, include_invalidated=include_invalidated, as_of=as_of
-                    )
+                    if keep_payload(h.payload, include_invalidated=include_invalidated, as_of=as_of)
                 ][:per_source_limit]
                 if mca_hits:
+                    mca_weight = self._weight_for("mca", query)
                     all_lists.append([(hit, hit.score) for hit in mca_hits])
-                    per_list_weights.append(self._weight_for("mca", query))
-                    for hit in mca_hits:
-                        id_to_result[hit.id] = hit
+                    per_list_weights.append(mca_weight)
+                    if mca_weight > 0:
+                        # A zero-weight arm casts no vote, so it must not
+                        # claim the representative either. It used to be
+                        # spared that by accident: keyed raw, its `7` and a
+                        # vector arm's `"7"` were two entries and the fused
+                        # key found the enabled arm's. Now they are one
+                        # memory, and whoever registers first is what the
+                        # caller receives — text, payload and all.
+                        for hit in mca_hits:
+                            id_to_result[memory_key(hit.id)] = hit
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=max(len(self.retrievers), 1)
             ) as ex:
@@ -1132,14 +1136,19 @@ class Recaller:
                             trace.mark(reason)
                 if retr.name == "vector" and hits:
                     has_vector_results = True
+                # Needed BEFORE the loop below, not only when the list is
+                # appended: a zero-weight arm casts no vote and must not
+                # claim the representative for a memory either.
+                weight = self._weight_for(retr.name, query)
                 ranked: list[tuple[Any, float]] = []
                 for r in hits:
                     if retr.name == "vector":
                         r.payload.setdefault("raw_vector_score", r.score)
                         if vector_floor_candidates is not None:
                             vector_floor_candidates.append(r)
-                    if r.id in id_to_result:
-                        existing = id_to_result[r.id]
+                    key = memory_key(r.id)
+                    if key in id_to_result:
+                        existing = id_to_result[key]
                         for s in r.sources:
                             if s not in existing.sources:
                                 existing.sources.append(s)
@@ -1157,18 +1166,37 @@ class Recaller:
                                 existing.payload["raw_vector_score"] = max(
                                     existing_raw, incoming_raw
                                 )
+                        if weight > 0 and key in muted_keys:
+                            # A voting arm takes the representative slot
+                            # from a muted one, carrying what was pooled
+                            # above: the caller must not be handed the text
+                            # and payload of an arm that cast no vote.
+                            r.sources = list(existing.sources)
+                            if "raw_vector_score" in existing.payload:
+                                r.payload["raw_vector_score"] = existing.payload["raw_vector_score"]
+                            id_to_result[key] = r
+                            muted_keys.discard(key)
                     else:
-                        id_to_result[r.id] = r
-                    ranked.append((r.id, r.score))
+                        # Registered whatever its weight: this dict is also
+                        # where the non-expansion path finds the vector
+                        # floor's candidates, so skipping a muted arm here
+                        # silently switched off a guarantee the operator
+                        # configured. Muted entries are marked instead, and
+                        # yield the slot to the first arm that votes.
+                        id_to_result[key] = r
+                        if weight <= 0:
+                            muted_keys.add(key)
+                    ranked.append((key, r.score))
                 all_lists.append(ranked)
-                per_list_weights.append(self._weight_for(retr.name, query))
+                per_list_weights.append(weight)
             fused = reciprocal_rank_fusion(
                 all_lists, k=self.rrf_k, limit=limit, weights=per_list_weights
             )
             results: list[RecallResult] = []
             for item, rrf_score in fused:
-                key = getattr(item, "id", item)
-                r = id_to_result.get(key)
+                # An object from the MCA arm, or a bare id from a
+                # retriever arm — either way the lookup key is the rule.
+                r = id_to_result.get(memory_key(getattr(item, "id", item)))
                 if not r:
                     continue
                 r.score = rrf_score
@@ -1394,8 +1422,11 @@ class Recaller:
                 return []
             try:
                 hits = self.vector.search(
-                    query_vec, limit=limit, filters=self._vector_filters(filters),
-                    hide_invalidated=hide_invalidated, **tkw
+                    query_vec,
+                    limit=limit,
+                    filters=self._vector_filters(filters),
+                    hide_invalidated=hide_invalidated,
+                    **tkw,
                 )
             except Exception:
                 return []
@@ -1458,20 +1489,25 @@ class Recaller:
             "Low-confidence fallback triggered after primary vector recall returned no hits"
         )
         pipeline_results = list(results)
-        by_id: dict[Any, RecallResult] = {result.id: result for result in pipeline_results}
-        id_to_index: dict[Any, int] = {
-            result.id: index for index, result in enumerate(pipeline_results)
+        # Through the rule, like every other merge here: the fallback is a
+        # SEPARATE vector call, so it is exactly the kind of second opinion
+        # that can report one memory under the other id representation.
+        by_id: dict[str, RecallResult] = {
+            memory_key(result.id): result for result in pipeline_results
+        }
+        id_to_index: dict[str, int] = {
+            memory_key(result.id): index for index, result in enumerate(pipeline_results)
         }
         pipeline_scores = [result.score for result in pipeline_results]
         fallback_only_penalty_ceiling = min(pipeline_scores) - 0.01 if pipeline_scores else None
         fallback_only: list[RecallResult] = []
 
         for fallback in fallback_hits:
-            existing = by_id.get(fallback.id)
+            existing = by_id.get(memory_key(fallback.id))
             if existing is None:
                 if fallback_only_penalty_ceiling is not None:
                     fallback.score = min(fallback.score * 0.5, fallback_only_penalty_ceiling)
-                by_id[fallback.id] = fallback
+                by_id[memory_key(fallback.id)] = fallback
                 fallback_only.append(fallback)
                 continue
 
@@ -1481,8 +1517,8 @@ class Recaller:
                     merged_sources.append(source)
             if fallback.score > existing.score:
                 fallback.sources = merged_sources
-                by_id[fallback.id] = fallback
-                pipeline_results[id_to_index[fallback.id]] = fallback
+                by_id[memory_key(fallback.id)] = fallback
+                pipeline_results[id_to_index[memory_key(fallback.id)]] = fallback
             else:
                 existing.sources = merged_sources
 
