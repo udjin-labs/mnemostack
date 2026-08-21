@@ -94,9 +94,19 @@ def retry_weak_recall(
     if not variants:
         return results, False
 
+    # Each variant recalls into its OWN trace. Sharing the caller's would
+    # let every pass overwrite `fused`/`post_rerank`, so a client asking
+    # for a trace would get one describing the LAST paraphrase while the
+    # response carried the merged results — and under a tenant scope the
+    # per-pass `restrict_to_ids` would additionally drop entries earlier
+    # passes had recorded.
+    caller_trace = flow_kwargs.pop("trace", None)
     seen = {str(r.id) for r in results}
     merged = list(results)
     for variant in variants:
+        variant_trace = _fresh_trace(caller_trace)
+        if variant_trace is not None:
+            flow_kwargs["trace"] = variant_trace
         try:
             # The SAME call in other words: every scoping keyword the
             # caller gave is forwarded unchanged. `QueryExpander.recall`
@@ -111,6 +121,10 @@ def retry_weak_recall(
             if str(result.id) not in seen:
                 seen.add(str(result.id))
                 merged.append(result)
+        _absorb(caller_trace, variant_trace, variant)
+    flow_kwargs.pop("trace", None)
+    if caller_trace is not None:
+        flow_kwargs["trace"] = caller_trace
 
     if len(merged) == len(results):
         return results, True  # asked again, still nothing: an answer too
@@ -130,6 +144,57 @@ def retry_weak_recall(
         )
     gained = len(merged) - len(results)
     if gained <= 0:
-        return results if not merged else merged, True
+        final = results if not merged else merged
+        _retrace(caller_trace, final)
+        return final, True
     counter("mnemostack.recall.weak_retry_recovered", gained)
+    _retrace(caller_trace, merged)
     return merged, True
+
+
+def _fresh_trace(caller_trace: Any) -> Any:
+    """A trace of the same type as the caller's, or None when it wants none."""
+    if caller_trace is None:
+        return None
+    return type(caller_trace)()
+
+
+def _absorb(caller_trace: Any, variant_trace: Any, variant: str) -> None:
+    """Fold one variant's work into the caller's trace.
+
+    Retriever entries are kept — the extra retrieval is exactly the cost
+    an operator reading a trace wants to see — and labelled with the
+    paraphrase that produced them. Degradations and notes carry over
+    verbatim: an arm that failed during the retry failed, and hiding that
+    because it happened in the second pass would be the opposite of what
+    a trace is for.
+    """
+    if caller_trace is None or variant_trace is None:
+        return
+    # Over a SNAPSHOT: if the two traces were ever the same object this
+    # would otherwise append to the list it is walking and never stop.
+    # They cannot be today — `_fresh_trace` always builds a new one — but
+    # an unbounded loop is a bad thing to leave one refactor away.
+    for entry in list(getattr(variant_trace, "retrievers", [])):
+        entry.name = f"{entry.name}:retry"
+        caller_trace.retrievers.append(entry)
+    for tag in getattr(variant_trace, "degraded", []):
+        caller_trace.mark(tag)
+    del variant  # named for readability at the call site
+
+
+def _retrace(caller_trace: Any, final: list[Any]) -> None:
+    """Make the trace's order describe the order actually returned.
+
+    `fused` is documented as the order recall returned, and after a merge
+    no single pass produced it. Rewriting it here keeps that invariant
+    true; `post_rerank`, when a reranker ran, is rewritten to the same
+    order for the same reason — leaving either describing one paraphrase
+    while the response carries a merge is worse than either.
+    """
+    if caller_trace is None:
+        return
+    order = [(str(r.id), float(getattr(r, "score", 0.0))) for r in final]
+    caller_trace.fused = order
+    if getattr(caller_trace, "post_rerank", None) is not None:
+        caller_trace.post_rerank = list(order)

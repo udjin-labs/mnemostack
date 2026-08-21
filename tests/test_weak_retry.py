@@ -308,3 +308,69 @@ def test_answer_does_not_pay_for_a_paraphrase_round(monkeypatch, tmp_path):
     )
     assert r.status_code == 200, r.text
     assert calls == []
+
+
+def test_the_trace_describes_what_was_returned(monkeypatch):
+    """R2 (codex P2): every variant recalled into the CALLER's trace, so
+    `fused` ended up describing the last paraphrase while the response
+    carried the merge — and `trace.fused` is documented as the order
+    recall returned."""
+    from mnemostack.recall.trace import RecallTrace
+
+    def _fake(_recaller, query, _limit, **kwargs):
+        trace = kwargs.get("trace")
+        if trace is not None:  # each pass writes its own order, as flow does
+            trace.fused = [(f"{query}-1", 0.5)]
+            trace.retrievers.append(
+                type("RT", (), {"name": "vector", "ranked": [], "to_dict": dict})()
+            )
+        return [_Hit(9)] if query == "how did we decide auth" else []
+
+    import mnemostack.recall.retry as retry_mod
+
+    monkeypatch.setattr(retry_mod, "recall_flow", _fake)
+    trace = RecallTrace()
+    trace.fused = [("original", 0.1)]
+    first_pass = type("RT", (), {"name": "vector", "ranked": [], "to_dict": dict})()
+    trace.retrievers.append(first_pass)  # what the ORIGINAL recall recorded
+    out, retried = retry_weak_recall(
+        None, "q", 10, llm=_LLM(), results=[], trace=trace
+    )
+    assert retried is True and [r.id for r in out] == [9]
+    assert trace.fused == [("9", 0.9)]  # the order actually returned
+    # the retry's retrieval work is visible, labelled as such...
+    assert sum(rt.name.endswith(":retry") for rt in trace.retrievers) == MAX_VARIANTS
+    # ...and the first pass's own entry is untouched, which only holds if
+    # the variants recalled into traces of their own.
+    assert first_pass.name == "vector"
+
+
+def test_a_degradation_during_the_retry_is_not_swallowed(monkeypatch):
+    """An arm that failed in the second pass failed; hiding it because of
+    WHEN it happened is the opposite of what a trace is for."""
+    from mnemostack.recall.trace import RecallTrace
+
+    def _fake(_recaller, _query, _limit, **kwargs):
+        trace = kwargs.get("trace")
+        if trace is not None:
+            trace.mark("bm25:down")
+        return []
+
+    import mnemostack.recall.retry as retry_mod
+
+    monkeypatch.setattr(retry_mod, "recall_flow", _fake)
+    trace = RecallTrace()
+    retry_weak_recall(None, "q", 10, llm=_LLM(), results=[], trace=trace)
+    assert "bm25:down" in trace.degraded
+
+
+def test_the_caller_trace_is_restored_for_later_stages(monkeypatch):
+    """The helper borrows the trace keyword while it runs; whoever called
+    it must get its own object back in the kwargs it passed."""
+    from mnemostack.recall.trace import RecallTrace
+
+    _flow(monkeypatch, {})
+    trace = RecallTrace()
+    kwargs = {"trace": trace, "tenant": "acme"}
+    retry_weak_recall(None, "q", 10, llm=_LLM(), results=[], **kwargs)
+    assert kwargs["trace"] is trace
