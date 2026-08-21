@@ -905,3 +905,29 @@ def test_a_better_evidenced_hit_takes_a_weak_one_s_slot(monkeypatch):
     assert retried is True
     assert [r.id for r in out] == ["E", "N", "M"]  # W displaced, not lost to a bug
     assert len(out) > len([early, weak])  # ...and the caller ends up with MORE
+
+
+def test_one_pass_gets_one_vote(monkeypatch):
+    """R14 (codex P2): RRF adds `1/(k+rank)` once per list an item appears
+    in, so a pass that listed the same memory twice — `1` here and `"1"`
+    there — handed it two contributions and could out-vote a hit two
+    separate phrasings genuinely corroborated. Canonicalising the objects
+    is not enough: the fusion then sees the same OBJECT twice and scores
+    it twice."""
+    seen = _flow(
+        monkeypatch,
+        {
+            "how did we decide auth": [_Hit("A"), _Hit("C")],
+            "what was chosen for login": [_Hit("C")],  # C: corroborated
+        },
+    )
+    out, retried = retry_weak_recall(
+        None,
+        "q",
+        3,
+        llm=_LLM(),
+        results=[_Hit(1), _Hit("1")],  # one memory, listed twice
+        below=5,
+    )
+    assert retried is True and len(seen) == MAX_VARIANTS
+    assert [str(r.id) for r in out] == ["C", "1", "A"]  # not ["1", "C", "A"]

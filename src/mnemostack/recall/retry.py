@@ -144,7 +144,7 @@ def retry_weak_recall(
     # from those, so the fusion's own key cannot split what this dict
     # joined.
     by_id: dict[str, Any] = {}
-    ranked: list[list[tuple[Any, float]]] = [[(_canonical(by_id, r), r.score) for r in results]]
+    ranked: list[list[tuple[Any, float]]] = [_one_pass(by_id, results)]
     #: What the caller already had, counted the way the merge counts —
     #: `len(results)` would double-count a memory the original pass listed
     #: under two id types, and the recovery counter is supposed to report
@@ -175,7 +175,7 @@ def retry_weak_recall(
             continue
         if extra:
             retrieved = True
-        ranked.append([(_canonical(by_id, r), r.score) for r in extra])
+        ranked.append(_one_pass(by_id, extra))
         _absorb(caller_trace, variant_trace, variant)
     flow_kwargs.pop("trace", None)
     if caller_trace is not None:
@@ -265,6 +265,27 @@ def retry_weak_recall(
     counter("mnemostack.recall.weak_retry_recovered", gained)
     _retrace(caller_trace, merged)
     return merged, True
+
+
+def _one_pass(by_id: dict[str, Any], hits: list[Any]) -> list[tuple[Any, float]]:
+    """One pass's ranking, canonical objects, ONE entry per memory.
+
+    RRF adds `1/(k+rank)` once per list an item appears in, so a pass that
+    listed the same memory twice — `1` here and `"1"` there — would hand it
+    two contributions and let a single pass out-vote genuine corroboration
+    from two. Canonicalising the objects alone does not prevent that: the
+    fusion sees the SAME object twice and scores it twice. One pass, one
+    vote, so the duplicate is dropped here where the ranking is built.
+    """
+    ranking: list[tuple[Any, float]] = []
+    seen: set[str] = set()
+    for hit in hits:
+        key = str(hit.id)
+        if key in seen:
+            continue
+        seen.add(key)
+        ranking.append((_canonical(by_id, hit), hit.score))
+    return ranking
 
 
 def _canonical(by_id: dict[str, Any], result: Any) -> Any:
