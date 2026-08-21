@@ -150,7 +150,7 @@ def retry_weak_recall(
     # results with someone else's numbers and arms on them".
     original_state = [(r, r.score, list(r.sources), dict(r.payload or {})) for r in results]
     by_id: dict[str, Any] = {}
-    ranked: list[list[tuple[Any, float]]] = [_one_pass(by_id, results, limit)]
+    ranked: list[list[tuple[Any, float]]] = [_one_pass(by_id, results)]
     #: What the caller already had, counted the way the merge counts —
     #: `len(results)` would double-count a memory the original pass listed
     #: under two id types, and the recovery counter is supposed to report
@@ -197,7 +197,7 @@ def retry_weak_recall(
         if extra:
             retrieved = True
         floor_pool = _merged_candidates(floor_pool, _pass_pool(extra))
-        ranked.append(_one_pass(by_id, extra, limit))
+        ranked.append(_one_pass(by_id, extra))
         _absorb(caller_trace, variant_trace, variant)
     flow_kwargs.pop("trace", None)
     if caller_trace is not None:
@@ -291,7 +291,7 @@ def retry_weak_recall(
     return merged, True
 
 
-def _one_pass(by_id: dict[str, Any], hits: list[Any], limit: int) -> list[tuple[Any, float]]:
+def _one_pass(by_id: dict[str, Any], hits: list[Any]) -> list[tuple[Any, float]]:
     """One pass's RANKING: canonical objects, one entry per memory.
 
     RRF adds `1/(k+rank)` once per list an item appears in, so a pass that
@@ -301,16 +301,23 @@ def _one_pass(by_id: dict[str, Any], hits: list[Any], limit: int) -> list[tuple[
     fusion sees the SAME object twice and scores it twice. One pass, one
     vote, so the duplicate is dropped here where the ranking is built.
 
-    Only the first `limit` are a ranking at all. `recall_flow` returns the
-    ranked page AND, past it, the vector floor's guaranteed candidates —
-    items placed there precisely BECAUSE the ranking did not choose them.
-    Voting them would invert the floor: a candidate appended to two passes
-    collects two contributions, out-votes each pass's actual rank-one
-    winner, and at `limit=1` becomes the sole survivor, after which the
-    final floor step has nothing left to add. Every hit is still
-    canonicalised, so the caller's metadata, the "found something new"
-    test and the recovery count all see the full pass — it is only the
-    VOTE that is limited to what the pass actually ranked.
+    Not every hit is a ranking. `recall_flow` returns the ranked page AND
+    the vector floor's guaranteed candidates, items placed there precisely
+    BECAUSE the ranking did not choose them. Voting them inverts the
+    floor: a candidate appended to two passes collects two contributions,
+    out-votes each pass's actual rank-one winner, and can take the page
+    outright — after which the final floor step has nothing left to add
+    and the real winners are simply gone.
+
+    They are identified by the marker the floor sets when it appends one,
+    NOT by position. Position was the first answer here and it was wrong:
+    it only holds while the ranked page is full, and a weak recall — the
+    only kind this module ever sees — is exactly when it is not, so the
+    extras sit at ordinary indices and vote anyway.
+
+    Every hit is still canonicalised, so the caller's metadata, the "found
+    something new" test and the recovery count all see the full pass. It
+    is only the VOTE that is limited to what the pass actually ranked.
 
     Identity is `str(id)` throughout, and a collision needs two distinct
     memories whose ids are `1` and `"1"`. Qdrant does not permit it: a
@@ -321,13 +328,13 @@ def _one_pass(by_id: dict[str, Any], hits: list[Any], limit: int) -> list[tuple[
     """
     ranking: list[tuple[Any, float]] = []
     seen: set[str] = set()
-    for position, hit in enumerate(hits):
+    for hit in hits:
         key = _memory_key(hit.id)
         if key in seen:
             continue
         seen.add(key)
         item = _canonical(by_id, hit)
-        if position < limit:
+        if not getattr(hit, "from_vector_floor", False):
             ranking.append((item, hit.score))
     return ranking
 

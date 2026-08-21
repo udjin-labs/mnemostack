@@ -1028,8 +1028,11 @@ def test_a_floor_extra_does_not_vote_in_the_fusion(monkeypatch):
     floored = _floor_recaller()
 
     def _pass(winner):
-        # what recall_flow returns: the ranked page, then the floor's extra
-        return [_with_candidates(_Hit(winner), "F"), _Hit("F", text="floored F")]
+        # what recall_flow returns: the ranked page, then the floor's
+        # extra — marked, as the floor marks what it appends
+        extra = _Hit("F", text="floored F")
+        extra.from_vector_floor = True
+        return [_with_candidates(_Hit(winner), "F"), extra]
 
     _flow(
         monkeypatch,
@@ -1217,3 +1220,40 @@ def test_the_pool_itself_holds_one_entry_per_memory():
     merged = _merged_candidates([weak], [strong])
     assert len(merged) == 1 and merged[0]["text"] == "strong"
     assert _merged_candidates([strong], [weak])[0]["text"] == "strong"  # order-free
+
+
+def test_a_floor_extra_does_not_vote_on_a_short_page_either(monkeypatch):
+    """PR #167 (bot P2): position was the wrong way to spot an appended
+    floor hit. `recall_flow` appends them right after the ranked page, so
+    when that page is SHORT — and a weak recall, the only kind this module
+    sees, is exactly when it is — the extras sit at ordinary indices and
+    vote anyway. At `limit=2` an `F` appended to both passes outranked both
+    genuine rank-one hits and evicted one of them entirely."""
+
+    def _pass(winner):
+        extra = _Hit("F", text="floored F")
+        extra.from_vector_floor = True
+        return [_with_candidates(_Hit(winner), "F"), extra]  # one ranked hit, one extra
+
+    _flow(
+        monkeypatch,
+        {"how did we decide auth": _pass("A"), "what was chosen for login": _pass("B")},
+    )
+    out, retried = retry_weak_recall(_floor_recaller(), "q", 2, llm=_LLM(), results=[])
+    assert retried is True
+    assert [r.id for r in out] == ["A", "B", "F"]  # not ["F", "A"] — B survives
+
+
+def test_the_floor_marks_what_it_appended():
+    """The producer side of that rule. Anything downstream that treats a
+    result list as a ranking depends on this marker to tell the ranked
+    page from the guaranteed extras, and position cannot tell them apart
+    once the page is short."""
+    ranked = _Hit("A")
+    ranked.payload["_vector_floor_candidates"] = [
+        {"id": "F", "text": "floored", "score": 0.99, "payload": {}, "sources": ["vector"]}
+    ]
+    out = _floor_recaller().apply_vector_floor_after_rerank([ranked], [ranked])
+    assert [r.id for r in out] == ["A", "F"]
+    assert not getattr(out[0], "from_vector_floor", False)  # the ranking chose A
+    assert out[1].from_vector_floor is True  # the floor appended F
