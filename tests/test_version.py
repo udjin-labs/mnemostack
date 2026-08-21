@@ -25,16 +25,25 @@ def test_current_version_has_dated_changelog_entry():
     assert version_heading is not None
 
 
-def test_release_notes_state_openbao_revocation_latency():
-    """Do not advertise file-keystore revocation semantics for every backend."""
-    changelog = Path("CHANGELOG.md").read_text()
-    release_match = re.search(
-        rf"^## \[{re.escape(mnemostack.__version__)}\].*?(?=^## \[)",
-        changelog,
-        re.MULTILINE | re.DOTALL,
-    )
+def test_docs_do_not_advertise_file_keystore_revocation_for_every_backend():
+    """The claim this guards is an operational one — how fast a revoked key
+    stops working — and it belongs where an operator reads it.
 
-    assert release_match is not None
-    current_release = release_match.group(0)
-    assert "file-keystore revocation takes effect on the caller's next call" in current_release
-    assert "MNEMOSTACK_OPENBAO_CACHE_TTL" in current_release
+    It was pinned to the CURRENT release's notes when the correction
+    shipped in 2.2.0, which made every later release repeat a 2.2.0
+    correction verbatim or fail. Release notes are a historical record:
+    2.3.0 restating a fix it did not make would be false. So the guard now
+    holds the two places the claim actually lives — the deployment guide an
+    operator reads, and the changelog entry that recorded the correction —
+    neither of which a future release can quietly drop.
+    """
+    deployment = Path("docs/deployment.md").read_text()
+    assert "takes effect on the caller's next call" in deployment
+    assert "MNEMOSTACK_OPENBAO_CACHE_TTL" in deployment
+    # ...and specifically that the two backends are distinguished, rather
+    # than the file keystore's semantics being claimed for both.
+    assert "the OpenBao adapter's positive cache instead bounds" in deployment
+
+    changelog = Path("CHANGELOG.md").read_text()
+    assert "file-keystore revocation takes effect on the caller's next call" in changelog
+    assert "MNEMOSTACK_OPENBAO_CACHE_TTL" in changelog
