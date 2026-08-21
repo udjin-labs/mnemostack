@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ..llm.base import LLMProvider
 from ..reranker_cache import RerankerCache
@@ -115,7 +115,18 @@ class Reranker:
                 self.cache.stats.hit_rate,
                 self.cache.stats.hits,
             )
-            return cached
+            # Copies, not the cached objects themselves. The entry lives
+            # for `cache_ttl` and is handed to every request that repeats
+            # this (query, id-set), so returning it by reference makes one
+            # request's results another's: anything downstream that writes
+            # to a result — the vector floor stamping an appended
+            # candidate's score, a weak-recall retry writing fused scores —
+            # would edit what a later request receives, and two concurrent
+            # requests would edit it at once. `payload` and `sources` are
+            # rebuilt too, since those are mutated in place as well.
+            return [
+                replace(r, payload=dict(r.payload or {}), sources=list(r.sources)) for r in cached
+            ]
 
         prompt_ids = self._ordinal_ids(head)
         prompt = self._build_prompt(query, head, prompt_ids)
