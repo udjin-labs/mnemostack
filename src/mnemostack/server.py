@@ -1401,6 +1401,11 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         # and the second retrieval round — so switching it on is the
         # operator's decision, exactly like the other spend knobs, and a
         # caller who does not want it can still decline.
+        #
+        # /answer passes False: its generator already runs inference and
+        # expansion retries of its own over a fresh sub-recall, so a
+        # paraphrase round in front of that is a second bill for the same
+        # idea — and AnswerRequest has no field with which to decline it.
         if cfg.retry_on_weak and retry_on_weak is not False:
             # Ask the same question in other words. Every scoping keyword
             # goes through unchanged — a retry that widened the scope
@@ -1649,6 +1654,8 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 req.as_of,
                 tenant,
                 # Recorded after generation succeeds, not here — see below.
+                False,
+                # And no weak-recall retry: the generator has its own.
                 False,
             )
             # recall_filters keeps the answer generator's retry sub-recalls

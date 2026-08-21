@@ -45,8 +45,17 @@ MAX_VARIANTS = 2
 DEFAULT_WEAK_BELOW = 1
 
 
-def is_weak(results: list[Any], below: int = DEFAULT_WEAK_BELOW) -> bool:
-    """Whether this recall is weak enough to be worth asking again."""
+def is_weak(results: list[Any], below: int = DEFAULT_WEAK_BELOW, limit: int | None = None) -> bool:
+    """Whether this recall is weak enough to be worth asking again.
+
+    Weak means BOTH too few results and room to add some: with a
+    threshold above the caller's limit, a full page still counts as
+    "below the threshold", and every hit the retry found would then be
+    appended past the limit and cut away again — real spend, no change to
+    the answer, and a recovery counter that lied about it.
+    """
+    if limit is not None and len(results) >= limit:
+        return False
     return len(results) < max(1, below)
 
 
@@ -67,7 +76,7 @@ def retry_weak_recall(
     Never raises: a failed retry is a recall that did not improve, not a
     failed request.
     """
-    if not is_weak(results, below):
+    if not is_weak(results, below, limit):
         return results, False
     if llm is None:
         counter("mnemostack.recall.weak_retry_unavailable", 1)
@@ -105,5 +114,22 @@ def retry_weak_recall(
 
     if len(merged) == len(results):
         return results, True  # asked again, still nothing: an answer too
-    counter("mnemostack.recall.weak_retry_recovered", len(merged) - len(results))
-    return merged[:limit], True
+
+    merged = merged[:limit]
+    budget = flow_kwargs.get("token_budget")
+    if budget:
+        # Re-applied to the MERGED list: each variant's own flow capped
+        # its own results, and concatenating two lists that each fit the
+        # budget produces one that does not. The budget is documented as a
+        # hard cap on the response, so it has to hold after the merge, not
+        # before it.
+        from .tokens import apply_token_budget
+
+        merged, _tokens = apply_token_budget(
+            merged, budget, flow_kwargs.get("token_counter")
+        )
+    gained = len(merged) - len(results)
+    if gained <= 0:
+        return results if not merged else merged, True
+    counter("mnemostack.recall.weak_retry_recovered", gained)
+    return merged, True

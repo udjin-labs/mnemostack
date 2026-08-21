@@ -241,3 +241,70 @@ def test_a_request_cannot_turn_it_on_where_the_operator_did_not(monkeypatch, tmp
     monkeypatch.setattr(srv, "recall_flow", lambda *_a, **_k: [])
     assert _recall(TestClient(app), keys, retry_on_weak=True).status_code == 200
     assert calls == []
+
+
+def test_no_room_means_no_retry(monkeypatch):
+    """R1 (codex P2): with a threshold above the caller's limit, a FULL
+    page still counts as "below the threshold" — and every hit the retry
+    found would be appended past the limit and cut away again. Real spend,
+    identical answer, and a recovery counter that lied about it."""
+    llm = _LLM()
+    seen = _flow(monkeypatch, {"how did we decide auth": [_Hit(9)]})
+    full_page = [_Hit(1), _Hit(2)]
+    out, retried = retry_weak_recall(None, "q", 2, llm=llm, results=full_page, below=5)
+    assert out == full_page and retried is False
+    assert llm.calls == 0 and seen == []
+    # ...but a page that is short DOES get asked again.
+    out, retried = retry_weak_recall(None, "q", 5, llm=llm, results=full_page, below=5)
+    assert retried is True and [r.id for r in out] == [1, 2, 9]
+
+
+def test_the_token_budget_holds_after_the_merge(monkeypatch):
+    """R1 (codex P2): each variant's flow capped its OWN results, and two
+    lists that each fit the budget concatenate into one that does not. The
+    budget is documented as a hard cap on the response."""
+    long_hit = lambda pid: _Hit(pid, text="word " * 200)  # noqa: E731
+    _flow(
+        monkeypatch,
+        {
+            "how did we decide auth": [long_hit(1)],
+            "what was chosen for login": [long_hit(2)],
+        },
+    )
+    from mnemostack.recall.tokens import sum_tokens
+
+    out, retried = retry_weak_recall(
+        None, "q", 10, llm=_LLM(), results=[], token_budget=120
+    )
+    assert retried is True
+    assert sum_tokens(out, None) <= 120, [r.id for r in out]
+
+
+def test_answer_does_not_pay_for_a_paraphrase_round(monkeypatch, tmp_path):
+    """R1 (codex P2): the generator already runs inference and expansion
+    retries over a fresh sub-recall, and AnswerRequest has no field to
+    decline this one — so /answer must not add a paraphrase round in
+    front of its own."""
+    import mnemostack.server as srv
+
+    calls: list = []
+    monkeypatch.setattr(
+        srv, "retry_weak_recall", lambda *a, **k: calls.append(k) or ([], False)
+    )
+
+    class _Gen:
+        def generate(self, *_a, **_k):
+            from mnemostack.recall.answer import Answer
+
+            return Answer(text="an answer", confidence=0.9)
+
+    monkeypatch.setattr(srv, "AnswerGenerator", lambda *_a, **_k: _Gen())
+    app, _store, _emb, keys = _ingest_app(
+        monkeypatch, tmp_path, cfg_extra={"retry_on_weak": True}, llm=object()
+    )
+    monkeypatch.setattr(srv, "recall_flow", lambda *_a, **_k: [])
+    r = TestClient(app).post(
+        "/answer", json={"query": "anything"}, headers={"X-API-Key": keys["read"]}
+    )
+    assert r.status_code == 200, r.text
+    assert calls == []
