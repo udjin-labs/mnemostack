@@ -1153,3 +1153,67 @@ def test_the_floor_weighs_every_pass_that_ran_not_only_the_winners(monkeypatch):
     # A wins the single slot on the RRF tie; the floor still owes the
     # caller the strongest candidate the retry saw, which B's pass found.
     assert [r.id for r in out] == ["A", "F2"]
+
+
+def test_the_floor_pool_speaks_the_survivors_id_language(monkeypatch):
+    """PR #167 (bot P2): the floor's candidate pool was the one place in
+    this module still keyed on the RAW id. A memory offered as `"1"` by one
+    pass and `1` by another therefore kept BOTH entries, and since
+    `Recaller._apply_vector_floor` dedupes against the results natively, it
+    could not recognise the string candidate as the integer survivor
+    already on the page — appending it, and showing one memory twice."""
+    int_hit = _Hit(1)
+    int_hit.payload["_vector_floor_candidates"] = [
+        {"id": 1, "text": "weak", "score": 0.5, "payload": {}, "sources": ["vector"]}
+    ]
+    other = _Hit("X")
+    other.payload["_vector_floor_candidates"] = [
+        {"id": "1", "text": "strong", "score": 0.99, "payload": {}, "sources": ["vector"]}
+    ]
+    _flow(
+        monkeypatch,
+        {"how did we decide auth": [int_hit], "what was chosen for login": [other]},
+    )
+    out, retried = retry_weak_recall(_floor_recaller(), "q", 1, llm=_LLM(), results=[])
+    assert retried is True
+    assert [str(r.id) for r in out] == ["1"]  # one memory, one row — not ["1", "1"]
+
+
+def test_every_id_this_module_keys_on_goes_through_one_rule(monkeypatch):
+    """The class, not the position. Three separate places each shipped a
+    bug by answering "same memory?" their own way, so the rule now has one
+    name — and this asserts nothing bypasses it, since a fourth place with
+    a fresh answer is the shape every one of those bugs had."""
+    import ast
+    import inspect
+
+    import mnemostack.recall.retry as retry_mod
+
+    tree = ast.parse(inspect.getsource(retry_mod))
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef) or node.name == "_memory_key":
+            continue
+        for inner in ast.walk(node):
+            if (
+                isinstance(inner, ast.Call)
+                and isinstance(inner.func, ast.Name)
+                and inner.func.id == "str"
+            ):
+                offenders.append(f"{node.name}:{inner.lineno}")
+    assert not offenders, (
+        f"an id is stringified outside `_memory_key`: {offenders} — key through it instead"
+    )
+
+
+def test_the_pool_itself_holds_one_entry_per_memory():
+    """The rule at the level it is stated, not only through the floor: a
+    pool that keeps `1` and `"1"` as two candidates is a second notion of
+    identity, whatever a later stage happens to do about it."""
+    from mnemostack.recall.retry import _merged_candidates
+
+    weak = {"id": 1, "text": "weak", "score": 0.5, "payload": {}, "sources": ["vector"]}
+    strong = {"id": "1", "text": "strong", "score": 0.99, "payload": {}, "sources": ["vector"]}
+    merged = _merged_candidates([weak], [strong])
+    assert len(merged) == 1 and merged[0]["text"] == "strong"
+    assert _merged_candidates([strong], [weak])[0]["text"] == "strong"  # order-free

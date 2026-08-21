@@ -239,7 +239,7 @@ def retry_weak_recall(
         # union is what makes it the pool the floor actually weighs. When
         # no pass carried one, nothing is prepended and the helper keeps
         # its own fallback (derive candidates from the results themselves).
-        pool: list[Any] = [_FloorPool(floor_pool)] if floor_pool else []
+        pool: list[Any] = [_FloorPool(_as_canonical_ids(by_id, floor_pool))] if floor_pool else []
         merged = apply_floor(merged, pool + results + merged)
 
     if budget:
@@ -322,7 +322,7 @@ def _one_pass(by_id: dict[str, Any], hits: list[Any], limit: int) -> list[tuple[
     ranking: list[tuple[Any, float]] = []
     seen: set[str] = set()
     for position, hit in enumerate(hits):
-        key = str(hit.id)
+        key = _memory_key(hit.id)
         if key in seen:
             continue
         seen.add(key)
@@ -334,6 +334,51 @@ def _one_pass(by_id: dict[str, Any], hits: list[Any], limit: int) -> list[tuple[
 
 #: Payload key under which a pass carries its vector-floor candidate pool.
 _FLOOR_CANDIDATES = "_vector_floor_candidates"
+
+
+def _memory_key(value: Any) -> str:
+    """THE identity rule of this module. Every id it keys on comes here.
+
+    A memory can come back as `1` from one pass and `"1"` from another, so
+    anything that asks "are these the same memory" has to ask it the same
+    way. Three separate places learned that lesson separately — the
+    "found something new" dict, a pass's own ranking, and the floor's
+    candidate pool — each after shipping a bug where one memory occupied
+    two slots of the caller's page. This function exists so a fourth place
+    cannot be added with a fresh answer: key through here, or you are
+    inventing a second notion of identity.
+
+    Two DISTINCT memories cannot collide under it. A string point id must
+    be a UUID in Qdrant (`Point id 1 is not a valid UUID`), ingest mints
+    ids as `str(uuid.UUID(...))`, and graph hits are namespaced by
+    `graph_result_id()`.
+    """
+    return str(value)
+
+
+def _as_canonical_ids(by_id: dict[str, Any], candidates: Any) -> Any:
+    """The pool, speaking the survivors' id representation.
+
+    `Recaller._apply_vector_floor` dedupes against the results by NATIVE
+    id, so a candidate carrying `"1"` for a survivor carrying `1` is a
+    memory the floor cannot recognise as already present — it appends it,
+    and the caller's page shows one memory twice. Agreement cannot be
+    asked of the floor here (that blind spot is its own, tracked as
+    udjin-labs/mnemostack#168); it can be established BEFORE it runs, by
+    handing it the representation this retry settled on. Copied, not
+    mutated: these dicts live in the callers' payloads.
+    """
+    if not isinstance(candidates, list):
+        return candidates
+    spoken = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict) or "id" not in candidate:
+            continue
+        canonical = by_id.get(_memory_key(candidate["id"]))
+        if canonical is not None and canonical.id != candidate["id"]:
+            candidate = {**candidate, "id": canonical.id}
+        spoken.append(candidate)
+    return spoken
 
 
 class _FloorPool:
@@ -382,9 +427,10 @@ def _merged_candidates(first: Any, later: Any) -> Any:
     for candidate in [*first, *later]:
         if not isinstance(candidate, dict) or "id" not in candidate:
             continue
-        seated = merged.get(candidate["id"])
+        key = _memory_key(candidate["id"])
+        seated = merged.get(key)
         if seated is None or _candidate_score(candidate) > _candidate_score(seated):
-            merged[candidate["id"]] = candidate
+            merged[key] = candidate
     return list(merged.values())
 
 
@@ -418,7 +464,7 @@ def _canonical(by_id: dict[str, Any], result: Any) -> Any:
     filters anyway, because the retry forwards the caller's scope
     unchanged.
     """
-    key = str(result.id)
+    key = _memory_key(result.id)
     incumbent = by_id.get(key)
     if incumbent is None:
         by_id[key] = result
@@ -514,4 +560,4 @@ def _retrace(caller_trace: Any, final: list[Any]) -> None:
     """
     if caller_trace is None:
         return
-    caller_trace.fused = [(str(r.id), float(getattr(r, "score", 0.0))) for r in final]
+    caller_trace.fused = [(_memory_key(r.id), float(getattr(r, "score", 0.0))) for r in final]
