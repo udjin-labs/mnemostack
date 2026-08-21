@@ -4402,9 +4402,10 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     p_serve.add_argument(
         "--retry-weak-below",
         type=int,
-        default=1,
+        default=None,
         help=(
-            "How few results count as weak (default 1: only a recall that returned nothing at all)"
+            "How few results count as weak (default 1: only a recall that returned "
+            "nothing at all). Also settable as MNEMOSTACK_RETRY_WEAK_BELOW."
         ),
     )
     p_serve.add_argument(
@@ -4533,7 +4534,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     try:
         import uvicorn
 
-        from mnemostack.server import ServerConfig, _env_bool, build_app
+        from mnemostack.server import ServerConfig, _env_bool, _env_int, build_app
     except ImportError as exc:
         print(
             f"error: server extra not installed ({exc}). Install with: "
@@ -4543,6 +4544,17 @@ def cmd_serve(args: argparse.Namespace) -> int:
         return 2
 
     _schema_text, _schema_ts, _schema_fmt = _payload_schema()
+    # CLI wins, env fills in, the default is last — the flag defaults to
+    # None precisely so "not passed" is distinguishable from "passed 1".
+    # Without this, `MNEMOSTACK_RETRY_WEAK_BELOW` worked only for the
+    # programmatic-ASGI deployment and was silently ignored by `serve`,
+    # which is the entry point the documentation points at first.
+    _weak_below = getattr(args, "retry_weak_below", None)
+    _weak_below = (
+        max(1, int(_weak_below))
+        if _weak_below is not None
+        else _env_int("MNEMOSTACK_RETRY_WEAK_BELOW", 1)
+    )
     cfg = ServerConfig(
         provider_name=args.provider,
         embedding_model=_embedding_model(args),
@@ -4572,7 +4584,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         retry_on_weak=(
             getattr(args, "retry_on_weak", False) or _env_bool("MNEMOSTACK_RETRY_ON_WEAK")
         ),
-        retry_weak_below=max(1, int(getattr(args, "retry_weak_below", 1) or 1)),
+        retry_weak_below=_weak_below,
         # Honor MNEMOSTACK_AUTH_ENABLED too: cmd_serve builds ServerConfig
         # explicitly (never from_env), so without this the documented env toggle
         # would silently leave the endpoints unauthenticated.

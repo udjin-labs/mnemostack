@@ -812,3 +812,72 @@ def test_the_env_deployment_can_set_the_threshold_too(monkeypatch):
     for bad in ("nonsense", "0", "-2", ""):
         monkeypatch.setenv("MNEMOSTACK_RETRY_WEAK_BELOW", bad)
         assert ServerConfig.from_env().retry_weak_below == 1
+
+
+def _serve_args(**overrides):
+    """A `serve` namespace like the CLI builds, minus what a test varies."""
+    import argparse
+
+    base = dict(
+        provider="fake",
+        embedding_model=None,
+        llm="fake-llm",
+        llm_model=None,
+        collection="test",
+        qdrant="http://localhost:6333",
+        memgraph_uri=None,
+        graph_timeout=5.0,
+        qdrant_health_timeout=2,
+        bm25_path=[],
+        state_path="/tmp/state.json",
+        vector_floor=0,
+        rerank_mode="relevant_only",
+        token_budget=None,
+        auto_record_ior=False,
+        auth=False,
+        keys_file=None,
+        host="127.0.0.1",
+        port=8000,
+        reload=False,
+    )
+    base.update(overrides)
+    return argparse.Namespace(**base)
+
+
+def _serve_cfg(monkeypatch, **overrides):
+    import sys
+    from unittest.mock import MagicMock, patch
+
+    import mnemostack.server as srv
+    from mnemostack.cli import cmd_serve
+
+    monkeypatch.setitem(sys.modules, "uvicorn", MagicMock())
+    captured = {}
+
+    def _fake_build_app(cfg):
+        captured["cfg"] = cfg
+        return MagicMock()
+
+    with patch.object(srv, "build_app", _fake_build_app):
+        cmd_serve(_serve_args(**overrides))
+    return captured["cfg"]
+
+
+def test_serve_honors_the_weak_threshold_env(monkeypatch):
+    """R12 (codex P2): round 11 gave the threshold an env var and wired it
+    into `ServerConfig.from_env()` — the programmatic-ASGI path. `serve`
+    builds its config explicitly and never calls `from_env`, so the knob
+    the README had just documented did nothing on the entry point the
+    README points at first. CLI wins, env fills in, default is last."""
+    monkeypatch.setenv("MNEMOSTACK_RETRY_ON_WEAK", "1")
+    monkeypatch.setenv("MNEMOSTACK_RETRY_WEAK_BELOW", "4")
+
+    cfg = _serve_cfg(monkeypatch, retry_on_weak=False, retry_weak_below=None)
+    assert cfg.retry_on_weak is True and cfg.retry_weak_below == 4  # env fills in
+
+    cfg = _serve_cfg(monkeypatch, retry_on_weak=True, retry_weak_below=2)
+    assert cfg.retry_weak_below == 2  # ...but an explicit flag wins over it
+
+    monkeypatch.delenv("MNEMOSTACK_RETRY_WEAK_BELOW")
+    cfg = _serve_cfg(monkeypatch, retry_on_weak=True, retry_weak_below=None)
+    assert cfg.retry_weak_below == 1  # neither: the conservative default
