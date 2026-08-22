@@ -25,6 +25,14 @@ def test_current_version_has_dated_changelog_entry():
     assert version_heading is not None
 
 
+def test_current_version_is_latest_changelog_release():
+    """A dated heading elsewhere must not leave new notes under an older release."""
+    changelog = Path("CHANGELOG.md").read_text()
+    release_headings = re.findall(r"^## \[([^]]+)](?: - .+)?$", changelog, re.MULTILINE)
+
+    assert release_headings[:2] == ["Unreleased", mnemostack.__version__]
+
+
 def test_docs_do_not_advertise_file_keystore_revocation_for_every_backend():
     """The claim this guards is an operational one — how fast a revoked key
     stops working — and it belongs where an operator reads it.
