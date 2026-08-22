@@ -2493,7 +2493,24 @@ def _build_recaller(
     )
 
 
+def _utcnow_iso() -> str:
+    """Now, as the ISO-8601 UTC string this stack writes into `indexed_at`.
+
+    Timezone-aware on purpose: the freshness stage reads this field as
+    strict ISO, and a naive stamp would be read as UTC anyway — so a naive
+    local clock would shift every indexed point by the operator's offset.
+    """
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
+
+
 def cmd_index(args: argparse.Namespace) -> int:
+    # One instant for the whole run: chunks written together get the same
+    # write time, rather than times that differ by the wall-clock cost of
+    # embedding — precision this field does not have and does not need.
+    _run_indexed_at = _utcnow_iso()
+
     tenant = getattr(args, "tenant", None)
     if tenant is not None and not str(tenant).strip():
         # An explicitly empty --tenant (e.g. `--tenant "$UNSET_VAR"`) fails
@@ -2699,6 +2716,14 @@ def cmd_index(args: argparse.Namespace) -> int:
             # id commitment.
             payload.update(snapshot)
             payload["_id_scheme"] = "stable_chunk_id"
+            # Write time, stamped here for the same reason and in the same
+            # place as the markers above: after enrichment, so an enricher
+            # key collision cannot fabricate one. The freshness stage falls
+            # back to this when a document carries no event time of its own,
+            # and every OTHER write path already sets it — a point written
+            # by this command would have been the one kind that still could
+            # not age.
+            payload["indexed_at"] = _run_indexed_at
             chunks.append((cid, chunk, payload))
         if args.window_size > 1:
             for start in range(0, len(file_chunks) - args.window_size + 1):
@@ -2925,6 +2950,15 @@ def cmd_index(args: argparse.Namespace) -> int:
             # snapshot keeps its stored capture time, or every warm refresh
             # would rewrite every point for the timestamp alone.
             payload = carry_snapshot_capture_time(old_payload, payload)
+            # Same rule, same reason, for the write stamp: a payload refresh
+            # is not a rewrite of WHEN THE POINT WAS WRITTEN. Restamping it
+            # would make every warm refresh a full payload write (which the
+            # zero-write test pins), and — worse — reset the age of the
+            # entire corpus to today, undoing the very ageing this field
+            # was added to provide.
+            carried_write_time = old_payload.get("indexed_at")
+            if isinstance(carried_write_time, str) and carried_write_time:
+                payload["indexed_at"] = carried_write_time
             old_enrich = old_payload.get("_enrich_keys") or []
             stale_keys = [k for k in old_enrich if k not in payload]
             if old_enrich and "_enrich_keys" not in payload:

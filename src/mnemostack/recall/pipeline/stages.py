@@ -589,11 +589,19 @@ class FreshnessBlend(Stage):
     def _parse_instant(value: Any) -> datetime | None:
         """An instant from a server-stamped ISO field, or None.
 
-        Separate from `_parse_timestamp`: that one reads the CONFIGURED
-        payload key in the deployment's own format (a foreign collection may
-        store epoch numbers), while `indexed_at` is written by this stack
-        and is always ISO-8601.
+        Separate from `_parse_timestamp`, and deliberately STRICTER. That
+        one reads the CONFIGURED payload key in whatever format the
+        deployment declared, epoch numbers included, because a foreign
+        collection brings its own schema. `indexed_at` has no such freedom:
+        it is written by this stack alone and is always ISO-8601, so a
+        number in it is corruption rather than a Unix time.
+
+        Reading it as one would be worse than ignoring it — `12345` becomes
+        1970 and buries the memory at the bottom of every recall, which is
+        an active harm where returning None merely declines to age it.
         """
+        if not isinstance(value, str):
+            return None
         from ..validity import parse_payload_instant
 
         return parse_payload_instant(value)

@@ -80,11 +80,152 @@ def test_a_memory_with_no_time_information_at_all_is_unchanged():
     assert _fresh({"indexed_at": None}) == 0.5
 
 
-def test_a_write_stamp_in_a_foreign_numeric_format_does_not_crash():
-    """`indexed_at` is written by this stack and is always ISO, but a
-    payload is a payload: a hand-edited or migrated point can hold
-    anything, and a recall must not 500 over it."""
-    for bad in (12345, [1], {"a": 1}, "", "   "):
-        assert (
-            _fresh({"indexed_at": bad}) in (0.5, 1.0) or 0.0 <= _fresh({"indexed_at": bad}) <= 1.0
-        )
+def test_a_non_string_write_stamp_is_ignored_rather_than_read_as_an_epoch():
+    """The contract is STRICT ISO, and the strictness is the point.
+
+    The shared instant parser also accepts Unix epochs, because the
+    configured `timestamp` key may legitimately be numeric in a foreign
+    collection. `indexed_at` has no such freedom — this stack writes it and
+    always writes ISO — so a number in it is corruption. Reading it as an
+    epoch is worse than ignoring it: `12345` becomes 1970 and buries the
+    memory at the bottom of every recall, where declining to age it merely
+    leaves it where it was.
+
+    (The assertion this replaced allowed any value in [0, 1] — which is
+    every value freshness can take, so it pinned nothing.)
+    """
+    for corrupt in (12345, 12345.0, [1], {"a": 1}, True, object()):
+        assert _fresh({"indexed_at": corrupt}) == 0.5, corrupt
+
+    # An unparseable STRING is likewise neutral — not an error, not 1970.
+    for text in ("", "   ", "not-a-date", "2026-13-45T99:99:99"):
+        assert _fresh({"indexed_at": text}) == 0.5, text
+
+    # ...and a real ISO stamp still ages, so strictness has not quietly
+    # disabled the fallback this file exists to add.
+    assert _fresh({"indexed_at": _ago(365)}) < 0.05
+
+
+class _ConstantProvider:
+    dimension = 3
+
+    def embed(self, text):
+        return [0.1, 0.2, 0.3]
+
+    def embed_batch(self, texts):
+        return [self.embed(t) for t in texts]
+
+    def health_check(self):
+        return True, "ok"
+
+
+class _RecordingStore:
+    """Just enough VectorStore for `cmd_index` to run against."""
+
+    def __init__(self):
+        self.points: dict[str, dict] = {}
+        self.set_payloads: list = []
+        self.deletes: list = []
+
+    def collection_exists(self):
+        return True
+
+    def ensure_collection(self, recreate=False):
+        pass
+
+    def count(self):
+        return len(self.points)
+
+    def iter_ids(self):
+        return iter(self.points)
+
+    def scroll(self, *a, **kw):
+        from types import SimpleNamespace
+
+        return iter(SimpleNamespace(id=cid, payload=dict(p)) for cid, p in self.points.items())
+
+    def upsert(self, cid, vec, payload, **kw):
+        self.points[cid] = dict(payload)
+
+    def upsert_batch(self, points, **kw):
+        for cid, vec, payload in points:
+            self.upsert(cid, vec, payload)
+
+    def set_payload(self, cid, payload, **kw):
+        self.set_payloads.append((cid, payload))
+        self.points[cid].update(payload)
+
+    def delete_payload_keys(self, cid, keys, **kw):
+        self.deletes.append((cid, keys))
+
+
+# ------------------------------------------- the write path that feeds it
+
+
+def test_the_cli_indexer_writes_the_stamp_the_fallback_reads(tmp_path, monkeypatch):
+    """The fallback is only worth having if the core write path fills the
+    field. `mnemostack index` built its payloads without `indexed_at` while
+    every other write path set it — so documents indexed through the
+    command most people use were exactly the ones that still could not age.
+
+    Asserted on what lands in the STORE, and then on what the stage makes
+    of it, rather than on the shape of the source: a stamp that is written
+    but unreadable by the reader is the same outage as no stamp.
+    """
+    import mnemostack.cli as cli
+
+    # Long enough to chunk SEVERAL times: with one chunk, "one stamp per
+    # run" and "one stamp per chunk" are the same assertion and neither is
+    # tested — a mutation moving the clock into the loop survived exactly
+    # that way.
+    (tmp_path / "doc.md").write_text(
+        "\n\n".join(f"paragraph {i} " + "filler words " * 40 for i in range(12)),
+        encoding="utf-8",
+    )
+    store = _RecordingStore()
+    monkeypatch.setattr(cli, "get_provider", lambda *a, **kw: _ConstantProvider())
+    monkeypatch.setattr(cli, "VectorStore", lambda **kw: store)
+    assert cli.main(["index", str(tmp_path), "--chunk-size", "200"]) == 0
+
+    payloads = list(store.points.values())
+    assert len(payloads) > 3, f"expected several chunks, got {len(payloads)}"
+    stamps = [p.get("indexed_at") for p in payloads]
+    assert all(isinstance(v, str) and v for v in stamps), stamps
+    # One instant for the whole run, not one per chunk: chunks written
+    # together share a write time rather than differing by the wall-clock
+    # cost of embedding.
+    assert len(set(stamps)) == 1, sorted(set(stamps))
+
+    parsed = datetime.fromisoformat(stamps[0])
+    assert parsed.tzinfo is not None and parsed.utcoffset() == timedelta(0), stamps[0]
+    # ...and the stage actually ages by it: a just-written point is fresh,
+    # which the flat 0.5 could never express.
+    assert _fresh({"indexed_at": stamps[0]}) > 0.99
+
+
+def test_a_payload_refresh_does_not_reset_the_write_time(tmp_path, monkeypatch):
+    """A refresh rewrites payload FIELDS; it does not re-write the point.
+    Restamping would reset the age of the whole corpus to today — undoing
+    the ageing this field exists to provide — and would turn every warm
+    refresh into a full payload write."""
+    import mnemostack.cli as cli
+
+    (tmp_path / "doc.md").write_text("stable content", encoding="utf-8")
+    store = _RecordingStore()
+    monkeypatch.setattr(cli, "get_provider", lambda *a, **kw: _ConstantProvider())
+    monkeypatch.setattr(cli, "VectorStore", lambda **kw: store)
+    argv = ["index", str(tmp_path), "--chunk-size", "2000", "--refresh-payloads"]
+
+    assert cli.main(argv) == 0
+    first = {cid: p["indexed_at"] for cid, p in store.points.items()}
+    assert first
+
+    # Age the stored stamp, then refresh: the old value must survive.
+    aged = _ago(200)
+    for payload in store.points.values():
+        payload["indexed_at"] = aged
+    assert cli.main(argv) == 0
+
+    after = {cid: p["indexed_at"] for cid, p in store.points.items()}
+    assert set(after.values()) == {aged}, (first, after)
+    assert _fresh({"indexed_at": after[next(iter(after))]}) < 0.05
