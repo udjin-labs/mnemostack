@@ -24,6 +24,8 @@ from .followup import rewrite_followup
 from .fusion import reciprocal_rank_fusion
 from .mca_prefilter import extract_exact_tokens, mca_prefilter
 from .pipeline import (
+    DEFAULT_ACCESS_BONUS_MAX,
+    MAX_ACCESS_BONUS_MAX,
     ClassifyQuery,
     CuriosityBoost,
     ExactTokenProtection,
@@ -41,6 +43,8 @@ from .pipeline import (
     StateStore,
     build_full_pipeline,
     build_stateless_pipeline,
+    normalize_access_bonus_max,
+    resolve_access_bonus_max,
 )
 from .query_expansion import expand_query
 from .recaller import Recaller, RecallResult
@@ -133,6 +137,10 @@ __all__ = [
     "CuriosityBoost",
     "QLearningReranker",
     "ExactTokenProtection",
+    "DEFAULT_ACCESS_BONUS_MAX",
+    "MAX_ACCESS_BONUS_MAX",
+    "normalize_access_bonus_max",
+    "resolve_access_bonus_max",
     "build_full_pipeline",
     "build_stateless_pipeline",
 ]

@@ -87,6 +87,7 @@ from mnemostack.observability.recorder import (
 from mnemostack.provenance import SOURCE_HASH_KEY
 from mnemostack.quotas import QuotaExceededError
 from mnemostack.recall import (
+    DEFAULT_ACCESS_BONUS_MAX,
     DEGRADED_COUNTER,
     RERANK_MODES,
     AnswerGenerator,
@@ -102,7 +103,9 @@ from mnemostack.recall import (
     build_full_pipeline,
     build_qdrant_text_arms,
     chunk_filter_probe_via,
+    normalize_access_bonus_max,
     recall_flow,
+    resolve_access_bonus_max,
     sum_tokens,
 )
 from mnemostack.recall.pipeline import FileStateStore, default_state_path
@@ -786,6 +789,12 @@ class ServerConfig:
     #: How few results count as "weak". 1 = only a recall that returned
     #: nothing at all, which is the least ambiguous case and the default.
     retry_weak_below: int = 1
+    #: Ceiling on the freshness stage's access bonus. 0 removes the access
+    #: signal from ranking entirely — the switch for a deployment whose
+    #: clients stamp `last_accessed` themselves and do not want it steering
+    #: rank. Turning `record_access` off does NOT help them: the stage reads
+    #: those keys whoever wrote them. Appended, like every knob above.
+    access_bonus_max: float = DEFAULT_ACCESS_BONUS_MAX
 
     def __post_init__(self) -> None:
         if self.rerank_mode not in RERANK_MODES:
@@ -795,6 +804,11 @@ class ServerConfig:
         # and a bad value here would 500 every request.
         if self.token_budget is not None and self.token_budget <= 0:
             self.token_budget = None
+        # Through the same helper the multiplier and the stage use, so what
+        # this config REPORTS is what ranking actually applies. The bound is
+        # not restated here: a rule copied per entry point is a rule that
+        # drifts, and the copy that is forgotten is the one that matters.
+        self.access_bonus_max = normalize_access_bonus_max(self.access_bonus_max)
 
     @classmethod
     def from_env(cls) -> ServerConfig:
@@ -821,6 +835,7 @@ class ServerConfig:
             token_budget=cfg.recall.token_budget,
             auto_record_ior=_env_bool("MNEMOSTACK_AUTO_RECORD_IOR"),
             record_access=_env_bool("MNEMOSTACK_RECORD_ACCESS"),
+            access_bonus_max=resolve_access_bonus_max(),
             retry_on_weak=_env_bool("MNEMOSTACK_RETRY_ON_WEAK"),
             retry_weak_below=_env_int("MNEMOSTACK_RETRY_WEAK_BELOW", 1),
             auth_enabled=_env_bool("MNEMOSTACK_AUTH_ENABLED"),
@@ -1194,6 +1209,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     state_path.parent.mkdir(parents=True, exist_ok=True)
     pipeline = build_full_pipeline(
         state_store=FileStateStore(state_path),
+        access_bonus_max=cfg.access_bonus_max,
         graph_uri=cfg.graph_uri,
         graph_user=cfg.graph_user,
         graph_password=cfg.graph_password,
