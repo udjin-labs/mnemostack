@@ -493,3 +493,59 @@ def test_the_flag_and_the_variable_never_disagree(monkeypatch):
     # not to "off": a typo must not silently disable a ranking signal.
     monkeypatch.setenv("MNEMOSTACK_ACCESS_BONUS_MAX", "not-a-number")
     assert resolve_access_bonus_max() == DEFAULT
+
+
+# ------------------------------ a payload is not a contract
+
+
+def test_no_payload_value_can_raise_out_of_the_recall():
+    """A read path must not be crashable by a value somebody else wrote,
+    and `access_count` / `last_accessed` are ordinary payload fields a
+    client can fill with anything.
+
+    The gap this closes was not in the boost function — that had already
+    learned about huge integers — but in the STAGE, which coerced the
+    counter a second time on the way in and caught a different set of
+    exceptions. `int(inf)` raises OverflowError, which that second guard
+    did not list, so the recall died upstream of the very switch meant to
+    disable the feature: it crashed even with `access_bonus_max=0`.
+    """
+    stamp = _iso_days_ago(0)
+    hostile = [
+        float("inf"),
+        float("-inf"),
+        float("nan"),
+        10**400,
+        -(10**400),
+        "many",
+        "",
+        None,
+        [3],
+        {"n": 1},
+        True,
+    ]
+    ctx = PipelineContext(query="q")
+    for value in hostile:
+        for ceiling in (DEFAULT_ACCESS_BONUS_MAX, 0.0):
+            used = _result(score=1.0, last_accessed=stamp, access_count=value)
+            out = FreshnessBlend(weight=0.0, access_bonus_max=ceiling).apply(ctx, [used])
+            boost = out[0].payload["access_boost"]
+            assert 1.0 <= boost <= 1.0 + DEFAULT_ACCESS_BONUS_MAX, (value, ceiling, boost)
+            if ceiling == 0.0:
+                assert boost == 1.0, (value, boost)
+
+
+def test_an_unreadable_stamp_is_neutral_rather_than_an_exception():
+    """`last_accessed` likewise. A `datetime` or `bytes` in that field has
+    a `.replace` that takes different arguments, so the parse raises
+    TypeError instead of failing to parse — and "this stage cannot read the
+    stamp" must mean "no evidence of use", never a 500."""
+    for stamp in (
+        datetime.now(timezone.utc),
+        b"2026-01-01T00:00:00Z",
+        12345,
+        12.5,
+        object(),
+        ["2026-01-01"],
+    ):
+        assert compute_access_boost(stamp, access_count=5) == 1.0, stamp
