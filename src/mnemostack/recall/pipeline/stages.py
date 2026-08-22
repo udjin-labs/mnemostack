@@ -531,12 +531,31 @@ class FreshnessBlend(Stage):
                 # e.g. a BM25 hit from a Qdrant point with no source key —
                 # must not reach _date_from_source's regex as None.
                 ts_dt = self._date_from_source(r.payload.get("source") or "")
+            # Last resort: WHEN IT WAS WRITTEN. Without this the stage had no
+            # age for a memory carrying no event time and substituted a flat
+            # 0.5 — the same value at a day old and at a year old, so such a
+            # memory never aged by anything at all. A whole class of writer
+            # is affected: `timestamp` is optional on ingest, so any client
+            # that does not send one (the hermes connector did not, until
+            # 0.9.2) had every memory frozen at that constant.
+            wrote_at = None
+            if ts_dt is None:
+                wrote_at = self._parse_instant(r.payload.get("indexed_at"))
+                ts_dt = wrote_at
             freshness = 0.5
             age_minutes = None
             if ts_dt is not None:
                 age_days = max(0.0, (now - ts_dt).total_seconds() / 86400)
                 freshness = math.exp(-math.log(2) * age_days / self.halflife_days)
-                age_minutes = (now - ts_dt).total_seconds() / 60
+                # ...but write time does NOT arm the echo penalty. That
+                # penalty means "this is probably meta-noise from the
+                # conversation happening right now", which is a claim about
+                # when the content HAPPENED. Re-indexing an old corpus
+                # stamps every point with the current time, and letting that
+                # count would halve the score of an entire archive for the
+                # crime of being imported today.
+                if wrote_at is None:
+                    age_minutes = (now - ts_dt).total_seconds() / 60
             # Always-current files (MEMORY.md, AGENTS.md, etc.) get a high
             # static freshness so they don't lose to today's transcripts.
             src = str(
@@ -565,6 +584,19 @@ class FreshnessBlend(Stage):
             r.payload["freshness"] = round(freshness, 3)
         results.sort(key=lambda x: -x.score)
         return results
+
+    @staticmethod
+    def _parse_instant(value: Any) -> datetime | None:
+        """An instant from a server-stamped ISO field, or None.
+
+        Separate from `_parse_timestamp`: that one reads the CONFIGURED
+        payload key in the deployment's own format (a foreign collection may
+        store epoch numbers), while `indexed_at` is written by this stack
+        and is always ISO-8601.
+        """
+        from ..validity import parse_payload_instant
+
+        return parse_payload_instant(value)
 
     def _parse_timestamp(self, payload: dict[str, Any]) -> datetime | None:
         # parse_payload_instant accepts every shape a foreign collection may
