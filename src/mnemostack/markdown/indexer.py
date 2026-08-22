@@ -22,6 +22,7 @@ from ..provenance import (
     STABLE_ID_SCHEME,
     source_snapshot,
 )
+from ..vector.patch import WRITE_TIME_KEY
 from .parse import extract_links, parse_frontmatter
 
 #: Structural payload keys the resolver keys verdicts on — a frontmatter key
@@ -162,6 +163,12 @@ def collect_markdown(
     single-file refresh updates the same chunk/graph nodes as the parent
     directory index. Defaults to the file's parent.
     """
+    from datetime import datetime, timezone
+
+    # One instant for the whole walk: chunks collected together share a
+    # write time rather than differing by the cost of reading files.
+    run_write_time = datetime.now(timezone.utc).isoformat()
+
     root = Path(root)
 
     def _md_files(d: Path) -> list[Path]:
@@ -211,11 +218,7 @@ def collect_markdown(
         # Qdrant payload field names must be strings; a YAML key like ``2026:``
         # parses to an int and would abort the upsert, so coerce keys to str.
         # Structural resolver keys are RESERVED — frontmatter cannot set them.
-        meta = {
-            str(k): v
-            for k, v in meta.items()
-            if str(k) not in _RESERVED_STRUCTURAL_KEYS
-        }
+        meta = {str(k): v for k, v in meta.items() if str(k) not in _RESERVED_STRUCTURAL_KEYS}
         out.sources.append(rel)
 
         for link in extract_links(body):
@@ -226,7 +229,9 @@ def collect_markdown(
                 # first (handles ../ and same-dir links, and duplicate
                 # basenames), then fall back to a corpus-wide name/path match.
                 resolved = _resolve_relative(rel, link.target, rels_lower)
-            resolved = resolved or key_to_rel.get(link.target.lower()) or key_to_rel.get(norm.lower())
+            resolved = (
+                resolved or key_to_rel.get(link.target.lower()) or key_to_rel.get(norm.lower())
+            )
             out.edges.append(
                 LinkEdge(
                     source=rel,
@@ -264,6 +269,14 @@ def collect_markdown(
                 **meta,
                 **snapshot,
                 ID_SCHEME_KEY: STABLE_ID_SCHEME,
+                # When the POINT was written. The freshness stage ages a
+                # memory by this when the memory carries no event time of
+                # its own, and this path bypasses `Ingestor` — which is
+                # where every other writer got the field — so without it
+                # markdown corpora were frozen at a flat middling
+                # freshness however old they were. One instant for the
+                # whole collection run, like the snapshot above.
+                WRITE_TIME_KEY: run_write_time,
                 "text": chunk.text,
                 "source": rel,
                 "offset": chunk.offset,
