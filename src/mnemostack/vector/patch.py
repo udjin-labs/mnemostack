@@ -147,8 +147,7 @@ def diff_payload(
     (``_md_keys``/``_enrich_keys``); values compare by normalized JSON form.
     """
     changed = any(
-        key not in old or _canonical(old[key]) != _canonical(value)
-        for key, value in new.items()
+        key not in old or _canonical(old[key]) != _canonical(value) for key, value in new.items()
     )
     delete = tuple(stale_keys)
     if not changed and not delete:
@@ -158,6 +157,43 @@ def diff_payload(
         set_values=dict(new),
         delete_keys=delete,
     )
+
+
+WRITE_TIME_KEY = "indexed_at"
+
+
+def carry_write_time(
+    old: Mapping[str, Any],
+    new: dict[str, Any],
+    *,
+    key: str = WRITE_TIME_KEY,
+) -> dict[str, Any]:
+    """Keep the stored write time on a point that already exists.
+
+    ``indexed_at`` records when the POINT was written, and the freshness
+    stage ages a memory by it when the memory carries no event time of its
+    own. A payload refresh rewrites fields; it does not write the point, so
+    restamping would reset the age of an entire corpus to today — and would
+    mark every point changed, making the warm-run zero-write guarantee
+    fiction, exactly as the snapshot rule above prevents for capture time.
+
+    Carried by PRESENCE, not by validity. Requiring a well-formed value
+    looks like the safer check and is the opposite: a point holding a
+    corrupt stamp would keep the RUN's fresh one instead, promoting the
+    values the reader deliberately neutralises to maximally fresh.
+
+    And never invented: a point predating the field is left without one
+    rather than stamped today, because this operation has no way to learn
+    when that point was written.
+
+    Shared by every write path on purpose — three of them exist, and
+    stamping was added to them one review round at a time.
+    """
+    if key in old:
+        new[key] = old[key]
+    else:
+        new.pop(key, None)
+    return new
 
 
 def carry_snapshot_capture_time(
@@ -178,11 +214,7 @@ def carry_snapshot_capture_time(
     it is carried into the new payload — both for the comparison and for
     any write that happens for other reasons.
     """
-    if (
-        hash_key in old
-        and old.get(hash_key) == new.get(hash_key)
-        and captured_key in old
-    ):
+    if hash_key in old and old.get(hash_key) == new.get(hash_key) and captured_key in old:
         new[captured_key] = old[captured_key]
     return new
 

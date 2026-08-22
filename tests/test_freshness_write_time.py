@@ -354,3 +354,83 @@ def test_the_docstrings_do_not_deny_the_fallback_they_now_have():
         assert "no ``indexed_at`` fallback" not in lowered
         assert "does not fall back to `indexed_at`" not in lowered
         assert "flat 0.5 whatever its age" not in lowered
+
+
+# ------------------------------------- every path that writes a point
+
+
+def test_every_write_path_stamps_the_field_this_fallback_reads():
+    """Three separate paths write points, and the stamp was added to them
+    one review round at a time: the library `Ingestor`, `mnemostack index`,
+    and `index-markdown` (which bypasses `Ingestor` entirely). Each miss
+    looked like a small omission and was a whole indexing mode frozen at a
+    flat middling freshness however old its documents were.
+
+    Enumerated here so a FOURTH writer fails loudly instead of shipping as
+    another unstampable mode — that is the only part of this that a future
+    change can inherit.
+    """
+    import inspect
+
+    from mnemostack import cli, ingest
+    from mnemostack.markdown import indexer
+    from mnemostack.vector.patch import WRITE_TIME_KEY
+
+    writers = {
+        "library Ingestor": inspect.getsource(ingest),
+        "mnemostack index": inspect.getsource(cli.cmd_index),
+        "index-markdown": inspect.getsource(indexer.collect_markdown),
+    }
+    for name, source in writers.items():
+        assert WRITE_TIME_KEY in source or "WRITE_TIME_KEY" in source, name
+
+    # ...and both merge paths carry the stored value rather than restamping.
+    from mnemostack.markdown import sync
+
+    for name, source in (
+        ("mnemostack index", inspect.getsource(cli.cmd_index)),
+        ("index-markdown", inspect.getsource(sync)),
+    ):
+        assert "carry_write_time(" in source, name
+
+
+def test_the_carry_rule_is_one_function_not_a_copy_per_path():
+    """Both merge paths call the same helper. Two copies of a rule this
+    subtle — carried by presence, never invented — is two rules, and the
+    copy that drifts is the one nobody re-reads."""
+    from mnemostack.vector.patch import WRITE_TIME_KEY, carry_write_time
+
+    # present, however malformed → carried unchanged
+    for stored in ("", "   ", "12345", 12345, None, "not-a-date"):
+        assert carry_write_time({WRITE_TIME_KEY: stored}, {WRITE_TIME_KEY: "NEW"}) == {
+            WRITE_TIME_KEY: stored
+        }, stored
+    # absent → never invented
+    assert carry_write_time({}, {WRITE_TIME_KEY: "NEW"}) == {}
+    # unrelated fields are left alone
+    assert carry_write_time({"a": 1}, {"b": 2, WRITE_TIME_KEY: "NEW"}) == {"b": 2}
+
+
+def test_the_markdown_indexer_stamps_what_it_collects(tmp_path):
+    """The behavioural half of the enumeration above, for the path that was
+    missing it: assert on the payloads `collect_markdown` produces, and on
+    what the freshness stage makes of them."""
+    from mnemostack.markdown import collect_markdown
+    from mnemostack.vector.patch import WRITE_TIME_KEY
+
+    (tmp_path / "a.md").write_text("# Title\n\n" + "body words " * 200, encoding="utf-8")
+    (tmp_path / "b.md").write_text("# Other\n\n" + "more words " * 200, encoding="utf-8")
+
+    collection = collect_markdown(tmp_path, chunk_size=200)
+    payloads = [chunk.payload for chunk in collection.chunks]
+    assert len(payloads) > 3, len(payloads)
+
+    stamps = [p.get(WRITE_TIME_KEY) for p in payloads]
+    assert all(isinstance(v, str) and v for v in stamps), stamps
+    # One instant for the whole walk, not one per chunk or per file.
+    assert len(set(stamps)) == 1, sorted(set(stamps))
+
+    parsed = datetime.fromisoformat(stamps[0])
+    assert parsed.tzinfo is not None and parsed.utcoffset() == timedelta(0), stamps[0]
+    # ...and it is readable by the stage that needs it.
+    assert _fresh({"indexed_at": stamps[0]}) > 0.99
