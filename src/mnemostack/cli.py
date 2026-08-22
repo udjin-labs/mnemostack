@@ -66,6 +66,7 @@ from .vector.patch import (
     PayloadPatch,
     apply_patches_via,
     carry_snapshot_capture_time,
+    carry_write_time,
     diff_payload,
 )
 from .vector.qdrant import PayloadIndexConflictError, payload_index_type_name
@@ -2493,7 +2494,24 @@ def _build_recaller(
     )
 
 
+def _utcnow_iso() -> str:
+    """Now, as the ISO-8601 UTC string this stack writes into `indexed_at`.
+
+    Timezone-aware on purpose: the freshness stage reads this field as
+    strict ISO, and a naive stamp would be read as UTC anyway — so a naive
+    local clock would shift every indexed point by the operator's offset.
+    """
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
+
+
 def cmd_index(args: argparse.Namespace) -> int:
+    # One instant for the whole run: chunks written together get the same
+    # write time, rather than times that differ by the wall-clock cost of
+    # embedding — precision this field does not have and does not need.
+    _run_indexed_at = _utcnow_iso()
+
     tenant = getattr(args, "tenant", None)
     if tenant is not None and not str(tenant).strip():
         # An explicitly empty --tenant (e.g. `--tenant "$UNSET_VAR"`) fails
@@ -2737,6 +2755,19 @@ def cmd_index(args: argparse.Namespace) -> int:
                     )
                 chunks.append((cid, chunk, payload))
 
+    # Write time, stamped ONCE over the collected chunks rather than inside
+    # each branch that builds a payload. There are three of those — prose,
+    # `--code`, and sliding windows — and stamping per branch had already
+    # missed two of them; a fourth branch added later would miss it again.
+    # This is the point every chunk reaches whatever built it — the same
+    # reasoning the tenant stamp below already applies, and for the same
+    # kind of consequence.
+    #
+    # After enrichment for the same reason the markers above are: an
+    # enricher key collision must not be able to fabricate a write time.
+    for *_, chunk_payload in chunks:
+        chunk_payload["indexed_at"] = _run_indexed_at
+
     # Load existing point IDs once so re-runs skip unchanged chunks without
     # re-embedding (saves API quota / local GPU time). When refreshing
     # payloads we also need each point's recorded root: a chunk id carries no
@@ -2925,6 +2956,13 @@ def cmd_index(args: argparse.Namespace) -> int:
             # snapshot keeps its stored capture time, or every warm refresh
             # would rewrite every point for the timestamp alone.
             payload = carry_snapshot_capture_time(old_payload, payload)
+            # Same rule, same reason, for the write stamp: a payload refresh
+            # is not a rewrite of WHEN THE POINT WAS WRITTEN. Restamping it
+            # would make every warm refresh a full payload write (which the
+            # zero-write test pins), and — worse — reset the age of the
+            # entire corpus to today, undoing the very ageing this field
+            # was added to provide.
+            payload = carry_write_time(old_payload, payload)
             old_enrich = old_payload.get("_enrich_keys") or []
             stale_keys = [k for k in old_enrich if k not in payload]
             if old_enrich and "_enrich_keys" not in payload:

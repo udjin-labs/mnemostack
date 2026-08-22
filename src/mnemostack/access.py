@@ -31,10 +31,9 @@ a month and hit a 0.1 floor within four, while a memory nothing had ever
 found kept a flat 1.0 forever — junk nobody wanted outranked a useful
 fact nobody had needed lately. Ageing by AGE is not lost as a result: it
 is the same stage's ``freshness`` term, computed from the memory's own
-timestamp. Folding age in here as well would count it twice — though only
-where that timestamp parses: ``freshness`` has no ``indexed_at`` fallback,
-so a memory with no event time does not age by anything. That gap belongs
-to the age term, not this one.
+timestamp, falling back to the ``indexed_at`` write stamp when the memory
+carries no event time of its own. Folding age in here as well would count
+it twice.
 
 The one thing to weigh before turning it on is that this is the only term
 in the pipeline that a recall's own output feeds back into. Three things

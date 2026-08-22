@@ -396,14 +396,11 @@ def compute_access_boost(
     falling back to `indexed_at`, say) would count it twice: once
     softened by that weight, once at full multiplicative strength.
 
-    That holds WHERE A TIMESTAMP PARSES, which is the honest limit of the
-    claim: `freshness` does not fall back to `indexed_at`, so a memory
-    carrying no event time sits at a flat 0.5 whatever its age. Giving the
-    AGE term that fallback is the real repair for it, and it is not this
-    function's to make. Nothing here depends on it either way — measured
-    on untimestamped memories, a used one still outranks unused junk
-    (1.07 against 0.90), which is the inversion this change exists to
-    fix.
+    `freshness` covers that whole job, including for a memory carrying no
+    event time: it falls back to `indexed_at`, the write stamp, and only a
+    point with no time information at all sits at the historical flat 0.5.
+    So age is accounted for once, there, and this term does not need to
+    know about it.
 
     So the two causes of a rank change stay separate: `freshness` answers
     "how old is this?", and this answers "has it been useful, lately?".
@@ -531,12 +528,31 @@ class FreshnessBlend(Stage):
                 # e.g. a BM25 hit from a Qdrant point with no source key —
                 # must not reach _date_from_source's regex as None.
                 ts_dt = self._date_from_source(r.payload.get("source") or "")
+            # Last resort: WHEN IT WAS WRITTEN. Without this the stage had no
+            # age for a memory carrying no event time and substituted a flat
+            # 0.5 — the same value at a day old and at a year old, so such a
+            # memory never aged by anything at all. A whole class of writer
+            # is affected: `timestamp` is optional on ingest, so any client
+            # that does not send one (the hermes connector did not, until
+            # 0.9.2) had every memory frozen at that constant.
+            wrote_at = None
+            if ts_dt is None:
+                wrote_at = self._parse_instant(r.payload.get("indexed_at"))
+                ts_dt = wrote_at
             freshness = 0.5
             age_minutes = None
             if ts_dt is not None:
                 age_days = max(0.0, (now - ts_dt).total_seconds() / 86400)
                 freshness = math.exp(-math.log(2) * age_days / self.halflife_days)
-                age_minutes = (now - ts_dt).total_seconds() / 60
+                # ...but write time does NOT arm the echo penalty. That
+                # penalty means "this is probably meta-noise from the
+                # conversation happening right now", which is a claim about
+                # when the content HAPPENED. Re-indexing an old corpus
+                # stamps every point with the current time, and letting that
+                # count would halve the score of an entire archive for the
+                # crime of being imported today.
+                if wrote_at is None:
+                    age_minutes = (now - ts_dt).total_seconds() / 60
             # Always-current files (MEMORY.md, AGENTS.md, etc.) get a high
             # static freshness so they don't lose to today's transcripts.
             src = str(
@@ -565,6 +581,38 @@ class FreshnessBlend(Stage):
             r.payload["freshness"] = round(freshness, 3)
         results.sort(key=lambda x: -x.score)
         return results
+
+    @staticmethod
+    def _parse_instant(value: Any) -> datetime | None:
+        """An instant from a server-stamped ISO field, or None.
+
+        Separate from `_parse_timestamp`, and deliberately STRICTER. That
+        one reads the CONFIGURED payload key in whatever format the
+        deployment declared, epoch numbers included, because a foreign
+        collection brings its own schema. `indexed_at` has no such freedom:
+        it is written by this stack alone and is always ISO-8601, so a
+        number in it is corruption rather than a Unix time.
+
+        Reading it as one would be worse than ignoring it — `12345` becomes
+        1970 and buries the memory at the bottom of every recall, which is
+        an active harm where returning None merely declines to age it.
+        """
+        if not isinstance(value, str):
+            return None
+        # Parsed as ISO HERE rather than delegated. The shared parser also
+        # accepts numeric STRINGS as epochs, so a type check alone left
+        # "12345" reading as 1970 — the exact harm this docstring claims to
+        # avoid. A type is not a format, and the contract is the format.
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
 
     def _parse_timestamp(self, payload: dict[str, Any]) -> datetime | None:
         # parse_payload_instant accepts every shape a foreign collection may
