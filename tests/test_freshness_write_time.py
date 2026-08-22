@@ -275,3 +275,82 @@ def test_every_chunking_branch_gets_the_write_stamp(tmp_path, monkeypatch, flags
     assert all(isinstance(v, str) and v for v in stamps), (flags, stamps)
     assert len(set(stamps)) == 1, (flags, sorted(set(stamps)))
     assert _fresh({"indexed_at": stamps[0]}) > 0.99, (flags, stamps[0])
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        pytest.param("", id="empty-string"),
+        pytest.param("   ", id="blank"),
+        pytest.param("not-a-date", id="unparseable"),
+        pytest.param("12345", id="numeric-string"),
+        pytest.param(12345, id="number"),
+        pytest.param(None, id="null"),
+    ],
+)
+def test_a_refresh_does_not_promote_a_corrupt_stamp_to_today(tmp_path, monkeypatch, stored):
+    """The reader treats a corrupt stamp as the neutral 0.5. A refresh that
+    replaced it with the run's own time would promote exactly those points
+    to MAXIMALLY fresh — the opposite of what the reader decided about them,
+    reached by a metadata-only operation that is supposed to change nothing
+    about when the point was written.
+
+    Carried by presence, not by validity: requiring a well-formed value
+    looked like the safe check and was the one that caused this.
+    """
+    import mnemostack.cli as cli
+
+    (tmp_path / "doc.md").write_text("stable content", encoding="utf-8")
+    store = _RecordingStore()
+    monkeypatch.setattr(cli, "get_provider", lambda *a, **kw: _ConstantProvider())
+    monkeypatch.setattr(cli, "VectorStore", lambda **kw: store)
+    argv = ["index", str(tmp_path), "--chunk-size", "2000", "--refresh-payloads"]
+
+    assert cli.main(argv) == 0
+    for payload in store.points.values():
+        payload["indexed_at"] = stored
+    assert cli.main(argv) == 0
+
+    after = [p.get("indexed_at") for p in store.points.values()]
+    assert after == [stored] * len(after), after
+    assert _fresh({"indexed_at": after[0]}) == 0.5, after[0]
+
+
+def test_a_refresh_does_not_invent_a_write_time_for_a_legacy_point(tmp_path, monkeypatch):
+    """A point predating the field has no write time, and a refresh has no
+    way to learn one — it rewrites payload FIELDS, it does not write the
+    point. Stamping today would claim knowledge it does not have and make
+    an old point look new."""
+    import mnemostack.cli as cli
+
+    (tmp_path / "doc.md").write_text("stable content", encoding="utf-8")
+    store = _RecordingStore()
+    monkeypatch.setattr(cli, "get_provider", lambda *a, **kw: _ConstantProvider())
+    monkeypatch.setattr(cli, "VectorStore", lambda **kw: store)
+    argv = ["index", str(tmp_path), "--chunk-size", "2000", "--refresh-payloads"]
+
+    assert cli.main(argv) == 0
+    for payload in store.points.values():
+        payload.pop("indexed_at", None)  # a point from before the field existed
+    assert cli.main(argv) == 0
+
+    for payload in store.points.values():
+        assert "indexed_at" not in payload, payload
+    assert _fresh({}) == 0.5
+
+
+def test_the_docstrings_do_not_deny_the_fallback_they_now_have():
+    """These two passages document the ranking model, and both were written
+    to say `freshness` has NO `indexed_at` fallback — which this change made
+    false. A wrong explanation of a ranking rule outlives the reviewer who
+    would have caught it."""
+    import inspect
+
+    from mnemostack import access
+    from mnemostack.recall.pipeline.stages import compute_access_boost
+
+    for text in (compute_access_boost.__doc__ or "", inspect.getdoc(access) or ""):
+        lowered = text.lower()
+        assert "no ``indexed_at`` fallback" not in lowered
+        assert "does not fall back to `indexed_at`" not in lowered
+        assert "flat 0.5 whatever its age" not in lowered

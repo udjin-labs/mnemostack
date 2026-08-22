@@ -396,14 +396,11 @@ def compute_access_boost(
     falling back to `indexed_at`, say) would count it twice: once
     softened by that weight, once at full multiplicative strength.
 
-    That holds WHERE A TIMESTAMP PARSES, which is the honest limit of the
-    claim: `freshness` does not fall back to `indexed_at`, so a memory
-    carrying no event time sits at a flat 0.5 whatever its age. Giving the
-    AGE term that fallback is the real repair for it, and it is not this
-    function's to make. Nothing here depends on it either way — measured
-    on untimestamped memories, a used one still outranks unused junk
-    (1.07 against 0.90), which is the inversion this change exists to
-    fix.
+    `freshness` covers that whole job, including for a memory carrying no
+    event time: it falls back to `indexed_at`, the write stamp, and only a
+    point with no time information at all sits at the historical flat 0.5.
+    So age is accounted for once, there, and this term does not need to
+    know about it.
 
     So the two causes of a rank change stay separate: `freshness` answers
     "how old is this?", and this answers "has it been useful, lately?".

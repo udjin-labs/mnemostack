@@ -2961,9 +2961,19 @@ def cmd_index(args: argparse.Namespace) -> int:
             # zero-write test pins), and — worse — reset the age of the
             # entire corpus to today, undoing the very ageing this field
             # was added to provide.
-            carried_write_time = old_payload.get("indexed_at")
-            if isinstance(carried_write_time, str) and carried_write_time:
-                payload["indexed_at"] = carried_write_time
+            # Carried by PRESENCE, not by validity — and never invented.
+            # Requiring a well-formed value looked safer and was the
+            # opposite: a point holding a corrupt stamp kept the run's fresh
+            # one instead, so a metadata-only refresh promoted it from the
+            # neutral 0.5 the reader gives corruption to maximally fresh.
+            # And a legacy point that predates the field gets no stamp at
+            # all rather than today's: a refresh rewrites payload fields, it
+            # does not write the point, so it has no business claiming to
+            # know when the point was written.
+            if "indexed_at" in old_payload:
+                payload["indexed_at"] = old_payload["indexed_at"]
+            else:
+                payload.pop("indexed_at", None)
             old_enrich = old_payload.get("_enrich_keys") or []
             stale_keys = [k for k in old_enrich if k not in payload]
             if old_enrich and "_enrich_keys" not in payload:
