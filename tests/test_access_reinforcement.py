@@ -9,6 +9,7 @@ feeds back into is also the one that could compound into permanent
 favouritism if it were left unbounded.
 """
 
+import os
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -119,7 +120,7 @@ def test_a_count_below_one_still_earns_the_bonus_it_evidences():
     )
 
 
-def test_a_naive_stamp_is_read_as_utc_not_local(monkeypatch):
+def test_a_naive_stamp_is_read_as_utc_not_local():
     """Payloads written by older clients carry naive timestamps; reading one
     as local time would shift the bonus by the operator's UTC offset.
 
@@ -136,14 +137,27 @@ def test_a_naive_stamp_is_read_as_utc_not_local(monkeypatch):
         # nothing is worse than an honest gap, and this project's CI is
         # Linux — but contributors are not.
         pytest.skip("TZ cannot be forced on this platform (no time.tzset)")
-    monkeypatch.setenv("TZ", "Pacific/Kiritimati")  # UTC+14
+    # Restored by hand rather than with monkeypatch: monkeypatch puts the
+    # TZ variable back but cannot call `tzset()` afterwards, so libc would
+    # stay at UTC+14 for every later test in this process and make the
+    # timezone-sensitive ones order-dependent. And "no previous value" is
+    # an ABSENCE, not an empty string — an empty TZ means UTC to libc,
+    # which is a different setting than not having one.
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = "Pacific/Kiritimati"  # UTC+14
     time.tzset()
-
-    naive = (datetime.now(timezone.utc) - timedelta(days=1)).replace(tzinfo=None)
-    aware = datetime.now(timezone.utc) - timedelta(days=1)
-    assert compute_access_boost(naive.isoformat(), access_count=1) == pytest.approx(
-        compute_access_boost(aware.isoformat(), access_count=1), abs=1e-6
-    )
+    try:
+        naive = (datetime.now(timezone.utc) - timedelta(days=1)).replace(tzinfo=None)
+        aware = datetime.now(timezone.utc) - timedelta(days=1)
+        assert compute_access_boost(naive.isoformat(), access_count=1) == pytest.approx(
+            compute_access_boost(aware.isoformat(), access_count=1), abs=1e-6
+        )
+    finally:
+        if previous is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous
+        time.tzset()
 
 
 def test_a_future_stamp_does_not_exceed_the_ceiling():
