@@ -271,18 +271,149 @@ class HubDampen(Stage):
 # ---------- freshness ----------
 
 
-def compute_decay(
+#: Ceiling on the access bonus, as a fraction of the score it multiplies.
+#: Small on purpose: this is the ONE term in the pipeline that a recall's
+#: own output feeds back into, so a generous ceiling would let whatever is
+#: already being found compound into permanent favouritism. Set it to 0 to
+#: take the access signal out of ranking entirely.
+DEFAULT_ACCESS_BONUS_MAX = 0.25
+
+#: Hard cap an operator's configured ceiling is clamped to. The safety of
+#: this term rests on it being SMALL relative to similarity: it is the one
+#: signal the service's own output feeds back into, so a bonus that could
+#: double a score would let what is already being found decide what gets
+#: found next.
+MAX_ACCESS_BONUS_MAX = 1.0
+
+#: Access count at which the bonus reaches its ceiling. Saturating rather
+#: than linear, and clamped, so a hot memory cannot keep buying rank.
+_ACCESS_BONUS_FULL_AT = 10.0
+
+#: Shapes the approach to that ceiling: the bonus is half-way there at
+#: roughly three accesses.
+_ACCESS_BONUS_KNEE = 3.0
+
+
+def normalize_access_bonus_max(value: float) -> float:
+    """The configured ceiling, bounded — the one place that decides.
+
+    Every path that can set this bound calls through here: the multiplier
+    itself, the stage that holds it, and the server config that reports it.
+    Two enforcement points and one rule, rather than a clamp copied to each
+    entry point where the copy that is forgotten is the one that matters —
+    which is exactly what happened when this lived in `ServerConfig` alone
+    and the public builders, the MCP surface and library callers all sailed
+    past it.
+
+    NaN reads as OFF, not as the default. It compares false against every
+    bound, so a plain clamp passes it straight through to a multiplier that
+    would erase the score of everything it touched; and a ceiling nobody
+    can interpret must not be resolved into a ranking effect nobody asked
+    for. A negative reads as off too — never as an inverted penalty, the
+    one direction this term must not have.
+    """
+    # Compared BEFORE conversion, not after. `float()` on an int wider than
+    # the double range raises OverflowError rather than returning inf, so a
+    # caller passing 10**1000 to a public builder would crash construction
+    # instead of getting the documented ceiling. Comparing first keeps the
+    # arbitrary-precision int in its own domain, where the comparison is
+    # exact and cannot raise.
+    if isinstance(value, int) and not isinstance(value, bool):
+        if value <= 0:
+            return 0.0
+        if value >= MAX_ACCESS_BONUS_MAX:
+            return MAX_ACCESS_BONUS_MAX
+    try:
+        bonus = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    if bonus != bonus:  # NaN
+        return 0.0
+    return min(max(0.0, bonus), MAX_ACCESS_BONUS_MAX)
+
+
+#: Environment name for the access ceiling, so every entry point spells it
+#: the same way. The variable is read HERE rather than at each call site
+#: because three separate surfaces already shipped without it: the public
+#: builders, the MCP server, and `search`/`answer`. A knob whose wiring is
+#: retyped per entry point is a knob some entry point will not have.
+ACCESS_BONUS_MAX_ENV = "MNEMOSTACK_ACCESS_BONUS_MAX"
+
+
+def resolve_access_bonus_max(explicit: float | None = None) -> float:
+    """The ceiling actually in force: the explicit setting, else the
+    environment, else the default — normalised either way.
+
+    Every command that builds a recall pipeline calls this, so an operator
+    who sets `MNEMOSTACK_ACCESS_BONUS_MAX=0` gets the same answer from
+    `serve`, from `search`, from `answer` and from `mcp-serve`. Anything
+    unparseable in the environment falls back to the default rather than
+    failing startup, matching the other tuning knobs.
+    """
+    if explicit is not None:
+        return normalize_access_bonus_max(explicit)
+
+    import os
+
+    raw = os.environ.get(ACCESS_BONUS_MAX_ENV)
+    if raw is None:
+        return DEFAULT_ACCESS_BONUS_MAX
+    try:
+        # Parsed here rather than through a generic reader that rejects
+        # non-finite values, because the flag and the variable must not
+        # answer differently: `--access-bonus-max inf` clamps to the cap, so
+        # `MNEMOSTACK_ACCESS_BONUS_MAX=inf` has to as well. Asking for no
+        # ceiling gets you the highest one allowed, exactly as 99 does.
+        parsed = float(raw.strip())
+    except (TypeError, ValueError):
+        # Genuinely unparseable: fall back rather than fail startup, and
+        # rather than silently meaning "off".
+        return DEFAULT_ACCESS_BONUS_MAX
+    return normalize_access_bonus_max(parsed)
+
+
+def compute_access_boost(
     last_accessed: str | None,
     access_count: int = 0,
     half_life_days: float = 30.0,
+    max_bonus: float = DEFAULT_ACCESS_BONUS_MAX,
 ) -> float:
-    """Ebbinghaus-style decay with reinforcement.
+    """Bounded reinforcement for a memory that has actually been used.
 
-    Returns a multiplier between 0.1 and 1.0.
-    - Missing/invalid last_accessed is a no-op for backwards compatibility
-    - Decays exponentially based on days since last access
-    - Each access_count extends effective half-life (reinforcement)
-    - Minimum floor of 0.1 (never fully forgotten)
+    Returns a multiplier in ``[1.0, 1 + max_bonus]`` — use can only help a
+    memory's rank, never hurt it.
+
+    That asymmetry is the point, and it is a deliberate correction. This
+    term used to be a DECAY measured from ``last_accessed``, which made
+    being used strictly punishing: a memory recalled once and then left
+    cold fell to 0.56 within a month and hit a 0.1 floor within four,
+    while a memory nothing had ever found kept a flat 1.0 forever. Junk
+    nobody wanted outranked a useful fact nobody had needed lately.
+
+    Ageing by age is NOT missing from the stack as a result — it is
+    `FreshnessBlend`'s own `freshness` term, computed from the memory's
+    timestamp and blended in by weight. Folding age in here as well (by
+    falling back to `indexed_at`, say) would count it twice: once
+    softened by that weight, once at full multiplicative strength.
+
+    That holds WHERE A TIMESTAMP PARSES, which is the honest limit of the
+    claim: `freshness` does not fall back to `indexed_at`, so a memory
+    carrying no event time sits at a flat 0.5 whatever its age. Giving the
+    AGE term that fallback is the real repair for it, and it is not this
+    function's to make. Nothing here depends on it either way — measured
+    on untimestamped memories, a used one still outranks unused junk
+    (1.07 against 0.90), which is the inversion this change exists to
+    fix.
+
+    So the two causes of a rank change stay separate: `freshness` answers
+    "how old is this?", and this answers "has it been useful, lately?".
+
+    - Never accessed (or an unparseable stamp) is exactly 1.0 — a
+      deployment that does not record accesses sees no change at all.
+    - The bonus decays back TOWARD 1.0 with time since the last access,
+      and stops there.
+    - `access_count` raises it with saturation, reaching the ceiling at
+      `_ACCESS_BONUS_FULL_AT` accesses, so popularity cannot compound.
     """
     if not last_accessed:
         return 1.0
@@ -292,32 +423,52 @@ def compute_decay(
     except (ValueError, AttributeError):
         return 1.0
 
+    safe_max = normalize_access_bonus_max(max_bonus)
+    if safe_max == 0.0:
+        return 1.0
+
     if last_dt.tzinfo is None:
         last_dt = last_dt.replace(tzinfo=timezone.utc)
 
     now = datetime.now(timezone.utc)
-    days_elapsed = max(0, (now - last_dt).total_seconds() / 86400)
+    days_elapsed = max(0.0, (now - last_dt).total_seconds() / 86400)
 
-    # Reinforcement: each access extends half-life by 20% (capped to avoid runaway).
-    # Clamp defensive inputs so bad metadata/config cannot invert or explode decay.
-    safe_access_count = max(0, min(access_count, 10))
+    # A recorded access means at least one happened, whatever the counter
+    # says: a payload carrying `last_accessed` without a count is still
+    # evidence of use, and reading it as zero would deny the bonus to the
+    # very memories this term exists to reward.
+    # Clamped in the INTEGER domain first, for the same reason the ceiling
+    # is: `access_count` arrives from a payload, and a remote caller can put
+    # a thousand-digit number there through ordinary metadata. `float()` on
+    # it raises OverflowError, which would abort the whole recall — a read
+    # path crashed by a value someone else wrote.
+    try:
+        raw = int(access_count)
+    except (TypeError, ValueError, OverflowError):
+        raw = 1
+    count = float(max(1, min(raw, int(_ACCESS_BONUS_FULL_AT))))
+    knee = _ACCESS_BONUS_KNEE
+    # Normalised so `max_bonus` is the bonus actually reached at
+    # `_ACCESS_BONUS_FULL_AT` accesses, rather than an asymptote the curve
+    # never touches — the knob means what its name says.
+    saturation = (count / (count + knee)) / (_ACCESS_BONUS_FULL_AT / (_ACCESS_BONUS_FULL_AT + knee))
+
     safe_half_life_days = max(0.001, half_life_days)
-    effective_half_life = safe_half_life_days * (1 + 0.2 * safe_access_count)
+    recency = math.exp(-math.log(2) * days_elapsed / safe_half_life_days)
 
-    # Exponential decay.
-    decay = math.exp(-0.693 * days_elapsed / effective_half_life)
-
-    return max(0.1, decay)
+    return 1.0 + safe_max * saturation * recency
 
 
 class FreshnessBlend(Stage):
-    """Blend similarity with recency decay and confidence decay.
+    """Blend similarity with recency, then reinforce what has been used.
 
     Score becomes `(1-weight)*old_score + weight*freshness`, where freshness
     is `exp(-ln(2) * age_days / halflife_days)`. Items from the last
     `echo_window_minutes` are penalized (likely meta-noise from current
-    conversation). The blended score is then multiplied by an Ebbinghaus-style
-    confidence decay based on `last_accessed` and `access_count`.
+    conversation). The blended score is then multiplied by a bounded
+    reinforcement bonus from `last_accessed` and `access_count`, which can
+    only raise a used memory's rank — see `compute_access_boost` for why
+    that direction, and not a decay, is the correct one here.
     """
 
     half_life_days: float = 30.0
@@ -342,11 +493,25 @@ class FreshnessBlend(Stage):
         always_current_freshness: float = 0.8,
         timestamp_key: str = "timestamp",
         timestamp_format: str = "iso",
+        # KEYWORD-ONLY, and that is the point rather than a style choice.
+        # This signature is positional: appending here would still be safe
+        # today but puts the next knob one careless insert away from
+        # binding a caller's `echo_window_minutes` to a bonus ceiling — a
+        # SILENT ranking change, since 60 clamps to a legal value instead
+        # of raising. Past the star, no future parameter can shift another.
+        *,
+        access_bonus_max: float = DEFAULT_ACCESS_BONUS_MAX,
     ):
         self.weight = weight
         self.halflife_days = halflife_days
         if confidence_half_life_days is not None:
             self.half_life_days = confidence_half_life_days
+        #: Ceiling on the reinforcement bonus; 0 removes the access signal
+        #: from ranking without a second code path. Normalised on assignment
+        #: so the value the stage REPORTS is the value it applies — a public
+        #: builder handing this straight through must not leave an operator
+        #: reading a ceiling that is not the one in force.
+        self.access_bonus_max = normalize_access_bonus_max(access_bonus_max)
         self.echo_window_minutes = echo_window_minutes
         self.echo_penalty = echo_penalty
         self.always_current_files = always_current_files
@@ -389,13 +554,14 @@ class FreshnessBlend(Stage):
                 access_count = int(r.payload.get("access_count", 0))
             except (TypeError, ValueError):
                 access_count = 0
-            decay_factor = compute_decay(
+            access_boost = compute_access_boost(
                 r.payload.get("last_accessed"),
                 access_count=access_count,
                 half_life_days=self.half_life_days,
+                max_bonus=self.access_bonus_max,
             )
-            r.score *= decay_factor
-            r.payload["decay_factor"] = round(decay_factor, 3)
+            r.score *= access_boost
+            r.payload["access_boost"] = round(access_boost, 3)
             r.payload["freshness"] = round(freshness, 3)
         results.sort(key=lambda x: -x.score)
         return results
@@ -538,9 +704,7 @@ class CuriosityBoost(Stage):
             # including epoch 0, which is a REAL very-old instant, not
             # missing data (hence no truthiness test on the value itself).
             ts = (
-                parse_payload_instant(
-                    created, numeric_unit=numeric_unit_for(self.timestamp_format)
-                )
+                parse_payload_instant(created, numeric_unit=numeric_unit_for(self.timestamp_format))
                 if created is not None
                 else None
             )

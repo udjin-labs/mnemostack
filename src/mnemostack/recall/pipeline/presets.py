@@ -12,6 +12,7 @@ from typing import Any
 from .base import Pipeline
 from .resurrection import GraphResurrection
 from .stages import (
+    DEFAULT_ACCESS_BONUS_MAX,
     ClassifyQuery,
     CuriosityBoost,
     ExactTokenProtection,
@@ -48,6 +49,7 @@ def build_full_pipeline(
     text_key: str = "text",
     timestamp_key: str = "timestamp",
     timestamp_format: str = "iso",
+    access_bonus_max: float = DEFAULT_ACCESS_BONUS_MAX,
 ) -> Pipeline:
     """Build the full 8-stage reranking pipeline.
 
@@ -104,6 +106,7 @@ def build_full_pipeline(
             weight=freshness_weight,
             timestamp_key=timestamp_key,
             timestamp_format=timestamp_format,
+            access_bonus_max=access_bonus_max,
         )
     )
 
@@ -136,6 +139,7 @@ def build_stateless_pipeline(
     *,
     timestamp_key: str = "timestamp",
     timestamp_format: str = "iso",
+    access_bonus_max: float = DEFAULT_ACCESS_BONUS_MAX,
 ) -> Pipeline:
     """Minimal pipeline with stateless stages only.
 
@@ -156,6 +160,7 @@ def build_stateless_pipeline(
             weight=freshness_weight,
             timestamp_key=timestamp_key,
             timestamp_format=timestamp_format,
+            access_bonus_max=access_bonus_max,
         )
     )
     stages.append(ExactTokenProtection())
