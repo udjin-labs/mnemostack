@@ -345,6 +345,15 @@ def compute_access_boost(
     falling back to `indexed_at`, say) would count it twice: once
     softened by that weight, once at full multiplicative strength.
 
+    That holds WHERE A TIMESTAMP PARSES, which is the honest limit of the
+    claim: `freshness` does not fall back to `indexed_at`, so a memory
+    carrying no event time sits at a flat 0.5 whatever its age. Giving the
+    AGE term that fallback is the real repair for it, and it is not this
+    function's to make. Nothing here depends on it either way — measured
+    on untimestamped memories, a used one still outranks unused junk
+    (1.07 against 0.90), which is the inversion this change exists to
+    fix.
+
     So the two causes of a rank change stay separate: `freshness` answers
     "how old is this?", and this answers "has it been useful, lately?".
 
@@ -409,7 +418,6 @@ class FreshnessBlend(Stage):
         weight: float = 0.2,
         halflife_days: int = 14,
         confidence_half_life_days: float | None = None,
-        access_bonus_max: float = DEFAULT_ACCESS_BONUS_MAX,
         echo_window_minutes: int = 10,
         echo_penalty: float = 0.5,
         always_current_files: tuple[str, ...] = (
@@ -425,6 +433,14 @@ class FreshnessBlend(Stage):
         always_current_freshness: float = 0.8,
         timestamp_key: str = "timestamp",
         timestamp_format: str = "iso",
+        # KEYWORD-ONLY, and that is the point rather than a style choice.
+        # This signature is positional: appending here would still be safe
+        # today but puts the next knob one careless insert away from
+        # binding a caller's `echo_window_minutes` to a bonus ceiling — a
+        # SILENT ranking change, since 60 clamps to a legal value instead
+        # of raising. Past the star, no future parameter can shift another.
+        *,
+        access_bonus_max: float = DEFAULT_ACCESS_BONUS_MAX,
     ):
         self.weight = weight
         self.halflife_days = halflife_days

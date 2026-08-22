@@ -308,3 +308,50 @@ def test_a_configured_ceiling_actually_reaches_the_stage():
     used = _result(score=1.0, last_accessed=_iso_days_ago(0), access_count=10)
     out = stage.apply(PipelineContext(query="memory"), [used])
     assert out[0].payload["access_boost"] == 1.0
+
+
+def test_the_stage_positional_surface_is_pinned():
+    """Third time this class of defect appeared in one change, so it gets a
+    pin rather than a fourth act of remembering.
+
+    `access_bonus_max` was first inserted mid-signature, where
+    `FreshnessBlend(0.2, 14, None, 60, 0.5)` bound 60 to the bonus ceiling
+    and 0.5 to `echo_window_minutes`. This is NOT a stability promise —
+    `docs/api-stability.md` files the pipeline stages as experimental and
+    tells callers to use `Recaller` / `recall_flow` rather than assemble
+    stages themselves. It is pinned because of how the mistake FAILS: 60
+    clamps to a legal 1.0 instead of raising, so the recall simply ranks
+    differently and nothing anywhere says why.
+
+    The knob is keyword-only now, which is stronger than appending: past
+    the star no future parameter can shift another one either.
+    """
+    import inspect
+
+    from mnemostack.recall.pipeline import FreshnessBlend
+
+    params = inspect.signature(FreshnessBlend.__init__).parameters
+    positional = [
+        name
+        for name, p in params.items()
+        if p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD and name != "self"
+    ]
+    assert positional == [
+        "weight",
+        "halflife_days",
+        "confidence_half_life_days",
+        "echo_window_minutes",
+        "echo_penalty",
+        "always_current_files",
+        "always_current_freshness",
+        "timestamp_key",
+        "timestamp_format",
+    ], positional
+    assert params["access_bonus_max"].kind is inspect.Parameter.KEYWORD_ONLY
+
+    # ...and the call that would have broken, spelled out: the fourth
+    # positional is the echo window, not a bonus ceiling.
+    stage = FreshnessBlend(0.2, 14, None, 60, 0.5)
+    assert stage.echo_window_minutes == 60
+    assert stage.echo_penalty == 0.5
+    assert stage.access_bonus_max == DEFAULT_ACCESS_BONUS_MAX
