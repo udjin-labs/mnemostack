@@ -417,7 +417,12 @@ def compute_access_boost(
 
     try:
         last_dt = datetime.fromisoformat(last_accessed.replace("Z", "+00:00"))
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError, TypeError):
+        # TypeError too: a payload is not a contract. A `datetime` or a
+        # `bytes` in this field has a `.replace` that takes different
+        # arguments, so the call raises instead of failing to parse — and a
+        # stamp this stage cannot read must read as "no evidence of use",
+        # which is the neutral 1.0, never an exception out of a read path.
         return 1.0
 
     safe_max = normalize_access_bonus_max(max_bonus)
@@ -440,8 +445,13 @@ def compute_access_boost(
     # it raises OverflowError, which would abort the whole recall — a read
     # path crashed by a value someone else wrote.
     try:
+        # `int()` on a non-finite float raises OverflowError, and on an
+        # int wider than a double it does not — so both the float and the
+        # arbitrary-precision cases have to be caught here, where the
+        # decision lives.
         raw = int(access_count)
     except (TypeError, ValueError, OverflowError):
+        # Unreadable counter, but the stamp already proved one access.
         raw = 1
     count = float(max(1, min(raw, int(_ACCESS_BONUS_FULL_AT))))
     knee = _ACCESS_BONUS_KNEE
@@ -566,13 +576,16 @@ class FreshnessBlend(Stage):
                 freshness *= self.echo_penalty
                 r.payload["echo_penalty"] = True
             r.score = (1 - self.weight) * r.score + self.weight * freshness
-            try:
-                access_count = int(r.payload.get("access_count", 0))
-            except (TypeError, ValueError):
-                access_count = 0
+            # The raw payload value goes straight through: coercing it here
+            # as well meant two places decided what a bad counter means, and
+            # they disagreed. This one caught TypeError and ValueError but
+            # not OverflowError, so `access_count: inf` raised before
+            # `compute_access_boost` was ever consulted — crashing the whole
+            # recall even with the access signal turned OFF, since the crash
+            # happened upstream of the switch that disables it.
             access_boost = compute_access_boost(
                 r.payload.get("last_accessed"),
-                access_count=access_count,
+                access_count=r.payload.get("access_count", 0),
                 half_life_days=self.half_life_days,
                 max_bonus=self.access_bonus_max,
             )
