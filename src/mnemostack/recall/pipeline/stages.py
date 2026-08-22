@@ -312,13 +312,51 @@ def normalize_access_bonus_max(value: float) -> float:
     for. A negative reads as off too — never as an inverted penalty, the
     one direction this term must not have.
     """
+    # Compared BEFORE conversion, not after. `float()` on an int wider than
+    # the double range raises OverflowError rather than returning inf, so a
+    # caller passing 10**1000 to a public builder would crash construction
+    # instead of getting the documented ceiling. Comparing first keeps the
+    # arbitrary-precision int in its own domain, where the comparison is
+    # exact and cannot raise.
+    if isinstance(value, int) and not isinstance(value, bool):
+        if value <= 0:
+            return 0.0
+        if value >= MAX_ACCESS_BONUS_MAX:
+            return MAX_ACCESS_BONUS_MAX
     try:
         bonus = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0.0
     if bonus != bonus:  # NaN
         return 0.0
     return min(max(0.0, bonus), MAX_ACCESS_BONUS_MAX)
+
+
+#: Environment name for the access ceiling, so every entry point spells it
+#: the same way. The variable is read HERE rather than at each call site
+#: because three separate surfaces already shipped without it: the public
+#: builders, the MCP server, and `search`/`answer`. A knob whose wiring is
+#: retyped per entry point is a knob some entry point will not have.
+ACCESS_BONUS_MAX_ENV = "MNEMOSTACK_ACCESS_BONUS_MAX"
+
+
+def resolve_access_bonus_max(explicit: float | None = None) -> float:
+    """The ceiling actually in force: the explicit setting, else the
+    environment, else the default — normalised either way.
+
+    Every command that builds a recall pipeline calls this, so an operator
+    who sets `MNEMOSTACK_ACCESS_BONUS_MAX=0` gets the same answer from
+    `serve`, from `search`, from `answer` and from `mcp-serve`. Anything
+    unparseable in the environment falls back to the default rather than
+    failing startup, matching the other tuning knobs.
+    """
+    if explicit is not None:
+        return normalize_access_bonus_max(explicit)
+    from ...config import env_float
+
+    return normalize_access_bonus_max(
+        env_float(ACCESS_BONUS_MAX_ENV, DEFAULT_ACCESS_BONUS_MAX)
+    )
 
 
 def compute_access_boost(
@@ -386,7 +424,16 @@ def compute_access_boost(
     # says: a payload carrying `last_accessed` without a count is still
     # evidence of use, and reading it as zero would deny the bonus to the
     # very memories this term exists to reward.
-    count = max(1.0, min(float(access_count), _ACCESS_BONUS_FULL_AT))
+    # Clamped in the INTEGER domain first, for the same reason the ceiling
+    # is: `access_count` arrives from a payload, and a remote caller can put
+    # a thousand-digit number there through ordinary metadata. `float()` on
+    # it raises OverflowError, which would abort the whole recall — a read
+    # path crashed by a value someone else wrote.
+    try:
+        raw = int(access_count)
+    except (TypeError, ValueError, OverflowError):
+        raw = 1
+    count = float(max(1, min(raw, int(_ACCESS_BONUS_FULL_AT))))
     knee = _ACCESS_BONUS_KNEE
     # Normalised so `max_bonus` is the bonus actually reached at
     # `_ACCESS_BONUS_FULL_AT` accesses, rather than an asymptote the curve

@@ -387,3 +387,79 @@ def test_the_stage_positional_surface_is_pinned():
     assert stage.echo_window_minutes == 60
     assert stage.echo_penalty == 0.5
     assert stage.access_bonus_max == DEFAULT_ACCESS_BONUS_MAX
+
+
+# --------------------------------------- overflow, and every recall surface
+
+
+def test_a_payload_counter_cannot_crash_the_recall():
+    """P1 from review. `access_count` arrives from a payload, and a remote
+    caller can put a thousand-digit number there through ordinary metadata:
+    it passes the metadata size limits, becomes a Python int, and `float()`
+    on it raises OverflowError — aborting the WHOLE recall. A read path
+    must not be crashable by a value somebody else wrote."""
+    stamp = _iso_days_ago(0)
+    huge = 10**400
+    assert compute_access_boost(stamp, access_count=huge) == pytest.approx(
+        compute_access_boost(stamp, access_count=10), abs=1e-9
+    )
+    assert compute_access_boost(stamp, access_count=-huge) >= 1.0
+
+    used = _result(score=1.0, last_accessed=stamp, access_count=huge)
+    out = FreshnessBlend(weight=0.0).apply(PipelineContext(query="q"), [used])
+    assert 1.0 <= out[0].score <= 1.0 + DEFAULT_ACCESS_BONUS_MAX
+
+
+def test_an_overflowing_ceiling_clamps_instead_of_raising():
+    """Same shape on the configuration side: `float(10**1000)` raises
+    before any clamp can run, so a programmatic caller passing it to a
+    public builder crashed construction instead of getting the cap."""
+    from mnemostack.recall.pipeline import MAX_ACCESS_BONUS_MAX, normalize_access_bonus_max
+
+    assert normalize_access_bonus_max(10**400) == MAX_ACCESS_BONUS_MAX
+    assert normalize_access_bonus_max(-(10**400)) == 0.0
+    assert normalize_access_bonus_max("nonsense") == 0.0
+
+
+def test_every_recall_command_honours_the_off_switch():
+    """Three separate surfaces shipped without this knob before it was
+    caught — the public builders, then MCP, then `search`/`answer`. So the
+    check is over the whole SET rather than one more entry point: an off
+    switch that depends on which command you typed is not an off switch.
+    """
+    from mnemostack.cli import build_parser
+
+    parser = build_parser()
+    for argv in (
+        ["serve", "--access-bonus-max", "0"],
+        ["search", "q", "--access-bonus-max", "0"],
+        ["answer", "q", "--access-bonus-max", "0"],
+        ["mcp-serve", "--access-bonus-max", "0"],
+    ):
+        assert parser.parse_args(argv).access_bonus_max == 0.0, argv
+
+
+def test_the_environment_reaches_every_surface_through_one_resolver(monkeypatch):
+    """...and the env var likewise. It is read in one place so that the
+    answer cannot differ between commands — the failure mode when each
+    entry point retypes its own wiring."""
+    from mnemostack.recall.pipeline import (
+        DEFAULT_ACCESS_BONUS_MAX as DEFAULT,
+    )
+    from mnemostack.recall.pipeline import (
+        MAX_ACCESS_BONUS_MAX,
+        resolve_access_bonus_max,
+    )
+
+    monkeypatch.delenv("MNEMOSTACK_ACCESS_BONUS_MAX", raising=False)
+    assert resolve_access_bonus_max() == DEFAULT
+
+    monkeypatch.setenv("MNEMOSTACK_ACCESS_BONUS_MAX", "0")
+    assert resolve_access_bonus_max() == 0.0
+    # An explicit setting still beats the environment.
+    assert resolve_access_bonus_max(1.0) == MAX_ACCESS_BONUS_MAX
+
+    # A typo must not fail startup, and must not silently mean "off" —
+    # it falls back to the default, like every other tuning knob here.
+    monkeypatch.setenv("MNEMOSTACK_ACCESS_BONUS_MAX", "not-a-number")
+    assert resolve_access_bonus_max() == DEFAULT

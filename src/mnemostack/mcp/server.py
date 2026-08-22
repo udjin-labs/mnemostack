@@ -26,7 +26,7 @@ except ImportError:  # pragma: no cover
     StrictInt = int  # type: ignore[assignment, misc]
     _FASTMCP_AVAILABLE = False
 
-from ..config import Config, env_float, model_kwargs, provider_kwargs
+from ..config import Config, model_kwargs, provider_kwargs
 from ..embeddings import get_provider
 from ..embeddings.roles import EmbeddingSpaceError
 from ..feedback import apply_feedback
@@ -61,6 +61,7 @@ from ..recall import (
     build_full_pipeline,
     chunk_filter_probe_via,
     recall_flow,
+    resolve_access_bonus_max,
     sum_tokens,
 )
 from ..recall.pipeline import FileStateStore, default_state_path
@@ -1307,9 +1308,7 @@ def main() -> None:
         auth_enabled=auth_enabled,
         api_key=os.environ.get("MNEMOSTACK_API_KEY") or None,
         keys_file=os.environ.get("MNEMOSTACK_KEYS_FILE") or None,
-        access_bonus_max=env_float(
-            "MNEMOSTACK_ACCESS_BONUS_MAX", DEFAULT_ACCESS_BONUS_MAX
-        ),
+        access_bonus_max=resolve_access_bonus_max(),
     )
     mcp.run()
 

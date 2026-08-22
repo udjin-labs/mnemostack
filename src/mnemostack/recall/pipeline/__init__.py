@@ -36,6 +36,7 @@ from .stages import (
     QLearningReranker,
     is_exact_token_query,
     normalize_access_bonus_max,
+    resolve_access_bonus_max,
 )
 from .state import FileStateStore, InMemoryStateStore, StateStore, default_state_path
 
@@ -55,6 +56,7 @@ __all__ = [
     "DEFAULT_ACCESS_BONUS_MAX",
     "MAX_ACCESS_BONUS_MAX",
     "normalize_access_bonus_max",
+    "resolve_access_bonus_max",
     "FreshnessBlend",
     "InhibitionOfReturn",
     "CuriosityBoost",

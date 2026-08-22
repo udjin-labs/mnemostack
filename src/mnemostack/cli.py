@@ -24,7 +24,6 @@ from . import __version__
 from .config import (
     DEFAULT_CONFIG_PATHS,
     Config,
-    env_float,
     generate_example_config,
     model_kwargs,
     provider_kwargs,
@@ -55,11 +54,11 @@ from .recall import (
     sum_tokens,
 )
 from .recall.pipeline import (
-    DEFAULT_ACCESS_BONUS_MAX,
     MAX_ACCESS_BONUS_MAX,
     FileStateStore,
     build_full_pipeline,
     default_state_path,
+    resolve_access_bonus_max,
 )
 from .synthesis import synthesize
 from .vector import VectorStore
@@ -386,7 +385,11 @@ def _doctor_qdrant(
             except Exception:  # noqa: BLE001 — older server: can't verify
                 gap = -1
             if gap == 0:
-                add("qdrant.sparse_space", "ok", f"'{SPARSE_TEXT_VECTOR}' space present, all points covered")
+                add(
+                    "qdrant.sparse_space",
+                    "ok",
+                    f"'{SPARSE_TEXT_VECTOR}' space present, all points covered",
+                )
             elif gap > 0:
                 add(
                     "qdrant.sparse_space",
@@ -395,7 +398,11 @@ def _doctor_qdrant(
                     "run `mnemostack sparse-backfill`",
                 )
             else:
-                add("qdrant.sparse_space", "warn", f"'{SPARSE_TEXT_VECTOR}' space present (coverage not verifiable on this server)")
+                add(
+                    "qdrant.sparse_space",
+                    "warn",
+                    f"'{SPARSE_TEXT_VECTOR}' space present (coverage not verifiable on this server)",
+                )
         else:
             add(
                 "qdrant.sparse_space",
@@ -411,8 +418,7 @@ def _doctor_qdrant(
     payload_schema = getattr(info, "payload_schema", None) or {}
     if payload_schema:
         listed_indexes = ", ".join(
-            f"{name} ({payload_index_type_name(fi)})"
-            for name, fi in sorted(payload_schema.items())
+            f"{name} ({payload_index_type_name(fi)})" for name, fi in sorted(payload_schema.items())
         )
         add("qdrant.payload_indexes", "ok", listed_indexes)
     else:
@@ -431,9 +437,10 @@ def _doctor_qdrant(
         missing = []
         for gate_field in _lexical_gate_fields():
             field_info = schema.get(gate_field)
-            if field_info is not None and "text" in str(
-                getattr(field_info, "data_type", field_info)
-            ).lower():
+            if (
+                field_info is not None
+                and "text" in str(getattr(field_info, "data_type", field_info)).lower()
+            ):
                 add("qdrant.text_index", "ok", f"full-text index on '{gate_field}'")
             else:
                 missing.append(gate_field)
@@ -569,7 +576,9 @@ def cmd_tenant_migrate(args: argparse.Namespace) -> int:
     if not exists:
         if not args.dry_run:
             _audit(
-                "tenant.migrate", tenant=args.tenant, outcome="error",
+                "tenant.migrate",
+                tenant=args.tenant,
+                outcome="error",
                 reason="collection_absent",
             )
         print(f"error: collection '{args.collection}' does not exist", file=sys.stderr)
@@ -620,7 +629,9 @@ def cmd_tenant_migrate(args: argparse.Namespace) -> int:
             # needs---yes refusal (a validation gate, nothing attempted — not).
             if rc == 1:
                 _audit(
-                    "tenant.migrate", tenant=args.tenant, outcome="error",
+                    "tenant.migrate",
+                    tenant=args.tenant,
+                    outcome="error",
                     reason="graph_preflight_failed",
                 )
             return rc
@@ -1034,8 +1045,11 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
             print(f"  {label} {value}")
 
     print(f"tenant '{tenant}':")
-    _line("vector points:   ", f"{points}" + (" (collection absent)" if collection_absent else ""),
-          "vector points")
+    _line(
+        "vector points:   ",
+        f"{points}" + (" (collection absent)" if collection_absent else ""),
+        "vector points",
+    )
     if "graph" in unavailable:
         print("  graph:            unknown — store unavailable")
     elif graph_counts is not None:
@@ -1176,9 +1190,7 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
     if gs is not None:
         try:
             gc = gs.delete_tenant(tenant)
-            extra = (
-                f" (+{gc['detached']} attached unowned edge(s))" if gc.get("detached") else ""
-            )
+            extra = f" (+{gc['detached']} attached unowned edge(s))" if gc.get("detached") else ""
             print(f"deleted {gc['nodes']} graph node(s), {gc['relationships']} edge(s){extra}")
         except Exception as e:  # noqa: BLE001
             failed.append("graph")
@@ -1251,7 +1263,9 @@ def cmd_tenant_rm(args: argparse.Namespace) -> int:
     return 0
 
 
-def _audit(action: str, *, tenant: str | None = None, outcome: str = "success", **details: Any) -> None:
+def _audit(
+    action: str, *, tenant: str | None = None, outcome: str = "success", **details: Any
+) -> None:
     """Best-effort audit of a control-plane operation (see ``mnemostack.audit``:
     never raises, and a no-op unless ``MNEMOSTACK_AUDIT_FILE`` is set).
 
@@ -1429,10 +1443,7 @@ def cmd_quota_set(args: argparse.Namespace) -> int:
     mp = "unlimited" if quota.max_points is None else str(quota.max_points)
     rps = "unlimited" if quota.max_rps is None else f"{quota.max_rps:g}"
     burst = "-" if quota.effective_burst() is None else str(quota.effective_burst())
-    print(
-        f"quota for tenant '{args.tenant}': "
-        f"max_points={mp}, max_rps={rps}, burst={burst}"
-    )
+    print(f"quota for tenant '{args.tenant}': max_points={mp}, max_rps={rps}, burst={burst}")
     return 0
 
 
@@ -1627,8 +1638,13 @@ def cmd_resolve(args: argparse.Namespace) -> int:
         print(json.dumps(res.to_dict(), ensure_ascii=False, indent=2))
     else:
         print(f"{res.verdict}: {res.detail}")
-        print(f"  source:   {res.source}" + (f" -> {res.resolved_path}" if res.resolved_path else ""))
-        print(f"  snapshot: {res.snapshot}" + (f" (captured {res.captured_at})" if res.captured_at else ""))
+        print(
+            f"  source:   {res.source}" + (f" -> {res.resolved_path}" if res.resolved_path else "")
+        )
+        print(
+            f"  snapshot: {res.snapshot}"
+            + (f" (captured {res.captured_at})" if res.captured_at else "")
+        )
         if res.found_offset is not None and res.found_offset != res.stored_offset:
             print(f"  offset:   {res.stored_offset} -> {res.found_offset}")
     if res.supported:
@@ -1753,9 +1769,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         except ValueError as e:
             add("config.text_search_fields", "misconfig", str(e))
         else:
-            listed = ", ".join(
-                f"{k}={v:g}" for k, v in cfg.recall.text_search_fields.items()
-            )
+            listed = ", ".join(f"{k}={v:g}" for k, v in cfg.recall.text_search_fields.items())
             add("config.text_search_fields", "ok", listed)
     if cfg.recall.timestamp_format in _TR.TIMESTAMP_FORMATS:
         add("config.timestamp_format", "ok", cfg.recall.timestamp_format)
@@ -1764,8 +1778,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             "config.timestamp_format",
             "misconfig",
             f"invalid timestamp_format '{cfg.recall.timestamp_format}'",
-            "set recall.timestamp_format to one of: "
-            + ", ".join(_TR.TIMESTAMP_FORMATS),
+            "set recall.timestamp_format to one of: " + ", ".join(_TR.TIMESTAMP_FORMATS),
         )
 
     # Embedding provider (a hard recall dependency).
@@ -1955,6 +1968,10 @@ def _recall_for_cli(args: argparse.Namespace, recaller, query: str, limit: int):
     _text_key, _ts_key, _ts_fmt = _payload_schema()
     pipeline = build_full_pipeline(
         state_store=FileStateStore(default_state_path()),
+        # `search` and `answer` run the same freshness stage `serve` does, so
+        # a deployment that turned the access signal off must get that here
+        # too — otherwise the off switch depends on which command you type.
+        access_bonus_max=resolve_access_bonus_max(getattr(args, "access_bonus_max", None)),
         graph_uri=getattr(args, "memgraph_uri", None) or None,
         graph_timeout=getattr(args, "graph_timeout", 5.0),
         text_key=_text_key,
@@ -2238,9 +2255,7 @@ def cmd_answer(args: argparse.Namespace) -> int:
     return 0
 
 
-def _stable_chunk_id(
-    source: str, offset: int, text: str, *, tenant: str | None = None
-) -> str:
+def _stable_chunk_id(source: str, offset: int, text: str, *, tenant: str | None = None) -> str:
     """Deterministic UUID for an (source, offset, text) triple.
 
     Same inputs always produce the same id. That makes `mnemostack index` safe
@@ -2396,7 +2411,13 @@ def _build_recaller(
                 )
         elif mode == "qdrant_bm25" and store is not None:
             retrievers.append(
-                BM25Retriever.from_qdrant(store.client, args.collection, text_key=schema_kw["text_key"], timestamp_key=schema_kw["timestamp_key"], timestamp_format=schema_kw["timestamp_format"])
+                BM25Retriever.from_qdrant(
+                    store.client,
+                    args.collection,
+                    text_key=schema_kw["text_key"],
+                    timestamp_key=schema_kw["timestamp_key"],
+                    timestamp_format=schema_kw["timestamp_format"],
+                )
             )
         elif mode == "lexical" and provider is not None and store is not None:
             arms, lexical_weights = build_qdrant_text_arms(
@@ -2417,7 +2438,12 @@ def _build_recaller(
                 text_key=text_key,
             )
             retrievers.append(
-                QdrantSparseRetriever(vector_store=sparse_store, text_key=schema_kw["text_key"], timestamp_key=schema_kw["timestamp_key"], timestamp_format=schema_kw["timestamp_format"])
+                QdrantSparseRetriever(
+                    vector_store=sparse_store,
+                    text_key=schema_kw["text_key"],
+                    timestamp_key=schema_kw["timestamp_key"],
+                    timestamp_format=schema_kw["timestamp_format"],
+                )
             )
     memgraph_uri = getattr(args, "memgraph_uri", None)
     if _source_enabled_for_cli("memgraph", source_filter) and memgraph_uri:
@@ -2532,9 +2558,19 @@ def cmd_index(args: argparse.Namespace) -> int:
             # `Component.TSX` are found even on case-sensitive filesystems,
             # where per-extension globs would silently miss them.
             skip_dirs = {
-                ".git", "node_modules", "__pycache__", ".venv", "venv",
-                "dist", "build", "target", ".tox", ".mypy_cache",
-                ".ruff_cache", ".pytest_cache", "vendor",
+                ".git",
+                "node_modules",
+                "__pycache__",
+                ".venv",
+                "venv",
+                "dist",
+                "build",
+                "target",
+                ".tox",
+                ".mypy_cache",
+                ".ruff_cache",
+                ".pytest_cache",
+                "vendor",
             }
             # os.walk with in-place dirnames pruning: a huge node_modules is
             # never DESCENDED into (rglob would enumerate it fully and only
@@ -2637,9 +2673,7 @@ def cmd_index(args: argparse.Namespace) -> int:
                 # searchable through code_tokens.
                 from .code import CODE_OWNED_KEYS
 
-                payload["_code_keys"] = sorted(
-                    k for k in CODE_OWNED_KEYS if k in payload
-                )
+                payload["_code_keys"] = sorted(k for k in CODE_OWNED_KEYS if k in payload)
                 payload.update(snapshot)
                 payload["_id_scheme"] = "stable_chunk_id"
                 chunks.append((cid, cc.text, payload))
@@ -2743,9 +2777,7 @@ def cmd_index(args: argparse.Namespace) -> int:
         max_points = _resolve_max_points(args, tenant)
         if max_points is not None:
             try:
-                enforce_points_quota(
-                    tenant, store.count(tenant=tenant), len(to_embed), max_points
-                )
+                enforce_points_quota(tenant, store.count(tenant=tenant), len(to_embed), max_points)
             except QuotaExceededError as exc:
                 print(f"error: {exc}", file=sys.stderr)
                 return 2
@@ -2976,8 +3008,7 @@ def cmd_index(args: argparse.Namespace) -> int:
         f"Done: inserted/updated {inserted}, skipped {skipped},"
         f" failed-embedding {failed}, total chunks seen {len(chunks)}"
         + (
-            f", payloads: {compared} compared / {unchanged} unchanged / "
-            f"{refreshed} patched"
+            f", payloads: {compared} compared / {unchanged} unchanged / {refreshed} patched"
             if args.refresh_payloads
             else ""
         )
@@ -3130,14 +3161,24 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
     # what the prune step will remove — per-source replacements plus full-root
     # deletions), checked after embedding but before any write.
     _quota_check = markdown_quota_check(
-        store, tenant, max_points, existing_payloads, chunks, set(col.sources),
-        prune=bool(args.prune and not args.recreate), full_root=full_root_walk,
+        store,
+        tenant,
+        max_points,
+        existing_payloads,
+        chunks,
+        set(col.sources),
+        prune=bool(args.prune and not args.recreate),
+        full_root=full_root_walk,
         md_owned_only=False,  # bulk prune_stale_chunks removes every stale point of the source
     )
     initial_skipped = False
     try:
         cs = upsert_markdown_chunks(
-            store, provider, chunks, existing_payloads, tenant=tenant,
+            store,
+            provider,
+            chunks,
+            existing_payloads,
+            tenant=tenant,
             before_upsert=_quota_check,
             embedding_batch_size=getattr(args, "embedding_batch_size", None) or 64,
         )
@@ -3259,8 +3300,7 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
         f"Done: inserted/updated {inserted}, skipped {skipped},"
         f" failed-embedding {failed}, total chunks {len(chunks)}"
         + (
-            f", payloads: {cs.compared} compared / {cs.unchanged} unchanged / "
-            f"{refreshed} patched"
+            f", payloads: {cs.compared} compared / {cs.unchanged} unchanged / {refreshed} patched"
             if cs.compared
             else ""
         )
@@ -3271,7 +3311,13 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
 
     if getattr(args, "watch", False):
         return _watch_markdown(
-            args, store, provider, index_root, str(target), graph_uri, watch_baseline,
+            args,
+            store,
+            provider,
+            index_root,
+            str(target),
+            graph_uri,
+            watch_baseline,
             retry_all=initial_skipped,
         )
     return 0
@@ -3488,9 +3534,7 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         parents=[common],
         help="Diagnose config + dependencies (read-only; exit 0 ok / 1 down / 2 misconfigured)",
     )
-    p_doctor.add_argument(
-        "--json", action="store_true", help="Emit the diagnostic report as JSON"
-    )
+    p_doctor.add_argument("--json", action="store_true", help="Emit the diagnostic report as JSON")
     p_doctor.add_argument(
         "--check-llm",
         action="store_true",
@@ -3544,9 +3588,7 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         help="Where relative sources are looked up (default: the payload's own index_root)",
     )
     p_resolve.add_argument("--tenant", default=None, help="Tenant scope for the lookup")
-    p_resolve.add_argument(
-        "--json", action="store_true", help="Emit the full resolution as JSON"
-    )
+    p_resolve.add_argument("--json", action="store_true", help="Emit the full resolution as JSON")
     p_resolve.set_defaults(func=cmd_resolve)
 
     p_sparse_backfill = sub.add_parser(
@@ -3712,9 +3754,7 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     pk_revoke.set_defaults(func=cmd_keys_revoke)
 
     # ---- quota ----
-    p_quota = sub.add_parser(
-        "quota", help="Manage per-tenant resource quotas (set / list / rm)"
-    )
+    p_quota = sub.add_parser("quota", help="Manage per-tenant resource quotas (set / list / rm)")
     qsub = p_quota.add_subparsers(dest="quota_action")
 
     def _quota_help(_args: argparse.Namespace) -> int:
@@ -3723,9 +3763,9 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
 
     p_quota.set_defaults(func=_quota_help)
     from mnemostack.quotas import _UNSET
+
     _quotas_file_help = (
-        "Quota store path (default: $MNEMOSTACK_QUOTAS_FILE or "
-        "~/.config/mnemostack/quotas.json)"
+        "Quota store path (default: $MNEMOSTACK_QUOTAS_FILE or ~/.config/mnemostack/quotas.json)"
     )
     pq_set = qsub.add_parser(
         "set",
@@ -3744,8 +3784,7 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         type=_float_or_none,
         default=_UNSET,
         metavar="R|none",
-        help="Max sustained requests/sec at the authenticated HTTP surface "
-        "('none' to clear)",
+        help="Max sustained requests/sec at the authenticated HTTP surface ('none' to clear)",
     )
     pq_set.add_argument(
         "--burst",
@@ -3824,6 +3863,16 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         "--query-expansion",
         action="store_true",
         help="Expand query with an LLM and fuse recall over original + variants",
+    )
+    p_search.add_argument(
+        "--access-bonus-max",
+        type=float,
+        default=None,
+        help=(
+            "Ceiling on the freshness stage's access bonus (default 0.25, "
+            "clamped to 1.0). 0 removes the access signal from ranking. "
+            "Env: MNEMOSTACK_ACCESS_BONUS_MAX"
+        ),
     )
     p_search.add_argument(
         "--vector-floor",
@@ -3993,6 +4042,16 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         help="Expand query with an LLM and fuse recall over original + variants",
     )
     p_answer.add_argument(
+        "--access-bonus-max",
+        type=float,
+        default=None,
+        help=(
+            "Ceiling on the freshness stage's access bonus (default 0.25, "
+            "clamped to 1.0). 0 removes the access signal from ranking. "
+            "Env: MNEMOSTACK_ACCESS_BONUS_MAX"
+        ),
+    )
+    p_answer.add_argument(
         "--vector-floor",
         type=int,
         default=cfg.recall.vector_floor,
@@ -4003,8 +4062,7 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         type=int,
         default=cfg.recall.token_budget,
         help=(
-            "Hard cap on the total (estimated) text tokens of the memories "
-            "fed to the answer LLM"
+            "Hard cap on the total (estimated) text tokens of the memories fed to the answer LLM"
         ),
     )
     _add_validity_recall_flags(p_answer)
@@ -4249,6 +4307,16 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         "--state-path",
         default=default_state_path(),
         help="Pipeline state file path for feedback",
+    )
+    p_mcp.add_argument(
+        "--access-bonus-max",
+        type=float,
+        default=None,
+        help=(
+            "Ceiling on the freshness stage's access bonus (default 0.25, "
+            "clamped to 1.0). 0 removes the access signal from ranking. "
+            "Env: MNEMOSTACK_ACCESS_BONUS_MAX"
+        ),
     )
     p_mcp.add_argument(
         "--vector-floor",
@@ -4543,12 +4611,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     # Explicit flag beats env. Bounds are ServerConfig's to apply, not this
     # call site's — a knob clamped at each entry point is a rule stated three
     # times, and library callers would get none of them.
-    _bonus = getattr(args, "access_bonus_max", None)
-    _access_bonus_max = (
-        env_float("MNEMOSTACK_ACCESS_BONUS_MAX", DEFAULT_ACCESS_BONUS_MAX)
-        if _bonus is None
-        else float(_bonus)
-    )
+    _access_bonus_max = resolve_access_bonus_max(getattr(args, "access_bonus_max", None))
     _weak_below = getattr(args, "retry_weak_below", None)
     _weak_below = (
         max(1, int(_weak_below))
@@ -4770,6 +4833,9 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
         # getattr: programmatic callers construct bare Namespaces without
         # every parser default (the tier tests do exactly that).
         quotas_file=getattr(args, "quotas_file", None),
+        # Same resolver as `serve`: the documented env var must not depend
+        # on which command starts the server.
+        access_bonus_max=resolve_access_bonus_max(getattr(args, "access_bonus_max", None)),
         text_key=_schema_text,
         timestamp_key=_schema_ts,
         timestamp_format=_schema_fmt,

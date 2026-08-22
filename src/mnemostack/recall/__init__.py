@@ -44,6 +44,7 @@ from .pipeline import (
     build_full_pipeline,
     build_stateless_pipeline,
     normalize_access_bonus_max,
+    resolve_access_bonus_max,
 )
 from .query_expansion import expand_query
 from .recaller import Recaller, RecallResult
@@ -139,6 +140,7 @@ __all__ = [
     "DEFAULT_ACCESS_BONUS_MAX",
     "MAX_ACCESS_BONUS_MAX",
     "normalize_access_bonus_max",
+    "resolve_access_bonus_max",
     "build_full_pipeline",
     "build_stateless_pipeline",
 ]
