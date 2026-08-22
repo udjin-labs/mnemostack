@@ -98,7 +98,10 @@ def test_a_non_string_write_stamp_is_ignored_rather_than_read_as_an_epoch():
         assert _fresh({"indexed_at": corrupt}) == 0.5, corrupt
 
     # An unparseable STRING is likewise neutral — not an error, not 1970.
-    for text in ("", "   ", "not-a-date", "2026-13-45T99:99:99"):
+    # The numeric strings matter most: the shared instant parser accepts
+    # those as Unix epochs, so a type check alone left "12345" reading as
+    # 1970 while the docstring claimed strict ISO. A type is not a format.
+    for text in ("", "   ", "not-a-date", "2026-13-45T99:99:99", "12345", "1719834000"):
         assert _fresh({"indexed_at": text}) == 0.5, text
 
     # ...and a real ISO stamp still ages, so strictness has not quietly
@@ -229,3 +232,46 @@ def test_a_payload_refresh_does_not_reset_the_write_time(tmp_path, monkeypatch):
     after = {cid: p["indexed_at"] for cid, p in store.points.items()}
     assert set(after.values()) == {aged}, (first, after)
     assert _fresh({"indexed_at": after[next(iter(after))]}) < 0.05
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        pytest.param([], id="prose"),
+        pytest.param(["--code"], id="code"),
+        pytest.param(["--window-size", "3"], id="sliding-window"),
+    ],
+)
+def test_every_chunking_branch_gets_the_write_stamp(tmp_path, monkeypatch, flags):
+    """`cmd_index` builds payloads in three places — prose chunks, `--code`
+    chunks, and sliding windows — and the first attempt stamped only the
+    first, leaving two whole modes unable to age.
+
+    Parametrised over the branches rather than asserting one of them: the
+    stamp is applied at the single point they all converge on, and this is
+    what makes a fourth branch fail loudly instead of quietly shipping
+    another unstampable mode.
+    """
+    import mnemostack.cli as cli
+
+    # Both kinds of input, so each mode finds something: the prose and
+    # window branches scan .md/.txt, `--code` scans sources.
+    (tmp_path / "doc.md").write_text(
+        "\n\n".join(f"paragraph {i} " + "filler words " * 40 for i in range(12)),
+        encoding="utf-8",
+    )
+    (tmp_path / "doc.py").write_text(
+        "\n\n".join(f"def f{i}():\n    return {i}  # " + "x " * 30 for i in range(12)),
+        encoding="utf-8",
+    )
+    store = _RecordingStore()
+    monkeypatch.setattr(cli, "get_provider", lambda *a, **kw: _ConstantProvider())
+    monkeypatch.setattr(cli, "VectorStore", lambda **kw: store)
+    assert cli.main(["index", str(tmp_path), "--chunk-size", "200", *flags]) == 0
+
+    payloads = list(store.points.values())
+    assert payloads, f"nothing indexed for {flags}"
+    stamps = [p.get("indexed_at") for p in payloads]
+    assert all(isinstance(v, str) and v for v in stamps), (flags, stamps)
+    assert len(set(stamps)) == 1, (flags, sorted(set(stamps)))
+    assert _fresh({"indexed_at": stamps[0]}) > 0.99, (flags, stamps[0])

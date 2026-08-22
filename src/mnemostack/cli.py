@@ -2716,14 +2716,6 @@ def cmd_index(args: argparse.Namespace) -> int:
             # id commitment.
             payload.update(snapshot)
             payload["_id_scheme"] = "stable_chunk_id"
-            # Write time, stamped here for the same reason and in the same
-            # place as the markers above: after enrichment, so an enricher
-            # key collision cannot fabricate one. The freshness stage falls
-            # back to this when a document carries no event time of its own,
-            # and every OTHER write path already sets it — a point written
-            # by this command would have been the one kind that still could
-            # not age.
-            payload["indexed_at"] = _run_indexed_at
             chunks.append((cid, chunk, payload))
         if args.window_size > 1:
             for start in range(0, len(file_chunks) - args.window_size + 1):
@@ -2761,6 +2753,19 @@ def cmd_index(args: argparse.Namespace) -> int:
                         payload,
                     )
                 chunks.append((cid, chunk, payload))
+
+    # Write time, stamped ONCE over the collected chunks rather than inside
+    # each branch that builds a payload. There are three of those — prose,
+    # `--code`, and sliding windows — and stamping per branch had already
+    # missed two of them; a fourth branch added later would miss it again.
+    # This is the point every chunk reaches whatever built it — the same
+    # reasoning the tenant stamp below already applies, and for the same
+    # kind of consequence.
+    #
+    # After enrichment for the same reason the markers above are: an
+    # enricher key collision must not be able to fabricate a write time.
+    for *_, chunk_payload in chunks:
+        chunk_payload["indexed_at"] = _run_indexed_at
 
     # Load existing point IDs once so re-runs skip unchanged chunks without
     # re-embedding (saves API quota / local GPU time). When refreshing

@@ -602,9 +602,20 @@ class FreshnessBlend(Stage):
         """
         if not isinstance(value, str):
             return None
-        from ..validity import parse_payload_instant
-
-        return parse_payload_instant(value)
+        # Parsed as ISO HERE rather than delegated. The shared parser also
+        # accepts numeric STRINGS as epochs, so a type check alone left
+        # "12345" reading as 1970 — the exact harm this docstring claims to
+        # avoid. A type is not a format, and the contract is the format.
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
 
     def _parse_timestamp(self, payload: dict[str, Any]) -> datetime | None:
         # parse_payload_instant accepts every shape a foreign collection may
