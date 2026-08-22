@@ -9,6 +9,7 @@ feeds back into is also the one that could compound into permanent
 favouritism if it were left unbounded.
 """
 
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -118,9 +119,26 @@ def test_a_count_below_one_still_earns_the_bonus_it_evidences():
     )
 
 
-def test_a_naive_stamp_is_read_as_utc_not_local():
+def test_a_naive_stamp_is_read_as_utc_not_local(monkeypatch):
     """Payloads written by older clients carry naive timestamps; reading one
-    as local time would shift the bonus by the operator's UTC offset."""
+    as local time would shift the bonus by the operator's UTC offset.
+
+    The offset is FORCED rather than inherited from the host. Comparing a
+    naive stamp against an aware one proves nothing on a machine that is
+    already UTC — the two readings coincide whatever the code does, so on
+    a UTC runner (which CI is) this test would pass over the very bug it
+    names. TZ is pinned to a zone with a large offset so the difference
+    has somewhere to show up.
+    """
+    if not hasattr(time, "tzset"):
+        # Windows has no tzset, so the offset cannot be forced there. Skip
+        # rather than fall back to the host zone: a green run that proves
+        # nothing is worse than an honest gap, and this project's CI is
+        # Linux — but contributors are not.
+        pytest.skip("TZ cannot be forced on this platform (no time.tzset)")
+    monkeypatch.setenv("TZ", "Pacific/Kiritimati")  # UTC+14
+    time.tzset()
+
     naive = (datetime.now(timezone.utc) - timedelta(days=1)).replace(tzinfo=None)
     aware = datetime.now(timezone.utc) - timedelta(days=1)
     assert compute_access_boost(naive.isoformat(), access_count=1) == pytest.approx(
