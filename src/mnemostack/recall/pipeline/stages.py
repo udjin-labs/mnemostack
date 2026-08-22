@@ -352,11 +352,24 @@ def resolve_access_bonus_max(explicit: float | None = None) -> float:
     """
     if explicit is not None:
         return normalize_access_bonus_max(explicit)
-    from ...config import env_float
 
-    return normalize_access_bonus_max(
-        env_float(ACCESS_BONUS_MAX_ENV, DEFAULT_ACCESS_BONUS_MAX)
-    )
+    import os
+
+    raw = os.environ.get(ACCESS_BONUS_MAX_ENV)
+    if raw is None:
+        return DEFAULT_ACCESS_BONUS_MAX
+    try:
+        # Parsed here rather than through a generic reader that rejects
+        # non-finite values, because the flag and the variable must not
+        # answer differently: `--access-bonus-max inf` clamps to the cap, so
+        # `MNEMOSTACK_ACCESS_BONUS_MAX=inf` has to as well. Asking for no
+        # ceiling gets you the highest one allowed, exactly as 99 does.
+        parsed = float(raw.strip())
+    except (TypeError, ValueError):
+        # Genuinely unparseable: fall back rather than fail startup, and
+        # rather than silently meaning "off".
+        return DEFAULT_ACCESS_BONUS_MAX
+    return normalize_access_bonus_max(parsed)
 
 
 def compute_access_boost(

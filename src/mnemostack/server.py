@@ -43,7 +43,6 @@ from mnemostack.access import record_access
 from mnemostack.config import (
     Config,
     ensure_text_fields_mode,
-    env_float,
     model_kwargs,
     provider_kwargs,
     resolve_text_search_mode,
@@ -106,6 +105,7 @@ from mnemostack.recall import (
     chunk_filter_probe_via,
     normalize_access_bonus_max,
     recall_flow,
+    resolve_access_bonus_max,
     sum_tokens,
 )
 from mnemostack.recall.pipeline import FileStateStore, default_state_path
@@ -835,9 +835,7 @@ class ServerConfig:
             token_budget=cfg.recall.token_budget,
             auto_record_ior=_env_bool("MNEMOSTACK_AUTO_RECORD_IOR"),
             record_access=_env_bool("MNEMOSTACK_RECORD_ACCESS"),
-            access_bonus_max=env_float(
-                "MNEMOSTACK_ACCESS_BONUS_MAX", DEFAULT_ACCESS_BONUS_MAX
-            ),
+            access_bonus_max=resolve_access_bonus_max(),
             retry_on_weak=_env_bool("MNEMOSTACK_RETRY_ON_WEAK"),
             retry_weak_below=_env_int("MNEMOSTACK_RETRY_WEAK_BELOW", 1),
             auth_enabled=_env_bool("MNEMOSTACK_AUTH_ENABLED"),

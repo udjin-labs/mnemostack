@@ -463,3 +463,33 @@ def test_the_environment_reaches_every_surface_through_one_resolver(monkeypatch)
     # it falls back to the default, like every other tuning knob here.
     monkeypatch.setenv("MNEMOSTACK_ACCESS_BONUS_MAX", "not-a-number")
     assert resolve_access_bonus_max() == DEFAULT
+
+
+def test_the_flag_and_the_variable_never_disagree(monkeypatch):
+    """Found by reading a reviewer's own probe output rather than its
+    findings: `99` clamped to the cap both ways, but `inf` clamped via the
+    flag and fell back to the DEFAULT via the environment — 1.0 against
+    0.25 for the same intent, expressed two ways.
+
+    That is the branch's recurring defect wearing a different hat: not "one
+    surface is missing the knob" but "two ways of setting it disagree".
+    Asking for no ceiling gets the highest one allowed, exactly as 99 does,
+    whichever way you ask.
+    """
+    from mnemostack.recall.pipeline import (
+        DEFAULT_ACCESS_BONUS_MAX as DEFAULT,
+    )
+    from mnemostack.recall.pipeline import (
+        resolve_access_bonus_max,
+    )
+
+    for text in ("0", "0.4", "99", "1e400", "inf", "-1", "-inf"):
+        monkeypatch.setenv("MNEMOSTACK_ACCESS_BONUS_MAX", text)
+        from_env = resolve_access_bonus_max()
+        from_flag = resolve_access_bonus_max(float(text))
+        assert from_env == from_flag, (text, from_env, from_flag)
+
+    # Only a genuinely unparseable value falls back — and to the default,
+    # not to "off": a typo must not silently disable a ranking signal.
+    monkeypatch.setenv("MNEMOSTACK_ACCESS_BONUS_MAX", "not-a-number")
+    assert resolve_access_bonus_max() == DEFAULT
