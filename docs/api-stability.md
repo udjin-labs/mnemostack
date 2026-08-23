@@ -490,21 +490,24 @@ Covered in detail in [migration notes](migration-0.8-to-1.0.md). Summary:
   single-tenant (unscoped). A scoped read confines to it and can never see another
   tenant's — or an unscoped — node.
 
-⚠️ **`as_of` needs the world-time bounds to be present.** Point-in-time recall
-reconstructs the past from `valid_from` / `valid_until` only — `valid_at()`
-deliberately ignores `invalidated_at`, because a point-in-time query wants what
-was true then, including facts since marked stale. `invalidated_at` governs the
-*default* current view, so stamping it on a record that is still in force hides
-it from ordinary recall; set it only on records that really are superseded.
-Without the world-time bounds mnemostack has no data that
-separates "recorded later" from "in force at the instant you asked about", and
-recency is the only temporal signal ranking can use. Measured on a synthetic set
-whose facts are recorded last but were in force first: the un-annotated mode
-puts the correct record first in 21 of 48 cases and answers correctly in 1 of
-48, where the same facts annotated give 48 of 48 and 41 of 48. Those figures
-characterise the un-annotated mode, not general recall quality — pass the
-validity keys whenever you intend to use `as_of`, or to ask about facts that can
-be superseded.
+⚠️ **`as_of` reads the world-time bounds, and each of them is optional.**
+`valid_at()` keeps a record when `valid_from <= as_of < valid_until`, treating a
+missing `valid_from` as the indefinite past and a missing `valid_until` as the
+indefinite future. It ignores `invalidated_at` entirely — a point-in-time query
+wants what was true then, including facts since marked stale — so stamping
+`invalidated_at` on a record that is still in force does not help `as_of` and
+does hide it from the default current view.
+
+Supply the bounds you actually know: a fact that began on a date needs only
+`valid_from`, and inventing an endpoint to satisfy the query is worse than
+leaving it open. The consequence to plan for is that a record carrying neither
+bound is valid at every instant, so `as_of` cannot exclude it — a point-in-time
+query then returns the same set as an ordinary one and the answer rests on
+ranking alone, where recency is the only temporal signal left. Measured on a
+synthetic set whose facts are recorded last but were in force first: with no
+bounds the correct record comes first in 21 of 48 cases and the answer is
+correct in 1 of 48, against 48 of 48 and 41 of 48 for the same facts bounded.
+Those figures characterise the unbounded mode, not general recall quality.
 
 ---
 
@@ -523,13 +526,16 @@ threshold without calibrating on your own data.
 
 | path | what `score` holds |
 |---|---|
-| bare `Recaller.recall` (fusion only) | the RRF value — `sum of weight/(k + rank)` over the arms that returned the item |
-| full pipeline (`recall_flow`, HTTP, MCP) | a pipeline-rewritten value: `FreshnessBlend`, the vector floor and the Q-learning blend all overwrite `r.score` |
+| fused results from `Recaller.recall` | the RRF value — `sum of weight/(k + rank)` over the arms that ranked the item |
+| fallback-only results (the primary vector arm returned nothing) | raw vector similarity if there was nothing to fuse, otherwise a penalised synthetic value: `min(similarity * 0.5, lowest fused score - 0.01)` |
+| results appended by the vector floor (`vector_floor`, off by default) | a synthetic tail value — `lowest score on the page * 0.999`, stepping down for each further extra; the similarity is kept in `raw_vector_score` and the result is identifiable through `is_floor_extra` |
+| full pipeline (`recall_flow`, HTTP, MCP) | a pipeline-rewritten value: `FreshnessBlend`, the exact-token floor and the Q-learning blend each overwrite `r.score` |
 | after a reranker | unchanged by the rerank — the ORDER moved, the numbers did not |
-| appended by the vector floor (`vector_floor`, off by default) | raw vector similarity, also stashed in `raw_vector_score`, identifiable via `is_floor_extra` |
 
-So one response can carry values from more than one scale, and none of them is
-guaranteed to be monotone in the final order.
+So one response can carry values from more than one scale — RRF ranks, raw
+cosine, and synthetic tail values placed only to keep an appended item below the
+page — and none of them is guaranteed to be monotone in the final order. Where
+you want a similarity, read `raw_vector_score`; `score` is not one.
 
 ### No threshold on it decides answerability
 
