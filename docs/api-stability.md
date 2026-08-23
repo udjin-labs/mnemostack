@@ -490,6 +490,76 @@ Covered in detail in [migration notes](migration-0.8-to-1.0.md). Summary:
   single-tenant (unscoped). A scoped read confines to it and can never see another
   tenant's — or an unscoped — node.
 
+⚠️ **`as_of` reads the world-time bounds, and each of them is optional.**
+`valid_at()` keeps a record when `valid_from <= as_of < valid_until`, treating a
+missing `valid_from` as the indefinite past and a missing `valid_until` as the
+indefinite future. Supply the bounds you actually know — a fact that began on a
+date needs only `valid_from`, and inventing an endpoint to satisfy the query is
+worse than leaving it open.
+
+Two consequences follow, and neither is an edge case:
+
+- **`as_of` ignores `invalidated_at`.** A point-in-time query wants what was
+  true then, including facts since marked stale. So `as_of` can return a
+  SUPERSET of the default view: `mnemostack invalidate <id>` without
+  `--valid-until` leaves a record that ordinary recall hides through
+  `is_current()` and that `as_of` brings back, because `valid_at()` never reads
+  that key. Stamping `invalidated_at` on a record still in force therefore does
+  not help `as_of` and does hide it from the current view.
+- **A record with neither bound is valid at every instant**, so `as_of` cannot
+  exclude it on world-time grounds. Without bounds there is nothing in the
+  payload separating "recorded later" from "in force then", and ranking — where
+  recency is the only temporal signal — decides the answer.
+
+---
+
+## What `score` is not
+
+**The order of the response array is authoritative. Do not re-sort by `score`.**
+A rerank changes the order and not the numbers, so sorting by them undoes it —
+and on an LLM reranker cache hit the results are copies of a previous call's,
+carrying that call's scores rather than the ones this call computed.
+
+**`score` has no single documented scale, and that is the contract rather than
+an omission.** Around a dozen places write it — fusion, a second fusion pass
+over query-expansion variants, the low-confidence vector fallback, the vector
+floor, and several pipeline stages — each on its own scale and under its own
+conditions: RRF rank sums, the store's native vector score, penalised
+derivatives, synthetic tail
+values placed only to keep an appended item below the page, hand-tuned bands for
+graph-resurrected results. That set is deliberately not enumerated here. It is
+implementation detail that moves between releases, and a caller who depends on
+which branch produced a number will break on an upgrade that breaks nothing else.
+
+What is stable, and what you may rely on:
+
+- the number belongs to **one response** and means nothing outside it;
+- it does **not** necessarily order that response either: a rerank moves the
+  list without moving the numbers, so score order and list order come apart —
+  and the list order is the one that counts;
+- it is not a similarity, not a probability, and not a confidence;
+- it is not comparable across queries, and not necessarily comparable between
+  two results of the same response;
+- a fused score is a function of RANKS, not of match quality, so it cannot
+  express how good a match is;
+- where the vector arm set `raw_vector_score`, that field holds the store's
+  own vector score — whatever distance the collection was created with, cosine
+  or otherwise — recorded there precisely because `score` may no longer hold
+  it. It is present on ordinary vector hits too, so it marks a scale, not a
+  provenance: it does not tell you which results were appended. Both built-in
+  servers pass it through (they strip only the underscore-prefixed internal
+  keys), so it arrives in `payload` over MCP and inside `metadata` over HTTP.
+
+**Do not threshold on it for confidence or abstention.** Deciding whether an
+answer is present is not something a retrieval score can do: a retriever must
+return its nearest candidates, and a question with no answer still has near
+neighbours, so the two populations overlap by construction. We checked this on a
+synthetic set with planted look-alike distractors and found no usable threshold
+on either the fused score or the top-1 vector score — but the argument above does
+not rest on that measurement. If your product needs a "do I know this?" signal,
+it is a separate calibrated answerability/abstention layer — a model, a trained
+classifier, or a threshold you fit and validate on your own data.
+
 ---
 
 ## What "1.0" will lock
