@@ -545,9 +545,10 @@ What is stable, and what you may rely on:
 - where the vector arm set `raw_vector_score`, that field holds the store's
   own vector score — whatever distance the collection was created with, cosine
   or otherwise — recorded there precisely because `score` may no longer hold
-  it. It is present on ordinary vector hits too, so it identifies a scale, not
-  a provenance, and it reaches remote callers only if your own serializer
-  passes the payload through.
+  it. It is present on ordinary vector hits too, so it marks a scale, not a
+  provenance: it does not tell you which results were appended. Both built-in
+  servers pass it through (they strip only the underscore-prefixed internal
+  keys), so it arrives in `payload` over MCP and inside `metadata` over HTTP.
 
 **Do not threshold on it for confidence or abstention.** Deciding whether an
 answer is present is not something a retrieval score can do: a retriever must
