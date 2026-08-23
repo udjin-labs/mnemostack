@@ -490,9 +490,13 @@ Covered in detail in [migration notes](migration-0.8-to-1.0.md). Summary:
   single-tenant (unscoped). A scoped read confines to it and can never see another
   tenant's — or an unscoped — node.
 
-⚠️ **`as_of` needs the validity keys to be present.** Point-in-time recall and
-correctness on superseded facts are reconstructed from `valid_from` /
-`valid_until` / `invalidated_at`. Without them mnemostack has no data that
+⚠️ **`as_of` needs the world-time bounds to be present.** Point-in-time recall
+reconstructs the past from `valid_from` / `valid_until` only — `valid_at()`
+deliberately ignores `invalidated_at`, because a point-in-time query wants what
+was true then, including facts since marked stale. `invalidated_at` governs the
+*default* current view, so stamping it on a record that is still in force hides
+it from ordinary recall; set it only on records that really are superseded.
+Without the world-time bounds mnemostack has no data that
 separates "recorded later" from "in force at the instant you asked about", and
 recency is the only temporal signal ranking can use. Measured on a synthetic set
 whose facts are recorded last but were in force first: the un-annotated mode
@@ -506,27 +510,46 @@ be superseded.
 
 ## What `score` is not
 
-`RecallResult.score` orders candidates **within one recall call**. It is not
-comparable across queries, not a probability that an answer is correct, and not
-a signal that the memory contains an answer at all. Do not use it as a
-confidence or abstention threshold without calibrating on your own data.
+**The order of the response array is authoritative. Do not re-sort by `score`.**
+A successful rerank reorders the results without rewriting their scores, so
+sorting by the number undoes the reranking you paid for.
 
-Measured on 336 questions — 264 answerable, and 72 with no answer in the corpus
-but a deliberately similar distractor planted for each:
+`score` is a within-call ranking signal. It is not comparable across queries,
+not a probability that an answer is correct, and not a signal that the memory
+contains an answer at all. Do not use it as a confidence or abstention
+threshold without calibrating on your own data.
+
+### What the number actually is depends on the path
+
+| path | what `score` holds |
+|---|---|
+| bare `Recaller.recall` (fusion only) | the RRF value — `sum of weight/(k + rank)` over the arms that returned the item |
+| full pipeline (`recall_flow`, HTTP, MCP) | a pipeline-rewritten value: `FreshnessBlend`, the vector floor and the Q-learning blend all overwrite `r.score` |
+| after a reranker | unchanged by the rerank — the ORDER moved, the numbers did not |
+| appended by the vector floor (`vector_floor`, off by default) | raw vector similarity, also stashed in `raw_vector_score`, identifiable via `is_floor_extra` |
+
+So one response can carry values from more than one scale, and none of them is
+guaranteed to be monotone in the final order.
+
+### No threshold on it decides answerability
+
+Measured on the bare fusion output — 336 questions: 264 answerable, and 72 with
+no answer in the corpus but a deliberately similar distractor planted for each:
 
 | signal | separation | best achievable threshold |
 |---|---|---|
 | fused `score` of the top result | AUC **0.500** — chance | does not separate the classes; balanced accuracy 0.500 |
 | raw cosine of the top result | AUC 0.675 | balanced accuracy 0.657 |
 
-The fused score carried no information at all here: every one of the 336
-queries returned a top-1 score of exactly `2/61` (0.03278688524590164), because
-in each of them the same candidate was ranked first by **both** arms (`vector`
-and `bm25`). That exact constant is a property of this corpus, not of RRF — arms
-that disagree produce other values. The general property is the one to design
-against: **an RRF score is a function of ranks and arm agreement, not of match
-quality**, so it takes values from a small discrete set and cannot express "how
-good" a match is.
+The fused score carried no information at all: every one of the 336 queries
+returned a top-1 score of exactly `2/61` (0.03278688524590164), because in each
+of them the same candidate was ranked first by **both** arms (`vector` and
+`bm25`). That exact constant is a property of this corpus and of the bare
+fusion path, not of RRF in general — arms that disagree produce other values,
+and the pipeline overwrites them anyway. The property to design against is that
+**a fused score is a function of ranks and arm agreement, not of match
+quality**, and that whatever the pipeline leaves behind is not a similarity
+either.
 
 Raw cosine separates a little better than chance, but the two populations
 overlap substantially — they share 0.687–0.815, with tails on either side
@@ -534,13 +557,6 @@ overlap substantially — they share 0.687–0.815, with tails on either side
 **optimistic in-sample estimate**: the threshold was chosen on the same data it
 was measured on. Out-of-sample behaviour is unknown and needs its own
 calibration.
-
-One more reason not to threshold: a single response can carry **two different
-scales**. Fused results are scored by RRF; results appended by the vector floor
-(`vector_floor`, off by default) keep their raw vector similarity, which is why
-they also stash it in `raw_vector_score` and are identifiable through
-`is_floor_extra`. With the floor enabled, comparing `score` between two results
-of the same response can compare a rank artefact against a cosine.
 
 The cause is structural rather than a tuning gap: a retriever must return its
 nearest candidates, and a question with no answer still has near neighbours. A
