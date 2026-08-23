@@ -493,83 +493,62 @@ Covered in detail in [migration notes](migration-0.8-to-1.0.md). Summary:
 ⚠️ **`as_of` reads the world-time bounds, and each of them is optional.**
 `valid_at()` keeps a record when `valid_from <= as_of < valid_until`, treating a
 missing `valid_from` as the indefinite past and a missing `valid_until` as the
-indefinite future. It ignores `invalidated_at` entirely — a point-in-time query
-wants what was true then, including facts since marked stale — so stamping
-`invalidated_at` on a record that is still in force does not help `as_of` and
-does hide it from the default current view.
+indefinite future. Supply the bounds you actually know — a fact that began on a
+date needs only `valid_from`, and inventing an endpoint to satisfy the query is
+worse than leaving it open.
 
-Supply the bounds you actually know: a fact that began on a date needs only
-`valid_from`, and inventing an endpoint to satisfy the query is worse than
-leaving it open. The consequence to plan for is that a record carrying neither
-bound is valid at every instant, so `as_of` cannot exclude it — a point-in-time
-query then returns the same set as an ordinary one and the answer rests on
-ranking alone, where recency is the only temporal signal left. Measured on a
-synthetic set whose facts are recorded last but were in force first: with no
-bounds the correct record comes first in 21 of 48 cases and the answer is
-correct in 1 of 48, against 48 of 48 and 41 of 48 for the same facts bounded.
-Those figures characterise the unbounded mode, not general recall quality.
+Two consequences follow, and neither is an edge case:
+
+- **`as_of` ignores `invalidated_at`.** A point-in-time query wants what was
+  true then, including facts since marked stale. So `as_of` can return a
+  SUPERSET of the default view: `mnemostack invalidate <id>` without
+  `--valid-until` leaves a record that ordinary recall hides through
+  `is_current()` and that `as_of` brings back, because `valid_at()` never reads
+  that key. Stamping `invalidated_at` on a record still in force therefore does
+  not help `as_of` and does hide it from the current view.
+- **A record with neither bound is valid at every instant**, so `as_of` cannot
+  exclude it on world-time grounds. Without bounds there is nothing in the
+  payload separating "recorded later" from "in force then", and ranking — where
+  recency is the only temporal signal — decides the answer.
 
 ---
 
 ## What `score` is not
 
 **The order of the response array is authoritative. Do not re-sort by `score`.**
-A successful rerank reorders the results without rewriting their scores, so
-sorting by the number undoes the reranking you paid for.
+Neither reranker rewrites the scores it reorders, so sorting by the number
+undoes the reranking.
 
-`score` is a within-call ranking signal. It is not comparable across queries,
-not a probability that an answer is correct, and not a signal that the memory
-contains an answer at all. Do not use it as a confidence or abstention
-threshold without calibrating on your own data.
+**`score` has no single documented scale, and that is the contract rather than
+an omission.** Around a dozen places write it — fusion, a second fusion pass
+over query-expansion variants, the low-confidence vector fallback, the vector
+floor, and several pipeline stages — each on its own scale and under its own
+conditions: RRF rank sums, raw cosine, penalised derivatives, synthetic tail
+values placed only to keep an appended item below the page, hand-tuned bands for
+graph-resurrected results. That set is deliberately not enumerated here. It is
+implementation detail that moves between releases, and a caller who depends on
+which branch produced a number will break on an upgrade that breaks nothing else.
 
-### What the number actually is depends on the path
+What is stable, and what you may rely on:
 
-| path | what `score` holds |
-|---|---|
-| fused results from `Recaller.recall` | the RRF value — `sum of weight/(k + rank)` over the arms that ranked the item |
-| fallback-only results (the primary vector arm returned nothing) | raw vector similarity if there was nothing to fuse, otherwise a penalised synthetic value: `min(similarity * 0.5, lowest fused score - 0.01)` |
-| results appended by the vector floor (`vector_floor`, off by default) | a synthetic tail value — `lowest score on the page * 0.999`, stepping down for each further extra; the similarity is kept in `raw_vector_score` and the result is identifiable through `is_floor_extra` |
-| full pipeline (`recall_flow`, HTTP, MCP) | a pipeline-rewritten value: `FreshnessBlend`, the exact-token floor and the Q-learning blend each overwrite `r.score` |
-| after a reranker | unchanged by the rerank — the ORDER moved, the numbers did not |
+- the number ranks candidates **within one response**, and nothing more;
+- it is not a similarity, not a probability, and not a confidence;
+- it is not comparable across queries, and not necessarily comparable between
+  two results of the same response;
+- a fused score is a function of RANKS, not of match quality, so it cannot
+  express how good a match is;
+- when you want a similarity, read `raw_vector_score` — the vector arm records
+  it there precisely because `score` may no longer hold it.
 
-So one response can carry values from more than one scale — RRF ranks, raw
-cosine, and synthetic tail values placed only to keep an appended item below the
-page — and none of them is guaranteed to be monotone in the final order. Where
-you want a similarity, read `raw_vector_score`; `score` is not one.
-
-### No threshold on it decides answerability
-
-Measured on the bare fusion output — 336 questions: 264 answerable, and 72 with
-no answer in the corpus but a deliberately similar distractor planted for each:
-
-| signal | separation | best achievable threshold |
-|---|---|---|
-| fused `score` of the top result | AUC **0.500** — chance | does not separate the classes; balanced accuracy 0.500 |
-| raw cosine of the top result | AUC 0.675 | balanced accuracy 0.657 |
-
-The fused score carried no information at all: every one of the 336 queries
-returned a top-1 score of exactly `2/61` (0.03278688524590164), because in each
-of them the same candidate was ranked first by **both** arms (`vector` and
-`bm25`). That exact constant is a property of this corpus and of the bare
-fusion path, not of RRF in general — arms that disagree produce other values,
-and the pipeline overwrites them anyway. The property to design against is that
-**a fused score is a function of ranks and arm agreement, not of match
-quality**, and that whatever the pipeline leaves behind is not a similarity
-either.
-
-Raw cosine separates a little better than chance, but the two populations
-overlap substantially — they share 0.687–0.815, with tails on either side
-(answerable up to 0.841, unanswerable down to 0.662). The 0.657 figure is an
-**optimistic in-sample estimate**: the threshold was chosen on the same data it
-was measured on. Out-of-sample behaviour is unknown and needs its own
-calibration.
-
-The cause is structural rather than a tuning gap: a retriever must return its
-nearest candidates, and a question with no answer still has near neighbours. A
-retrieval score does not decide whether an answer is present. If your product
-needs a "do I know this?" signal, that is a separate calibrated
-answerability/abstention layer — it can be a model, a trained classifier, or a
-threshold you fit and validate yourself, but it is not this number.
+**Do not threshold on it for confidence or abstention.** Deciding whether an
+answer is present is not something a retrieval score can do: a retriever must
+return its nearest candidates, and a question with no answer still has near
+neighbours, so the two populations overlap by construction. We checked this on a
+synthetic set with planted look-alike distractors and found no usable threshold
+on either the fused score or the top-1 raw cosine — but the argument above does
+not rest on that measurement. If your product needs a "do I know this?" signal,
+it is a separate calibrated answerability/abstention layer — a model, a trained
+classifier, or a threshold you fit and validate on your own data.
 
 ---
 
