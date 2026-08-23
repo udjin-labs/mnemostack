@@ -535,7 +535,7 @@ recaller = Recaller(embedding_provider=emb, vector_store=store)
 results = recaller.recall("what did we decide", limit=10)
 
 # Each result: .id .text .score .source ("vector" | "bm25" | "memgraph" | "temporal") .metadata
-# The list order is authoritative. .score is a within-call ranking signal, not a
+# The list order is authoritative — .score need not follow it, and is not a
 # confidence; re-sorting by it undoes reranking. docs/api-stability.md#what-score-is-not
 
 # Optional: synthesize a concise answer
