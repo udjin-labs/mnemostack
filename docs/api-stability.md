@@ -533,7 +533,10 @@ which branch produced a number will break on an upgrade that breaks nothing else
 
 What is stable, and what you may rely on:
 
-- the number ranks candidates **within one response**, and nothing more;
+- the number belongs to **one response** and means nothing outside it;
+- it does **not** necessarily order that response either: a rerank moves the
+  list without moving the numbers, so score order and list order come apart —
+  and the list order is the one that counts;
 - it is not a similarity, not a probability, and not a confidence;
 - it is not comparable across queries, and not necessarily comparable between
   two results of the same response;
