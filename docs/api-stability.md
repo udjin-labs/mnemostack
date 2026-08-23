@@ -490,6 +490,65 @@ Covered in detail in [migration notes](migration-0.8-to-1.0.md). Summary:
   single-tenant (unscoped). A scoped read confines to it and can never see another
   tenant's — or an unscoped — node.
 
+⚠️ **`as_of` needs the validity keys to be present.** Point-in-time recall and
+correctness on superseded facts are reconstructed from `valid_from` /
+`valid_until` / `invalidated_at`. Without them mnemostack has no data that
+separates "recorded later" from "in force at the instant you asked about", and
+recency is the only temporal signal ranking can use. Measured on a synthetic set
+whose facts are recorded last but were in force first: the un-annotated mode
+puts the correct record first in 21 of 48 cases and answers correctly in 1 of
+48, where the same facts annotated give 48 of 48 and 41 of 48. Those figures
+characterise the un-annotated mode, not general recall quality — pass the
+validity keys whenever you intend to use `as_of`, or to ask about facts that can
+be superseded.
+
+---
+
+## What `score` is not
+
+`RecallResult.score` orders candidates **within one recall call**. It is not
+comparable across queries, not a probability that an answer is correct, and not
+a signal that the memory contains an answer at all. Do not use it as a
+confidence or abstention threshold without calibrating on your own data.
+
+Measured on 336 questions — 264 answerable, and 72 with no answer in the corpus
+but a deliberately similar distractor planted for each:
+
+| signal | separation | best achievable threshold |
+|---|---|---|
+| fused `score` of the top result | AUC **0.500** — chance | does not separate the classes; balanced accuracy 0.500 |
+| raw cosine of the top result | AUC 0.675 | balanced accuracy 0.657 |
+
+The fused score carried no information at all here: every one of the 336
+queries returned a top-1 score of exactly `2/61` (0.03278688524590164), because
+in each of them the same candidate was ranked first by **both** arms (`vector`
+and `bm25`). That exact constant is a property of this corpus, not of RRF — arms
+that disagree produce other values. The general property is the one to design
+against: **an RRF score is a function of ranks and arm agreement, not of match
+quality**, so it takes values from a small discrete set and cannot express "how
+good" a match is.
+
+Raw cosine separates a little better than chance, but the two populations
+overlap substantially — they share 0.687–0.815, with tails on either side
+(answerable up to 0.841, unanswerable down to 0.662). The 0.657 figure is an
+**optimistic in-sample estimate**: the threshold was chosen on the same data it
+was measured on. Out-of-sample behaviour is unknown and needs its own
+calibration.
+
+One more reason not to threshold: a single response can carry **two different
+scales**. Fused results are scored by RRF; results appended by the vector floor
+(`vector_floor`, off by default) keep their raw vector similarity, which is why
+they also stash it in `raw_vector_score` and are identifiable through
+`is_floor_extra`. With the floor enabled, comparing `score` between two results
+of the same response can compare a rank artefact against a cosine.
+
+The cause is structural rather than a tuning gap: a retriever must return its
+nearest candidates, and a question with no answer still has near neighbours. A
+retrieval score does not decide whether an answer is present. If your product
+needs a "do I know this?" signal, that is a separate calibrated
+answerability/abstention layer — it can be a model, a trained classifier, or a
+threshold you fit and validate yourself, but it is not this number.
+
 ---
 
 ## What "1.0" will lock

@@ -263,7 +263,7 @@ On failure, a component contains `{"ok": false, "error": "..."}` and top-level `
 | `filters` | `object` | `null` | Payload filters applied inside every retriever: exact match (`{"tenant": "a"}`) or `gte`/`lte` ranges (`{"timestamp": {"gte": "2026-01-01"}}`). Results never include points outside the filtered scope — a soft isolation mechanism for multi-tenant memory. Note: filters are caller-supplied, **not an authorization boundary**. For a server-enforced tenant boundary, run `mnemostack mcp-serve --auth` instead: the tenant is derived from the service key (not the request), stamped on writes, and enforced on reads — see [api-stability.md](api-stability.md#multi-tenancy--authentication). **Prerequisite:** data indexed with a plain `mnemostack index` (no `--tenant`) carries no `tenant_id`, so under `--auth` it's invisible to recall until you stamp it (`mnemostack tenant-migrate --tenant <t>`) or re-index with `mnemostack index --tenant <t>`. Otherwise inject filters in your proxy. |
 | `token_budget` | `integer` | `null` | Hard cap on the total (estimated) text tokens of the returned results: the final ranking is cut to the prefix that fits (never overshot). Unset falls back to the server-wide default (`--token-budget` / `MNEMOSTACK_TOKEN_BUDGET`), if any. |
 | `include_invalidated` | `boolean` | `false` | Include facts marked stale. By default, memories with an `invalidated_at` payload marker are hidden from recall. |
-| `as_of` | `string` | `null` | Point-in-time recall (ISO-8601): return facts valid at this world-time instant (`valid_from <= as_of < valid_until`), ignoring later invalidation. |
+| `as_of` | `string` | `null` | Point-in-time recall (ISO-8601): return facts valid at this world-time instant (`valid_from <= as_of < valid_until`), ignoring later invalidation. Requires `valid_from`/`valid_until`/`invalidated_at` on the stored points — without them there is no data distinguishing "recorded later" from "in force then", and the query degrades to plain recency. |
 
 **Return shape:**
 
@@ -289,6 +289,10 @@ On failure, a component contains `{"ok": false, "error": "..."}` and top-level `
   ]
 }
 ```
+
+`score` ranks results **within this response** — an RRF value encoding rank, not
+a similarity or a confidence, and not comparable across calls. See
+[what `score` is not](api-stability.md#what-score-is-not).
 
 `notes` is the authoritative list of routine signals — stages that did not apply to this query (e.g. `"temporal:no_parse"` on any query without a parseable date); informational, never a fault. `degraded` lists components that actually fell back while serving the call (e.g. `"retriever:bm25:failed"`, `"reranker:fallback"`) — plus, deprecated until the next major, a back-compat duplicate of the routine tags (existing matchers keep working across a minor upgrade). A `degraded` entry absent from `notes` is a real fault. `tokens_estimate` is the estimated total text tokens of the returned results — the value `token_budget` is enforced against (heuristic: ≈4 chars/token for ASCII, ≈2 for non-ASCII scripts; leave margin rather than budgeting to an exact context limit). With `include_trace: true` the response additionally carries a `trace` object.
 
