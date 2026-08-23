@@ -128,7 +128,7 @@ The practical effect: you stop re-explaining your project to the agent after eve
 
 ### How it works, in one paragraph
 
-On each `recall(query)`: the configured retrievers (Vector and Temporal by default, with BM25 and Memgraph when configured) run in parallel and return ranked lists. Reciprocal Rank Fusion merges them. The optional 8-stage pipeline can reweight results using query classification, exact-token rescue, gravity/hub dampening, freshness, inhibition-of-return, curiosity boosts, Q-learning weights supplied through its state store, and graph resurrection. An optional LLM reranker does a final ordering pass. You get a list of `RecallResult` with source, score, and provenance — ready to hand to a model. The list order is authoritative: `score` has no single scale — many stages and fallback paths write it, and a rerank reorders without rewriting it — so re-sorting by the number undoes the reranking. It is not a similarity, not a confidence, and not comparable across queries; see [what `score` is not](docs/api-stability.md#what-score-is-not).
+On each `recall(query)`: the configured retrievers (Vector and Temporal by default, with BM25 and Memgraph when configured) run in parallel and return ranked lists. Reciprocal Rank Fusion merges them. The optional 8-stage pipeline can reweight results using query classification, exact-token rescue, gravity/hub dampening, freshness, inhibition-of-return, curiosity boosts, Q-learning weights supplied through its state store, and graph resurrection. An optional LLM reranker does a final ordering pass. You get a list of `RecallResult` with source, score, and provenance — ready to hand to a model. The list order is authoritative: `score` has no single scale — many stages and fallback paths write it, and a rerank changes the order without rewriting the numbers — so re-sorting by them undoes it. It is not a similarity, not a confidence, and not comparable across queries; see [what `score` is not](docs/api-stability.md#what-score-is-not).
 
 ![mnemostack architecture](docs/images/mnemostack-architecture.jpg)
 
@@ -764,7 +764,7 @@ Response shape (abridged):
 }
 ```
 
-The order of `results` is authoritative — do not re-sort by `score`: many stages and fallback paths write that number on different scales, and a rerank reorders without rewriting it. See [what `score` is not](docs/api-stability.md#what-score-is-not).
+The order of `results` is authoritative — do not re-sort by `score`: many stages and fallback paths write that number on different scales, and a rerank changes the order without rewriting it. See [what `score` is not](docs/api-stability.md#what-score-is-not).
 
 Pass `"include_trace": true` in the request body to additionally get a `trace` object with per-retriever ranked lists, the fused order, and the post-rerank order — useful when debugging why a memory did or didn't surface.
 

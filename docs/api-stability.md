@@ -516,14 +516,16 @@ Two consequences follow, and neither is an edge case:
 ## What `score` is not
 
 **The order of the response array is authoritative. Do not re-sort by `score`.**
-Neither reranker rewrites the scores it reorders, so sorting by the number
-undoes the reranking.
+A rerank changes the order and not the numbers, so sorting by them undoes it —
+and on an LLM reranker cache hit the results are copies of a previous call's,
+carrying that call's scores rather than the ones this call computed.
 
 **`score` has no single documented scale, and that is the contract rather than
 an omission.** Around a dozen places write it — fusion, a second fusion pass
 over query-expansion variants, the low-confidence vector fallback, the vector
 floor, and several pipeline stages — each on its own scale and under its own
-conditions: RRF rank sums, raw cosine, penalised derivatives, synthetic tail
+conditions: RRF rank sums, the store's native vector score, penalised
+derivatives, synthetic tail
 values placed only to keep an appended item below the page, hand-tuned bands for
 graph-resurrected results. That set is deliberately not enumerated here. It is
 implementation detail that moves between releases, and a caller who depends on
@@ -537,15 +539,19 @@ What is stable, and what you may rely on:
   two results of the same response;
 - a fused score is a function of RANKS, not of match quality, so it cannot
   express how good a match is;
-- when you want a similarity, read `raw_vector_score` — the vector arm records
-  it there precisely because `score` may no longer hold it.
+- where the vector arm set `raw_vector_score`, that field holds the store's
+  own vector score — whatever distance the collection was created with, cosine
+  or otherwise — recorded there precisely because `score` may no longer hold
+  it. It is present on ordinary vector hits too, so it identifies a scale, not
+  a provenance, and it reaches remote callers only if your own serializer
+  passes the payload through.
 
 **Do not threshold on it for confidence or abstention.** Deciding whether an
 answer is present is not something a retrieval score can do: a retriever must
 return its nearest candidates, and a question with no answer still has near
 neighbours, so the two populations overlap by construction. We checked this on a
 synthetic set with planted look-alike distractors and found no usable threshold
-on either the fused score or the top-1 raw cosine — but the argument above does
+on either the fused score or the top-1 vector score — but the argument above does
 not rest on that measurement. If your product needs a "do I know this?" signal,
 it is a separate calibrated answerability/abstention layer — a model, a trained
 classifier, or a threshold you fit and validate on your own data.

@@ -292,7 +292,7 @@ On failure, a component contains `{"ok": false, "error": "..."}` and top-level `
 
 **The order of `results` is authoritative — do not re-sort by `score`.** Many
 stages and fallback paths write that number, on different scales; a rerank then
-reorders the list without rewriting it. It ranks within this response only — not
+changes the order without rewriting it. It ranks within this response only — not
 a similarity, not a confidence, not comparable across calls. See
 [what `score` is not](api-stability.md#what-score-is-not).
 
