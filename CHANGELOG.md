@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.3.2] - 2026-09-03
+
 - **An unconfigured graph no longer costs every request** (#181). The server's
   documented default still points the graph at `bolt://localhost:7687`, but the
   neo4j driver is lazy — constructing it never connects — so a store that was
