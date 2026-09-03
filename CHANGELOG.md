@@ -6,6 +6,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **The configured Ollama host reaches the LLM on every surface** (#180). The
+  embedding path resolves its host through `provider_kwargs` — the shared
+  resolution point whose docstring promises a configured host can never be
+  accepted by the config schema yet silently dropped — while the LLM was built
+  with `model_kwargs` (model only) at eight call sites across the server, MCP
+  and the CLI: `--ollama-host` pointed embeddings at the GPU box and every LLM
+  call dialed localhost, so `/answer` returned empty 200s and the reranker
+  logged `rerank failed` on a box with no local Ollama. `llm_kwargs` is the
+  sibling resolution point used everywhere now; for the ollama provider the
+  host inherits the embedding host (one box serving both models is the common
+  deployment), and `llm.host` / `MNEMOSTACK_LLM_HOST` overrides the
+  inheritance for split ones. The timeout (`llm.timeout` /
+  `MNEMOSTACK_LLM_TIMEOUT`) is deliberately NOT inherited from the embedding
+  timeout — generation is a different workload, and a short embedding timeout
+  would cut off long answers. `OllamaLLM` itself now resolves
+  explicit host → native `OLLAMA_HOST` → localhost, the same chain the ollama
+  embedding provider has always documented; the README already claimed
+  `OLLAMA_HOST` applied to "embeddings / LLM", and now it does.
+
 ## [2.3.1] - 2026-08-22
 
 - **No payload value can raise out of a recall** (fixes a crash in 2.3.0's access accounting): `access_count` and `last_accessed` are ordinary payload fields a client fills, and the freshness stage coerced the counter a second time on its way into `compute_access_boost` — catching `TypeError`/`ValueError` but not `OverflowError`. `int(float("inf"))` raises exactly that, so a point carrying `access_count: inf` killed the entire recall **even with `access_bonus_max=0`**: the crash happened upstream of the switch meant to disable the feature. The stage no longer second-guesses the value; it hands the raw payload field to the one function that owns what a bad counter means, which already clamps huge integers and now covers non-finite floats too. `last_accessed` gets the same treatment for `TypeError`: a `datetime` or `bytes` in that field has a `.replace` taking different arguments, so the parse raised instead of failing to parse — an unreadable stamp now reads as "no evidence of use", the neutral 1.0, rather than a 500.
