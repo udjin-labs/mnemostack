@@ -222,9 +222,24 @@ without a major bump. `graph.uri = null` (disabled) is the documented off state 
 the **library** recall path — but the **HTTP server defaults it on**: both
 `mnemostack serve` and the `ServerConfig.from_env()` ASGI factory expand an unset
 `graph.uri` to `bolt://localhost:7687`. To keep graph off there, pass
-`--memgraph-uri ""` (CLI) or construct `ServerConfig(graph_uri=None)`
-programmatically — an empty `MNEMOSTACK_MEMGRAPH_URI` does **not** work, since the
-env override ignores empty values. `token_budget <= 0` normalizing to "no budget"
+`--memgraph-uri ""` (CLI), set an explicitly empty `MNEMOSTACK_GRAPH_URI=` /
+`MNEMOSTACK_MEMGRAPH_URI=` (the env-only path a container has), or construct
+`ServerConfig(graph_uri=None)` programmatically. An ABSENT variable still
+expands to the default; only a present-and-empty one disables. When the default
+(or any configured) graph proves unreachable, the RECALL path's Bolt owners —
+the graph retriever and the graph-resurrection stage — each trip a cooldown:
+one warning, then zero connection attempts for the window, one half-open retry
+probe afterwards even under concurrent traffic. The bound holds from the FIRST
+FAILURE on: the very first contact with a store is deliberately not serialized,
+because gating a healthy store's cold start behind a single probe would drop
+the graph arm from every concurrent request while the first one is in flight —
+so an unreachable store's first burst may cost one attempt per in-flight
+request, once, before the breaker exists to consult. The breaker is deliberately
+per component, not per URI (each carries its own credentials and can point at
+its own store), so a dead store costs at most one attempt per component per
+window rather than one per request. The `/health`, `/readyz` and `/status`
+graph probes stay LIVE by design: their job is to notice recovery immediately,
+they are bounded by `graph_health_timeout`, and they log nothing. `token_budget <= 0` normalizing to "no budget"
 is a 🟢 documented behavior.
 
 ## MCP tools (`mnemostack mcp-serve`)
