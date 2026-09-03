@@ -595,10 +595,22 @@ def _apply_env_overrides(cfg: Config) -> Config:
         # after this and covers the file path too.
         cfg.llm.timeout = int(v)
 
-    # Graph (with alias)
-    graph_uri = env.get("MNEMOSTACK_GRAPH_URI") or env.get("MNEMOSTACK_MEMGRAPH_URI")
-    if graph_uri:
-        cfg.graph.uri = graph_uri
+    # Graph (with alias). Unlike every other override here, PRESENCE decides,
+    # not truthiness: the graph is the one optional store, and an explicitly
+    # empty MNEMOSTACK_GRAPH_URI= is the only way a deployment configured
+    # purely by environment can say "off" — the HTTP server otherwise expands
+    # an unset URI to its documented localhost default. The canonical name
+    # wins over the alias whenever it is present at all: an explicit empty
+    # string is a statement, not an accident to skip. The empty value is kept
+    # as "" rather than None so ServerConfig can tell "explicitly off" from
+    # "never configured"; every truthiness guard reads both as disabled. This
+    # is the single resolution point for these two variables — nothing else
+    # may re-read them, or two parts of one process end up disagreeing about
+    # whether the graph exists.
+    for _name in ("MNEMOSTACK_GRAPH_URI", "MNEMOSTACK_MEMGRAPH_URI"):
+        if _name in env:
+            cfg.graph.uri = env[_name]
+            break
     if v := env.get("MNEMOSTACK_GRAPH_USER"):
         cfg.graph.user = v
     if v := env.get("MNEMOSTACK_GRAPH_PASSWORD"):

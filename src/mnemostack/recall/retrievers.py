@@ -58,6 +58,140 @@ try:
 except ImportError:
     _NEO4J_AVAILABLE = False
 
+try:
+    from neo4j.exceptions import DatabaseUnavailable, ServiceUnavailable, SessionExpired
+
+    # DatabaseUnavailable is a TransientError, NOT a ServiceUnavailable
+    # subclass: the Bolt server answers but the configured database is down —
+    # which still fails identically on every request until an operator acts.
+    _UNREACHABLE_ERRORS: tuple[type[BaseException], ...] = (
+        DatabaseUnavailable,
+        ServiceUnavailable,
+        SessionExpired,
+        OSError,
+    )
+except ImportError:
+    # OSError alone still catches ConnectionRefusedError from an injected or
+    # non-neo4j driver, so the cooldown works without the optional dependency.
+    _UNREACHABLE_ERRORS = (OSError,)
+
+
+def _is_unreachable(exc: BaseException) -> bool:
+    """Whether this failure means "the store is not there", not "bad query".
+
+    Only connection-level faults qualify. A Cypher error, a malformed stored
+    bound or an auth failure keeps the loud per-call path: those are operator
+    mistakes that must stay visible, and silencing them for a cooldown would
+    hide the very thing that needs fixing.
+    """
+    return isinstance(exc, _UNREACHABLE_ERRORS)
+
+
+#: How long a Bolt-backed component stays skipped after its store proved
+#: unreachable. Long enough that a dead store costs at most one attempt per
+#: component per window instead of one per request; short enough that a
+#: Memgraph which boots after the server — the ordinary compose case —
+#: rejoins on its own without a restart. Deliberately PER COMPONENT, not per
+#: URI: the retriever and the resurrection stage carry their own credentials
+#: and can be pointed at different stores, so a breaker keyed by URI alone
+#: could couple two components that only look identical.
+GRAPH_UNAVAILABLE_COOLDOWN_S = 60.0
+
+#: One module-level lock for every component's cooldown transitions. The
+#: server runs recalls on worker threads, so without it every thread in a
+#: burst passes the deadline check before any of them trips — one timeout per
+#: concurrent request instead of one per window. The critical sections are a
+#: few reads and writes; a shared lock is contention-free at that size and
+#: sidesteps per-instance locks entirely, which matters because tests build
+#: these components via ``__new__``.
+_BOLT_STATE_LOCK = threading.Lock()
+
+
+def _redacted_uri(uri: str) -> str:
+    """A Bolt URI safe for logs: any userinfo is masked, never printed.
+
+    Credentials normally arrive through the separate user/password settings,
+    but a URI CAN embed them — and a malformed credential-bearing URI is
+    exactly the kind that fails driver construction and lands in the cooldown
+    warning. Pure string surgery on the authority part, no parser to raise.
+    """
+    scheme, sep, rest = uri.partition("://")
+    if not sep:
+        scheme, rest = "", uri
+    netloc, slash, tail = rest.partition("/")
+    if "@" in netloc:
+        netloc = "***@" + netloc.rpartition("@")[2]
+    return (scheme + sep if sep else "") + netloc + slash + tail
+
+
+def bolt_arm_available(component: Any) -> bool:
+    """Whether this component may touch its store right now.
+
+    Race-free deadline check with HALF-OPEN semantics: when a window has just
+    expired, the first caller through claims the single retry probe by
+    re-arming the deadline before it dials; every concurrent caller keeps
+    skipping until that probe either succeeds (``bolt_mark_recovered`` clears
+    the deadline) or fails (``trip_bolt_cooldown`` re-arms it with the
+    once-a-window warning). Without the claim, a traffic burst at window
+    expiry pays one connection timeout per in-flight request.
+    """
+    with _BOLT_STATE_LOCK:
+        now = time.monotonic()
+        if now < component._unavailable_until:
+            return False
+        if component._unavailable_until:
+            component._unavailable_until = now + GRAPH_UNAVAILABLE_COOLDOWN_S
+            component._probe_inflight = True
+        return True
+
+
+def bolt_mark_recovered(component: Any) -> None:
+    """The store answered: clear the window so the arm runs freely again."""
+    if component._unavailable_until or component._probe_inflight:
+        with _BOLT_STATE_LOCK:
+            component._unavailable_until = 0.0
+            component._probe_inflight = False
+
+
+def trip_bolt_cooldown(component: Any, reason: BaseException | str) -> None:
+    """Skip ``component``'s Bolt store until the cooldown expires, once, loudly.
+
+    Shared by every component that owns a lazy Bolt driver (the graph
+    retriever and the graph-resurrection stage — issue #181 came from BOTH,
+    and a cooldown implemented in one of them would have left the other
+    tracing per request). Expects the common shape: ``uri``, ``_driver``,
+    ``_own_driver``, ``_unavailable_until``, ``_probe_inflight``.
+
+    Concurrent failures race here, so the warning is deduplicated under the
+    lock: the first failure of a window owns it, later ones only extend the
+    deadline silently — except the half-open prober reporting the window it
+    claimed itself, which must stay audible once a window. A driver we own is
+    dropped so the retry after the window rebuilds it; an injected driver
+    belongs to the caller and is left alone — only the deadline applies.
+    """
+    with _BOLT_STATE_LOCK:
+        now = time.monotonic()
+        should_warn = component._probe_inflight or now >= component._unavailable_until
+        component._probe_inflight = False
+        component._unavailable_until = max(
+            component._unavailable_until, now + GRAPH_UNAVAILABLE_COOLDOWN_S
+        )
+        driver_to_close = component._driver if component._own_driver else None
+        if component._own_driver:
+            component._driver = None
+    if driver_to_close is not None:
+        try:
+            driver_to_close.close()
+        except Exception:
+            pass
+    if should_warn:
+        logger.warning(
+            "graph unreachable at %s, skipping the graph arm for %.0fs: %s",
+            _redacted_uri(component.uri),
+            GRAPH_UNAVAILABLE_COOLDOWN_S,
+            reason,
+        )
+
 
 #: The built-in retriever family names. A ``name=`` override may carry its
 #: OWN family's name (suffixed or not) but never another family's: the
@@ -1340,6 +1474,21 @@ class MemgraphRetriever(Retriever):
     #: allowances and re-probe a failing store (serial timeouts x variants).
     accepts_recall_scope = True
 
+    #: Monotonic deadline until which this arm skips itself because the store
+    #: was unreachable. The neo4j driver is LAZY — constructing it never
+    #: connects — so an unconfigured or down Memgraph is discovered once per
+    #: QUERY, not once per process, and without this the arm pays (and logs) a
+    #: refused connection on every single recall. A CLASS default rather than
+    #: an ``__init__`` assignment on purpose: several tests build the instance
+    #: via ``__new__`` and set only the attributes they need, and "never
+    #: tripped" is the right reading for any instance that skipped ``__init__``.
+    #: Tripping always writes an instance attribute over this.
+    _unavailable_until = 0.0
+    #: Whether this component holds the half-open probe claim for the window
+    #: it just re-armed (see ``bolt_arm_available``). Class default for the
+    #: same ``__new__`` reason as the deadline above.
+    _probe_inflight = False
+
     def __init__(
         self,
         uri: str = "bolt://localhost:7687",
@@ -1381,10 +1530,14 @@ class MemgraphRetriever(Retriever):
         self.chunk_filter_probe = chunk_filter_probe
 
     def _get_driver(self):
+        # Library check first: claiming the half-open probe and then returning
+        # None for a missing dependency would leak the claim.
+        if self._driver is None and not _NEO4J_AVAILABLE:
+            return None
+        if not bolt_arm_available(self):
+            return None
         if self._driver is not None:
             return self._driver
-        if not _NEO4J_AVAILABLE:
-            return None
         try:
             self._driver = GraphDatabase.driver(
                 self.uri,
@@ -1393,7 +1546,13 @@ class MemgraphRetriever(Retriever):
                 connection_acquisition_timeout=self.timeout,
             )
             return self._driver
-        except Exception:
+        except Exception as exc:
+            # Construction fails for config-shaped reasons (a malformed URI —
+            # the lazy driver never touches the network here) and fails the
+            # same way on every call. This used to be silent None per request:
+            # invisible to the operator AND retried forever. Same cooldown,
+            # and the warning names the cause once a window.
+            trip_bolt_cooldown(self, exc)
             return None
 
     def close(self) -> None:
@@ -1529,14 +1688,17 @@ class MemgraphRetriever(Retriever):
         # chunk proof fail closed when no probe is configured (excluded,
         # never leaked — the historical contract). The dedicated `tenant`
         # scope is different: a server-owned graph property, always honored.
-        driver = self._get_driver()
-        if driver is None:
-            return []
         # Deduplicated, order-preserving, and CAPPED: each token costs up to
         # four Cypher probes, and the query string is caller-controlled on
         # HTTP/MCP — "same word × 100" must cost one probe set, and a
         # pathological word soup must not turn into hundreds of serial
         # backend round trips (bounded work, like every knob on this arm).
+        #
+        # Words come BEFORE the driver on purpose: _get_driver may claim the
+        # single half-open retry probe at window expiry, and a query with
+        # nothing to ask the graph must not consume that claim — it would
+        # re-arm the window without probing and keep the arm dark for another
+        # minute while every substantive recall is told to skip.
         words: list[str] = []
         seen_words: set[str] = set()
         for raw_word in query.split():
@@ -1548,6 +1710,9 @@ class MemgraphRetriever(Retriever):
             if len(words) >= _MAX_QUERY_TOKENS:
                 break
         if not words:
+            return []
+        driver = self._get_driver()
+        if driver is None:
             return []
         # Tenant scope: confine every probe/relationship match to nodes+edges
         # carrying `tenant`. Unscoped (tenant=None) adds nothing, so a legacy
@@ -1908,10 +2073,24 @@ class MemgraphRetriever(Retriever):
                             sources=["memgraph"],
                         )
                     )
+                bolt_mark_recovered(self)
                 return results[:limit]
-        except Exception:
+        except Exception as exc:
             # Fail open (graph is optional), but log — a bad query or a malformed
             # stored bound blanks graph recall for this call, which was silent.
+            #
+            # An UNREACHABLE store is different in kind from a bad query: the
+            # next request will fail identically, so retrying it per request
+            # buys nothing and buries real errors under repeated stack traces.
+            # Trip the arm for a cooldown instead, and say so once.
+            if _is_unreachable(exc):
+                trip_bolt_cooldown(self, exc)
+                return []
+            # The store ANSWERED — this is an operator error, not an outage.
+            # Release any half-open claim so the arm is not silently dark for
+            # the rest of a window the failed probe re-armed; loud stays loud,
+            # per call, which is the whole point of the classification.
+            bolt_mark_recovered(self)
             logger.warning("graph recall failed, returning no graph hits", exc_info=True)
             return []
 
