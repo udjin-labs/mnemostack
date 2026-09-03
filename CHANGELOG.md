@@ -6,6 +6,48 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **An unconfigured graph no longer costs every request** (#181). The server's
+  documented default still points the graph at `bolt://localhost:7687`, but the
+  neo4j driver is lazy — constructing it never connects — so a store that was
+  not there was rediscovered per query, by BOTH Bolt-owning components: the
+  graph retriever and the graph-resurrection stage each paid refused Bolt
+  attempts and logged a stack trace on every recall. An unreachable store now
+  trips a shared 60-second cooldown: one warning naming the URI (userinfo
+  redacted) and the window, then zero connection attempts until it expires,
+  after which ONE half-open retry probe runs even under concurrent traffic —
+  the first caller through claims it, a burst does not turn window expiry into
+  one timeout per in-flight request — and a probe that succeeds clears the
+  window at once, so a Memgraph that boots after the server rejoins without a
+  restart. The bound holds from the first failure on; the very first contact
+  is deliberately not serialized, since gating a healthy cold start behind one
+  probe would cost every concurrent request its graph arm. A probe that
+  reaches the store but fails as an operator error (bad Cypher, auth) releases
+  the claim — reachable is reachable — and `DatabaseUnavailable` (Bolt answers,
+  database down) counts as unreachable, since it too fails identically until
+  an operator acts. A query with no graph-eligible words never consumes the
+  claim. The breaker is per component (each carries its own credentials and
+  can target its own store): a dead store costs at most one attempt per
+  component per window. Health endpoints keep their live, bounded, silent
+  probes — their job is to notice recovery immediately. Only connection-level
+  failures trip the cooldown; a bad query or auth mistake keeps the loud
+  per-call log, because those need fixing, not silencing. A driver whose
+  CONSTRUCTION fails (a malformed URI — equally identical on every call, and
+  previously a silent `None` retried forever) trips the same cooldown, so the
+  cause is named once a window instead of never.
+- **An explicitly empty `MNEMOSTACK_GRAPH_URI=` / `MNEMOSTACK_MEMGRAPH_URI=`
+  disables the graph on the server path** (#181). The CLI has always had
+  `--memgraph-uri ""` as the off switch, but a deployment configured only by
+  environment — a container — had none: the env override ignored empty values
+  and the documented localhost default won. For these two variables PRESENCE
+  now decides, not truthiness, and the canonical name wins over the alias
+  whenever it is present at all — an explicit empty string is a statement, not
+  an accident to skip. This is a deliberate exception to the config layer's
+  usual empty-means-unset rule, resolved in exactly one place (the config
+  layer itself), so every consumer of the configuration agrees on whether the
+  graph exists. An absent variable still expands to the documented server
+  default; a file-configured URI is used as configured; a present-and-empty
+  variable disables the graph even over a config file.
+
 ## [2.3.1] - 2026-08-22
 
 - **No payload value can raise out of a recall** (fixes a crash in 2.3.0's access accounting): `access_count` and `last_accessed` are ordinary payload fields a client fills, and the freshness stage coerced the counter a second time on its way into `compute_access_boost` — catching `TypeError`/`ValueError` but not `OverflowError`. `int(float("inf"))` raises exactly that, so a point carrying `access_count: inf` killed the entire recall **even with `access_bonus_max=0`**: the crash happened upstream of the switch meant to disable the feature. The stage no longer second-guesses the value; it hands the raw payload field to the one function that owns what a bad counter means, which already clamps huge integers and now covers non-finite floats too. `last_accessed` gets the same treatment for `TypeError`: a `datetime` or `bytes` in that field has a `.replace` taking different arguments, so the parse raised instead of failing to parse — an unreadable stamp now reads as "no evidence of use", the neutral 1.0, rather than a 500.

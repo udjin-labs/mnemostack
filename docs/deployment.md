@@ -211,7 +211,7 @@ docker run --rm caddy:2 caddy hash-password --plaintext 'your-long-password'
 
 `depends_on` controls startup order, not readiness. Keep `restart: unless-stopped`; if Qdrant or Memgraph is still starting, Mnemostack health checks may fail briefly until dependencies become reachable.
 
-If you do not need graph memory, remove the `memgraph` service and explicitly pass `--memgraph-uri ""` to disable graph. **Important:** the `mnemostack serve` CLI defaults `--memgraph-uri` to `bolt://localhost:7687` when omitted, so simply removing the flag does **not** disable graph — the server will attempt Bolt connections and log repeated timeouts. Pass an empty string to force it off. The `mnemostack mcp-serve` entrypoint reads from config where the default is `None` (disabled), so omitting is safe there. Verify with `/health` after startup.
+If you do not need graph memory, remove the `memgraph` service and explicitly disable graph: pass `--memgraph-uri ""`, or set an empty `MNEMOSTACK_GRAPH_URI=` / `MNEMOSTACK_MEMGRAPH_URI=` where you configure by environment. **Important:** the `mnemostack serve` CLI defaults `--memgraph-uri` to `bolt://localhost:7687` when omitted, so simply removing the flag does **not** disable graph. An unreachable graph is fail-soft with a cooldown — one warning and at most one Bolt attempt per minute for each of the two recall-path graph components, not one per request; health endpoints keep their live bounded probes — but explicit off is still cleaner. The `mnemostack mcp-serve` entrypoint reads from config where the default is `None` (disabled), so omitting is safe there. Verify with `/health` after startup.
 
 ## Persistence model
 
