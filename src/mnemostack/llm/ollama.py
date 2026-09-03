@@ -49,6 +49,11 @@ class OllamaLLM(LLMProvider):
         # localhost — so in a container with ``OLLAMA_HOST`` set, embeddings
         # reached the GPU box and every LLM call died on localhost (#180).
         resolved = host or os.environ.get("OLLAMA_HOST") or "http://localhost:11434"
+        # OLLAMA_HOST is commonly bare "host:port" — the embedding provider
+        # normalizes that, and "same chain" must include the normalization,
+        # or a scheme-less value builds a malformed urlopen URL here.
+        if "://" not in resolved:
+            resolved = f"http://{resolved}"
         self.host = resolved.rstrip("/")
         self.timeout = timeout
         self.think = think

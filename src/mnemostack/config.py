@@ -397,8 +397,22 @@ class Config:
         )
 
     def llm_provider_kwargs(self) -> dict[str, Any]:
-        """Keyword arguments for the configured LLM provider."""
-        return model_kwargs(self.llm.model)
+        """Keyword arguments for the configured LLM provider.
+
+        Delegates to :func:`llm_kwargs` so the SDK path
+        (``get_llm(cfg.llm.provider, **cfg.llm_provider_kwargs())``) carries
+        the same host/timeout knobs as every built-in entry point — the exact
+        contract :meth:`embedding_provider_kwargs` documents. This helper was
+        the ninth construction surface, and the one an enumeration by
+        ``get_llm(`` call sites cannot find: it builds kwargs, not the LLM.
+        """
+        return llm_kwargs(
+            self.llm.provider,
+            model=self.llm.model,
+            llm_host=self.llm.host,
+            embedding_ollama_host=self.embedding.ollama_host,
+            timeout=self.llm.timeout,
+        )
 
     @classmethod
     def load(cls, path: str | Path | None = None) -> Config:
@@ -438,6 +452,16 @@ class Config:
                 raise ValueError(
                     "embedding.timeout must be a positive integer number of "
                     f"seconds, got {timeout!r}"
+                )
+        # Same contract for the LLM timeout, file path included: its config
+        # comment defines it relative to embedding.timeout, so it validates
+        # like it too.
+        if cfg.llm.timeout is not None:
+            llm_timeout = cfg.llm.timeout
+            if isinstance(llm_timeout, bool) or not isinstance(llm_timeout, int) or llm_timeout < 1:
+                raise ValueError(
+                    "llm.timeout must be a positive integer number of "
+                    f"seconds, got {llm_timeout!r}"
                 )
         batch = cfg.embedding.batch_size
         if isinstance(batch, bool) or not isinstance(batch, int) or batch < 1:
@@ -566,7 +590,10 @@ def _apply_env_overrides(cfg: Config) -> Config:
     if v := env.get("MNEMOSTACK_LLM_HOST"):
         cfg.llm.host = v
     if v := env.get("MNEMOSTACK_LLM_TIMEOUT"):
-        cfg.llm.timeout = max(1, int(v))
+        # Strict, like MNEMOSTACK_EMBEDDING_TIMEOUT: a malformed value must
+        # fail at startup; Config.load's positive-integer validation runs
+        # after this and covers the file path too.
+        cfg.llm.timeout = int(v)
 
     # Graph (with alias)
     graph_uri = env.get("MNEMOSTACK_GRAPH_URI") or env.get("MNEMOSTACK_MEMGRAPH_URI")

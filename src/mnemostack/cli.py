@@ -3625,7 +3625,6 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         action="store_true",
         help="Include a live (billable) LLM generation probe (default: config check only)",
     )
-    p_doctor.set_defaults(_llm_host=cfg.llm.host, _llm_timeout=cfg.llm.timeout)
     p_doctor.set_defaults(func=cmd_doctor)
 
     p_text_index = sub.add_parser(

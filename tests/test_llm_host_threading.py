@@ -146,3 +146,48 @@ def test_cli_helper_reads_one_place():
     args._llm_timeout = 240
     kw = cli._llm_build_kwargs(args, "ollama")
     assert kw == {"model": "qwen", "host": "http://llm-box:11434", "timeout": 240}
+
+
+# --- the SDK surface: the ninth construction site ----------------------------
+
+
+def test_sdk_helper_carries_llm_host(isolated_env):
+    """`get_llm(cfg.llm.provider, **cfg.llm_provider_kwargs())` — the documented
+    sibling of the embedding SDK path — must carry the host too. This helper
+    builds kwargs rather than calling get_llm, so an enumeration by call sites
+    cannot find it; it gets its own pin instead."""
+    isolated_env.setenv("MNEMOSTACK_PROVIDER", "ollama")
+    isolated_env.setenv("MNEMOSTACK_OLLAMA_HOST", "http://gpu:11434")
+    isolated_env.setenv("MNEMOSTACK_LLM", "ollama")
+    cfg = Config.load(path=None)
+    kw = cfg.llm_provider_kwargs()
+    assert kw["host"] == "http://gpu:11434"
+
+    isolated_env.setenv("MNEMOSTACK_LLM_HOST", "http://llm-box:11434")
+    isolated_env.setenv("MNEMOSTACK_LLM_TIMEOUT", "120")
+    cfg = Config.load(path=None)
+    kw = cfg.llm_provider_kwargs()
+    assert kw["host"] == "http://llm-box:11434"
+    assert kw["timeout"] == 120
+
+
+def test_ollama_llm_normalizes_schemeless_native_env(monkeypatch):
+    """OLLAMA_HOST is commonly bare host:port; the embedding provider
+    normalizes it and 'same chain' must include the normalization."""
+    pytest.importorskip("httpx")
+    from mnemostack.llm.ollama import OllamaLLM
+
+    monkeypatch.setenv("OLLAMA_HOST", "gpu-node:11434")
+    assert OllamaLLM().host == "http://gpu-node:11434"
+
+
+def test_llm_timeout_is_validated_like_its_sibling(isolated_env, tmp_path):
+    cfg_file = tmp_path / "mnemostack.yaml"
+    cfg_file.write_text("llm:\n  timeout: -5\n")
+    isolated_env.setenv("MNEMOSTACK_CONFIG", str(cfg_file))
+    with pytest.raises(ValueError, match="llm.timeout must be a positive integer"):
+        Config.load()
+    isolated_env.delenv("MNEMOSTACK_CONFIG")
+    isolated_env.setenv("MNEMOSTACK_LLM_TIMEOUT", "abc")
+    with pytest.raises(ValueError):
+        Config.load(path=None)
