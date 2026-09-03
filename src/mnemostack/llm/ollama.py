@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import urllib.request
 from typing import Any
 
@@ -35,13 +36,25 @@ class OllamaLLM(LLMProvider):
     def __init__(
         self,
         model: str = DEFAULT_MODEL,
-        host: str = "http://localhost:11434",
+        host: str | None = None,
         timeout: int = 60,
         think: bool | None = False,
         options: dict[str, Any] | None = None,
     ):
         self.model = model
-        self.host = host.rstrip("/")
+        # Same resolution chain as the ollama EMBEDDING provider, documented
+        # there: an explicit ``host`` argument -> the native ``OLLAMA_HOST``
+        # env var -> localhost. The two clients used to disagree — the
+        # embedding provider honored ``OLLAMA_HOST`` while this one pinned
+        # localhost — so in a container with ``OLLAMA_HOST`` set, embeddings
+        # reached the GPU box and every LLM call died on localhost (#180).
+        resolved = host or os.environ.get("OLLAMA_HOST") or "http://localhost:11434"
+        # OLLAMA_HOST is commonly bare "host:port" — the embedding provider
+        # normalizes that, and "same chain" must include the normalization,
+        # or a scheme-less value builds a malformed urlopen URL here.
+        if "://" not in resolved:
+            resolved = f"http://{resolved}"
+        self.host = resolved.rstrip("/")
         self.timeout = timeout
         self.think = think
         self.options = dict(options or {})

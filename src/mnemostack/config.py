@@ -79,6 +79,45 @@ def provider_kwargs(
     return kw
 
 
+def llm_kwargs(
+    provider: str,
+    *,
+    model: str | None = None,
+    llm_host: str | None = None,
+    embedding_ollama_host: str | None = None,
+    timeout: int | None = None,
+) -> dict[str, Any]:
+    """Constructor kwargs for ``get_llm()`` incl. provider-specific knobs.
+
+    Sibling of ``provider_kwargs`` with the same contract: ONE resolution
+    point for every surface (CLI, HTTP server, MCP, doctor), so a configured
+    host can never be accepted by the config schema yet silently dropped
+    before reaching the LLM. The embedding path kept that promise while the
+    LLM path was built through ``model_kwargs`` — model only — on every
+    surface, so ``--ollama-host`` pointed embeddings at the GPU box while the
+    LLM silently dialed localhost (#180).
+
+    For the ollama provider the host falls back to the embedding provider's
+    ``ollama_host``; ``llm.host`` / ``MNEMOSTACK_LLM_HOST`` overrides the
+    inheritance for split deployments. The fallback lives here rather than at
+    the call sites — an inheritance rule copied per surface is a rule that
+    drifts. Only known built-in providers receive host/timeout, same gating
+    as ``provider_kwargs``: a custom registered provider keeps the historical
+    model-only construction contract, so an unexpected keyword can't break it.
+    """
+    kw: dict[str, Any] = dict(model_kwargs(model))
+    name = (provider or "").lower()
+    if name == "ollama":
+        host = llm_host or embedding_ollama_host
+        if host:
+            kw["host"] = host
+        if timeout is not None:
+            kw["timeout"] = timeout
+    elif name in ("gemini", "gemini-flash") and timeout is not None:
+        kw["timeout"] = timeout
+    return kw
+
+
 class _StrictYamlLoader(yaml.SafeLoader):
     """SafeLoader that REJECTS duplicate mapping keys.
 
@@ -157,6 +196,14 @@ class VectorConfig:
 class LLMConfig:
     provider: str = "gemini"
     model: str | None = None
+    # None = inherit: for the ollama provider the LLM host falls back to
+    # embedding.ollama_host (one GPU box serving both models is the common
+    # deployment); set this only when the LLM lives on a different host.
+    host: str | None = None
+    # LLM request timeout in seconds; None = provider default. NOT inherited
+    # from embedding.timeout on purpose — generation is a different workload,
+    # and inheriting a short embedding timeout would cut off long answers.
+    timeout: int | None = None
 
 
 @dataclass
@@ -350,8 +397,22 @@ class Config:
         )
 
     def llm_provider_kwargs(self) -> dict[str, Any]:
-        """Keyword arguments for the configured LLM provider."""
-        return model_kwargs(self.llm.model)
+        """Keyword arguments for the configured LLM provider.
+
+        Delegates to :func:`llm_kwargs` so the SDK path
+        (``get_llm(cfg.llm.provider, **cfg.llm_provider_kwargs())``) carries
+        the same host/timeout knobs as every built-in entry point — the exact
+        contract :meth:`embedding_provider_kwargs` documents. This helper was
+        the ninth construction surface, and the one an enumeration by
+        ``get_llm(`` call sites cannot find: it builds kwargs, not the LLM.
+        """
+        return llm_kwargs(
+            self.llm.provider,
+            model=self.llm.model,
+            llm_host=self.llm.host,
+            embedding_ollama_host=self.embedding.ollama_host,
+            timeout=self.llm.timeout,
+        )
 
     @classmethod
     def load(cls, path: str | Path | None = None) -> Config:
@@ -391,6 +452,16 @@ class Config:
                 raise ValueError(
                     "embedding.timeout must be a positive integer number of "
                     f"seconds, got {timeout!r}"
+                )
+        # Same contract for the LLM timeout, file path included: its config
+        # comment defines it relative to embedding.timeout, so it validates
+        # like it too.
+        if cfg.llm.timeout is not None:
+            llm_timeout = cfg.llm.timeout
+            if isinstance(llm_timeout, bool) or not isinstance(llm_timeout, int) or llm_timeout < 1:
+                raise ValueError(
+                    "llm.timeout must be a positive integer number of "
+                    f"seconds, got {llm_timeout!r}"
                 )
         batch = cfg.embedding.batch_size
         if isinstance(batch, bool) or not isinstance(batch, int) or batch < 1:
@@ -453,6 +524,8 @@ def _apply_env_overrides(cfg: Config) -> Config:
         MNEMOSTACK_LLM_PROVIDER
         MNEMOSTACK_LLM              (alias for LLM_PROVIDER)
         MNEMOSTACK_LLM_MODEL
+        MNEMOSTACK_LLM_HOST         (ollama LLM host; default: inherit MNEMOSTACK_OLLAMA_HOST)
+        MNEMOSTACK_LLM_TIMEOUT
         MNEMOSTACK_GRAPH_URI
         MNEMOSTACK_GRAPH_USER
         MNEMOSTACK_GRAPH_PASSWORD
@@ -514,6 +587,13 @@ def _apply_env_overrides(cfg: Config) -> Config:
         cfg.llm.provider = llm_provider
     if v := env.get("MNEMOSTACK_LLM_MODEL"):
         cfg.llm.model = v
+    if v := env.get("MNEMOSTACK_LLM_HOST"):
+        cfg.llm.host = v
+    if v := env.get("MNEMOSTACK_LLM_TIMEOUT"):
+        # Strict, like MNEMOSTACK_EMBEDDING_TIMEOUT: a malformed value must
+        # fail at startup; Config.load's positive-integer validation runs
+        # after this and covers the file path too.
+        cfg.llm.timeout = int(v)
 
     # Graph (with alias). Unlike every other override here, PRESENCE decides,
     # not truthiness: the graph is the one optional store, and an explicitly
@@ -596,6 +676,8 @@ vector:
 llm:
   provider: gemini
   model: null             # null = provider default (gemini-2.5-flash)
+  host: null              # ollama LLM host; null = inherit embedding.ollama_host
+  timeout: null           # LLM request seconds; null = provider default (not inherited)
 
 graph:
   uri: null               # e.g. bolt://localhost:7687 to enable graph
