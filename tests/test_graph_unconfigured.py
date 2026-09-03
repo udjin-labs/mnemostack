@@ -21,7 +21,13 @@ from typing import Any
 import pytest
 
 from mnemostack.recall import retrievers as retrievers_mod
-from mnemostack.recall.retrievers import GRAPH_UNAVAILABLE_COOLDOWN_S, MemgraphRetriever
+from mnemostack.recall.retrievers import (
+    GRAPH_UNAVAILABLE_COOLDOWN_S,
+    MemgraphRetriever,
+    _redacted_uri,
+    bolt_arm_available,
+    trip_bolt_cooldown,
+)
 
 
 @pytest.fixture
@@ -275,3 +281,93 @@ def test_resurrection_bad_data_stays_loud_and_does_not_trip():
     stage, ctx = _resurrection(_Driver())
     assert stage.apply(ctx, []) == []
     assert stage._unavailable_until == 0.0
+
+
+# --- concurrency semantics of the cooldown ----------------------------------
+
+
+def test_expired_window_is_claimed_by_one_caller(monkeypatch):
+    """Half-open: at window expiry exactly one caller gets the retry probe."""
+    driver = _CountingDriver(ConnectionRefusedError("refused"))
+    r = MemgraphRetriever(uri="bolt://dead:7687", driver=driver)
+    r.search("deploy window", limit=3)
+
+    now = [0.0]
+    monkeypatch.setattr(retrievers_mod.time, "monotonic", lambda: now[0])
+    now[0] = r._unavailable_until + 1.0
+    # The first check through claims the probe and re-arms the deadline;
+    # every concurrent caller must be told to skip.
+    assert bolt_arm_available(r) is True
+    assert r._probe_inflight is True
+    assert bolt_arm_available(r) is False
+
+
+def test_concurrent_failures_warn_once_per_window(caplog):
+    driver = _CountingDriver(ConnectionRefusedError("refused"))
+    r = MemgraphRetriever(uri="bolt://dead:7687", driver=driver)
+    with caplog.at_level("WARNING"):
+        r.search("deploy window", limit=3)          # owns the warning
+        trip_bolt_cooldown(r, ConnectionRefusedError("late loser"))
+        trip_bolt_cooldown(r, ConnectionRefusedError("later loser"))
+    warnings = [rec for rec in caplog.records if "skipping the graph arm" in rec.message]
+    assert len(warnings) == 1
+
+
+def test_success_clears_the_window(monkeypatch):
+    class _OKSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def run(self, *a, **k):
+            return _Result()
+
+    class _FlakyDriver:
+        """Refuses once, then answers."""
+
+        def __init__(self):
+            self.sessions = 0
+
+        def session(self, **kwargs: Any):
+            self.sessions += 1
+            if self.sessions == 1:
+                raise ConnectionRefusedError("refused")
+            return _OKSession()
+
+    driver = _FlakyDriver()
+    r = MemgraphRetriever(uri="bolt://flaky:7687", driver=driver)
+    r.search("deploy window", limit=3)
+    assert r._unavailable_until > 0.0
+
+    now = [0.0]
+    monkeypatch.setattr(retrievers_mod.time, "monotonic", lambda: now[0])
+    now[0] = r._unavailable_until + 1.0
+    r.search("deploy window", limit=3)              # half-open probe succeeds
+    assert r._unavailable_until == 0.0
+    assert r._probe_inflight is False
+
+
+def test_cooldown_warning_redacts_credentials(caplog):
+    driver = _CountingDriver(ConnectionRefusedError("refused"))
+    r = MemgraphRetriever(uri="bolt://alice:secret@dead:7687", driver=driver)
+    with caplog.at_level("WARNING"):
+        r.search("deploy window", limit=3)
+    joined = " ".join(rec.getMessage() for rec in caplog.records)
+    assert "secret" not in joined
+    assert "***@dead:7687" in joined
+
+
+@pytest.mark.parametrize(
+    ("uri", "expected"),
+    [
+        ("bolt://alice:secret@host:7687", "bolt://***@host:7687"),
+        ("bolt://host:7687", "bolt://host:7687"),
+        ("alice:secret@host:7687", "***@host:7687"),
+        ("bolt://alice:secret@host:7687/db", "bolt://***@host:7687/db"),
+        ("definitely not a uri", "definitely not a uri"),
+    ],
+)
+def test_redacted_uri_shapes(uri, expected):
+    assert _redacted_uri(uri) == expected

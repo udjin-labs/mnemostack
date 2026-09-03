@@ -226,10 +226,15 @@ the **library** recall path — but the **HTTP server defaults it on**: both
 `MNEMOSTACK_MEMGRAPH_URI=` (the env-only path a container has), or construct
 `ServerConfig(graph_uri=None)` programmatically. An ABSENT variable still
 expands to the default; only a present-and-empty one disables. When the default
-(or any configured) graph proves unreachable, the graph arm trips a cooldown —
-one warning, then zero connection attempts for the window, retrying on its own
-afterwards — so a store that is down, or not there at all, costs one attempt a
-minute rather than one per request. `token_budget <= 0` normalizing to "no budget"
+(or any configured) graph proves unreachable, the RECALL path's Bolt owners —
+the graph retriever and the graph-resurrection stage — each trip a cooldown:
+one warning, then zero connection attempts for the window, one half-open retry
+probe afterwards even under concurrent traffic. The breaker is deliberately
+per component, not per URI (each carries its own credentials and can point at
+its own store), so a dead store costs at most one attempt per component per
+window rather than one per request. The `/health`, `/readyz` and `/status`
+graph probes stay LIVE by design: their job is to notice recovery immediately,
+they are bounded by `graph_health_timeout`, and they log nothing. `token_budget <= 0` normalizing to "no budget"
 is a 🟢 documented behavior.
 
 ## MCP tools (`mnemostack mcp-serve`)

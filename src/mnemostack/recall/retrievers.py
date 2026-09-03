@@ -84,11 +84,69 @@ def _is_unreachable(exc: BaseException) -> bool:
 
 
 #: How long a Bolt-backed component stays skipped after its store proved
-#: unreachable. Long enough that a dead store costs one attempt a minute
-#: instead of two per request; short enough that a Memgraph which boots after
-#: the server — the ordinary compose case — rejoins on its own without a
-#: restart.
+#: unreachable. Long enough that a dead store costs at most one attempt per
+#: component per window instead of one per request; short enough that a
+#: Memgraph which boots after the server — the ordinary compose case —
+#: rejoins on its own without a restart. Deliberately PER COMPONENT, not per
+#: URI: the retriever and the resurrection stage carry their own credentials
+#: and can be pointed at different stores, so a breaker keyed by URI alone
+#: could couple two components that only look identical.
 GRAPH_UNAVAILABLE_COOLDOWN_S = 60.0
+
+#: One module-level lock for every component's cooldown transitions. The
+#: server runs recalls on worker threads, so without it every thread in a
+#: burst passes the deadline check before any of them trips — one timeout per
+#: concurrent request instead of one per window. The critical sections are a
+#: few reads and writes; a shared lock is contention-free at that size and
+#: sidesteps per-instance locks entirely, which matters because tests build
+#: these components via ``__new__``.
+_BOLT_STATE_LOCK = threading.Lock()
+
+
+def _redacted_uri(uri: str) -> str:
+    """A Bolt URI safe for logs: any userinfo is masked, never printed.
+
+    Credentials normally arrive through the separate user/password settings,
+    but a URI CAN embed them — and a malformed credential-bearing URI is
+    exactly the kind that fails driver construction and lands in the cooldown
+    warning. Pure string surgery on the authority part, no parser to raise.
+    """
+    scheme, sep, rest = uri.partition("://")
+    if not sep:
+        scheme, rest = "", uri
+    netloc, slash, tail = rest.partition("/")
+    if "@" in netloc:
+        netloc = "***@" + netloc.rpartition("@")[2]
+    return (scheme + sep if sep else "") + netloc + slash + tail
+
+
+def bolt_arm_available(component: Any) -> bool:
+    """Whether this component may touch its store right now.
+
+    Race-free deadline check with HALF-OPEN semantics: when a window has just
+    expired, the first caller through claims the single retry probe by
+    re-arming the deadline before it dials; every concurrent caller keeps
+    skipping until that probe either succeeds (``bolt_mark_recovered`` clears
+    the deadline) or fails (``trip_bolt_cooldown`` re-arms it with the
+    once-a-window warning). Without the claim, a traffic burst at window
+    expiry pays one connection timeout per in-flight request.
+    """
+    with _BOLT_STATE_LOCK:
+        now = time.monotonic()
+        if now < component._unavailable_until:
+            return False
+        if component._unavailable_until:
+            component._unavailable_until = now + GRAPH_UNAVAILABLE_COOLDOWN_S
+            component._probe_inflight = True
+        return True
+
+
+def bolt_mark_recovered(component: Any) -> None:
+    """The store answered: clear the window so the arm runs freely again."""
+    if component._unavailable_until or component._probe_inflight:
+        with _BOLT_STATE_LOCK:
+            component._unavailable_until = 0.0
+            component._probe_inflight = False
 
 
 def trip_bolt_cooldown(component: Any, reason: BaseException | str) -> None:
@@ -98,25 +156,37 @@ def trip_bolt_cooldown(component: Any, reason: BaseException | str) -> None:
     retriever and the graph-resurrection stage — issue #181 came from BOTH,
     and a cooldown implemented in one of them would have left the other
     tracing per request). Expects the common shape: ``uri``, ``_driver``,
-    ``_own_driver``, ``_unavailable_until``.
+    ``_own_driver``, ``_unavailable_until``, ``_probe_inflight``.
 
-    A driver we own is dropped so the retry after the window rebuilds it; an
-    injected driver belongs to the caller and is left alone — only the
-    deadline applies to it.
+    Concurrent failures race here, so the warning is deduplicated under the
+    lock: the first failure of a window owns it, later ones only extend the
+    deadline silently — except the half-open prober reporting the window it
+    claimed itself, which must stay audible once a window. A driver we own is
+    dropped so the retry after the window rebuilds it; an injected driver
+    belongs to the caller and is left alone — only the deadline applies.
     """
-    component._unavailable_until = time.monotonic() + GRAPH_UNAVAILABLE_COOLDOWN_S
-    if component._driver is not None and component._own_driver:
+    with _BOLT_STATE_LOCK:
+        now = time.monotonic()
+        should_warn = component._probe_inflight or now >= component._unavailable_until
+        component._probe_inflight = False
+        component._unavailable_until = max(
+            component._unavailable_until, now + GRAPH_UNAVAILABLE_COOLDOWN_S
+        )
+        driver_to_close = component._driver if component._own_driver else None
+        if component._own_driver:
+            component._driver = None
+    if driver_to_close is not None:
         try:
-            component._driver.close()
+            driver_to_close.close()
         except Exception:
             pass
-        component._driver = None
-    logger.warning(
-        "graph unreachable at %s, skipping the graph arm for %.0fs: %s",
-        component.uri,
-        GRAPH_UNAVAILABLE_COOLDOWN_S,
-        reason,
-    )
+    if should_warn:
+        logger.warning(
+            "graph unreachable at %s, skipping the graph arm for %.0fs: %s",
+            _redacted_uri(component.uri),
+            GRAPH_UNAVAILABLE_COOLDOWN_S,
+            reason,
+        )
 
 
 #: The built-in retriever family names. A ``name=`` override may carry its
@@ -1410,6 +1480,10 @@ class MemgraphRetriever(Retriever):
     #: tripped" is the right reading for any instance that skipped ``__init__``.
     #: Tripping always writes an instance attribute over this.
     _unavailable_until = 0.0
+    #: Whether this component holds the half-open probe claim for the window
+    #: it just re-armed (see ``bolt_arm_available``). Class default for the
+    #: same ``__new__`` reason as the deadline above.
+    _probe_inflight = False
 
     def __init__(
         self,
@@ -1452,7 +1526,7 @@ class MemgraphRetriever(Retriever):
         self.chunk_filter_probe = chunk_filter_probe
 
     def _get_driver(self):
-        if time.monotonic() < self._unavailable_until:
+        if not bolt_arm_available(self):
             return None
         if self._driver is not None:
             return self._driver
@@ -1987,6 +2061,7 @@ class MemgraphRetriever(Retriever):
                             sources=["memgraph"],
                         )
                     )
+                bolt_mark_recovered(self)
                 return results[:limit]
         except Exception as exc:
             # Fail open (graph is optional), but log — a bad query or a malformed

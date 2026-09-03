@@ -12,14 +12,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   not there was rediscovered per query, by BOTH Bolt-owning components: the
   graph retriever and the graph-resurrection stage each paid refused Bolt
   attempts and logged a stack trace on every recall. An unreachable store now
-  trips a shared 60-second cooldown: one warning naming the URI and the window,
-  then zero connection attempts until it expires, after which the arm retries
-  on its own — a Memgraph that boots after the server rejoins without a
-  restart. Only connection-level failures trip it; a bad query or auth mistake
-  keeps the loud per-call log, because those need fixing, not silencing. A
-  driver whose CONSTRUCTION fails (a malformed URI — equally identical on
-  every call, and previously a silent `None` retried forever) trips the same
-  cooldown, so the cause is named once a window instead of never.
+  trips a shared 60-second cooldown: one warning naming the URI (userinfo
+  redacted) and the window, then zero connection attempts until it expires,
+  after which ONE half-open retry probe runs even under concurrent traffic —
+  the first caller through claims it, a burst does not turn window expiry into
+  one timeout per in-flight request — and a probe that succeeds clears the
+  window at once, so a Memgraph that boots after the server rejoins without a
+  restart. The breaker is per component (each carries its own credentials and
+  can target its own store): a dead store costs at most one attempt per
+  component per window. Health endpoints keep their live, bounded, silent
+  probes — their job is to notice recovery immediately. Only connection-level
+  failures trip the cooldown; a bad query or auth mistake keeps the loud
+  per-call log, because those need fixing, not silencing. A driver whose
+  CONSTRUCTION fails (a malformed URI — equally identical on every call, and
+  previously a silent `None` retried forever) trips the same cooldown, so the
+  cause is named once a window instead of never.
 - **An explicitly empty `MNEMOSTACK_GRAPH_URI=` / `MNEMOSTACK_MEMGRAPH_URI=`
   disables the graph on the server path** (#181). The CLI has always had
   `--memgraph-uri ""` as the off switch, but a deployment configured only by

@@ -14,12 +14,13 @@ the stage is a no-op. This matches legacy behaviour.
 from __future__ import annotations
 
 import logging
-import time
 from typing import Any
 
 from ..recaller import RecallResult
 from ..retrievers import (
     _is_unreachable,
+    bolt_arm_available,
+    bolt_mark_recovered,
     graph_result_id,
     graph_valid_clause,
     trip_bolt_cooldown,
@@ -92,9 +93,10 @@ class GraphResurrection(Stage):
     #: stage ran. Issue #181's log noise came from BOTH components. Class
     #: default so an instance built via __new__ reads "never tripped".
     _unavailable_until = 0.0
+    _probe_inflight = False
 
     def _get_driver(self):
-        if time.monotonic() < self._unavailable_until:
+        if not bolt_arm_available(self):
             return None
         if self._driver is not None:
             return self._driver
@@ -215,6 +217,8 @@ class GraphResurrection(Stage):
             logger.warning("graph resurrection failed, skipping", exc_info=True)
             return results
 
+        # Reached only when the session block completed: the store answered.
+        bolt_mark_recovered(self)
         resurrected: list[tuple[RecallResult, float]] = []
         for key, info in seed_match.items():
             nb = info["data"]
