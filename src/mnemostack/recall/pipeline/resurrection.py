@@ -14,10 +14,16 @@ the stage is a no-op. This matches legacy behaviour.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from ..recaller import RecallResult
-from ..retrievers import graph_result_id, graph_valid_clause
+from ..retrievers import (
+    _is_unreachable,
+    graph_result_id,
+    graph_valid_clause,
+    trip_bolt_cooldown,
+)
 from ..validity import to_utc_instant
 from .base import PipelineContext, Stage
 from .stages import STOPWORDS
@@ -80,7 +86,16 @@ class GraphResurrection(Stage):
         #: text key, so resurrected seeds dedup against the real chunk text.
         self.text_key = text_key
 
+    #: Same cooldown contract as MemgraphRetriever, for the same reason: this
+    #: stage owns its own lazy Bolt driver, so a store that is not there was
+    #: rediscovered — with a warning and a stack trace — on every request this
+    #: stage ran. Issue #181's log noise came from BOTH components. Class
+    #: default so an instance built via __new__ reads "never tripped".
+    _unavailable_until = 0.0
+
     def _get_driver(self):
+        if time.monotonic() < self._unavailable_until:
+            return None
         if self._driver is not None:
             return self._driver
         if not _AVAILABLE:
@@ -93,7 +108,11 @@ class GraphResurrection(Stage):
                 connection_acquisition_timeout=self.timeout,
             )
             return self._driver
-        except Exception:
+        except Exception as exc:
+            # Same as MemgraphRetriever._get_driver: construction fails for
+            # config-shaped reasons and fails identically every call — trip
+            # the cooldown so the cause is named once a window, not never.
+            trip_bolt_cooldown(self, exc)
             return None
 
     def close(self) -> None:
@@ -182,9 +201,17 @@ class GraphResurrection(Stage):
                         )
                         slot["seeds"].add(seed)
                         slot["rels"].add(nb.get("rel") or "")
-        except Exception:
+        except Exception as exc:
             # Fail soft (graph optional), but log — a malformed stored bound or
             # driver error skips resurrection for this call, which was silent.
+            #
+            # An UNREACHABLE store trips the shared cooldown instead: the next
+            # request would fail identically, and this stage plus the graph
+            # retriever tracing the same dead store twice per request is
+            # exactly the noise issue #181 is about.
+            if _is_unreachable(exc):
+                trip_bolt_cooldown(self, exc)
+                return results
             logger.warning("graph resurrection failed, skipping", exc_info=True)
             return results
 

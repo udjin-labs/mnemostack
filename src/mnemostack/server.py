@@ -718,7 +718,7 @@ def _make_probe_client(url: str, timeout: int) -> Any:
 
 
 def _graph_uri_from_env(cfg: Config) -> str | None:
-    """The server's graph URI, honouring an explicitly empty environment value.
+    """The server's graph URI: map the config layer's sentinel, read no env.
 
     The HTTP server defaults the graph ON: an unset `graph.uri` expands to
     `bolt://localhost:7687` (documented in docs/api-stability.md, and not
@@ -728,15 +728,17 @@ def _graph_uri_from_env(cfg: Config) -> str | None:
     configured only by environment could not turn the graph off at all and paid
     a refused Bolt connection on every request.
 
-    One rule rather than a special case: the first of the two names that is
-    PRESENT decides, matching the alias precedence the config layer already
-    uses. An absent variable still expands to the documented default; a present
-    but empty one disables the graph.
+    The environment is resolved in exactly one place — the config layer, which
+    keeps an explicitly empty variable as ``""`` and an unconfigured graph as
+    ``None``. Re-reading the variables here is how a first version of this
+    function made two parts of one process disagree about whether the graph
+    exists. This function only maps the sentinel: ``None`` (never configured)
+    expands to the documented default; ``""`` (explicitly off) stays falsy for
+    every guard; anything else passes through.
     """
-    for name in ("MNEMOSTACK_GRAPH_URI", "MNEMOSTACK_MEMGRAPH_URI"):
-        if name in os.environ:
-            return os.environ[name]
-    return cfg.graph.uri or "bolt://localhost:7687"
+    if cfg.graph.uri is None:
+        return "bolt://localhost:7687"
+    return cfg.graph.uri
 
 
 @dataclass

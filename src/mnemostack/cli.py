@@ -4437,8 +4437,13 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     )
     p_serve.add_argument(
         "--memgraph-uri",
-        default=cfg.graph.uri or "bolt://localhost:7687",
-        help="Memgraph bolt URI for the graph retriever",
+        # `is None`, not `or`: the config layer keeps an explicitly empty
+        # MNEMOSTACK_GRAPH_URI= as "" (graph off), and `or` would re-expand
+        # that to the localhost default, silently re-enabling what the
+        # operator just disabled. Only a never-configured graph gets the
+        # documented server default.
+        default=cfg.graph.uri if cfg.graph.uri is not None else "bolt://localhost:7687",
+        help='Memgraph bolt URI for the graph retriever ("" disables graph)',
     )
     p_serve.add_argument(
         "--graph-timeout",

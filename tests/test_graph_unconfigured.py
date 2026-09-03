@@ -57,10 +57,34 @@ def test_explicitly_empty_env_disables_graph(isolated_env, name):
 
 
 def test_empty_primary_beats_alias(isolated_env):
-    # Same precedence as the config layer: the first PRESENT name decides.
+    # PRESENCE decides, canonical name first — and there is exactly ONE
+    # resolution point for the pair, so Config and ServerConfig must agree.
+    # A first version resolved the environment a second time inside the
+    # server and disagreed with the config layer on exactly this input.
+    from mnemostack.config import Config
+
     isolated_env.setenv("MNEMOSTACK_GRAPH_URI", "")
     isolated_env.setenv("MNEMOSTACK_MEMGRAPH_URI", "bolt://alias:7687")
-    assert not _from_env().graph_uri
+    assert Config.load().graph.uri == ""
+    assert _from_env().graph_uri == ""
+
+
+def test_config_file_value_survives_absent_env(isolated_env, tmp_path):
+    cfg_file = tmp_path / "mnemostack.yaml"
+    cfg_file.write_text("graph:\n  uri: bolt://from-file:7687\n")
+    isolated_env.setenv("MNEMOSTACK_CONFIG", str(cfg_file))
+    # A file-configured graph is a CONFIGURED graph: the server must use it,
+    # not substitute the localhost default.
+    assert _from_env().graph_uri == "bolt://from-file:7687"
+
+
+def test_explicit_empty_env_overrides_config_file(isolated_env, tmp_path):
+    cfg_file = tmp_path / "mnemostack.yaml"
+    cfg_file.write_text("graph:\n  uri: bolt://from-file:7687\n")
+    isolated_env.setenv("MNEMOSTACK_CONFIG", str(cfg_file))
+    isolated_env.setenv("MNEMOSTACK_GRAPH_URI", "")
+    cfg = _from_env()
+    assert not cfg.graph_uri
 
 
 def test_set_env_still_wins(isolated_env):
@@ -190,3 +214,64 @@ def test_service_unavailable_counts_as_unreachable():
     r = MemgraphRetriever(uri="bolt://dead:7687", driver=driver)
     r.search("deploy window", limit=3)
     assert r._unavailable_until > 0.0
+
+
+def test_driver_construction_failure_trips_and_warns(monkeypatch, caplog):
+    # Construction fails for config-shaped reasons (malformed URI) and fails
+    # identically every call. It used to be a bare `return None` — invisible
+    # AND retried per request.
+    class _GraphDatabase:
+        @staticmethod
+        def driver(*a, **k):
+            raise ValueError("cannot parse URI")
+
+    monkeypatch.setattr(retrievers_mod, "GraphDatabase", _GraphDatabase)
+    monkeypatch.setattr(retrievers_mod, "_NEO4J_AVAILABLE", True)
+    r = MemgraphRetriever(uri="definitely not a uri")
+    with caplog.at_level("WARNING"):
+        assert r.search("deploy window", limit=3) == []
+    assert r._unavailable_until > 0.0
+    assert any("skipping the graph arm" in rec.message for rec in caplog.records)
+
+
+# --- the SECOND Bolt client: graph resurrection ------------------------------
+
+
+def _resurrection(driver):
+    from mnemostack.recall.pipeline.base import PipelineContext
+    from mnemostack.recall.pipeline.resurrection import GraphResurrection
+
+    stage = GraphResurrection(uri="bolt://dead:7687", driver=driver)
+    ctx = PipelineContext(query="deploy window schedule")
+    return stage, ctx
+
+
+def test_resurrection_trips_cooldown_on_unreachable_store():
+    driver = _CountingDriver(ConnectionRefusedError("refused"))
+    stage, ctx = _resurrection(driver)
+    assert stage.apply(ctx, []) == []
+    assert driver.sessions == 1
+    assert stage._unavailable_until > 0.0
+    # Window open: the stage contributes nothing and dials nothing.
+    assert stage.apply(ctx, []) == []
+    assert driver.sessions == 1
+
+
+def test_resurrection_bad_data_stays_loud_and_does_not_trip():
+    class _Session:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def run(self, *a, **k):
+            raise ValueError("malformed stored bound")
+
+    class _Driver:
+        def session(self, **kwargs: Any):
+            return _Session()
+
+    stage, ctx = _resurrection(_Driver())
+    assert stage.apply(ctx, []) == []
+    assert stage._unavailable_until == 0.0

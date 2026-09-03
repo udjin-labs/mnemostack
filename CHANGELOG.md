@@ -9,21 +9,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **An unconfigured graph no longer costs every request** (#181). The server's
   documented default still points the graph at `bolt://localhost:7687`, but the
   neo4j driver is lazy — constructing it never connects — so a store that was
-  not there was rediscovered per query: two refused Bolt attempts and a stack
-  trace on every recall. An unreachable store now trips a 60-second cooldown on
-  the graph arm: one warning, then zero connection attempts until the window
-  expires, after which the arm retries on its own — a Memgraph that boots after
-  the server rejoins without a restart. Only connection-level failures trip it;
-  a bad query or auth mistake keeps the loud per-call log, because those need
-  fixing, not silencing.
+  not there was rediscovered per query, by BOTH Bolt-owning components: the
+  graph retriever and the graph-resurrection stage each paid refused Bolt
+  attempts and logged a stack trace on every recall. An unreachable store now
+  trips a shared 60-second cooldown: one warning naming the URI and the window,
+  then zero connection attempts until it expires, after which the arm retries
+  on its own — a Memgraph that boots after the server rejoins without a
+  restart. Only connection-level failures trip it; a bad query or auth mistake
+  keeps the loud per-call log, because those need fixing, not silencing. A
+  driver whose CONSTRUCTION fails (a malformed URI — equally identical on
+  every call, and previously a silent `None` retried forever) trips the same
+  cooldown, so the cause is named once a window instead of never.
 - **An explicitly empty `MNEMOSTACK_GRAPH_URI=` / `MNEMOSTACK_MEMGRAPH_URI=`
   disables the graph on the server path** (#181). The CLI has always had
   `--memgraph-uri ""` as the off switch, but a deployment configured only by
   environment — a container — had none: the env override ignored empty values
-  and the documented localhost default won. An absent variable still expands to
-  that default; only a present-and-empty one disables. The first of the two
-  names that is present decides, matching the alias precedence the config layer
-  already uses.
+  and the documented localhost default won. For these two variables PRESENCE
+  now decides, not truthiness, and the canonical name wins over the alias
+  whenever it is present at all — an explicit empty string is a statement, not
+  an accident to skip. This is a deliberate exception to the config layer's
+  usual empty-means-unset rule, resolved in exactly one place (the config
+  layer itself), so every consumer of the configuration agrees on whether the
+  graph exists. An absent variable still expands to the documented server
+  default; a file-configured URI is used as configured; a present-and-empty
+  variable disables the graph even over a config file.
 
 ## [2.3.1] - 2026-08-22
 

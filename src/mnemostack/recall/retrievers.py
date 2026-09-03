@@ -83,6 +83,42 @@ def _is_unreachable(exc: BaseException) -> bool:
     return isinstance(exc, _UNREACHABLE_ERRORS)
 
 
+#: How long a Bolt-backed component stays skipped after its store proved
+#: unreachable. Long enough that a dead store costs one attempt a minute
+#: instead of two per request; short enough that a Memgraph which boots after
+#: the server — the ordinary compose case — rejoins on its own without a
+#: restart.
+GRAPH_UNAVAILABLE_COOLDOWN_S = 60.0
+
+
+def trip_bolt_cooldown(component: Any, reason: BaseException | str) -> None:
+    """Skip ``component``'s Bolt store until the cooldown expires, once, loudly.
+
+    Shared by every component that owns a lazy Bolt driver (the graph
+    retriever and the graph-resurrection stage — issue #181 came from BOTH,
+    and a cooldown implemented in one of them would have left the other
+    tracing per request). Expects the common shape: ``uri``, ``_driver``,
+    ``_own_driver``, ``_unavailable_until``.
+
+    A driver we own is dropped so the retry after the window rebuilds it; an
+    injected driver belongs to the caller and is left alone — only the
+    deadline applies to it.
+    """
+    component._unavailable_until = time.monotonic() + GRAPH_UNAVAILABLE_COOLDOWN_S
+    if component._driver is not None and component._own_driver:
+        try:
+            component._driver.close()
+        except Exception:
+            pass
+        component._driver = None
+    logger.warning(
+        "graph unreachable at %s, skipping the graph arm for %.0fs: %s",
+        component.uri,
+        GRAPH_UNAVAILABLE_COOLDOWN_S,
+        reason,
+    )
+
+
 #: The built-in retriever family names. A ``name=`` override may carry its
 #: OWN family's name (suffixed or not) but never another family's: the
 #: recaller branches on exact identities (``vector`` drives the vector floor
@@ -1328,13 +1364,6 @@ def chunk_filter_probe_via(
     return probe
 
 
-#: How long the graph arm stays skipped after the store proved unreachable.
-#: Long enough that a dead store costs one attempt a minute instead of two per
-#: request; short enough that a Memgraph which boots after the server — the
-#: ordinary compose case — rejoins on its own without a restart.
-GRAPH_UNAVAILABLE_COOLDOWN_S = 60.0
-
-
 class MemgraphRetriever(Retriever):
     """Knowledge-graph retriever — exact/contains match on node names.
 
@@ -1437,22 +1466,14 @@ class MemgraphRetriever(Retriever):
                 connection_acquisition_timeout=self.timeout,
             )
             return self._driver
-        except Exception:
+        except Exception as exc:
+            # Construction fails for config-shaped reasons (a malformed URI —
+            # the lazy driver never touches the network here) and fails the
+            # same way on every call. This used to be silent None per request:
+            # invisible to the operator AND retried forever. Same cooldown,
+            # and the warning names the cause once a window.
+            trip_bolt_cooldown(self, exc)
             return None
-
-    def _mark_unavailable(self) -> None:
-        """Skip this arm until the cooldown expires, and drop our own driver.
-
-        An injected driver belongs to the caller and is left alone — only the
-        deadline applies to it.
-        """
-        self._unavailable_until = time.monotonic() + GRAPH_UNAVAILABLE_COOLDOWN_S
-        if self._driver is not None and self._own_driver:
-            try:
-                self._driver.close()
-            except Exception:
-                pass
-            self._driver = None
 
     def close(self) -> None:
         if self._driver is not None and self._own_driver:
@@ -1976,13 +1997,7 @@ class MemgraphRetriever(Retriever):
             # buys nothing and buries real errors under repeated stack traces.
             # Trip the arm for a cooldown instead, and say so once.
             if _is_unreachable(exc):
-                self._mark_unavailable()
-                logger.warning(
-                    "graph unreachable at %s, skipping the graph arm for %.0fs: %s",
-                    self.uri,
-                    GRAPH_UNAVAILABLE_COOLDOWN_S,
-                    exc,
-                )
+                trip_bolt_cooldown(self, exc)
                 return []
             logger.warning("graph recall failed, returning no graph hits", exc_info=True)
             return []
