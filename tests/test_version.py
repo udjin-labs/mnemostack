@@ -33,6 +33,18 @@ def test_current_version_is_latest_changelog_release():
     assert release_headings[:2] == ["Unreleased", mnemostack.__version__]
 
 
+def test_current_version_has_exactly_one_dated_changelog_entry():
+    """Duplicate release headings split notes and make release extraction ambiguous."""
+    changelog = Path("CHANGELOG.md").read_text()
+    version_headings = re.findall(
+        rf"^## \[{re.escape(mnemostack.__version__)}\] - \d{{4}}-\d{{2}}-\d{{2}}$",
+        changelog,
+        re.MULTILINE,
+    )
+
+    assert len(version_headings) == 1
+
+
 def test_docs_do_not_advertise_file_keystore_revocation_for_every_backend():
     """The claim this guards is an operational one — how fast a revoked key
     stops working — and it belongs where an operator reads it.
