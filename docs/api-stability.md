@@ -229,7 +229,12 @@ expands to the default; only a present-and-empty one disables. When the default
 (or any configured) graph proves unreachable, the RECALL path's Bolt owners —
 the graph retriever and the graph-resurrection stage — each trip a cooldown:
 one warning, then zero connection attempts for the window, one half-open retry
-probe afterwards even under concurrent traffic. The breaker is deliberately
+probe afterwards even under concurrent traffic. The bound holds from the FIRST
+FAILURE on: the very first contact with a store is deliberately not serialized,
+because gating a healthy store's cold start behind a single probe would drop
+the graph arm from every concurrent request while the first one is in flight —
+so an unreachable store's first burst may cost one attempt per in-flight
+request, once, before the breaker exists to consult. The breaker is deliberately
 per component, not per URI (each carries its own credentials and can point at
 its own store), so a dead store costs at most one attempt per component per
 window rather than one per request. The `/health`, `/readyz` and `/status`

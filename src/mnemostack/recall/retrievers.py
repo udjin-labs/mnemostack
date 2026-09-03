@@ -59,9 +59,13 @@ except ImportError:
     _NEO4J_AVAILABLE = False
 
 try:
-    from neo4j.exceptions import ServiceUnavailable, SessionExpired
+    from neo4j.exceptions import DatabaseUnavailable, ServiceUnavailable, SessionExpired
 
+    # DatabaseUnavailable is a TransientError, NOT a ServiceUnavailable
+    # subclass: the Bolt server answers but the configured database is down —
+    # which still fails identically on every request until an operator acts.
     _UNREACHABLE_ERRORS: tuple[type[BaseException], ...] = (
+        DatabaseUnavailable,
         ServiceUnavailable,
         SessionExpired,
         OSError,
@@ -1526,12 +1530,14 @@ class MemgraphRetriever(Retriever):
         self.chunk_filter_probe = chunk_filter_probe
 
     def _get_driver(self):
+        # Library check first: claiming the half-open probe and then returning
+        # None for a missing dependency would leak the claim.
+        if self._driver is None and not _NEO4J_AVAILABLE:
+            return None
         if not bolt_arm_available(self):
             return None
         if self._driver is not None:
             return self._driver
-        if not _NEO4J_AVAILABLE:
-            return None
         try:
             self._driver = GraphDatabase.driver(
                 self.uri,
@@ -1682,14 +1688,17 @@ class MemgraphRetriever(Retriever):
         # chunk proof fail closed when no probe is configured (excluded,
         # never leaked — the historical contract). The dedicated `tenant`
         # scope is different: a server-owned graph property, always honored.
-        driver = self._get_driver()
-        if driver is None:
-            return []
         # Deduplicated, order-preserving, and CAPPED: each token costs up to
         # four Cypher probes, and the query string is caller-controlled on
         # HTTP/MCP — "same word × 100" must cost one probe set, and a
         # pathological word soup must not turn into hundreds of serial
         # backend round trips (bounded work, like every knob on this arm).
+        #
+        # Words come BEFORE the driver on purpose: _get_driver may claim the
+        # single half-open retry probe at window expiry, and a query with
+        # nothing to ask the graph must not consume that claim — it would
+        # re-arm the window without probing and keep the arm dark for another
+        # minute while every substantive recall is told to skip.
         words: list[str] = []
         seen_words: set[str] = set()
         for raw_word in query.split():
@@ -1701,6 +1710,9 @@ class MemgraphRetriever(Retriever):
             if len(words) >= _MAX_QUERY_TOKENS:
                 break
         if not words:
+            return []
+        driver = self._get_driver()
+        if driver is None:
             return []
         # Tenant scope: confine every probe/relationship match to nodes+edges
         # carrying `tenant`. Unscoped (tenant=None) adds nothing, so a legacy
@@ -2074,6 +2086,11 @@ class MemgraphRetriever(Retriever):
             if _is_unreachable(exc):
                 trip_bolt_cooldown(self, exc)
                 return []
+            # The store ANSWERED — this is an operator error, not an outage.
+            # Release any half-open claim so the arm is not silently dark for
+            # the rest of a window the failed probe re-armed; loud stays loud,
+            # per call, which is the whole point of the classification.
+            bolt_mark_recovered(self)
             logger.warning("graph recall failed, returning no graph hits", exc_info=True)
             return []
 

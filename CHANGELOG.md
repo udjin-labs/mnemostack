@@ -18,7 +18,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the first caller through claims it, a burst does not turn window expiry into
   one timeout per in-flight request — and a probe that succeeds clears the
   window at once, so a Memgraph that boots after the server rejoins without a
-  restart. The breaker is per component (each carries its own credentials and
+  restart. The bound holds from the first failure on; the very first contact
+  is deliberately not serialized, since gating a healthy cold start behind one
+  probe would cost every concurrent request its graph arm. A probe that
+  reaches the store but fails as an operator error (bad Cypher, auth) releases
+  the claim — reachable is reachable — and `DatabaseUnavailable` (Bolt answers,
+  database down) counts as unreachable, since it too fails identically until
+  an operator acts. A query with no graph-eligible words never consumes the
+  claim. The breaker is per component (each carries its own credentials and
   can target its own store): a dead store costs at most one attempt per
   component per window. Health endpoints keep their live, bounded, silent
   probes — their job is to notice recovery immediately. Only connection-level

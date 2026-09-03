@@ -371,3 +371,65 @@ def test_cooldown_warning_redacts_credentials(caplog):
 )
 def test_redacted_uri_shapes(uri, expected):
     assert _redacted_uri(uri) == expected
+
+
+def test_wordless_query_does_not_consume_the_claim(monkeypatch):
+    """A query with nothing to ask the graph must not spend the half-open probe."""
+    driver = _CountingDriver(ConnectionRefusedError("refused"))
+    r = MemgraphRetriever(uri="bolt://dead:7687", driver=driver)
+    r.search("deploy window", limit=3)                 # trips
+    now = [0.0]
+    monkeypatch.setattr(retrievers_mod.time, "monotonic", lambda: now[0])
+    expired_at = r._unavailable_until + 1.0
+    now[0] = expired_at
+    r.search("hi", limit=3)                            # no eligible words
+    # The claim is untouched: deadline still the OLD (expired) one, no probe.
+    assert r._unavailable_until < expired_at
+    assert driver.sessions == 1
+    r.search("deploy window schedule", limit=3)        # the real query probes
+    assert driver.sessions == 2
+
+
+def test_operator_error_during_half_open_releases_the_claim(monkeypatch):
+    """A probe that REACHES the store but fails as an operator error must not
+    leave the arm dark for the window it re-armed."""
+
+    class _BadCypherSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def run(self, *a, **k):
+            raise ValueError("bad cypher")
+
+    class _RefuseThenAnswerBadly:
+        def __init__(self):
+            self.sessions = 0
+
+        def session(self, **kwargs: Any):
+            self.sessions += 1
+            if self.sessions == 1:
+                raise ConnectionRefusedError("refused")
+            return _BadCypherSession()
+
+    driver = _RefuseThenAnswerBadly()
+    r = MemgraphRetriever(uri="bolt://flaky:7687", driver=driver)
+    r.search("deploy window", limit=3)                 # trips
+    now = [0.0]
+    monkeypatch.setattr(retrievers_mod.time, "monotonic", lambda: now[0])
+    now[0] = r._unavailable_until + 1.0
+    r.search("deploy window", limit=3)                 # half-open probe, loud error
+    assert r._unavailable_until == 0.0                 # claim released
+    assert r._probe_inflight is False
+    r.search("deploy window", limit=3)                 # loud again, per call
+    assert driver.sessions == 3
+
+
+def test_database_unavailable_counts_as_unreachable():
+    neo4j_exc = pytest.importorskip("neo4j.exceptions")
+    driver = _CountingDriver(neo4j_exc.DatabaseUnavailable("db stopped"))
+    r = MemgraphRetriever(uri="bolt://up-but-db-down:7687", driver=driver)
+    r.search("deploy window", limit=3)
+    assert r._unavailable_until > 0.0

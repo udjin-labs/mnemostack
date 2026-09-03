@@ -96,12 +96,14 @@ class GraphResurrection(Stage):
     _probe_inflight = False
 
     def _get_driver(self):
+        # Library check first: claiming the half-open probe and then returning
+        # None for a missing dependency would leak the claim.
+        if self._driver is None and not _AVAILABLE:
+            return None
         if not bolt_arm_available(self):
             return None
         if self._driver is not None:
             return self._driver
-        if not _AVAILABLE:
-            return None
         try:
             self._driver = GraphDatabase.driver(
                 self.uri,
@@ -214,6 +216,9 @@ class GraphResurrection(Stage):
             if _is_unreachable(exc):
                 trip_bolt_cooldown(self, exc)
                 return results
+            # The store answered: operator error, stays loud per call, and any
+            # half-open claim is released so the stage is not dark for a window.
+            bolt_mark_recovered(self)
             logger.warning("graph resurrection failed, skipping", exc_info=True)
             return results
 
