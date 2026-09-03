@@ -705,6 +705,8 @@ These are the MCP-relevant environment variables read by `mnemostack mcp-serve` 
 | `MNEMOSTACK_LLM_MODEL` | Provider default | LLM model override. |
 | `MNEMOSTACK_QDRANT_HOST` | `http://localhost:6333` | Qdrant URL. Alias of `MNEMOSTACK_VECTOR_HOST` / `MNEMOSTACK_QDRANT_URL`. |
 | `MNEMOSTACK_MEMGRAPH_URI` | unset | Memgraph Bolt URI. If unset, graph tools are not registered. Alias of `MNEMOSTACK_GRAPH_URI`. |
+| `MNEMOSTACK_LLM_HOST` | unset | Ollama LLM host; defaults to inheriting the embedding Ollama host, so one GPU box serves both. Set only for split deployments. |
+| `MNEMOSTACK_LLM_TIMEOUT` | provider default | LLM request timeout in seconds. Not inherited from the embedding timeout — generation is a different workload. |
 | `MNEMOSTACK_GRAPH_TIMEOUT` | `5.0` | Memgraph operation timeout in seconds. |
 | `MNEMOSTACK_BM25_PATHS` | unset | File or directory paths for BM25 exact-token retrieval, separated by `os.pathsep` (`:` on Unix, `;` on Windows). |
 | `MNEMOSTACK_RERANK_MODE` | `relevant_only` | LLM reranker contract: `relevant_only` returns a relevant subset, `full_reorder` ranks the whole candidate list. |

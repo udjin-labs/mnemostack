@@ -337,6 +337,7 @@ Built-in profiles cover OpenClaw webchat and Telegram envelopes; pass `profiles=
 | `MNEMOSTACK_COLLECTION` | Qdrant collection name (default `mnemostack`) | CLI convenience |
 | `MNEMOSTACK_QDRANT_URL` | Qdrant URL (default `http://localhost:6333`) | Remote Qdrant |
 | `MNEMOSTACK_GRAPH_URI` / `MNEMOSTACK_MEMGRAPH_URI` | Memgraph bolt URI | Graph retriever / GraphStore |
+| `MNEMOSTACK_LLM_HOST` / `MNEMOSTACK_LLM_TIMEOUT` | Ollama LLM host (default: inherit the embedding `--ollama-host`) and LLM request timeout | Answer / reranker / expansion LLM |
 | `MNEMOSTACK_PROVIDER` / `MNEMOSTACK_EMBEDDING_PROVIDER` | Embedding provider | CLI / HTTP / MCP |
 | `MNEMOSTACK_LLM` / `MNEMOSTACK_LLM_PROVIDER` | LLM provider | Answer generation / reranking |
 | `MNEMOSTACK_BM25_PATHS` | BM25 corpus paths separated by `os.pathsep` (`:` on Unix) | CLI / HTTP / MCP BM25 retriever |
@@ -375,7 +376,7 @@ The mnemostack container runs the HTTP API on port 8000 by default. Interactive 
 
 Tear down with `docker compose -f examples/docker-compose.yml down -v` (the `-v` wipes Qdrant + Memgraph state).
 
-Prefer Ollama (no cloud key needed)? Run Ollama on the host and pass `--provider ollama` everywhere instead of `gemini`. The endpoint resolves as: `--ollama-host` flag > `MNEMOSTACK_OLLAMA_HOST` env / `embedding.ollama_host` config > the native `OLLAMA_HOST` variable > `http://localhost:11434` — so a client running in a container or VM can reach a remote Ollama daemon directly:
+Prefer Ollama (no cloud key needed)? Run Ollama on the host and pass `--provider ollama` everywhere instead of `gemini`. The endpoint resolves as: `--ollama-host` flag > `MNEMOSTACK_OLLAMA_HOST` env / `embedding.ollama_host` config > the native `OLLAMA_HOST` variable > `http://localhost:11434` — so a client running in a container or VM can reach a remote Ollama daemon directly. An ollama **LLM** follows the same chain and inherits the embedding host by default; set `llm.host` / `MNEMOSTACK_LLM_HOST` only when generation lives on a different box:
 
 ```bash
 mnemostack index-markdown memory/ \
