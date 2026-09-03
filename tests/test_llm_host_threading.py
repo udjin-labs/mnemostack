@@ -191,3 +191,81 @@ def test_llm_timeout_is_validated_like_its_sibling(isolated_env, tmp_path):
     isolated_env.setenv("MNEMOSTACK_LLM_TIMEOUT", "abc")
     with pytest.raises(ValueError):
         Config.load(path=None)
+
+
+# --- the tenth and eleventh surfaces, found in review ------------------------
+
+
+def test_standalone_mcp_entry_point_threads_llm_settings(isolated_env, monkeypatch):
+    """`python -m mnemostack.mcp.server` builds through main(); the config's
+    llm host/timeout must survive that wiring too."""
+    pytest.importorskip("fastmcp")
+    from mnemostack.mcp import server as mcp_server
+
+    isolated_env.setenv("MNEMOSTACK_LLM", "ollama")
+    isolated_env.setenv("MNEMOSTACK_LLM_HOST", "http://llm-box:11434")
+    isolated_env.setenv("MNEMOSTACK_LLM_TIMEOUT", "150")
+
+    captured: dict = {}
+
+    class _Stop(RuntimeError):
+        pass
+
+    def fake_build_server(**kwargs):
+        captured.update(kwargs)
+        raise _Stop
+
+    monkeypatch.setattr(mcp_server, "build_server", fake_build_server)
+    with pytest.raises(_Stop):
+        mcp_server.main()
+    assert captured["llm_host"] == "http://llm-box:11434"
+    assert captured["llm_timeout"] == 150
+
+
+def test_doctor_llm_probe_sees_the_ollama_host_flag(monkeypatch):
+    """doctor inherits --ollama-host from the common parent and the embedding
+    probe reads the flag; the LLM probe must see the same endpoint."""
+    import argparse
+
+    from mnemostack import cli
+
+    captured: dict = {}
+
+    def fake_doctor_llm(add, name, model, live, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(cli, "_doctor_llm", fake_doctor_llm)
+    monkeypatch.setattr(cli, "_doctor_graph", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_doctor_qdrant", lambda *a, **k: None, raising=False)
+
+    ns = argparse.Namespace(
+        provider="ollama",
+        embedding_model=None,
+        ollama_host="http://flag-host:11434",
+        embedding_timeout=None,
+        embedding_batch_size=64,
+        collection="c",
+        qdrant="http://localhost:6333",
+        json=False,
+        check_llm=False,
+    )
+    try:
+        cli.cmd_doctor(ns)
+    except SystemExit:
+        pass
+    except Exception:
+        # Upstream probes may fail in a unit environment; the LLM probe kwargs
+        # are captured before any exit path we care about — assert on them.
+        pass
+    assert captured.get("embedding_ollama_host") == "http://flag-host:11434"
+
+
+def test_generated_config_documents_the_llm_knobs():
+    import yaml
+
+    from mnemostack.config import generate_example_config
+
+    text = generate_example_config()
+    parsed = yaml.safe_load(text)
+    assert "host" in parsed["llm"]
+    assert "timeout" in parsed["llm"]

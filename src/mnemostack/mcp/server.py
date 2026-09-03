@@ -1310,6 +1310,8 @@ def main() -> None:
         embedding_timeout=cfg.embedding.timeout,
         llm_provider=cfg.llm.provider,
         llm_model=cfg.llm.model,
+        llm_host=cfg.llm.host,
+        llm_timeout=cfg.llm.timeout,
         qdrant_host=cfg.vector.host,
         memgraph_uri=cfg.graph.uri,
         graph_user=cfg.graph.user,

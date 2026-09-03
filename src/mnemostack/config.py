@@ -664,6 +664,8 @@ vector:
 llm:
   provider: gemini
   model: null             # null = provider default (gemini-2.5-flash)
+  host: null              # ollama LLM host; null = inherit embedding.ollama_host
+  timeout: null           # LLM request seconds; null = provider default (not inherited)
 
 graph:
   uri: null               # e.g. bolt://localhost:7687 to enable graph

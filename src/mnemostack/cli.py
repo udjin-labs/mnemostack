@@ -1897,7 +1897,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         cfg.llm.model,
         bool(getattr(args, "check_llm", False)),
         llm_host=cfg.llm.host,
-        embedding_ollama_host=cfg.embedding.ollama_host,
+        # args, not cfg: doctor inherits --ollama-host from the common parent
+        # (default folds the config value in), and the embedding probe reads
+        # the flag — the LLM probe must see the same endpoint or a flag-only
+        # override reports a false LLM failure against the wrong host.
+        embedding_ollama_host=getattr(args, "ollama_host", None),
         timeout=cfg.llm.timeout,
     )
     _doctor_graph(add, cfg)
