@@ -6,6 +6,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **An unconfigured graph no longer costs every request** (#181). The server's
+  documented default still points the graph at `bolt://localhost:7687`, but the
+  neo4j driver is lazy — constructing it never connects — so a store that was
+  not there was rediscovered per query: two refused Bolt attempts and a stack
+  trace on every recall. An unreachable store now trips a 60-second cooldown on
+  the graph arm: one warning, then zero connection attempts until the window
+  expires, after which the arm retries on its own — a Memgraph that boots after
+  the server rejoins without a restart. Only connection-level failures trip it;
+  a bad query or auth mistake keeps the loud per-call log, because those need
+  fixing, not silencing.
+- **An explicitly empty `MNEMOSTACK_GRAPH_URI=` / `MNEMOSTACK_MEMGRAPH_URI=`
+  disables the graph on the server path** (#181). The CLI has always had
+  `--memgraph-uri ""` as the off switch, but a deployment configured only by
+  environment — a container — had none: the env override ignored empty values
+  and the documented localhost default won. An absent variable still expands to
+  that default; only a present-and-empty one disables. The first of the two
+  names that is present decides, matching the alias precedence the config layer
+  already uses.
+
 ## [2.3.1] - 2026-08-22
 
 - **No payload value can raise out of a recall** (fixes a crash in 2.3.0's access accounting): `access_count` and `last_accessed` are ordinary payload fields a client fills, and the freshness stage coerced the counter a second time on its way into `compute_access_boost` — catching `TypeError`/`ValueError` but not `OverflowError`. `int(float("inf"))` raises exactly that, so a point carrying `access_count: inf` killed the entire recall **even with `access_bonus_max=0`**: the crash happened upstream of the switch meant to disable the feature. The stage no longer second-guesses the value; it hands the raw payload field to the one function that owns what a bad counter means, which already clamps huge integers and now covers non-finite floats too. `last_accessed` gets the same treatment for `TypeError`: a `datetime` or `bytes` in that field has a `.replace` taking different arguments, so the parse raised instead of failing to parse — an unreadable stamp now reads as "no evidence of use", the neutral 1.0, rather than a 500.

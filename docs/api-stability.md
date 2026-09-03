@@ -222,9 +222,14 @@ without a major bump. `graph.uri = null` (disabled) is the documented off state 
 the **library** recall path — but the **HTTP server defaults it on**: both
 `mnemostack serve` and the `ServerConfig.from_env()` ASGI factory expand an unset
 `graph.uri` to `bolt://localhost:7687`. To keep graph off there, pass
-`--memgraph-uri ""` (CLI) or construct `ServerConfig(graph_uri=None)`
-programmatically — an empty `MNEMOSTACK_MEMGRAPH_URI` does **not** work, since the
-env override ignores empty values. `token_budget <= 0` normalizing to "no budget"
+`--memgraph-uri ""` (CLI), set an explicitly empty `MNEMOSTACK_GRAPH_URI=` /
+`MNEMOSTACK_MEMGRAPH_URI=` (the env-only path a container has), or construct
+`ServerConfig(graph_uri=None)` programmatically. An ABSENT variable still
+expands to the default; only a present-and-empty one disables. When the default
+(or any configured) graph proves unreachable, the graph arm trips a cooldown —
+one warning, then zero connection attempts for the window, retrying on its own
+afterwards — so a store that is down, or not there at all, costs one attempt a
+minute rather than one per request. `token_budget <= 0` normalizing to "no budget"
 is a 🟢 documented behavior.
 
 ## MCP tools (`mnemostack mcp-serve`)

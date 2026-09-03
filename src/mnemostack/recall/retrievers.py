@@ -58,6 +58,30 @@ try:
 except ImportError:
     _NEO4J_AVAILABLE = False
 
+try:
+    from neo4j.exceptions import ServiceUnavailable, SessionExpired
+
+    _UNREACHABLE_ERRORS: tuple[type[BaseException], ...] = (
+        ServiceUnavailable,
+        SessionExpired,
+        OSError,
+    )
+except ImportError:
+    # OSError alone still catches ConnectionRefusedError from an injected or
+    # non-neo4j driver, so the cooldown works without the optional dependency.
+    _UNREACHABLE_ERRORS = (OSError,)
+
+
+def _is_unreachable(exc: BaseException) -> bool:
+    """Whether this failure means "the store is not there", not "bad query".
+
+    Only connection-level faults qualify. A Cypher error, a malformed stored
+    bound or an auth failure keeps the loud per-call path: those are operator
+    mistakes that must stay visible, and silencing them for a cooldown would
+    hide the very thing that needs fixing.
+    """
+    return isinstance(exc, _UNREACHABLE_ERRORS)
+
 
 #: The built-in retriever family names. A ``name=`` override may carry its
 #: OWN family's name (suffixed or not) but never another family's: the
@@ -1304,6 +1328,13 @@ def chunk_filter_probe_via(
     return probe
 
 
+#: How long the graph arm stays skipped after the store proved unreachable.
+#: Long enough that a dead store costs one attempt a minute instead of two per
+#: request; short enough that a Memgraph which boots after the server — the
+#: ordinary compose case — rejoins on its own without a restart.
+GRAPH_UNAVAILABLE_COOLDOWN_S = 60.0
+
+
 class MemgraphRetriever(Retriever):
     """Knowledge-graph retriever — exact/contains match on node names.
 
@@ -1339,6 +1370,17 @@ class MemgraphRetriever(Retriever):
     #: circuit breaker — otherwise each variant would re-spend fresh
     #: allowances and re-probe a failing store (serial timeouts x variants).
     accepts_recall_scope = True
+
+    #: Monotonic deadline until which this arm skips itself because the store
+    #: was unreachable. The neo4j driver is LAZY — constructing it never
+    #: connects — so an unconfigured or down Memgraph is discovered once per
+    #: QUERY, not once per process, and without this the arm pays (and logs) a
+    #: refused connection on every single recall. A CLASS default rather than
+    #: an ``__init__`` assignment on purpose: several tests build the instance
+    #: via ``__new__`` and set only the attributes they need, and "never
+    #: tripped" is the right reading for any instance that skipped ``__init__``.
+    #: Tripping always writes an instance attribute over this.
+    _unavailable_until = 0.0
 
     def __init__(
         self,
@@ -1381,6 +1423,8 @@ class MemgraphRetriever(Retriever):
         self.chunk_filter_probe = chunk_filter_probe
 
     def _get_driver(self):
+        if time.monotonic() < self._unavailable_until:
+            return None
         if self._driver is not None:
             return self._driver
         if not _NEO4J_AVAILABLE:
@@ -1395,6 +1439,20 @@ class MemgraphRetriever(Retriever):
             return self._driver
         except Exception:
             return None
+
+    def _mark_unavailable(self) -> None:
+        """Skip this arm until the cooldown expires, and drop our own driver.
+
+        An injected driver belongs to the caller and is left alone — only the
+        deadline applies to it.
+        """
+        self._unavailable_until = time.monotonic() + GRAPH_UNAVAILABLE_COOLDOWN_S
+        if self._driver is not None and self._own_driver:
+            try:
+                self._driver.close()
+            except Exception:
+                pass
+            self._driver = None
 
     def close(self) -> None:
         if self._driver is not None and self._own_driver:
@@ -1909,9 +1967,23 @@ class MemgraphRetriever(Retriever):
                         )
                     )
                 return results[:limit]
-        except Exception:
+        except Exception as exc:
             # Fail open (graph is optional), but log — a bad query or a malformed
             # stored bound blanks graph recall for this call, which was silent.
+            #
+            # An UNREACHABLE store is different in kind from a bad query: the
+            # next request will fail identically, so retrying it per request
+            # buys nothing and buries real errors under repeated stack traces.
+            # Trip the arm for a cooldown instead, and say so once.
+            if _is_unreachable(exc):
+                self._mark_unavailable()
+                logger.warning(
+                    "graph unreachable at %s, skipping the graph arm for %.0fs: %s",
+                    self.uri,
+                    GRAPH_UNAVAILABLE_COOLDOWN_S,
+                    exc,
+                )
+                return []
             logger.warning("graph recall failed, returning no graph hits", exc_info=True)
             return []
 

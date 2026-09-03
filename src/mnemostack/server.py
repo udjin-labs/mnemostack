@@ -717,6 +717,28 @@ def _make_probe_client(url: str, timeout: int) -> Any:
 # ----- Server construction -----
 
 
+def _graph_uri_from_env(cfg: Config) -> str | None:
+    """The server's graph URI, honouring an explicitly empty environment value.
+
+    The HTTP server defaults the graph ON: an unset `graph.uri` expands to
+    `bolt://localhost:7687` (documented in docs/api-stability.md, and not
+    changed here). The CLI has always had an escape hatch — `--memgraph-uri ""`
+    reaches `ServerConfig` as an empty string, which every downstream guard
+    reads as "no graph". The ASGI-factory path had none, so a deployment
+    configured only by environment could not turn the graph off at all and paid
+    a refused Bolt connection on every request.
+
+    One rule rather than a special case: the first of the two names that is
+    PRESENT decides, matching the alias precedence the config layer already
+    uses. An absent variable still expands to the documented default; a present
+    but empty one disables the graph.
+    """
+    for name in ("MNEMOSTACK_GRAPH_URI", "MNEMOSTACK_MEMGRAPH_URI"):
+        if name in os.environ:
+            return os.environ[name]
+    return cfg.graph.uri or "bolt://localhost:7687"
+
+
 @dataclass
 class ServerConfig:
     provider_name: str = "gemini"
@@ -823,7 +845,7 @@ class ServerConfig:
             collection=cfg.vector.collection,
             qdrant_url=cfg.vector.host,
             qdrant_health_timeout=cfg.vector.health_timeout,
-            graph_uri=cfg.graph.uri or "bolt://localhost:7687",
+            graph_uri=_graph_uri_from_env(cfg),
             graph_user=cfg.graph.user,
             graph_password=cfg.graph.password,
             graph_database=cfg.graph.database,
