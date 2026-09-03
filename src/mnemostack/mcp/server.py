@@ -26,7 +26,7 @@ except ImportError:  # pragma: no cover
     StrictInt = int  # type: ignore[assignment, misc]
     _FASTMCP_AVAILABLE = False
 
-from ..config import Config, model_kwargs, provider_kwargs
+from ..config import Config, provider_kwargs
 from ..embeddings import get_provider
 from ..embeddings.roles import EmbeddingSpaceError
 from ..feedback import apply_feedback
@@ -137,6 +137,11 @@ def build_server(
     #: leaving access recording off, because the stage reads those keys
     #: whoever wrote them.
     access_bonus_max: float = DEFAULT_ACCESS_BONUS_MAX,
+    # LLM host/timeout, resolved through `llm_kwargs` (None host = inherit
+    # `ollama_host` for the ollama provider). Appended at the tail — the
+    # positional-tail pin in test_provider_plumbing guards exactly this.
+    llm_host: str | None = None,
+    llm_timeout: int | None = None,
 ) -> Any:
     """Build and return a configured FastMCP server.
 
@@ -208,6 +213,7 @@ def build_server(
     # the weights themselves (parse) and the fields/mode pairing (ensure).
     from mnemostack.config import (
         ensure_text_fields_mode,
+        llm_kwargs,
         parse_text_search_fields,
         resolve_text_search_mode,
     )
@@ -411,7 +417,16 @@ def build_server(
         return _component(
             "answer",
             lambda: AnswerGenerator(
-                llm=get_llm(llm_provider, **model_kwargs(llm_model)),
+                llm=get_llm(
+                    llm_provider,
+                    **llm_kwargs(
+                        llm_provider,
+                        model=llm_model,
+                        llm_host=llm_host,
+                        embedding_ollama_host=ollama_host,
+                        timeout=llm_timeout,
+                    ),
+                ),
                 recaller=_get_recaller(),
                 timestamp_key=timestamp_key,
                 timestamp_format=timestamp_format,
@@ -448,7 +463,16 @@ def build_server(
         return _component(
             "reranker",
             lambda: Reranker(
-                llm=get_llm(llm_provider, **model_kwargs(llm_model)),
+                llm=get_llm(
+                    llm_provider,
+                    **llm_kwargs(
+                        llm_provider,
+                        model=llm_model,
+                        llm_host=llm_host,
+                        embedding_ollama_host=ollama_host,
+                        timeout=llm_timeout,
+                    ),
+                ),
                 max_items=20,
                 rerank_mode=rerank_mode,
             ),

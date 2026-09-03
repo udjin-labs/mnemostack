@@ -43,7 +43,7 @@ from mnemostack.access import record_access
 from mnemostack.config import (
     Config,
     ensure_text_fields_mode,
-    model_kwargs,
+    llm_kwargs,
     provider_kwargs,
     resolve_text_search_mode,
 )
@@ -795,6 +795,12 @@ class ServerConfig:
     #: rank. Turning `record_access` off does NOT help them: the stage reads
     #: those keys whoever wrote them. Appended, like every knob above.
     access_bonus_max: float = DEFAULT_ACCESS_BONUS_MAX
+    #: LLM host/timeout, threaded through `llm_kwargs` — the same shared
+    #: resolution point contract the embedding provider already has. None
+    #: host = inherit `ollama_host` for the ollama provider. Appended at the
+    #: tail, like every knob above, to keep positional construction stable.
+    llm_host: str | None = None
+    llm_timeout: int | None = None
 
     def __post_init__(self) -> None:
         if self.rerank_mode not in RERANK_MODES:
@@ -828,6 +834,8 @@ class ServerConfig:
             graph_password=cfg.graph.password,
             graph_database=cfg.graph.database,
             graph_health_timeout=cfg.graph.health_timeout,
+            llm_host=cfg.llm.host,
+            llm_timeout=cfg.llm.timeout,
             graph_timeout=cfg.graph.timeout,
             bm25_paths=list(cfg.recall.bm25_paths) or None,
             vector_floor=max(0, int(cfg.recall.vector_floor)),
@@ -1221,7 +1229,16 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     )
 
     try:
-        llm = get_llm(cfg.llm_name, **model_kwargs(cfg.llm_model))
+        llm = get_llm(
+            cfg.llm_name,
+            **llm_kwargs(
+                cfg.llm_name,
+                model=cfg.llm_model,
+                llm_host=cfg.llm_host,
+                embedding_ollama_host=cfg.ollama_host,
+                timeout=cfg.llm_timeout,
+            ),
+        )
         answer_gen: AnswerGenerator | None = AnswerGenerator(
             llm=llm,
             recaller=recaller,

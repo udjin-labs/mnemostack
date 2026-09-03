@@ -25,7 +25,8 @@ from .config import (
     DEFAULT_CONFIG_PATHS,
     Config,
     generate_example_config,
-    model_kwargs,
+    llm_kwargs,
+    model_kwargs,  # noqa: F401 — re-exported: tests patch cli.model_kwargs as a construction seam
     provider_kwargs,
 )
 from .embeddings import ProviderProbeError, get_provider, list_providers
@@ -454,7 +455,33 @@ def _doctor_qdrant(
             )
 
 
-def _doctor_llm(add, name: str, model: str | None, live: bool) -> None:
+def _llm_build_kwargs(args, name: str) -> dict:
+    """get_llm kwargs for a CLI surface, through the shared resolution point.
+
+    Every LLM built from `args` goes through here — reranker, answer,
+    synthesize, query expansion, doctor — so the host/timeout threading rule
+    exists once, not per call site (#180: the embedding path had this via
+    `provider_kwargs` while eight LLM sites passed model only).
+    """
+    return llm_kwargs(
+        name,
+        model=_llm_model(args),
+        llm_host=getattr(args, "_llm_host", None),
+        embedding_ollama_host=getattr(args, "ollama_host", None),
+        timeout=getattr(args, "_llm_timeout", None),
+    )
+
+
+def _doctor_llm(
+    add,
+    name: str,
+    model: str | None,
+    live: bool,
+    *,
+    llm_host: str | None = None,
+    embedding_ollama_host: str | None = None,
+    timeout: int | None = None,
+) -> None:
     """LLM reachability. Never exceeds `warn` — /answer is optional."""
     # Case-insensitive: get_llm() lowercases names, so a mixed-case config value
     # is valid.
@@ -467,7 +494,16 @@ def _doctor_llm(add, name: str, model: str | None, live: bool) -> None:
         )
         return
     try:
-        llm = get_llm(name, **model_kwargs(model))
+        llm = get_llm(
+            name,
+            **llm_kwargs(
+                name,
+                model=model,
+                llm_host=llm_host,
+                embedding_ollama_host=embedding_ollama_host,
+                timeout=timeout,
+            ),
+        )
     except Exception as e:  # noqa: BLE001
         add(
             "llm",
@@ -1855,7 +1891,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     )
 
     # LLM (optional — answer only) and graph (optional).
-    _doctor_llm(add, cfg.llm.provider, cfg.llm.model, bool(getattr(args, "check_llm", False)))
+    _doctor_llm(
+        add,
+        cfg.llm.provider,
+        cfg.llm.model,
+        bool(getattr(args, "check_llm", False)),
+        llm_host=cfg.llm.host,
+        embedding_ollama_host=cfg.embedding.ollama_host,
+        timeout=cfg.llm.timeout,
+    )
     _doctor_graph(add, cfg)
 
     statuses = [c["status"] for c in checks]
@@ -1983,7 +2027,10 @@ def _recall_for_cli(args: argparse.Namespace, recaller, query: str, limit: int):
     reranker = None
     try:
         reranker = Reranker(
-            llm=get_llm(getattr(args, "llm", "gemini"), **model_kwargs(_llm_model(args))),
+            llm=get_llm(
+                getattr(args, "llm", "gemini"),
+                **_llm_build_kwargs(args, getattr(args, "llm", "gemini")),
+            ),
             max_items=20,
             rerank_mode=getattr(args, "rerank_mode", None) or "relevant_only",
         )
@@ -2136,7 +2183,7 @@ def cmd_synthesize(args: argparse.Namespace) -> int:
     recaller = _build_recaller(args, provider, store, source_filter=source_filter)
     llm = None
     if args.llm_summarize:
-        llm = get_llm(args.llm, **model_kwargs(_llm_model(args)))
+        llm = get_llm(args.llm, **_llm_build_kwargs(args, args.llm))
     result = synthesize(
         args.entity,
         sources=sources,
@@ -2171,7 +2218,7 @@ def cmd_answer(args: argparse.Namespace) -> int:
     recaller = _build_recaller(args, provider, store)
     results = _recall_for_cli(args, recaller, args.query, args.limit)
 
-    llm = get_llm(args.llm, **model_kwargs(_llm_model(args)))
+    llm = get_llm(args.llm, **_llm_build_kwargs(args, args.llm))
     answer_generator_kwargs = {
         "llm": llm,
         "confidence_threshold": args.min_confidence,
@@ -2478,7 +2525,7 @@ def _build_recaller(
     if query_expansion:
         expansion_llm = get_llm(
             getattr(args, "llm", "gemini"),
-            **model_kwargs(_llm_model(args)),
+            **_llm_build_kwargs(args, getattr(args, "llm", "gemini")),
         )
     return Recaller(
         embedding_provider=provider,
@@ -3578,6 +3625,7 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         action="store_true",
         help="Include a live (billable) LLM generation probe (default: config check only)",
     )
+    p_doctor.set_defaults(_llm_host=cfg.llm.host, _llm_timeout=cfg.llm.timeout)
     p_doctor.set_defaults(func=cmd_doctor)
 
     p_text_index = sub.add_parser(
@@ -3928,6 +3976,9 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         ),
     )
     _add_validity_recall_flags(p_search)
+        # Not flags: config-file/env LLM host+timeout ride along so every
+    # cmd_* that builds an LLM reads one place (_llm_build_kwargs).
+    p_search.set_defaults(_llm_host=cfg.llm.host, _llm_timeout=cfg.llm.timeout)
     p_search.set_defaults(func=cmd_search)
 
     p_invalidate = sub.add_parser(
@@ -4008,6 +4059,7 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         default=cfg.recall.vector_floor,
         help="Append missing top-N raw-vector candidates after fusion/rerank",
     )
+    p_synthesize.set_defaults(_llm_host=cfg.llm.host, _llm_timeout=cfg.llm.timeout)
     p_synthesize.set_defaults(func=cmd_synthesize)
 
     p_answer = sub.add_parser(
@@ -4105,6 +4157,7 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     )
     _add_validity_recall_flags(p_answer)
     p_answer.add_argument("--json", action="store_true", help="JSON output")
+    p_answer.set_defaults(_llm_host=cfg.llm.host, _llm_timeout=cfg.llm.timeout)
     p_answer.set_defaults(func=cmd_answer)
 
     p_index = sub.add_parser("index", parents=[common], help="Index files into vector store")
@@ -4403,6 +4456,7 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
             "same per-tenant caps as HTTP writes."
         ),
     )
+    p_mcp.set_defaults(_llm_host=cfg.llm.host, _llm_timeout=cfg.llm.timeout)
     p_mcp.set_defaults(func=cmd_mcp_serve)
 
     p_init = sub.add_parser(
@@ -4552,6 +4606,7 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     p_serve.add_argument(
         "--reload", action="store_true", help="Enable uvicorn auto-reload (dev only)"
     )
+    p_serve.set_defaults(_llm_host=cfg.llm.host, _llm_timeout=cfg.llm.timeout)
     p_serve.set_defaults(func=cmd_serve)
 
     p_inspect = sub.add_parser(
@@ -4666,6 +4721,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
         collection=args.collection,
         qdrant_url=args.qdrant,
         graph_uri=args.memgraph_uri,
+        llm_host=getattr(args, "_llm_host", None),
+        llm_timeout=getattr(args, "_llm_timeout", None),
         graph_user=_graph_auth(args)["user"],
         graph_password=_graph_auth(args)["password"],
         graph_database=_graph_auth(args)["database"],
@@ -4851,6 +4908,8 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
         embedding_timeout=getattr(args, "embedding_timeout", None),
         llm_provider=args.llm,
         llm_model=_llm_model(args),
+        llm_host=getattr(args, "_llm_host", None),
+        llm_timeout=getattr(args, "_llm_timeout", None),
         qdrant_host=args.qdrant,
         memgraph_uri=args.memgraph_uri,
         graph_user=_graph_auth(args)["user"],
