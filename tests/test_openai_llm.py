@@ -176,6 +176,29 @@ def test_unexpected_response_shape_is_an_error(monkeypatch):
     assert not resp.ok and "unexpected response shape" in resp.error
 
 
+def test_whitespace_only_content_is_an_error(monkeypatch):
+    monkeypatch.delenv(API_KEY_ENV, raising=False)
+    _capture(monkeypatch, body=_reply(content="\n  \n"))
+    resp = OpenAICompatLLM(model="m", host="http://gw:4000").generate("q")
+    assert not resp.ok and "empty content" in resp.error
+
+
+def test_list_content_names_the_type_not_a_budget(monkeypatch):
+    monkeypatch.delenv(API_KEY_ENV, raising=False)
+    _capture(monkeypatch, body=_reply(content=[{"type": "text", "text": "hi"}]))
+    resp = OpenAICompatLLM(model="m", host="http://gw:4000").generate("q")
+    assert not resp.ok and "unexpected content type: list" in resp.error
+
+
+@pytest.mark.parametrize("usage", ["n/a", ["tokens"], 7])
+def test_malformed_usage_never_raises(monkeypatch, usage):
+    body = json.dumps({"choices": [{"message": {"content": "Paris."}}], "usage": usage}).encode()
+    monkeypatch.delenv(API_KEY_ENV, raising=False)
+    _capture(monkeypatch, body=body)
+    resp = OpenAICompatLLM(model="m", host="http://gw:4000").generate("q")
+    assert resp.ok and resp.text == "Paris." and resp.tokens_used is None
+
+
 def test_empty_content_is_an_error(monkeypatch):
     monkeypatch.delenv(API_KEY_ENV, raising=False)
     _capture(monkeypatch, body=_reply(content=""))

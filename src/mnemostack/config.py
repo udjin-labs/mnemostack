@@ -535,7 +535,7 @@ def _apply_env_overrides(cfg: Config) -> Config:
         MNEMOSTACK_LLM_PROVIDER
         MNEMOSTACK_LLM              (alias for LLM_PROVIDER)
         MNEMOSTACK_LLM_MODEL
-        MNEMOSTACK_LLM_HOST         (ollama LLM host; default: inherit MNEMOSTACK_OLLAMA_HOST)
+        MNEMOSTACK_LLM_HOST         (LLM endpoint; ollama: default inherit MNEMOSTACK_OLLAMA_HOST, openai: required base URL)
         MNEMOSTACK_LLM_TIMEOUT
         MNEMOSTACK_GRAPH_URI
         MNEMOSTACK_GRAPH_USER

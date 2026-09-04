@@ -30,6 +30,11 @@ class OpenAICompatLLM(LLMProvider):
     construction (like the gemini provider's missing-key check), not as a
     per-call error.
 
+    Requests are single-shot — no transient-error retry, unlike the gemini
+    provider. Deliberate: the gateways this provider targets (LiteLLM and
+    friends) implement retries and fallbacks themselves, and every shipped
+    caller of ``generate()`` is fail-open on error.
+
     Auth: ``api_key`` argument, else the ``MNEMOSTACK_LLM_API_KEY`` env var.
     Unset, empty, or the literal string ``none`` (any case) sends no
     ``Authorization`` header — keyless vLLM and llama.cpp deployments must
@@ -119,11 +124,24 @@ class OpenAICompatLLM(LLMProvider):
                 text="",
                 error=f"{self.name} unexpected response shape: {str(data)[:300]}",
             )
-        if not isinstance(content, str) or not content:
+        if not isinstance(content, str):
+            # Some multimodal upstreams hand back content as a list of parts —
+            # name the real problem, not a token budget the operator will chase.
+            return LLMResponse(
+                text="",
+                error=f"{self.name} unexpected content type: {type(content).__name__}",
+            )
+        text = content.strip()
+        if not text:
+            # Whitespace-only counts: a truthy "\n" reporting ok would degrade
+            # reranking and expansion as silently as a genuinely empty string.
             return LLMResponse(text="", error=f"{self.name} returned empty content")
-        usage = data.get("usage") or {}
-        tokens = usage.get("total_tokens")
+        # isinstance gates, not `or {}`: a malformed truthy usage ("n/a", a
+        # list) must degrade to tokens_used=None, never raise past the
+        # base-class never-raise contract.
+        usage = data.get("usage")
+        tokens = usage.get("total_tokens") if isinstance(usage, dict) else None
         return LLMResponse(
-            text=content.strip(),
+            text=text,
             tokens_used=tokens if isinstance(tokens, int) else None,
         )
