@@ -113,6 +113,15 @@ def llm_kwargs(
             kw["host"] = host
         if timeout is not None:
             kw["timeout"] = timeout
+    elif name == "openai":
+        # No embedding-host inheritance here: the openai provider speaks a
+        # different protocol on a different port, so the Ollama embedding
+        # endpoint is never a valid chat/completions base URL. The provider
+        # itself rejects a missing host with an actionable error.
+        if llm_host:
+            kw["host"] = llm_host
+        if timeout is not None:
+            kw["timeout"] = timeout
     elif name in ("gemini", "gemini-flash") and timeout is not None:
         kw["timeout"] = timeout
     return kw
@@ -199,6 +208,8 @@ class LLMConfig:
     # None = inherit: for the ollama provider the LLM host falls back to
     # embedding.ollama_host (one GPU box serving both models is the common
     # deployment); set this only when the LLM lives on a different host.
+    # For the openai provider this is the REQUIRED base URL of the
+    # OpenAI-compatible endpoint (no inheritance — different protocol).
     host: str | None = None
     # LLM request timeout in seconds; None = provider default. NOT inherited
     # from embedding.timeout on purpose — generation is a different workload,
@@ -524,7 +535,7 @@ def _apply_env_overrides(cfg: Config) -> Config:
         MNEMOSTACK_LLM_PROVIDER
         MNEMOSTACK_LLM              (alias for LLM_PROVIDER)
         MNEMOSTACK_LLM_MODEL
-        MNEMOSTACK_LLM_HOST         (ollama LLM host; default: inherit MNEMOSTACK_OLLAMA_HOST)
+        MNEMOSTACK_LLM_HOST         (LLM endpoint; ollama: default inherit MNEMOSTACK_OLLAMA_HOST, openai: required base URL)
         MNEMOSTACK_LLM_TIMEOUT
         MNEMOSTACK_GRAPH_URI
         MNEMOSTACK_GRAPH_USER
@@ -676,7 +687,7 @@ vector:
 llm:
   provider: gemini
   model: null             # null = provider default (gemini-2.5-flash)
-  host: null              # ollama LLM host; null = inherit embedding.ollama_host
+  host: null              # ollama: null = inherit embedding.ollama_host; openai: required base URL
   timeout: null           # LLM request seconds; null = provider default (not inherited)
 
 graph:

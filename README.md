@@ -337,7 +337,8 @@ Built-in profiles cover OpenClaw webchat and Telegram envelopes; pass `profiles=
 | `MNEMOSTACK_COLLECTION` | Qdrant collection name (default `mnemostack`) | CLI convenience |
 | `MNEMOSTACK_QDRANT_URL` | Qdrant URL (default `http://localhost:6333`) | Remote Qdrant |
 | `MNEMOSTACK_GRAPH_URI` / `MNEMOSTACK_MEMGRAPH_URI` | Memgraph bolt URI | Graph retriever / GraphStore |
-| `MNEMOSTACK_LLM_HOST` / `MNEMOSTACK_LLM_TIMEOUT` | Ollama LLM host (default: inherit the embedding `--ollama-host`) and LLM request timeout | Answer / reranker / expansion LLM |
+| `MNEMOSTACK_LLM_HOST` / `MNEMOSTACK_LLM_TIMEOUT` | LLM endpoint (ollama: default inherits the embedding `--ollama-host`; openai: required base URL) and LLM request timeout | Answer / reranker / expansion LLM |
+| `MNEMOSTACK_LLM_API_KEY` | Bearer token for the `openai` LLM provider; unset or `none` = no auth header (keyless vLLM / llama.cpp) | Answer / reranker / expansion LLM |
 | `MNEMOSTACK_PROVIDER` / `MNEMOSTACK_EMBEDDING_PROVIDER` | Embedding provider | CLI / HTTP / MCP |
 | `MNEMOSTACK_LLM` / `MNEMOSTACK_LLM_PROVIDER` | LLM provider | Answer generation / reranking |
 | `MNEMOSTACK_BM25_PATHS` | BM25 corpus paths separated by `os.pathsep` (`:` on Unix) | CLI / HTTP / MCP BM25 retriever |
@@ -388,6 +389,15 @@ mnemostack index-markdown memory/ \
 ```
 
 Embedding uses the batch `POST /api/embed` endpoint (one request per batch; servers too old for it are detected once and served per-item with a loud warning). The embedding timeout (`--embedding-timeout` / `MNEMOSTACK_EMBEDDING_TIMEOUT`, default 180s) is independent of the short Qdrant liveness timeout — cold loads of larger local models are legitimately slow. Vector dimensions come from the model tables (quantization-suffix aware) or, for unknown models, a one-shot probe of the live model — there is no blind fallback dimension, so a wrong-size collection can't be created.
+
+**Behind an OpenAI-compatible endpoint** (LiteLLM proxy, vLLM, llama.cpp server, an API gateway)? Use the `openai` LLM provider — it speaks `POST {base}/v1/chat/completions`, which all of them accept:
+
+```bash
+MNEMOSTACK_LLM_API_KEY=sk-... mnemostack serve \
+    --llm openai --llm-model team-llm
+```
+
+with `llm.host: http://gateway:4000` in the config (or `MNEMOSTACK_LLM_HOST`). Both the base URL and the model name are required — gateways have no meaningful defaults, so a missing one is a loud, actionable error (`serve` logs it and disables `/answer`) instead of a silent dial to the wrong place. A base URL already ending in `/v1` (the OpenAI SDK convention) works too. Leave the key unset (or set it to `none`) for keyless vLLM / llama.cpp deployments; embeddings are unaffected and keep their own provider. Redirects are refused outright — a gateway 3xx becomes a normal error instead of carrying the bearer token to another origin. Reasoning models pointed straight at the cloud OpenAI endpoint (o1 family) reject the classic fields; via the SDK, `get_llm("openai", token_param="max_completion_tokens", options={"temperature": None})` renames the budget field and drops the fields they refuse (gateways normally translate this themselves).
 
 **Reasoning models** (qwen3, deepseek-r1 and similar): mnemostack disables thinking by default (`think=False` in `OllamaLLM`) — with thinking on, these models spend the whole token budget on thoughts and return empty text, silently degrading reranking, expansion and extraction. Pass `get_llm("ollama", think=None)` to keep the model's own default, or `think=True` to force it on models that support thinking. Extra generation options go through `options={...}` (e.g. `{"num_ctx": 8192}`).
 

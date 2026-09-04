@@ -6,6 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **New `openai` LLM provider — any OpenAI-compatible endpoint** (#187). The
+  LLM registry knew only `gemini` and `ollama` (native `/api/generate`), so
+  `serve --llm` could not talk to LiteLLM proxies, vLLM, llama.cpp server or
+  API gateways. `--llm openai` speaks `POST {base}/v1/chat/completions`: the
+  base URL comes from `llm.host` / `MNEMOSTACK_LLM_HOST` (a URL already
+  ending in `/v1` is accepted, bare `host:port` gets a scheme), the Bearer
+  token from `MNEMOSTACK_LLM_API_KEY` (unset or `none` sends no auth header,
+  for keyless vLLM), and `--llm-model` passes through as `model`. Base URL
+  and model are required and fail loud at construction — gateways have no
+  meaningful defaults. The embedding-host inheritance stays ollama-only:
+  an Ollama embedding endpoint is never a valid chat/completions base URL.
+  Redirects are refused (a 3xx must not carry the bearer token to another
+  origin), and SDK-level `token_param` / `options` knobs cover reasoning
+  models that reject the classic `max_tokens` / `temperature` fields.
+
 ## [2.3.2] - 2026-09-03
 
 - **An unconfigured graph no longer costs every request** (#181). The server's
