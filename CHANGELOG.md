@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-09-04
+
 - **New `openai` LLM provider — any OpenAI-compatible endpoint** (#187). The
   LLM registry knew only `gemini` and `ollama` (native `/api/generate`), so
   `serve --llm` could not talk to LiteLLM proxies, vLLM, llama.cpp server or

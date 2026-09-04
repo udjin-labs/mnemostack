@@ -31,6 +31,11 @@ _OPENER = urllib.request.build_opener(_NoRedirect)
 #: it. Same pattern as ``GEMINI_API_KEY`` in the gemini provider.
 API_KEY_ENV = "MNEMOSTACK_LLM_API_KEY"
 
+# Bound successful response bodies too, not only HTTP error details. A
+# misconfigured or hostile compatible endpoint must not be able to exhaust the
+# serving process's memory with an unbounded response.
+MAX_RESPONSE_BYTES = 10 * 1024 * 1024
+
 
 class OpenAICompatLLM(LLMProvider):
     """LLM behind any endpoint speaking ``POST {base}/v1/chat/completions``.
@@ -138,7 +143,12 @@ class OpenAICompatLLM(LLMProvider):
         try:
             req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=headers)
             with _OPENER.open(req, timeout=self.timeout) as resp:
-                data = json.loads(resp.read())
+                body = resp.read(MAX_RESPONSE_BYTES + 1)
+                if len(body) > MAX_RESPONSE_BYTES:
+                    return LLMResponse(
+                        text="", error=f"{self.name} response exceeds {MAX_RESPONSE_BYTES} bytes"
+                    )
+                data = json.loads(body)
         except HTTPError as exc:
             # The response body usually names the actual problem (unknown
             # model, quota, auth) — surface a bounded snippet of it.

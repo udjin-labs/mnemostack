@@ -16,7 +16,7 @@ import pytest
 
 from mnemostack.config import llm_kwargs
 from mnemostack.llm import get_llm, list_llms
-from mnemostack.llm.openai_compat import API_KEY_ENV, OpenAICompatLLM
+from mnemostack.llm.openai_compat import API_KEY_ENV, MAX_RESPONSE_BYTES, OpenAICompatLLM
 
 
 class _FakeResponse(io.BytesIO):
@@ -271,6 +271,22 @@ def test_http_error_body_read_is_bounded(monkeypatch):
     resp = OpenAICompatLLM(model="m", host="http://gw:4000").generate("q")
     assert not resp.ok and "500" in resp.error
     assert reads and all(n is not None and 0 < n <= 300 for n in reads)
+
+
+def test_success_response_body_read_is_bounded(monkeypatch):
+    reads = []
+
+    class _HugeBody(io.BytesIO):
+        def read(self, n=-1):
+            reads.append(n)
+            return b"x" * n
+
+    monkeypatch.delenv(API_KEY_ENV, raising=False)
+    _install(monkeypatch, lambda req, timeout: _HugeBody())
+    resp = OpenAICompatLLM(model="m", host="http://gw:4000").generate("q")
+
+    assert not resp.ok and "response exceeds" in resp.error
+    assert reads == [MAX_RESPONSE_BYTES + 1]
 
 
 @pytest.mark.parametrize("bad", [True, False, -5])
