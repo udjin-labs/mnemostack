@@ -36,17 +36,32 @@ def _reply(content="Paris.", total_tokens=17):
     ).encode()
 
 
+class _FakeOpener:
+    """Stands in for the module's no-redirect opener (the provider never
+    calls bare ``urllib.request.urlopen``)."""
+
+    def __init__(self, handler):
+        self._handler = handler
+
+    def open(self, req, timeout=0):
+        return self._handler(req, timeout)
+
+
+def _install(monkeypatch, handler):
+    monkeypatch.setattr("mnemostack.llm.openai_compat._OPENER", _FakeOpener(handler))
+
+
 def _capture(monkeypatch, body=None):
     captured = {}
 
-    def fake_urlopen(req, timeout=0):
+    def handler(req, timeout):
         captured["url"] = req.full_url
         captured["headers"] = dict(req.header_items())
         captured["body"] = json.loads(req.data.decode())
         captured["timeout"] = timeout
         return _FakeResponse(body if body is not None else _reply())
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    _install(monkeypatch, handler)
     return captured
 
 
@@ -149,10 +164,10 @@ def test_generate_payload_shape(monkeypatch):
 
 
 def test_http_error_surfaces_body_snippet_without_raising(monkeypatch):
-    def deny(req, timeout=0):
+    def deny(req, timeout):
         raise HTTPError(req.full_url, 401, "Unauthorized", {}, io.BytesIO(b'{"error":"bad key"}'))
 
-    monkeypatch.setattr("urllib.request.urlopen", deny)
+    _install(monkeypatch, deny)
     monkeypatch.delenv(API_KEY_ENV, raising=False)
     resp = OpenAICompatLLM(model="m", host="http://gw:4000").generate("q")
     assert not resp.ok
@@ -160,10 +175,10 @@ def test_http_error_surfaces_body_snippet_without_raising(monkeypatch):
 
 
 def test_network_error_becomes_response_error(monkeypatch):
-    def boom(req, timeout=0):
+    def boom(req, timeout):
         raise OSError("connection refused")
 
-    monkeypatch.setattr("urllib.request.urlopen", boom)
+    _install(monkeypatch, boom)
     monkeypatch.delenv(API_KEY_ENV, raising=False)
     resp = OpenAICompatLLM(model="m", host="http://gw:4000").generate("q")
     assert not resp.ok and "connection refused" in resp.error
@@ -210,6 +225,82 @@ def test_describe_image_fail_open_default(monkeypatch):
     monkeypatch.delenv(API_KEY_ENV, raising=False)
     resp = OpenAICompatLLM(model="m", host="http://gw:4000").describe_image(b"x")
     assert not resp.ok and "does not support image description" in resp.error
+
+
+# ----------------------------------------------- redirects and hard limits
+
+
+def test_redirect_handler_refuses_to_follow():
+    """A gateway 3xx must never carry the bearer token to a new origin.
+    The real opener is exercised directly: its redirect handler must return
+    None (urllib then raises the HTTPError our error path already handles)."""
+    import mnemostack.llm.openai_compat as mod
+
+    handlers = [h for h in mod._OPENER.handlers if isinstance(h, mod._NoRedirect)]
+    assert handlers, "no-redirect handler not installed on the opener"
+    req = mod.urllib.request.Request("http://gw:4000/v1/chat/completions")
+    assert handlers[0].redirect_request(req, None, 302, "Found", {}, "http://evil/v1") is None
+
+
+def test_redirect_surfaces_as_error_response(monkeypatch):
+    def redirect(req, timeout):
+        raise HTTPError(req.full_url, 302, "Found", {"Location": "http://evil/v1"}, None)
+
+    _install(monkeypatch, redirect)
+    monkeypatch.setenv(API_KEY_ENV, "sk-secret")
+    resp = OpenAICompatLLM(model="m", host="http://gw:4000").generate("q")
+    assert not resp.ok and "302" in resp.error
+
+
+def test_http_error_body_read_is_bounded(monkeypatch):
+    class _HugeBody(io.BytesIO):
+        def read(self, n=-1):
+            assert n != -1 and n <= 300, "unbounded read of the error body"
+            return b"x" * n
+
+    def deny(req, timeout):
+        raise HTTPError(req.full_url, 500, "boom", {}, _HugeBody())
+
+    _install(monkeypatch, deny)
+    monkeypatch.delenv(API_KEY_ENV, raising=False)
+    resp = OpenAICompatLLM(model="m", host="http://gw:4000").generate("q")
+    assert not resp.ok and "500" in resp.error
+
+
+@pytest.mark.parametrize("bad", [True, False, -5])
+def test_bool_and_negative_token_counts_degrade_to_none(monkeypatch, bad):
+    body = json.dumps(
+        {"choices": [{"message": {"content": "Paris."}}], "usage": {"total_tokens": bad}}
+    ).encode()
+    monkeypatch.delenv(API_KEY_ENV, raising=False)
+    _capture(monkeypatch, body=body)
+    resp = OpenAICompatLLM(model="m", host="http://gw:4000").generate("q")
+    assert resp.ok and resp.tokens_used is None
+
+
+# ------------------------------------------------ reasoning-model knobs
+
+
+def test_token_param_renames_the_budget_field(monkeypatch):
+    monkeypatch.delenv(API_KEY_ENV, raising=False)
+    captured = _capture(monkeypatch)
+    OpenAICompatLLM(
+        model="o1", host="http://gw:4000", token_param="max_completion_tokens"
+    ).generate("q", max_tokens=77)
+    assert captured["body"]["max_completion_tokens"] == 77
+    assert "max_tokens" not in captured["body"]
+
+
+def test_options_override_and_none_removes(monkeypatch):
+    monkeypatch.delenv(API_KEY_ENV, raising=False)
+    captured = _capture(monkeypatch)
+    OpenAICompatLLM(
+        model="o1",
+        host="http://gw:4000",
+        options={"temperature": None, "top_p": 0.9},
+    ).generate("q", temperature=0.0)
+    assert "temperature" not in captured["body"]
+    assert captured["body"]["top_p"] == 0.9
 
 
 # ------------------------------------------------------- llm_kwargs gating

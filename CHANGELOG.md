@@ -17,6 +17,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and model are required and fail loud at construction — gateways have no
   meaningful defaults. The embedding-host inheritance stays ollama-only:
   an Ollama embedding endpoint is never a valid chat/completions base URL.
+  Redirects are refused (a 3xx must not carry the bearer token to another
+  origin), and SDK-level `token_param` / `options` knobs cover reasoning
+  models that reject the classic `max_tokens` / `temperature` fields.
 
 ## [2.3.2] - 2026-09-03
 
