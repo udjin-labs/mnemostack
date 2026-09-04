@@ -253,10 +253,15 @@ def test_redirect_surfaces_as_error_response(monkeypatch):
 
 
 def test_http_error_body_read_is_bounded(monkeypatch):
+    # The assert must live OUT here, not inside the fake's read(): an
+    # exception raised inside exc.read() is swallowed by the provider's
+    # detail guard, and a pin that raises there passes even on regression.
+    reads = []
+
     class _HugeBody(io.BytesIO):
         def read(self, n=-1):
-            assert n != -1 and n <= 300, "unbounded read of the error body"
-            return b"x" * n
+            reads.append(n)
+            return b"x" * (n if n and n > 0 else 1_000_000)
 
     def deny(req, timeout):
         raise HTTPError(req.full_url, 500, "boom", {}, _HugeBody())
@@ -265,6 +270,7 @@ def test_http_error_body_read_is_bounded(monkeypatch):
     monkeypatch.delenv(API_KEY_ENV, raising=False)
     resp = OpenAICompatLLM(model="m", host="http://gw:4000").generate("q")
     assert not resp.ok and "500" in resp.error
+    assert reads and all(n is not None and 0 < n <= 300 for n in reads)
 
 
 @pytest.mark.parametrize("bad", [True, False, -5])
