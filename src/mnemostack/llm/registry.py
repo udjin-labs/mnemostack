@@ -40,6 +40,10 @@ def _lazy_register_builtins() -> None:
         register_llm("ollama", OllamaLLM)
     except ImportError:
         pass
+    # stdlib-only, no ImportError gate to swallow real defects behind.
+    from .openai_compat import OpenAICompatLLM
+
+    register_llm("openai", OpenAICompatLLM)
 
 
 _lazy_register_builtins()
