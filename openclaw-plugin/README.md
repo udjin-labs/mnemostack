@@ -15,7 +15,7 @@ mnemostack provides the durable recall backend: vector retrieval, BM25/exact-tok
 
 3. Install this plugin in OpenClaw from the `openclaw-plugin/` directory.
 4. Enable the plugin.
-5. Ask OpenClaw a recall-style question such as "what did we decide about the rollout?" or "что мы решили про релиз?".
+5. Ask OpenClaw a recall-style question such as "what did we decide about the rollout?" (trigger words cover English and Russian queries).
 
 With the daemon on the default port, no plugin configuration is required. The bundled `openclaw.plugin.json` and runtime defaults use:
 
