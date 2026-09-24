@@ -978,7 +978,7 @@ The plugin defaults to `http://127.0.0.1:18793/answer`, supports English/Russian
 ## Roadmap
 
 - [x] Embedding provider registry (Gemini / Ollama / HuggingFace)
-- [x] LLM provider registry (Gemini Flash / Ollama)
+- [x] LLM provider registry (Gemini Flash / Ollama / any OpenAI-compatible endpoint)
 - [x] Qdrant wrapper
 - [x] BM25 + RRF recall pipeline
 - [x] Answer mode with confidence + citations
@@ -1013,6 +1013,12 @@ The plugin defaults to `http://127.0.0.1:18793/answer`, supports English/Russian
 - [x] Ingest-time enrichment hook (`Ingestor(enrich=...)`) + `context_fields` answer projection
 - [x] Ollama `think` control (off by default) + generation `options` passthrough
 - [x] Follow-up question rewriting (`rewrite_followup`)
+- [x] Access reinforcement instead of punitive decay — being used raises rank, going unused never lowers it (`access_boost`, `--access-bonus-max`) (2.3.1)
+- [x] Half-open circuit breaker for an unreachable graph store + `MNEMOSTACK_GRAPH_URI=""` off switch (2.3.2)
+- [x] `llm.host` / `llm.timeout` reaching the LLM on every construction surface (2.3.2)
+- [x] `openai` LLM provider — LiteLLM proxies, vLLM, llama.cpp server, API gateways (2.4.0)
+- [x] hermes-agent memory provider — `hermes-mnemostack` on PyPI, listed in the official Hermes plugin catalog
+- [x] OpenClaw companion plugin published on ClawHub (`@udjin79/mnemostack-auto-recall`)
 
 ## Contributing
 
