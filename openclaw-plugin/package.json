@@ -1,6 +1,6 @@
 {
   "name": "@udjin79/mnemostack-auto-recall",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "OpenClaw companion plugin that injects mnemostack recall results into prompts.",
   "license": "MIT",
   "type": "module",
