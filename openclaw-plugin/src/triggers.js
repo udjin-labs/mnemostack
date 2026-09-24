@@ -23,7 +23,7 @@ export const DEFAULT_TRIGGERS = Object.freeze({
     "You are a memory search agent", "System (untrusted):", "<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>", "[Subagent Context]", "Runtime context (internal)"
   ],
   term_whitelist: [
-    "OpenClaw", "Mnemostack", "Qdrant", "Memgraph", "Gemini", "Hetzner", "Selectel", "Yandex", "Tailscale", "SearXNG", "API", "JSON", "CLI", "HTTP", "PR", "CI"
+    "OpenClaw", "Mnemostack", "Qdrant", "Memgraph", "API", "JSON", "CLI", "HTTP", "PR", "CI"
   ]
 });
 

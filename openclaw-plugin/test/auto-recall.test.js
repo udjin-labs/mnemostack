@@ -30,7 +30,7 @@ test("trigger defaults catch recall questions and avoid whitelisted tech false p
   for (const text of ["what did we decide?", "что было", "кто был?", "какой был план?", "помнишь что решили"] ) {
     assert.equal(getRecallTrigger(text).match, true, text);
   }
-  for (const term of ["OpenClaw", "Mnemostack", "Qdrant", "Memgraph", "Gemini", "Hetzner", "Selectel", "Yandex", "Tailscale", "SearXNG"]) {
+  for (const term of ["OpenClaw", "Mnemostack", "Qdrant", "Memgraph", "API", "CLI"]) {
     assert.equal(getRecallTrigger(`status ${term}`).match, false, term);
   }
   const snapshot = compileTriggers({ named_entities: ["Ada Lovelace"], memory_keywords: ["remember"], past_references: ["last time"], past_tense_questions: ["what"], past_tense_verbs: ["did"], internal_prompt_denylist: ["Internal"], term_whitelist: [] });
