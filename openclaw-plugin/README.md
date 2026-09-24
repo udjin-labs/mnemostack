@@ -1,6 +1,6 @@
 # mnemostack OpenClaw auto-recall plugin
 
-Companion OpenClaw plugin for [mnemostack](../README.md). It connects OpenClaw's `before_prompt_build` hook to a mnemostack recall backend and injects a bounded `<active_memory>` block before the model sees the prompt.
+Companion OpenClaw plugin for [mnemostack](https://github.com/udjin-labs/mnemostack). It connects OpenClaw's `before_prompt_build` hook to a mnemostack recall backend and injects a bounded `<active_memory>` block before the model sees the prompt.
 
 mnemostack provides the durable recall backend: vector retrieval, BM25/exact-token rescue, graph retrieval, temporal retrieval, fusion, reranking, and answer synthesis. This plugin only decides when to ask for recall and how to add the answer to OpenClaw context.
 
