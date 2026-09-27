@@ -18,7 +18,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   one tenant — every collection behind the recaller is asked (an in-memory
   BM25 arm answers for the corpus it actually loaded), and one tenant each in
   two collections counts as two — on
-  every public search surface (`recall`, `recall_async`, `search_many`, and
+  every public search surface of a recaller as configured — replacing its
+  internals after construction is not covered (`recall`, `recall_async`,
+  `search_many`, and
   so the answer generator's expansion retry, plus `synthesize`, whose
   `tenant=` scopes the supplied recaller and any directly supplied
   retrievers alike and backstops the merged report); collections with a

@@ -46,6 +46,13 @@ class CrossTenantRecallError(RuntimeError):
     (``tenant=...`` / ``Recaller(default_tenant=...)`` / ``MNEMOSTACK_TENANT``)
     or, for deliberate cross-tenant tooling operating inside the trust
     boundary, construct the recaller with ``allow_cross_tenant=True``.
+
+    Contract: the guard describes a recaller AS CONFIGURED. What it probes —
+    the arms, the own vector store and in-memory BM25 corpus, and the tenant
+    sets of in-memory corpora, captured when they are built — is fixed at
+    construction; replacing a recaller's internals afterwards (``bm25``,
+    ``retrievers``, ``vector``, ``embedding``) or mutating a corpus in place
+    is not covered. Build a new Recaller for a different configuration.
     """
 
 if TYPE_CHECKING:

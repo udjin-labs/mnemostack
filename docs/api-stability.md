@@ -329,7 +329,10 @@ behave exactly as listed above.
   not block); `allow_cross_tenant=True` restores
   it everywhere for deliberate cross-tenant tooling. This is a fail-closed guard
   against misconfigured consumers, not a security boundary — the trust boundary
-  remains `serve --auth`, where the key decides the tenant. `AnswerGenerator.generate`
+  remains `serve --auth`, where the key decides the tenant. The guard covers a
+  recaller **as configured**: replacing its internals after construction
+  (`bm25`, `retrievers`, `vector`, `embedding`) or mutating an in-memory corpus
+  in place is not covered — build a new `Recaller` instead. `AnswerGenerator.generate`
   (+ async) also takes `tenant=`, but it only scopes the method's **own** internal
   retry sub-recalls (expansion / inference) — it does **not** re-filter the
   `memories` you pass in. Pre-scope those yourself: feed `generate` the output of a
