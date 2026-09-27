@@ -1005,13 +1005,16 @@ class _DocsTenantProbe:
                 sample.add(tid)
             except TypeError:
                 # An array/object tenant_id (foreign payloads Qdrant allows)
-                # is unhashable: the answer is undetermined, as the live
-                # probe reports it — never a construction crash.
+                # is unhashable: note it and keep scanning — two valid
+                # tenants later in the corpus still prove multi-tenancy,
+                # whatever the document order.
                 determined = False
-                break
+                continue
             if len(sample) >= 2:
                 break
-        self._sample: set[Any] | None = sample if determined else None
+        # Undetermined only when the malformed markers leave the evidence
+        # inconclusive; two valid tenants are conclusive regardless.
+        self._sample: set[Any] | None = sample if (determined or len(sample) >= 2) else None
 
     def tenant_sample(self) -> set[Any] | None:
         return None if self._sample is None else set(self._sample)

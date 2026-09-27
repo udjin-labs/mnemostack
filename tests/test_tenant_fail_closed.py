@@ -1059,3 +1059,18 @@ def test_unhashable_tenant_marker_degrades_to_unknown_not_a_crash():
     ]
     arm = BM25Retriever(docs)  # must not raise
     assert arm.tenant_probe_store.tenant_sample() is None
+
+
+@pytest.mark.parametrize(
+    "order",
+    [
+        [["z"], "x", "y"],
+        ["x", ["z"], "y"],
+        ["x", "y", ["z"]],
+    ],
+)
+def test_unhashable_marker_never_hides_two_valid_tenants(order):
+    docs = [
+        BM25Doc(id=str(i), text="alpha", payload={"tenant_id": tid}) for i, tid in enumerate(order)
+    ]
+    assert BM25Retriever(docs).tenant_probe_store.tenant_sample() == {"x", "y"}
