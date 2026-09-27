@@ -484,20 +484,23 @@ def _query_retrievers(
     from .recall.recaller import Recaller
     from .recall.validity import filter_by_tenant
 
-    if not retrievers:
+    # Same family-aware matching as the recaller path: a suffixed
+    # multi-field arm ("qdrant_text:title") is part of the lexical family
+    # the "bm25" umbrella selects. Filter FIRST, so the guard below probes
+    # exactly the collections this synthesis will read.
+    enabled = [
+        r
+        for r in retrievers or []
+        if _source_enabled(str(getattr(r, "name", "")).lower(), source_filter)
+    ]
+    if not enabled:
         return []
     if tenant is None:
         Recaller(
-            retrievers=list(retrievers), allow_cross_tenant=allow_cross_tenant
+            retrievers=enabled, allow_cross_tenant=allow_cross_tenant
         )._guard_tenantless_recall()
     results: list[RecallResult] = []
-    for retr in retrievers:
-        name = str(getattr(retr, "name", "")).lower()
-        # Same family-aware matching as the recaller path: a suffixed
-        # multi-field arm ("qdrant_text:title") is part of the lexical
-        # family the "bm25" umbrella selects.
-        if not _source_enabled(name, source_filter):
-            continue
+    for retr in enabled:
         tkw: dict[str, Any] = {}
         if tenant is not None:
             if not getattr(retr, "accepts_tenant", False):

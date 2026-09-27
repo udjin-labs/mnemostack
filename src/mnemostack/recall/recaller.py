@@ -569,7 +569,7 @@ class Recaller:
                 sources.append(store)
         return sources
 
-    def _probe_multi_tenant(self) -> bool | str:
+    def _probe_multi_tenant(self, sources: list[Any] | None = None) -> bool | str:
         """Classify what a tenantless recall would read: True = two or more
         distinct tenants across all probe sources, False = at most one,
         "none" = nothing to probe (no collection-backed arm: file BM25,
@@ -578,7 +578,8 @@ class Recaller:
         fails closed: the guard exists for stores it can inspect, and
         crashing deployments that cannot be inspected would punish exactly
         the users who have no tenants at all."""
-        sources = self.tenant_probe_sources()
+        if sources is None:
+            sources = self.tenant_probe_sources()
         if not sources:
             return "none"
         union: set[Any] = set()
@@ -625,12 +626,29 @@ class Recaller:
         point and not another."""
         return tenant if tenant is not None else self.default_tenant
 
-    def _guard_tenantless_recall(self) -> None:
+    def _guard_tenantless_recall(self, sources: list[Any] | None = None) -> None:
         """Fail closed: refuse a tenantless recall over a collection that
         verifiably holds several tenants. See :class:`CrossTenantRecallError`
         for who this protects (misconfigured consumers) and who it does not
-        (holders of the store credentials)."""
+        (holders of the store credentials).
+
+        ``sources`` narrows the probe to exactly the stores an operation
+        reads (``search_many`` reads only the recaller's own vector store):
+        probing a collection the operation never touches would refuse a safe
+        search. A narrowed probe is not cached — it serves rare paths, and
+        the cache belongs to the full-recall answer."""
         if self.allow_cross_tenant:
+            return
+        if sources is not None:
+            verdict = self._probe_multi_tenant(sources)
+            if verdict is True:
+                raise CrossTenantRecallError(
+                    "search without a tenant over a multi-tenant collection: "
+                    "the collection holds several tenant_id values. Scope the "
+                    "search (tenant=..., Recaller(default_tenant=...), "
+                    "MNEMOSTACK_TENANT or recall.tenant) — or, for deliberate "
+                    "cross-tenant tooling, construct with allow_cross_tenant=True."
+                )
             return
         def _stale() -> bool:
             return self._multi_tenant_probe is None or (
@@ -975,7 +993,13 @@ class Recaller:
         # the collection through here.
         tenant = self._effective_tenant(tenant)
         if tenant is None:
-            self._guard_tenantless_recall()
+            # Only the collection this surface actually searches.
+            self._guard_tenantless_recall(
+                sources=[self.vector]
+                if hasattr(self.vector, "tenant_sample")
+                or hasattr(self.vector, "distinct_tenant_count")
+                else []
+            )
         # Direct search surface (expansion retry, library callers) — must be
         # space-guarded like every other path that queries the collection.
         self._ensure_space_compat(tenant=tenant)

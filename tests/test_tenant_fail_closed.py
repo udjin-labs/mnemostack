@@ -645,3 +645,39 @@ def test_synthesize_tenant_scopes_the_supplied_recaller_too():
     synthesize("q", recaller=r, retrievers=[direct], tenant="x")
     assert rec_arm.seen_tenants == ["x"]
     assert direct.seen_tenants == ["x"]
+
+
+# ============================================== review round 5 regressions
+
+
+def test_direct_retrievers_probe_only_the_selected_sources():
+    """A multi-tenant collection behind an arm the source filter drops must
+    not veto the arms it keeps."""
+    from mnemostack.synthesis import _query_retrievers
+
+    vec = _StaticArm("vector", [_hit("v", "t1")], store=_SampleStore({"t1", "t2"}))
+    file_bm25 = BM25Retriever([BM25Doc(id="d1", text="alpha notes")])
+    out = _query_retrievers([vec, file_bm25], "alpha", 10, {"bm25"}, None)
+    assert [r.id for r in out] == ["d1"]
+    with pytest.raises(CrossTenantRecallError):
+        _query_retrievers([vec, file_bm25], "alpha", 10, {"vector"}, None)
+
+
+def test_search_many_probes_only_the_store_it_searches():
+    """search_many reads the recaller's own vector store only; a multi-tenant
+    collection behind another arm must not veto it — and a multi-tenant own
+    store still refuses."""
+
+    class _Own(_SampleStore):
+        def search(self, vector, limit, filters=None, hide_invalidated=None, **kw):
+            return []
+
+    other = _StaticArm("other", [], store=_SampleStore({"x", "y"}))
+    ok = Recaller(vector_store=_Own({"a"}), retrievers=[other])
+    ok._ensure_space_compat = lambda tenant=None: None
+    assert ok.search_many([[0.1]], limit=3) == []
+
+    bad = Recaller(vector_store=_Own({"a", "b"}), retrievers=[other])
+    bad._ensure_space_compat = lambda tenant=None: None
+    with pytest.raises(CrossTenantRecallError):
+        bad.search_many([[0.1]], limit=3)
