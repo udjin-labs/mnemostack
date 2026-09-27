@@ -132,6 +132,88 @@ def test_env_rescore_rejects_non_boolean(isolated_env):
         Config.load()
 
 
+def test_env_oversampling_names_the_variable(isolated_env):
+    isolated_env.setenv("MNEMOSTACK_QUANTIZATION_OVERSAMPLING", "abc")
+    with pytest.raises(ValueError, match="MNEMOSTACK_QUANTIZATION_OVERSAMPLING"):
+        Config.load()
+
+
+@pytest.mark.parametrize(
+    "quant",
+    [
+        {"rescore": "yes"},
+        {"oversampling": 0.5},
+        {"oversampling": float("nan")},
+        {"oversampling": float("inf")},
+        {"oversampling": True},
+        {"oversampling": "2"},
+    ],
+)
+def test_sdk_values_are_validated(quant):
+    with pytest.raises(ValueError, match="quantization_"):
+        quantization_search_params(**quant)
+
+
+def test_rejected_values_create_no_client(monkeypatch):
+    # Validation precedes the client: nothing is left behind to close.
+    import mnemostack.vector.async_qdrant as aq
+    import mnemostack.vector.qdrant as q
+
+    made: list = []
+    monkeypatch.setattr(q, "QdrantClient", lambda **kw: made.append(kw))
+    monkeypatch.setattr(aq, "AsyncQdrantClient", lambda **kw: made.append(kw))
+    with pytest.raises(ValueError):
+        VectorStore(collection="c", dimension=4, quantization_oversampling=0.5)
+    with pytest.raises(ValueError):
+        AsyncVectorStore(collection="c", dimension=4, quantization_rescore="yes")
+    assert made == []
+
+
+def test_config_show_explicit_bad_file_is_a_clean_error(isolated_env, tmp_path, capsys):
+    import mnemostack.cli as cli
+
+    path = tmp_path / "bad.yaml"
+    path.write_text("vector: [\n")
+    assert cli.main(["config", "--config", str(path)]) == 2
+    assert "error: invalid configuration:" in capsys.readouterr().err
+
+
+def test_cli_bad_config_is_a_clean_error(isolated_env, capsys):
+    import mnemostack.cli as cli
+
+    isolated_env.setenv("MNEMOSTACK_QUANTIZATION_OVERSAMPLING", "0.5")
+    assert cli.main(["health"]) == 2
+    assert "error: invalid configuration:" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "body, reason",
+    [
+        ("vector: [\n", "not valid YAML"),
+        ("- a\n- b\n", "must be a mapping"),
+        ("[]\n", "must be a mapping"),
+        ("false\n", "must be a mapping"),
+        ("recall:\n  token_budget: []\n", ""),
+    ],
+)
+def test_cli_malformed_config_file_is_a_clean_error(isolated_env, tmp_path, capsys, body, reason):
+    import mnemostack.cli as cli
+
+    path = tmp_path / "config.yaml"
+    path.write_text(body)
+    isolated_env.setenv("MNEMOSTACK_CONFIG", str(path))
+    assert cli.main(["health"]) == 2
+    err = capsys.readouterr().err
+    assert "error: invalid configuration:" in err and reason in err
+
+
+@pytest.mark.parametrize("body", ["", "# only a comment\n", "null\n"])
+def test_empty_config_file_is_still_accepted(isolated_env, tmp_path, body):
+    path = tmp_path / "config.yaml"
+    path.write_text(body)
+    assert Config.load(path).vector.collection == "mnemostack"
+
+
 @pytest.mark.parametrize(
     "line",
     [

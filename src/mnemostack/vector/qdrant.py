@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -150,6 +151,19 @@ def quantization_search_params(
     before quantization is enabled on it."""
     if rescore is None and oversampling is None:
         return None
+    # SDK callers bypass Config.load's checks; without these a bad value would
+    # surface only at query time, as a server error (or silently, for NaN).
+    if rescore is not None and not isinstance(rescore, bool):
+        raise ValueError(f"quantization_rescore must be a boolean, got {rescore!r}")
+    if oversampling is not None and (
+        isinstance(oversampling, bool)
+        or not isinstance(oversampling, (int, float))
+        or not math.isfinite(oversampling)
+        or oversampling < 1.0
+    ):
+        raise ValueError(
+            f"quantization_oversampling must be a finite number >= 1.0, got {oversampling!r}"
+        )
     from qdrant_client.models import QuantizationSearchParams, SearchParams
 
     return SearchParams(
@@ -235,12 +249,13 @@ class VectorStore:
         self.collection = collection
         self.dimension = dimension
         self.distance = distance
-        self.client = QdrantClient(url=host, timeout=timeout)
         #: Sent with dense queries only (the sparse space is not quantized);
-        #: None = no search_params at all, as before.
+        #: None = no search_params at all, as before. Built (and validated)
+        #: before the client, so a rejected value leaves nothing to close.
         self.search_params = quantization_search_params(
             quantization_rescore, quantization_oversampling
         )
+        self.client = QdrantClient(url=host, timeout=timeout)
         #: Opt-in server-side lexical index: writes maintain a named sparse
         #: vector (see vector/sparse.py) next to the dense one, and
         #: ``sparse_search`` queries it. Off by default — collections and
