@@ -7,7 +7,7 @@ depending on the surface. This module is the single implementation.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .tokens import TokenCounter, apply_token_budget
 from .trace import RecallTrace, apply_rerank_safe
@@ -98,6 +98,13 @@ def recall_flow(
                 r, filters, timestamp_key=_ts_key, numeric_unit=_unit
             )
 
+        # The per-stage trace keywords go only to a traced call, so a Pipeline
+        # subclass whose `apply` predates them keeps working untraced.
+        trace_kw: dict[str, Any] = {}
+        if trace is not None:
+            trace_kw["trace"] = trace
+            if tenant is not None or filters:
+                trace_kw["trace_scope"] = _in_scope
         results = pipeline.apply(
             query,
             results,
@@ -108,8 +115,7 @@ def recall_flow(
             # recaller read, under its allow_cross_tenant — the real recaller,
             # not a QueryExpander wrapping it.
             recaller=_innermost_recaller(recaller),
-            trace=trace,
-            trace_scope=_in_scope if (tenant is not None or filters) else None,
+            **trace_kw,
         )
         if filters:
             # Pipeline stages may append candidates that never passed the

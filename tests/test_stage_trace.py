@@ -244,3 +244,25 @@ def test_a_filter_scope_leaves_the_pre_pipeline_trace_untouched():
         _Recaller(), "q", pipeline=Pipeline([_Reverse()]), trace=trace, filters={"user": "alice"}
     )
     assert [rid for rid, _ in trace.retrievers[0].ranked] == ["u1", "far"]
+
+
+def test_an_untraced_flow_keeps_an_older_pipeline_override_working():
+    class _OldPipeline(Pipeline):
+        def apply(
+            self,
+            query,
+            results,
+            *,
+            as_of=None,
+            include_invalidated=False,
+            tenant=None,
+            recaller=None,
+        ):
+            return results
+
+    class _Recaller:
+        def recall(self, query, **kw):
+            return [_r("a", 0.9)]
+
+    out = recall_flow(_Recaller(), "q", pipeline=_OldPipeline([]))
+    assert [r.id for r in out] == ["a"]
