@@ -967,3 +967,17 @@ def test_synthesize_opt_out_reaches_a_wrapped_recaller_without_mutating_it():
     synthesize("alpha", recaller=wrapped, allow_cross_tenant=True)  # must not raise
     assert inner.allow_cross_tenant is False
     assert wrapped.recaller is inner
+
+    nested = QueryExpander(QueryExpander(inner, llm=None), llm=None)
+    synthesize("alpha", recaller=nested, allow_cross_tenant=True)  # must not raise
+    assert inner.allow_cross_tenant is False
+    with pytest.raises(CrossTenantRecallError):  # no opt-out: still refused
+        synthesize("alpha", recaller=nested)
+
+    class _Duck:
+        def recall(self, query, **kw):
+            return [_hit("d")]
+
+    duck = _Duck()
+    synthesize("alpha", recaller=QueryExpander(duck, llm=None), allow_cross_tenant=True)
+    assert not hasattr(duck, "allow_cross_tenant")

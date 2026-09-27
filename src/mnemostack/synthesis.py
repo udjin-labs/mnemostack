@@ -190,23 +190,8 @@ def synthesize(
     tenant = explicit or getattr(recaller, "default_tenant", None) or None
     # The synthesis-level opt-out governs a supplied recaller too: run a
     # shallow copy with the flag set, never mutate the caller's object.
-    if kwargs.get("allow_cross_tenant") and recaller is not None and not getattr(
-        recaller, "allow_cross_tenant", False
-    ):
-        import copy
-
-        inner = getattr(recaller, "recaller", None)
-        if inner is not None and hasattr(inner, "allow_cross_tenant"):
-            # A wrapper (QueryExpander) delegates the flag to the recaller it
-            # wraps: copy both, set the flag on the inner copy.
-            inner_copy = copy.copy(inner)
-            inner_copy.allow_cross_tenant = True
-            wrapper_copy: Any = copy.copy(recaller)
-            wrapper_copy.recaller = inner_copy
-            recaller = wrapper_copy
-        else:
-            recaller = copy.copy(recaller)
-            recaller.allow_cross_tenant = True
+    if kwargs.get("allow_cross_tenant") and recaller is not None:
+        recaller = _with_cross_tenant_opt_out(recaller)
     raw_results = _query_recaller(
         recaller, entity, max_results, kwargs.get("filters"), tenant=tenant
     )
@@ -444,6 +429,24 @@ def _result_source_enabled(result: RecallResult, source_filter: set[str] | None)
     if "graph" in source_filter:
         source_filter = {*source_filter, "memgraph"}
     return bool(sources & source_filter)
+
+
+def _with_cross_tenant_opt_out(recaller: Any) -> Any:
+    """A copy of ``recaller`` whose fail-closed guard is opted out — the flag
+    set where the guard actually runs. A wrapper (anything exposing the
+    object it wraps as ``.recaller``, like QueryExpander) is copied level by
+    level down the chain and the flag lands on the copy of the innermost
+    object; the caller's objects are never mutated. On a duck-typed recaller
+    without a guard the flag is inert."""
+    import copy
+
+    clone: Any = copy.copy(recaller)
+    inner = getattr(recaller, "recaller", None)
+    if inner is not None:
+        clone.recaller = _with_cross_tenant_opt_out(inner)
+    else:
+        clone.allow_cross_tenant = True
+    return clone
 
 
 def _query_recaller(
