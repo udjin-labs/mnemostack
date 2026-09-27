@@ -925,3 +925,33 @@ def test_own_bm25_corpus_is_probed_only_when_the_active_mode_reads_it():
     assert [r.id for r in Recaller(retrievers=[arm], bm25_docs=docs).recall("alpha")] == ["1"]
     with pytest.raises(CrossTenantRecallError):
         Recaller(retrievers=[arm], bm25_docs=docs, mca_prefilter=True).recall("alpha")
+
+
+# ============================================ PR #195 bot round 4 regressions
+
+
+def test_recall_flow_scopes_the_pipeline_through_a_query_expander():
+    from mnemostack.recall import recall_flow
+    from mnemostack.recall.expansion import QueryExpander
+    from mnemostack.recall.pipeline import Pipeline, Stage
+
+    class _Inject(Stage):
+        @property
+        def name(self):
+            return "inject"
+
+        def apply(self, context, results):
+            return list(results) + [RecallResult(id="foreign", text="x", score=9.0, payload={})]
+
+    arm = _StaticArm("vector", [_hit("mine", "t1")], tenant_capable=True)
+    wrapped = QueryExpander(Recaller(retrievers=[arm], default_tenant="t1"), llm=None)
+    out = recall_flow(wrapped, "q", limit=5, pipeline=Pipeline([_Inject()]))
+    assert [x.id for x in out] == ["mine"]
+
+
+@pytest.mark.parametrize("bad", [123, False, 1.5])
+def test_non_string_configured_tenant_is_rejected(bad):
+    from mnemostack.config import normalize_tenant
+
+    with pytest.raises(ValueError, match="tenant must be a string"):
+        normalize_tenant(bad)

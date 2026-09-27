@@ -107,6 +107,17 @@ class QueryExpander:
         self.max_tokens = max_tokens
         self.apply_to = apply_to or (lambda q: bool(self.LIST_PATTERN.match(q)))
 
+    @property
+    def default_tenant(self):
+        """The wrapped recaller's construction-time tenant — recall_flow reads
+        it to scope the pipeline and the isolation backstop, which must run
+        under the same tenant the wrapped retrieval does."""
+        return getattr(self.recaller, "default_tenant", None)
+
+    @property
+    def allow_cross_tenant(self) -> bool:
+        return bool(getattr(self.recaller, "allow_cross_tenant", False))
+
     def generate_variants(self, query: str) -> list[str]:
         """Return paraphrases (excluding the original)."""
         prompt = _EXPANSION_PROMPT.format(n=self.n_variants, query=query)

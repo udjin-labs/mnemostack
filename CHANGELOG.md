@@ -50,8 +50,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   arm that cannot be tenant-scoped (previously silent). A blank or
   whitespace-only CONFIGURED tenant is treated as none; an explicit blank
   per-call tenant is refused rather than defaulted; nonblank tenant ids are
-  never rewritten. The graph arm
-  remaining tenant-incapable is #194.
+  never rewritten; a non-string configured tenant (YAML `tenant: 123`) is
+  rejected at load. The graph arm remains tenant-incapable and is not
+  probed by the guard: a tenantless recall over a graph holding several
+  tenants is not refused — #194.
 
 ## [2.4.0] - 2026-09-04
 

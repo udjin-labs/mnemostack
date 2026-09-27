@@ -53,6 +53,9 @@ class CrossTenantRecallError(RuntimeError):
     construction; replacing a recaller's internals afterwards (``bm25``,
     ``retrievers``, ``vector``, ``embedding``) or mutating a corpus in place
     is not covered. Build a new Recaller for a different configuration.
+    The graph arm is not probed either: a tenantless recall reading a graph
+    that holds several tenants is not refused (tenant-scoped graph recall is
+    tracked separately).
     """
 
 if TYPE_CHECKING:

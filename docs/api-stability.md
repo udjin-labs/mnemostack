@@ -332,7 +332,9 @@ behave exactly as listed above.
   remains `serve --auth`, where the key decides the tenant. The guard covers a
   recaller **as configured**: replacing its internals after construction
   (`bm25`, `retrievers`, `vector`, `embedding`) or mutating an in-memory corpus
-  in place is not covered — build a new `Recaller` instead. `AnswerGenerator.generate`
+  in place is not covered — build a new `Recaller` instead. The graph arm is
+  not probed: a tenantless recall reading a graph that holds several tenants
+  is not refused (tenant-scoped graph recall is #194). `AnswerGenerator.generate`
   (+ async) also takes `tenant=`, but it only scopes the method's **own** internal
   retry sub-recalls (expansion / inference) — it does **not** re-filter the
   `memories` you pass in. Pre-scope those yourself: feed `generate` the output of a

@@ -252,7 +252,14 @@ def normalize_tenant(value: Any) -> Any:
     and "acme " rewritten to "acme" would make reads and writes disagree
     (writes stamp the raw value). Explicit per-call tenants are not
     normalized at all; a blank one is refused where it is used."""
-    if isinstance(value, str) and not value.strip():
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        # A YAML `tenant: 123` / `tenant: false` parses as int/bool; a tenant
+        # id is a string, and a non-string scope would let retrieval and the
+        # pipeline's isolation backstop resolve different tenants.
+        raise ValueError(f"tenant must be a string, got {type(value).__name__}: {value!r}")
+    if not value.strip():
         return None
     return value
 
