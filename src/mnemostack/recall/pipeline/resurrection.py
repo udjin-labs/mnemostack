@@ -14,10 +14,13 @@ the stage is a no-op. This matches legacy behaviour.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
-from ..recaller import RecallResult
+from ...vector.qdrant import TENANT_ID_KEY
+from ..recaller import RecallResult, tenant_union
 from ..retrievers import (
+    _GraphTenantProbe,
     _is_unreachable,
     bolt_arm_available,
     bolt_mark_recovered,
@@ -94,6 +97,67 @@ class GraphResurrection(Stage):
     #: default so an instance built via __new__ reads "never tripped".
     _unavailable_until = 0.0
     _probe_inflight = False
+    #: Per-source tenant samples for the tenantless-walk check: {id(source):
+    #: (source, sample, taken_at)} where a sample is the typed tenant set, or
+    #: True for "several". Only conclusive samples are cached, each for
+    #: ``_TENANT_PROBE_TTL`` seconds; a source that could not answer is asked
+    #: again next time (free while a graph is in its cooldown: it is skipped
+    #: without dialing).
+    _tenant_samples: dict[int, tuple[Any, Any, float]] = {}
+    _multi_tenant_warned = False
+    _TENANT_PROBE_TTL = 60.0
+
+    @property
+    def tenant_probe_store(self) -> Any:
+        """The graph this stage walks, as a fail-closed tenant probe source."""
+        return _GraphTenantProbe(self)
+
+    def _sample(self, source: Any, now: float) -> Any:
+        """One source's cached tenant sample (see ``_tenant_samples``)."""
+        owner = getattr(source, "_component", source)  # graph probes are per call
+        cached = self._tenant_samples.get(id(owner))
+        if cached is not None and cached[0] is owner and now - cached[2] < self._TENANT_PROBE_TTL:
+            return cached[1]
+        sample = tenant_union([source])
+        if sample is not None:
+            if len(self._tenant_samples) >= 64:
+                self._tenant_samples.clear()
+            self._tenant_samples[id(owner)] = (owner, sample, now)
+        return sample
+
+    def _tenantless_walk_crosses_tenants(
+        self, recaller: Any, results: list[RecallResult]
+    ) -> bool:
+        """Whether a tenantless walk here is unsafe: this graph's tenants
+        unioned with those of every store ``recaller`` read and of the
+        results the walk is merged into hold several (one tenant in the graph
+        and another in the collection is as cross-tenant as two in the
+        graph) — or any of them could not answer the probe. A walk is a read
+        of this graph merged into the recall's results, so it is done only
+        when all of them are proven single-tenant together, as the graph arm
+        is (see ``graph_read_ok``)."""
+        if "_tenant_samples" not in self.__dict__:
+            self._tenant_samples = {}
+        now = time.monotonic()
+        own = self._sample(self.tenant_probe_store, now)
+        if own is None or own is True:
+            return True
+        union: set[tuple[type, Any]] = set(own)
+        sources_of = getattr(recaller, "tenant_probe_sources", None)
+        sources = list(sources_of()) if callable(sources_of) else []
+        for source in sources:
+            sample = self._sample(source, now)
+            if sample is None or sample is True:
+                return True
+            union |= sample
+        for r in results:
+            tid = (r.payload or {}).get(TENANT_ID_KEY)
+            if tid is not None:
+                try:
+                    union.add((type(tid), tid))
+                except TypeError:
+                    continue
+        return len(union) >= 2
 
     def _get_driver(self):
         # Library check first: claiming the half-open probe and then returning
@@ -139,6 +203,25 @@ class GraphResurrection(Stage):
         query = context.query
         seeds = self._seeds(query)
         if not seeds:
+            return results
+        # Fail closed across tenants: a tenantless walk over a graph holding
+        # several tenants would resurrect any tenant's nodes, so the stage
+        # skips itself instead (the recall's own results stand) unless the
+        # caller deliberately allowed cross-tenant recall.
+        recaller = context.extras.get("recaller")
+        if (
+            context.extras.get("tenant") is None
+            and getattr(recaller, "allow_cross_tenant", False) is not True
+            and self._tenantless_walk_crosses_tenants(recaller, results)
+        ):
+            if not self._multi_tenant_warned:
+                self._multi_tenant_warned = True
+                logger.warning(
+                    "graph resurrection skipped: the graph and the stores the recall "
+                    "read hold several tenants, or the graph could not be "
+                    "checked, and the recall names none; scope recalls with a tenant "
+                    "(MNEMOSTACK_TENANT / recall.tenant)"
+                )
             return results
         driver = self._get_driver()
         if driver is None:

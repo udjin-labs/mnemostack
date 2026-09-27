@@ -31,6 +31,8 @@ class _Session:
         return False
 
     def run(self, cypher, **params):
+        if "n.tenant IS NOT NULL" in cypher:  # tenant probe: an untenanted graph
+            return _Result([])
         if "labels(n)[0]" in cypher:  # node probe
             w = params.get("w", "")
             rows = [
@@ -859,7 +861,9 @@ def test_recall_cypher_calls_bounded_under_expansion():
     # Deterministic setup: 16 x 3 shapes for variants 1-2 spends the probe
     # ceiling exactly; variants 3-4 add zero. A looser <= bound would let an
     # under-spending accounting bug slip through.
-    assert len(driver.runs) == 96  # _MAX_RECALL_NODE_PROBES, not 192
+    # The fail-closed tenant probe (#194) is not search work; count search only.
+    search_runs = [c for c in driver.runs if "n.tenant IS NOT NULL" not in c]
+    assert len(search_runs) == 96  # _MAX_RECALL_NODE_PROBES, not 192
 
 
 def test_configured_max_nodes_above_pool_cap_is_honored_on_a_single_call():

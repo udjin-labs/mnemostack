@@ -7,7 +7,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from ..embeddings.base import EmbeddingProvider
 from ..embeddings.roles import EmbeddingSpaceError, SpaceGuard, embed_query_via
@@ -53,9 +53,8 @@ class CrossTenantRecallError(RuntimeError):
     construction; replacing a recaller's internals afterwards (``bm25``,
     ``retrievers``, ``vector``, ``embedding``) or mutating a corpus in place
     is not covered. Build a new Recaller for a different configuration.
-    The graph arm is not probed either: a tenantless recall reading a graph
-    that holds several tenants is not refused (tenant-scoped graph recall is
-    tracked separately). A ``sources`` filter in ``synthesize`` does not
+    A graph arm is probed like a collection, through the ``tenant`` values
+    on the nodes it reads. A ``sources`` filter in ``synthesize`` does not
     narrow the probe of a recaller wrapped in a QueryExpander — it probes
     every wrapped arm (a refusal, never a leak); filter before wrapping.
     """
@@ -271,6 +270,53 @@ def tenant_probe_sources_of(vector: Any, retrievers: list[Any]) -> list[Any]:
     return sources
 
 
+def _graph_component(source: Any) -> Any:
+    """The graph component behind a graph tenant probe, else None."""
+    from .retrievers import _GraphTenantProbe
+
+    return source._component if isinstance(source, _GraphTenantProbe) else None
+
+
+def probe_tenant_sources(sources: list[Any]) -> tuple[bool | str, frozenset[int]]:
+    """The verdict :func:`classify_tenant_sources` gives, plus the ids of the
+    graph components among ``sources`` that answered conclusively in this
+    very probe — the graphs a tenantless read may touch under this verdict
+    (see :func:`graph_read_ok`)."""
+    if not sources:
+        return "none", frozenset()
+    union: set[tuple[type, Any]] = set()
+    unknown = False
+    verified: set[int] = set()
+    for source in sources:
+        sample = tenant_union([source])
+        if sample is None:
+            unknown = True
+            continue
+        component = _graph_component(source)
+        if component is not None:
+            verified.add(id(component))
+        if sample is True:
+            return True, frozenset(verified)
+        union |= sample
+        if len(union) >= 2:
+            return True, frozenset(verified)
+    return ("unknown" if unknown else False), frozenset(verified)
+
+
+def graph_read_ok(retriever: Any, verdict: Any, verified: frozenset[int]) -> bool:
+    """Whether ``retriever`` may be searched without a tenant under a probe's
+    ``verdict``. Any arm but a graph arm is governed by the verdict alone. A
+    graph arm is read only when the verdict proved everything the search
+    reads single-tenant (False) AND its graph answered that same probe: a
+    graph that was down when the verdict was taken, or a verdict left
+    undetermined by any store, keeps the graph out, so it can never come
+    back between the probe and the read and be searched across tenants."""
+    component = _graph_component(getattr(retriever, "tenant_probe_store", None))
+    if component is None:
+        return True
+    return verdict is False and id(component) in verified
+
+
 def classify_tenant_sources(sources: list[Any]) -> bool | str:
     """True = two or more distinct tenants across ``sources``, False = at most
     one, "none" = nothing to probe, "unknown" = some source could not answer
@@ -278,6 +324,16 @@ def classify_tenant_sources(sources: list[Any]) -> bool | str:
     "unknown" fails closed: the guard exists for data it can inspect."""
     if not sources:
         return "none"
+    union = tenant_union(sources)
+    if union is True:
+        return True
+    return "unknown" if union is None else False
+
+
+def tenant_union(sources: list[Any]) -> set[tuple[type, Any]] | Literal[True] | None:
+    """The tenants ``sources`` hold, as typed values: True once two distinct
+    ones are proven, None when some source could not answer and the rest do
+    not prove two, else the (at most one-element) set of ``(type, value)``."""
     union: set[tuple[type, Any]] = set()
     unknown = False
     for store in sources:
@@ -313,27 +369,31 @@ def classify_tenant_sources(sources: list[Any]) -> bool | str:
             continue
         if len(union) >= 2:
             return True
-    return "unknown" if unknown else False
+    return None if unknown else union
 
 
-def refuse_tenantless(retrievers: list[Any], *, allow_cross_tenant: bool = False) -> None:
+def refuse_tenantless(
+    retrievers: list[Any], *, allow_cross_tenant: bool = False
+) -> tuple[bool | str, frozenset[int]]:
     """The fail-closed guard for a tenantless search over ``retrievers`` that
     does not go through a Recaller (synthesis over directly supplied arms):
     same verdicts, same refusal, same once-per-process warning — without
     constructing a Recaller, whose schema derivation has nothing to do with
-    tenancy and can fail on its own."""
+    tenancy and can fail on its own. Returns the verdict and the graphs it
+    verified, for :func:`graph_read_ok`."""
     if allow_cross_tenant:
-        return
-    verdict = classify_tenant_sources(tenant_probe_sources_of(None, retrievers))
+        return "allowed", frozenset()
+    verdict, verified = probe_tenant_sources(tenant_probe_sources_of(None, retrievers))
     if verdict == "unknown":
         Recaller._warn_probe_unknown()
     if verdict is True:
         raise CrossTenantRecallError(
             "search without a tenant over multi-tenant data: the searched "
-            "collections hold several tenant_id values. Scope the search "
+            "stores (collections, graph) hold several tenants. Scope the search "
             "(tenant=...) — or, for deliberate cross-tenant tooling, pass "
             "allow_cross_tenant=True."
         )
+    return verdict, verified
 
 
 class Recaller:
@@ -691,6 +751,8 @@ class Recaller:
     allow_cross_tenant: bool = False
     _multi_tenant_probe: bool | str | None = None
     _probe_at: float = 0.0
+    #: (verdict, ids of the graphs that verdict's probe heard from).
+    _graph_gate: tuple[Any, frozenset[int]] = (None, frozenset())
     _probe_lock: threading.Lock = _PROBE_LOCK
     _bm25_probe: Any = None
 
@@ -720,9 +782,11 @@ class Recaller:
             return
         _PROBE_UNKNOWN_WARNED = True
         logger.warning(
-            "recall: could not determine whether the collection holds several "
-            "tenants (the tenant probe failed); tenantless recall is NOT "
-            "guarded. If the collection is shared, scope recalls with a tenant "
+            "recall: could not determine whether the stores it reads "
+            "(collections, graph) hold several tenants (the tenant probe "
+            "failed); tenantless recall of the collections is NOT guarded, and "
+            "a graph arm is left out until a probe succeeds. If the data is "
+            "shared, scope recalls with a tenant "
             "(MNEMOSTACK_TENANT / recall.tenant) — after stamping existing "
             "points with `mnemostack tenant-migrate`, or the scope will hide them."
         )
@@ -759,26 +823,33 @@ class Recaller:
                 or time.monotonic() - self._probe_at >= self._PROBE_TTL_S
             )
 
+        def _refresh() -> None:
+            if not _stale():  # another thread may have refreshed meanwhile
+                return
+            verdict, verified = probe_tenant_sources(self.tenant_probe_sources())
+            # Only a CONCLUSIVE answer clears a known multi-tenant
+            # verdict: a failed refresh (timeout, error) keeps the
+            # refusal and is retried after the next TTL, instead of
+            # reopening tenantless cross-tenant recall.
+            if not (self._multi_tenant_probe is True and verdict == "unknown"):
+                self._multi_tenant_probe = verdict
+            # The graph gate reads verdict and verified graphs as ONE
+            # object, so it never pairs a new set with an old verdict.
+            self._graph_gate = (self._multi_tenant_probe, verified)
+            # Publish the verdict BEFORE marking the cache fresh: a
+            # reader that sees a fresh timestamp skips the lock, and
+            # must never pair it with the previous verdict.
+            self._probe_at = time.monotonic()
+            if self._multi_tenant_probe == "unknown":
+                self._warn_probe_unknown()
+
         if _stale():
             with self._probe_lock:
-                if _stale():  # another thread may have refreshed meanwhile
-                    verdict = self._probe_multi_tenant()
-                    # Only a CONCLUSIVE answer clears a known multi-tenant
-                    # verdict: a failed refresh (timeout, error) keeps the
-                    # refusal and is retried after the next TTL, instead of
-                    # reopening tenantless cross-tenant recall.
-                    if not (self._multi_tenant_probe is True and verdict == "unknown"):
-                        self._multi_tenant_probe = verdict
-                    # Publish the verdict BEFORE marking the cache fresh: a
-                    # reader that sees a fresh timestamp skips the lock, and
-                    # must never pair it with the previous verdict.
-                    self._probe_at = time.monotonic()
-                    if self._multi_tenant_probe == "unknown":
-                        self._warn_probe_unknown()
+                _refresh()
         if self._multi_tenant_probe is True:
             raise CrossTenantRecallError(
-                "recall without a tenant over a multi-tenant collection: the "
-                "collection holds several tenant_id values, and a tenantless "
+                "recall without a tenant over multi-tenant data: the stores it "
+                "reads (collections, graph) hold several tenants, and a tenantless "
                 "recall would search all of them at once. Scope the recall "
                 "(tenant=..., Recaller(default_tenant=...), MNEMOSTACK_TENANT "
                 "or recall.tenant in the config) — or, for deliberate "
@@ -1326,6 +1397,15 @@ class Recaller:
                         "graph issue to regain the arm.",
                         retr.name,
                     )
+                return retr, [], None, 0.0
+            # Tenantless: a graph arm is read only under a verdict that
+            # proved it (with every other store) single-tenant — see
+            # graph_read_ok; otherwise it sits this recall out.
+            if (
+                tenant is None
+                and not self.allow_cross_tenant
+                and not graph_read_ok(retr, *self._graph_gate)
+            ):
                 return retr, [], None, 0.0
             try:
                 # Graph facts carry no validity payload, so filter_by_validity

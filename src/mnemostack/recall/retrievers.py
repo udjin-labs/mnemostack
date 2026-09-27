@@ -1340,6 +1340,65 @@ def graph_valid_clause(var: str, as_of: str | None, include_invalidated: bool = 
     return graph_as_of_predicate(var)
 
 
+def graph_tenant_sample(component: Any) -> list[Any] | None:
+    """Up to two distinct ``tenant`` values on the graph nodes ``component``
+    (a graph arm or stage owning a lazy Bolt driver) reads: the graph twin of
+    the vector store's ``tenant_sample``. Two ``LIMIT 1`` queries: any stamped
+    node, then any stamped node of a different tenant. ``None`` = the graph
+    could not answer (unconfigured, unreachable, in cooldown, or a failed
+    query) — an undetermined verdict, never a refusal on its own.
+
+    Nodes, not edges: every tenant-scoped writer stamps both endpoints of what
+    it writes, and ``stamp_tenant`` stamps nodes and edges alike, so a graph
+    holding several tenants always shows them on its nodes."""
+    try:
+        driver = component._get_driver()
+    except Exception:
+        return None
+    if driver is None:
+        return None
+    database = getattr(component, "database", None)
+    session_kwargs = {"database": database} if database else {}
+    try:
+        with driver.session(**session_kwargs) as session:
+            first = session.run(
+                "MATCH (n) WHERE n.tenant IS NOT NULL RETURN n.tenant AS t LIMIT 1"
+            ).data()
+            if not first:
+                bolt_mark_recovered(component)
+                return []
+            t1 = first[0].get("t")
+            if t1 is None:
+                # Unreachable by the query (IS NOT NULL); a store that
+                # disagrees has not answered — but it did respond.
+                bolt_mark_recovered(component)
+                return None
+            other = session.run(
+                "MATCH (n) WHERE n.tenant IS NOT NULL AND n.tenant <> $t1 "
+                "RETURN n.tenant AS t LIMIT 1",
+                t1=t1,
+            ).data()
+        bolt_mark_recovered(component)
+        return [t1] if not other else [t1, other[0].get("t")]
+    except Exception as exc:
+        if _is_unreachable(exc):
+            trip_bolt_cooldown(component, exc)
+        else:
+            bolt_mark_recovered(component)
+        return None
+
+
+class _GraphTenantProbe:
+    """What a graph arm hands the recaller's fail-closed tenant probe (see
+    ``Retriever.tenant_probe_store``)."""
+
+    def __init__(self, component: Any):
+        self._component = component
+
+    def tenant_sample(self) -> list[Any] | None:
+        return graph_tenant_sample(self._component)
+
+
 def graph_result_id(node_id: str, tenant: str | None) -> str:
     """Stable id for a graph hit, tenant-namespaced (collision-free) when scoped.
 
@@ -1543,6 +1602,13 @@ class MemgraphRetriever(Retriever):
     #: circuit breaker — otherwise each variant would re-spend fresh
     #: allowances and re-probe a failing store (serial timeouts x variants).
     accepts_recall_scope = True
+
+    @property
+    def tenant_probe_store(self) -> Any:
+        """The graph this arm reads, for the recaller's fail-closed tenant
+        probe: a tenantless recall over a graph holding several tenants is
+        refused like one over a multi-tenant collection."""
+        return _GraphTenantProbe(self)
 
     #: Monotonic deadline until which this arm skips itself because the store
     #: was unreachable. The neo4j driver is LAZY — constructing it never

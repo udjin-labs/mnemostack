@@ -64,6 +64,10 @@ def recall_flow(
         default = getattr(recaller, "default_tenant", None)
         if isinstance(default, str) and default:
             tenant = default
+    # The graph stages check the real recaller behind any QueryExpander (one
+    # guarded, cycle-aware unwrap shared with synthesis).
+    from ..synthesis import _innermost_recaller
+
     raw_limit = max(limit * 3, 30) if pipeline is not None else limit
     recalled = recaller.recall(
         query,
@@ -82,6 +86,10 @@ def recall_flow(
             as_of=as_of,
             include_invalidated=include_invalidated,
             tenant=tenant,
+            # Graph stages check their graph together with the stores this
+            # recaller read, under its allow_cross_tenant — the real recaller,
+            # not a QueryExpander wrapping it.
+            recaller=_innermost_recaller(recaller),
         )
         if filters:
             # Pipeline stages may append candidates that never passed the

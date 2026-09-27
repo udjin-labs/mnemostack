@@ -64,6 +64,7 @@ class Pipeline:
         as_of: str | None = None,
         include_invalidated: bool = False,
         tenant: str | None = None,
+        recaller: Any = None,
     ) -> list[RecallResult]:
         context = PipelineContext(query=query)
         # Validity + tenant context for stages that reach back to the graph
@@ -74,6 +75,11 @@ class Pipeline:
             context.extras["include_invalidated"] = True
         if tenant is not None:
             context.extras["tenant"] = tenant
+        # The recaller whose results these are: graph stages union its stores
+        # with their graph for the fail-closed tenant check, and honor its
+        # allow_cross_tenant.
+        if recaller is not None:
+            context.extras["recaller"] = recaller
         for stage in self.stages:
             if self.stop_on_empty and not results:
                 break
