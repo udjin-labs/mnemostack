@@ -912,3 +912,16 @@ def test_recaller_own_bm25_corpus_is_probed():
     r = Recaller(embedding_provider=_Emb(), vector_store=_Vec(), bm25_docs=docs)
     with pytest.raises(CrossTenantRecallError):
         r.recall("alpha")
+
+
+def test_own_bm25_corpus_is_probed_only_when_the_active_mode_reads_it():
+    """Retrievers mode without the MCA prefilter never searches the
+    recaller's own bm25_docs; with MCA it does."""
+    docs = [
+        BM25Doc(id="a", text="alpha", payload={"tenant_id": "A"}),
+        BM25Doc(id="b", text="alpha", payload={"tenant_id": "B"}),
+    ]
+    arm = _StaticArm("vector", [_hit("1")])
+    assert [r.id for r in Recaller(retrievers=[arm], bm25_docs=docs).recall("alpha")] == ["1"]
+    with pytest.raises(CrossTenantRecallError):
+        Recaller(retrievers=[arm], bm25_docs=docs, mca_prefilter=True).recall("alpha")

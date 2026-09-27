@@ -645,7 +645,11 @@ class Recaller:
         if retrievers and getattr(self, "embedding", None) is None:
             vector = None
         sources = tenant_probe_sources_of(vector, retrievers)
-        if self._bm25_probe is not None:
+        # The own BM25 corpus is searched in legacy mode (no arms) and by the
+        # MCA prefilter; in retrievers mode without MCA nothing reads it.
+        if self._bm25_probe is not None and (
+            not retrievers or getattr(self, "mca_prefilter_enabled", False)
+        ):
             sources.append(self._bm25_probe)
         return sources
 
