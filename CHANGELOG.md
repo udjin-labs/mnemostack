@@ -12,8 +12,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   every tenant at once — observed in a real deployment answering from another
   tenant's corpus with full confidence. A tenantless recall now probes the
   collection (two `limit=1` server-side queries, exact with or without a
-  payload index on `tenant_id`; a positive answer is cached, a negative or
-  undetermined one re-checked every minute, one refresh at a time) and
+  payload index on `tenant_id`; the answer is cached and re-checked every
+  minute, one refresh at a time) and
   raises `CrossTenantRecallError` when what it would read holds more than
   one tenant — every collection behind the recaller is asked (an in-memory
   BM25 arm answers for the corpus it actually loaded), and one tenant each in

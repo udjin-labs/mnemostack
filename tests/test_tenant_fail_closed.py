@@ -328,10 +328,22 @@ def test_negative_probe_expires_and_a_new_tenant_trips_the_guard(monkeypatch):
         r.recall("q")
 
 
-def test_positive_probe_is_permanent(monkeypatch):
+def test_positive_probe_expires_after_a_tenant_is_removed(monkeypatch):
+    """A tenant removed with tenant-rm must stop the refusals without a
+    restart: a positive verdict expires on the same TTL as any other."""
+    store = _FakeStore(tenants=2)
+    r = Recaller(retrievers=[_StaticArm("vector", [_hit("a")], store=store)])
+    with pytest.raises(CrossTenantRecallError):
+        r.recall("q")
+    store._tenants = 1  # the second tenant is removed
+    monkeypatch.setattr(Recaller, "_PROBE_TTL_S", 0.0)
+    assert [x.id for x in r.recall("q")] == ["a"]
+
+
+def test_positive_probe_is_cached_within_the_ttl(monkeypatch):
     store = _FakeStore(tenants=2)
     r = Recaller(retrievers=[_StaticArm("vector", [], store=store)])
-    monkeypatch.setattr(Recaller, "_PROBE_TTL_S", 0.0)
+    monkeypatch.setattr(Recaller, "_PROBE_TTL_S", 3600.0)
     for _ in range(3):
         with pytest.raises(CrossTenantRecallError):
             r.recall("q")

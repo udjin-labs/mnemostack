@@ -485,11 +485,11 @@ class Recaller:
         # query the store directly — the guard exists to turn an honest
         # misconfiguration into a loud error, not to stop an insider.
         self.allow_cross_tenant = allow_cross_tenant
-        #: Multi-tenant probe cache. A POSITIVE result is permanent (a
-        #: collection does not stop holding several tenants); a negative or
-        #: "unknown" result expires after `_PROBE_TTL_S` — a long-lived process
-        #: must notice a second tenant ingested after startup, and a transient
-        #: probe failure must not disable the guard for the process lifetime.
+        #: Multi-tenant probe cache. Every verdict expires after
+        #: `_PROBE_TTL_S`: a long-lived process must notice a second tenant
+        #: ingested after startup, a transient probe failure must not disable
+        #: the guard for the process lifetime, and a tenant removed with
+        #: tenant-rm must stop refusing recalls without a restart.
         self._multi_tenant_probe: bool | str | None = None
         self._probe_at: float = 0.0
         self._probe_lock = threading.Lock()
@@ -741,9 +741,9 @@ class Recaller:
                 )
             return
         def _stale() -> bool:
-            return self._multi_tenant_probe is None or (
-                self._multi_tenant_probe is not True
-                and time.monotonic() - self._probe_at >= self._PROBE_TTL_S
+            return (
+                self._multi_tenant_probe is None
+                or time.monotonic() - self._probe_at >= self._PROBE_TTL_S
             )
 
         if _stale():

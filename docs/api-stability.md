@@ -324,7 +324,7 @@ behave exactly as listed above.
   applies first — in `Recaller.recall`, `search_many` and `recall_flow` alike —
   and a search that still has no tenant **raises `CrossTenantRecallError`**
   when the collection holds more than one `tenant_id` (two exact `limit=1`
-  server-side queries; positive result cached, negative re-checked). Single-tenant and legacy collections keep the exact
+  server-side queries; cached and re-checked every minute). Single-tenant and legacy collections keep the exact
   prior behavior (a probe that cannot answer at all logs a warning and does
   not block); `allow_cross_tenant=True` restores
   it everywhere for deliberate cross-tenant tooling. This is a fail-closed guard
