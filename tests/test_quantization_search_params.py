@@ -154,6 +154,30 @@ def test_sdk_values_are_validated(quant):
         quantization_search_params(**quant)
 
 
+def test_rejected_values_create_no_client(monkeypatch):
+    # Validation precedes the client: nothing is left behind to close.
+    import mnemostack.vector.async_qdrant as aq
+    import mnemostack.vector.qdrant as q
+
+    made: list = []
+    monkeypatch.setattr(q, "QdrantClient", lambda **kw: made.append(kw))
+    monkeypatch.setattr(aq, "AsyncQdrantClient", lambda **kw: made.append(kw))
+    with pytest.raises(ValueError):
+        VectorStore(collection="c", dimension=4, quantization_oversampling=0.5)
+    with pytest.raises(ValueError):
+        AsyncVectorStore(collection="c", dimension=4, quantization_rescore="yes")
+    assert made == []
+
+
+def test_config_show_explicit_bad_file_is_a_clean_error(isolated_env, tmp_path, capsys):
+    import mnemostack.cli as cli
+
+    path = tmp_path / "bad.yaml"
+    path.write_text("vector: [\n")
+    assert cli.main(["config", "--config", str(path)]) == 2
+    assert "error: invalid configuration:" in capsys.readouterr().err
+
+
 def test_cli_bad_config_is_a_clean_error(isolated_env, capsys):
     import mnemostack.cli as cli
 

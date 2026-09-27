@@ -4942,7 +4942,12 @@ def cmd_config_show(args: argparse.Namespace) -> int:
     """Print the currently resolved config (file + env overrides)."""
     import yaml
 
-    cfg = Config.load(args.config)
+    # --config names a file main()'s preflight never loaded: same clean error.
+    try:
+        cfg = Config.load(args.config)
+    except (ValueError, TypeError) as e:
+        print(f"error: invalid configuration: {e}", file=sys.stderr)
+        return 2
     print(yaml.safe_dump(cfg.to_dict(), default_flow_style=False, sort_keys=False))
     return 0
 

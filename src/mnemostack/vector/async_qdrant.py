@@ -65,10 +65,12 @@ class AsyncVectorStore:
         self.collection = collection
         self.dimension = dimension
         self.distance = distance
-        self.client = AsyncQdrantClient(url=host, timeout=timeout)
+        # Validated before the client exists: a rejected value must not leave
+        # an unclosable async client behind.
         self.search_params = quantization_search_params(
             quantization_rescore, quantization_oversampling
         )
+        self.client = AsyncQdrantClient(url=host, timeout=timeout)
 
     async def close(self) -> None:
         await self.client.close()
