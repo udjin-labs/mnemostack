@@ -92,6 +92,7 @@ from mnemostack.recall import (
     RERANK_MODES,
     AnswerGenerator,
     BM25Retriever,
+    CrossTenantRecallError,
     MemgraphRetriever,
     QdrantSparseRetriever,
     Recaller,
@@ -1157,6 +1158,10 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                     docs=bm25_docs,
                     timestamp_key=cfg.timestamp_key,
                     timestamp_format=cfg.timestamp_format,
+                    # Unauthenticated + scoped: the file corpus belongs to the
+                    # one configured tenant. Under auth the tenant varies per
+                    # request, so the corpus stays unstamped (and skipped).
+                    tenant=None if cfg.auth_enabled else cfg.default_tenant,
                 )
             )
     elif text_mode == "qdrant_bm25":
@@ -1250,10 +1255,10 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     # collection without auth and without a tenant scope would answer every
     # caller from every tenant at once. With auth on, the service key decides
     # the tenant per request and this cannot happen.
-    if not cfg.auth_enabled and cfg.default_tenant is None and not cfg.allow_cross_tenant:
+    if not cfg.auth_enabled and not cfg.default_tenant and not cfg.allow_cross_tenant:
         distinct = getattr(store, "distinct_tenant_count", lambda: None)()
         if isinstance(distinct, int) and distinct >= 2:
-            raise ValueError(
+            raise CrossTenantRecallError(
                 "refusing to serve without auth: the collection holds "
                 f"{distinct}+ tenants and every request would search all of "
                 "them. Enable auth (--auth), scope the server to one tenant "
@@ -1476,7 +1481,13 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         return _dep
 
     def _tenant_of(principal) -> str | None:
-        return principal.tenant if principal is not None else None
+        # Auth on: the key decides. Auth off: the server's configured scope
+        # (recall.tenant / MNEMOSTACK_TENANT) — the ONE resolution point for
+        # every handler, so reads, writes, access recording and learning
+        # state all run under the same tenant.
+        if principal is not None:
+            return principal.tenant
+        return cfg.default_tenant
 
     def _run_recall_sync(
         query: str,

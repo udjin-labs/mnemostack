@@ -321,10 +321,12 @@ behave exactly as listed above.
   tenant and applies `filter_by_tenant` as a backstop. Since #193, `None` no
   longer means "search all tenants" unconditionally: the construction-time
   scope (`Recaller(default_tenant=...)` / `recall.tenant` / `MNEMOSTACK_TENANT`)
-  applies first, and a recall that still has no tenant **raises
-  `CrossTenantRecallError`** when the collection verifiably holds more than one
-  `tenant_id` (one cached facet probe). Single-tenant, legacy and uninspectable
-  collections keep the exact prior behavior; `allow_cross_tenant=True` restores
+  applies first — in `Recaller.recall`, `search_many` and `recall_flow` alike —
+  and a search that still has no tenant **raises `CrossTenantRecallError`**
+  when the collection holds more than one `tenant_id` (facet probe with a
+  bounded-scan fallback; positive result cached, negative re-checked). Single-tenant and legacy collections keep the exact
+  prior behavior (a probe that cannot answer at all logs a warning and does
+  not block); `allow_cross_tenant=True` restores
   it everywhere for deliberate cross-tenant tooling. This is a fail-closed guard
   against misconfigured consumers, not a security boundary — the trust boundary
   remains `serve --auth`, where the key decides the tenant. `AnswerGenerator.generate`

@@ -196,7 +196,7 @@ def test_unauth_serve_refuses_a_multi_tenant_collection(monkeypatch):
     )
     monkeypatch.setattr(server_mod.VectorStore, "__init__", lambda self, **kw: None, raising=False)
     cfg = server_mod.ServerConfig(provider_name="gemini")
-    with pytest.raises(ValueError, match="refusing to serve without auth"):
+    with pytest.raises(CrossTenantRecallError, match="refusing to serve without auth"):
         server_mod.build_app(cfg)
 
 
@@ -218,8 +218,8 @@ def test_unauth_serve_with_default_tenant_starts(monkeypatch):
     cfg = server_mod.ServerConfig(provider_name="gemini", default_tenant="t1")
     try:
         server_mod.build_app(cfg)
-    except ValueError as exc:  # must not be the tenant gate
-        assert "refusing to serve without auth" not in str(exc)
+    except CrossTenantRecallError:  # must not be the tenant gate
+        pytest.fail("a scoped server must not hit the tenant gate")
     assert calls == []  # scoped server never needs the probe
 
 
@@ -248,3 +248,178 @@ def test_mnemostack_tenant_env_reaches_recall_config(monkeypatch):
     monkeypatch.setenv("MNEMOSTACK_TENANT", "t-env")
     cfg = Config.load(path=None)
     assert cfg.recall.tenant == "t-env"
+
+
+# ============================================== review round 1 regressions
+
+
+def test_gate_raises_the_typed_refusal(monkeypatch):
+    """The unauth-serve startup gate raises CrossTenantRecallError (the CLI
+    turns that into a clean `error:` + exit 2, not a traceback)."""
+    pytest.importorskip("fastapi")
+    import mnemostack.server as server_mod
+
+    monkeypatch.setattr(
+        server_mod, "get_provider", lambda *a, **k: type("P", (), {"dimension": 8})()
+    )
+    monkeypatch.setattr(
+        server_mod.VectorStore, "distinct_tenant_count", lambda self, limit=2: 2, raising=False
+    )
+    monkeypatch.setattr(server_mod.VectorStore, "__init__", lambda self, **kw: None, raising=False)
+    with pytest.raises(CrossTenantRecallError):
+        server_mod.build_app(server_mod.ServerConfig(provider_name="gemini"))
+
+
+def test_recall_flow_applies_default_tenant_to_pipeline_and_backstop():
+    """The default tenant must reach the pipeline stages and the post-
+    pipeline backstop, not only the retrieval step: a stage injecting an
+    unscoped record (graph resurrection does exactly that) must be dropped."""
+    from mnemostack.recall import recall_flow
+    from mnemostack.recall.pipeline import Pipeline, Stage
+
+    seen = {}
+
+    class _Inject(Stage):
+        @property
+        def name(self):
+            return "inject"
+
+        def apply(self, context, results):
+            seen["tenant"] = context.extras.get("tenant")
+            return list(results) + [RecallResult(id="foreign", text="x", score=9.0, payload={})]
+
+    arm = _StaticArm("vector", [_hit("mine", "t1")], tenant_capable=True)
+    r = Recaller(retrievers=[arm], default_tenant="t1")
+    out = recall_flow(r, "q", limit=5, pipeline=Pipeline([_Inject()]))
+    assert [x.id for x in out] == ["mine"]
+    assert seen["tenant"] == "t1"
+
+
+def test_search_many_resolves_default_tenant_and_guards():
+    calls = []
+
+    class _Store:
+        def distinct_tenant_count(self, limit=2):
+            return 2
+
+        def search(self, vector, limit, filters=None, hide_invalidated=None, **kw):
+            calls.append(kw.get("tenant"))
+            return []
+
+    scoped = Recaller(vector_store=_Store(), default_tenant="t1")
+    scoped._ensure_space_compat = lambda tenant=None: None
+    scoped.search_many([[0.1]], limit=3)
+    assert calls == ["t1"]
+
+    unscoped = Recaller(vector_store=_Store())
+    unscoped._ensure_space_compat = lambda tenant=None: None
+    with pytest.raises(CrossTenantRecallError):
+        unscoped.search_many([[0.1]], limit=3)
+
+
+def test_negative_probe_expires_and_a_new_tenant_trips_the_guard(monkeypatch):
+    store = _FakeStore(tenants=1)
+    arm = _StaticArm("vector", [_hit("a")], store=store)
+    r = Recaller(retrievers=[arm])
+    r.recall("q")  # single tenant: open
+    store._tenants = 2  # a second tenant is ingested later
+    monkeypatch.setattr(Recaller, "_PROBE_TTL_S", 0.0)
+    with pytest.raises(CrossTenantRecallError):
+        r.recall("q")
+
+
+def test_positive_probe_is_permanent(monkeypatch):
+    store = _FakeStore(tenants=2)
+    r = Recaller(retrievers=[_StaticArm("vector", [], store=store)])
+    monkeypatch.setattr(Recaller, "_PROBE_TTL_S", 0.0)
+    for _ in range(3):
+        with pytest.raises(CrossTenantRecallError):
+            r.recall("q")
+    assert store.probes == 1
+
+
+def test_unknown_probe_is_retried_and_warns_once(monkeypatch, caplog):
+    store = _FakeStore(tenants=None)
+    r = Recaller(retrievers=[_StaticArm("vector", [_hit("a")], store=store)])
+    monkeypatch.setattr(Recaller, "_PROBE_TTL_S", 0.0)
+    with caplog.at_level(logging.WARNING, logger="mnemostack.recall.recaller"):
+        r.recall("q")
+        r.recall("q")
+    assert store.probes == 2  # "unknown" is not cached for the process lifetime
+    assert r._probe_unknown_warned is True
+
+
+def test_distinct_tenant_count_falls_back_to_scroll_when_facet_is_rejected():
+    """A real server rejects faceting an unindexed tenant_id (collections
+    created before tenancy); the probe must fall back to a bounded scroll
+    instead of reporting "unknown" and leaving the guard open."""
+    from mnemostack.vector.qdrant import VectorStore
+
+    class _Pt:
+        def __init__(self, tid):
+            self.payload = {"tenant_id": tid} if tid else {}
+
+    class _Client:
+        def facet(self, **kw):
+            raise RuntimeError("No appropriate index for faceting: tenant_id")
+
+        def scroll(self, **kw):
+            return [_Pt(None), _Pt("a"), _Pt("a"), _Pt("b")], None
+
+    s = VectorStore.__new__(VectorStore)
+    s.client = _Client()
+    s.collection = "c"
+    assert s.distinct_tenant_count() == 2
+
+
+def test_synthesize_surfaces_the_refusal_instead_of_an_empty_report():
+    from mnemostack.synthesis import synthesize
+
+    store = _FakeStore(tenants=2)
+    r = Recaller(retrievers=[_StaticArm("vector", [_hit("a", "t1")], store=store)])
+    with pytest.raises(CrossTenantRecallError):
+        synthesize("alpha", recaller=r)
+
+
+def test_cli_honours_the_cross_tenant_env(monkeypatch):
+    import argparse
+
+    from mnemostack.cli import _allow_cross_tenant
+
+    ns = argparse.Namespace(allow_cross_tenant=False)
+    monkeypatch.delenv("MNEMOSTACK_ALLOW_CROSS_TENANT", raising=False)
+    assert _allow_cross_tenant(ns) is False
+    monkeypatch.setenv("MNEMOSTACK_ALLOW_CROSS_TENANT", "1")
+    assert _allow_cross_tenant(ns) is True
+
+
+def test_bm25_stamp_does_not_mutate_the_callers_docs():
+    doc = BM25Doc(id="d1", text="alpha")
+    BM25Retriever([doc], tenant="t1")
+    assert "tenant_id" not in doc.payload
+
+
+@pytest.mark.parametrize("blank", ["", None])
+def test_blank_default_tenant_is_unscoped_and_guarded(blank):
+    store = _FakeStore(tenants=2)
+    r = Recaller(retrievers=[_StaticArm("vector", [], store=store)], default_tenant=blank)
+    assert r.default_tenant is None
+    with pytest.raises(CrossTenantRecallError):
+        r.recall("q")
+
+
+def test_unauth_scoped_server_stamps_writes_with_its_tenant(monkeypatch, tmp_path):
+    """Auth off + a configured scope: the server's one tenant-resolution
+    point hands that tenant to writes too, so a scoped deployment can read
+    back what it writes."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from test_remote_ingest import _ingest_app
+
+    app, store, _emb, _keys = _ingest_app(
+        monkeypatch, tmp_path, auth=False, cfg_extra={"default_tenant": "alpha"}
+    )
+    resp = TestClient(app).post("/memories", json={"items": [{"text": "hello there"}]})
+    assert resp.status_code == 200, resp.text
+    pts, _ = store.client.scroll(collection_name=store.collection, limit=10)
+    assert pts and all(p.payload.get("tenant_id") == "alpha" for p in pts)

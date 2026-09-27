@@ -26,6 +26,7 @@ from qdrant_client.models import (
 )
 
 from .qdrant import (
+    _TENANT_PROBE_SCAN_CAP,
     TENANT_ID_KEY,
     DimensionMismatchError,
     Hit,
@@ -123,14 +124,50 @@ class AsyncVectorStore:
         return info.points_count or 0
 
     async def distinct_tenant_count(self, limit: int = 2) -> int | None:
-        """Async mirror of ``VectorStore.distinct_tenant_count`` — see there."""
+        """How many distinct ``tenant_id`` values the collection holds, up to
+        ``limit`` — the recaller's fail-closed guard only needs to know
+        "more than one?", so the default stops counting at 2.
+
+        The facet API answers only when ``tenant_id`` carries a payload index
+        (a real server rejects an unindexed facet); a collection created
+        before tenancy, or mounted from elsewhere, may lack it. The fallback
+        is a bounded payload scroll that stops as soon as ``limit`` distinct
+        values are seen. ``None`` means "could not determine" (transport
+        failure, or the scan cap reached without an answer); a collection
+        with no ``tenant_id`` at all returns 0.
+        """
+        want = max(2, limit)
         try:
             res = await self.client.facet(
                 collection_name=self.collection,
-                key="tenant_id",
-                limit=max(2, limit),
+                key=TENANT_ID_KEY,
+                limit=want,
             )
             return len(res.hits)
+        except Exception:
+            pass
+        try:
+            seen: set[Any] = set()
+            offset: Any = None
+            scanned = 0
+            while scanned < _TENANT_PROBE_SCAN_CAP:
+                points, offset = await self.client.scroll(
+                    collection_name=self.collection,
+                    with_payload=[TENANT_ID_KEY],
+                    with_vectors=False,
+                    limit=1000,
+                    offset=offset,
+                )
+                for pt in points:
+                    tid = (pt.payload or {}).get(TENANT_ID_KEY)
+                    if tid is not None:
+                        seen.add(tid)
+                        if len(seen) >= want:
+                            return len(seen)
+                scanned += len(points)
+                if offset is None or not points:
+                    return len(seen)
+            return None
         except Exception:
             return None
 

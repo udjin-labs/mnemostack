@@ -61,6 +61,7 @@ from .recall.pipeline import (
     default_state_path,
     resolve_access_bonus_max,
 )
+from .recall.recaller import CrossTenantRecallError
 from .synthesis import synthesize
 from .vector import VectorStore
 from .vector.patch import (
@@ -2415,6 +2416,16 @@ def _indexing_store(args: argparse.Namespace, provider) -> VectorStore:
     )
 
 
+def _allow_cross_tenant(args: argparse.Namespace) -> bool:
+    """The flag OR the documented env var — both spellings reach every
+    surface that builds a recaller or a server (search/answer/synthesize/
+    serve/mcp-serve), not just the env-driven entry points."""
+    # Parsed locally: mnemostack.server needs the optional [server] extra,
+    # and search/answer must not.
+    env = os.environ.get("MNEMOSTACK_ALLOW_CROSS_TENANT", "").strip().lower()
+    return bool(getattr(args, "allow_cross_tenant", False)) or env in {"1", "true", "yes", "on"}
+
+
 def _build_recaller(
     args: argparse.Namespace,
     provider,
@@ -2459,6 +2470,7 @@ def _build_recaller(
                         docs=bm25_docs,
                         timestamp_key=timestamp_key,
                         timestamp_format=timestamp_format,
+                        tenant=getattr(args, "tenant", None) or None,
                     )
                 )
         elif mode == "qdrant_bm25" and store is not None:
@@ -2545,8 +2557,8 @@ def _build_recaller(
         # --tenant flag > MNEMOSTACK_TENANT / recall.tenant (folded into the
         # flag's default). getattr: programmatic callers construct bare
         # Namespaces without parser defaults.
-        default_tenant=getattr(args, "tenant", None),
-        allow_cross_tenant=bool(getattr(args, "allow_cross_tenant", False)),
+        default_tenant=getattr(args, "tenant", None) or None,
+        allow_cross_tenant=_allow_cross_tenant(args),
     )
 
 
@@ -3994,7 +4006,7 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     p_search.add_argument(
         "--allow-cross-tenant",
         action="store_true",
-        help="Deliberately search across all tenants (tooling inside the trust boundary; not a security control).",
+        help="Allow an UNSCOPED recall over a multi-tenant collection (no effect while a tenant is set via --tenant / recall.tenant / MNEMOSTACK_TENANT). Also MNEMOSTACK_ALLOW_CROSS_TENANT. Tooling inside the trust boundary; not a security control.",
     )
     p_search.set_defaults(_llm_host=cfg.llm.host, _llm_timeout=cfg.llm.timeout)
     p_search.set_defaults(func=cmd_search)
@@ -4085,7 +4097,7 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     p_synthesize.add_argument(
         "--allow-cross-tenant",
         action="store_true",
-        help="Deliberately search across all tenants (tooling inside the trust boundary; not a security control).",
+        help="Allow an UNSCOPED recall over a multi-tenant collection (no effect while a tenant is set via --tenant / recall.tenant / MNEMOSTACK_TENANT). Also MNEMOSTACK_ALLOW_CROSS_TENANT. Tooling inside the trust boundary; not a security control.",
     )
     p_synthesize.set_defaults(_llm_host=cfg.llm.host, _llm_timeout=cfg.llm.timeout)
     p_synthesize.set_defaults(func=cmd_synthesize)
@@ -4193,7 +4205,7 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     p_answer.add_argument(
         "--allow-cross-tenant",
         action="store_true",
-        help="Deliberately search across all tenants (tooling inside the trust boundary; not a security control).",
+        help="Allow an UNSCOPED recall over a multi-tenant collection (no effect while a tenant is set via --tenant / recall.tenant / MNEMOSTACK_TENANT). Also MNEMOSTACK_ALLOW_CROSS_TENANT. Tooling inside the trust boundary; not a security control.",
     )
     p_answer.set_defaults(_llm_host=cfg.llm.host, _llm_timeout=cfg.llm.timeout)
     p_answer.set_defaults(func=cmd_answer)
@@ -4502,7 +4514,7 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     p_mcp.add_argument(
         "--allow-cross-tenant",
         action="store_true",
-        help="Deliberately search across all tenants (tooling inside the trust boundary; not a security control).",
+        help="Allow an UNSCOPED recall over a multi-tenant collection (no effect while a tenant is set via --tenant / recall.tenant / MNEMOSTACK_TENANT). Also MNEMOSTACK_ALLOW_CROSS_TENANT. Tooling inside the trust boundary; not a security control.",
     )
     p_mcp.set_defaults(_llm_host=cfg.llm.host, _llm_timeout=cfg.llm.timeout)
     p_mcp.set_defaults(func=cmd_mcp_serve)
@@ -4667,7 +4679,7 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     p_serve.add_argument(
         "--allow-cross-tenant",
         action="store_true",
-        help="Deliberately search across all tenants (tooling inside the trust boundary; not a security control).",
+        help="Allow an UNSCOPED recall over a multi-tenant collection (no effect while a tenant is set via --tenant / recall.tenant / MNEMOSTACK_TENANT). Also MNEMOSTACK_ALLOW_CROSS_TENANT. Tooling inside the trust boundary; not a security control.",
     )
     p_serve.set_defaults(_llm_host=cfg.llm.host, _llm_timeout=cfg.llm.timeout)
     p_serve.set_defaults(func=cmd_serve)
@@ -4786,8 +4798,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
         graph_uri=args.memgraph_uri,
         llm_host=getattr(args, "_llm_host", None),
         llm_timeout=getattr(args, "_llm_timeout", None),
-        default_tenant=getattr(args, "tenant", None),
-        allow_cross_tenant=bool(getattr(args, "allow_cross_tenant", False)),
+        default_tenant=getattr(args, "tenant", None) or None,
+        allow_cross_tenant=_allow_cross_tenant(args),
         graph_user=_graph_auth(args)["user"],
         graph_password=_graph_auth(args)["password"],
         graph_database=_graph_auth(args)["database"],
@@ -4975,8 +4987,8 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
         llm_model=_llm_model(args),
         llm_host=getattr(args, "_llm_host", None),
         llm_timeout=getattr(args, "_llm_timeout", None),
-        default_tenant=getattr(args, "tenant", None),
-        allow_cross_tenant=bool(getattr(args, "allow_cross_tenant", False)),
+        default_tenant=getattr(args, "tenant", None) or None,
+        allow_cross_tenant=_allow_cross_tenant(args),
         qdrant_host=args.qdrant,
         memgraph_uri=args.memgraph_uri,
         graph_user=_graph_auth(args)["user"],
@@ -5077,7 +5089,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.func(args)
-    except (ProviderProbeError, EmbeddingSpaceError) as e:
+    except (ProviderProbeError, EmbeddingSpaceError, CrossTenantRecallError) as e:
         # Typed, operator-actionable refusals (dimension undiscoverable,
         # embedding spaces would mix) follow the CLI's error convention —
         # a clean message and exit 2, never a raw traceback.

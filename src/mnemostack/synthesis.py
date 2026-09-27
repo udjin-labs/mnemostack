@@ -290,6 +290,7 @@ def _build_recaller_from_kwargs(
                 docs=list(kwargs["bm25_docs"]),
                 timestamp_key=timestamp_key,
                 timestamp_format=timestamp_format,
+                tenant=kwargs.get("tenant"),
             )
         )
     memgraph_uri = kwargs.get("memgraph_uri")
@@ -330,6 +331,8 @@ def _build_recaller_from_kwargs(
         text_key=text_key,
         timestamp_key=timestamp_key,
         timestamp_format=timestamp_format,
+        default_tenant=kwargs.get("tenant"),
+        allow_cross_tenant=bool(kwargs.get("allow_cross_tenant", False)),
     )
 
 
@@ -405,6 +408,8 @@ def _query_recaller(
 ) -> list[RecallResult]:
     if recaller is None:
         return []
+    from .recall.recaller import CrossTenantRecallError
+
     try:
         return list(
             recaller.recall(
@@ -415,12 +420,18 @@ def _query_recaller(
                 filters=filters,
             )
         )
+    except CrossTenantRecallError:
+        raise
     except TypeError:
         try:
             return list(recaller.recall(entity, limit=max_results, filters=filters))
+        except CrossTenantRecallError:
+            raise
         except TypeError:
             try:
                 return list(recaller.recall(entity, limit=max_results))
+            except CrossTenantRecallError:
+                raise
             except Exception:
                 return []
         except Exception:

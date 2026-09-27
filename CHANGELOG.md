@@ -11,21 +11,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   straight to a shared collection that forgot the argument silently searched
   every tenant at once — observed in a real deployment answering from another
   tenant's corpus with full confidence. A tenantless recall now probes the
-  collection once (Qdrant `tenant_id` facet, cached) and raises
-  `CrossTenantRecallError` when it verifiably holds more than one tenant;
-  single-tenant, legacy and uninspectable collections behave exactly as
-  before. The scope is set once, not per call: `Recaller(default_tenant=...)`,
+  collection (Qdrant `tenant_id` facet, falling back to a bounded payload
+  scan when the field is unindexed; a positive answer is cached, a negative
+  or undetermined one re-checked every minute) and raises
+  `CrossTenantRecallError` when it holds more than one tenant — on every
+  public search surface (`recall`, `recall_async`, `search_many`, and so the
+  answer generator's expansion retry); single-tenant and legacy collections
+  behave exactly as before, and a probe that cannot answer logs a warning. The scope is set once, not per call: `Recaller(default_tenant=...)`,
   `recall.tenant` in the config, `MNEMOSTACK_TENANT`, or `--tenant` on
-  `search`/`answer`/`synthesize`/`serve`/`mcp-serve`. An unauthenticated
-  `serve` refuses at startup to expose a multi-tenant collection.
+  `search`/`answer`/`synthesize`/`serve`/`mcp-serve` — resolved once more at
+  the top of `recall_flow`, so the pipeline stages (graph resurrection,
+  learning state) and the post-pipeline backstop run under it too. On an
+  unauthenticated `serve`/`mcp-serve` the scope is the surface's single
+  tenant-resolution point, covering writes as well as reads. An
+  unauthenticated `serve` refuses at startup to expose a multi-tenant
+  collection, and `synthesize` reports the refusal instead of printing an
+  empty report.
   `allow_cross_tenant=True` / `--allow-cross-tenant` restores the old
   behavior for deliberate cross-tenant tooling — documented as operating
   inside the trust boundary, not as a security control (with auth on, the
   service key still decides the tenant and none of this applies). A
-  file-backed BM25 corpus can now be stamped with its owning tenant
-  (`BM25Retriever(docs, tenant=...)`) so a scoped recall keeps its lexical
-  arm, and the isolation backstop logs once per arm when it has to drop an
-  arm that cannot be tenant-scoped (previously silent). The graph arm
+  file-backed BM25 corpus is stamped with the configured tenant on the
+  unauthenticated surfaces (`BM25Retriever(docs, tenant=...)` in the
+  library, without mutating the caller's docs) so a scoped recall keeps its
+  lexical arm, and the recaller logs once per arm when it has to skip an
+  arm that cannot be tenant-scoped (previously silent). A blank tenant is
+  treated as none. The graph arm
   remaining tenant-incapable is #194.
 
 ## [2.4.0] - 2026-09-04

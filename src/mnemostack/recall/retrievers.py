@@ -1003,17 +1003,22 @@ class BM25Retriever(Retriever):
         name: str | None = None,
         tenant: str | None = None,
     ):
-        if tenant is not None:
+        if tenant:
             # A file corpus has no tenant metadata of its own; stamping the
             # docs with the owning tenant is what lets a tenant-scoped recall
             # keep its lexical arm instead of losing it to the isolation
-            # backstop. setdefault: a doc that already carries a (different)
+            # backstop. The caller's docs are NOT mutated: each doc is copied
+            # with a stamped payload. A doc that already carries a (different)
             # tenant_id keeps it and is then excluded by the strict gate in
             # search() — relabeling foreign data would be worse than losing it.
+            from dataclasses import replace
+
             from ..vector.qdrant import TENANT_ID_KEY
 
-            for d in docs:
-                (d.payload if d.payload is not None else {}).setdefault(TENANT_ID_KEY, tenant)
+            docs = [
+                replace(d, payload={TENANT_ID_KEY: tenant, **(d.payload or {})})
+                for d in docs
+            ]
             tenant_aware = True
         self.bm25 = BM25(docs, tokenizer=tokenizer, retokenize=retokenize)
         self._set_name(name)

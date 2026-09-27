@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -372,15 +373,22 @@ class Recaller:
         # name a tenant explicitly runs under this one. Set it from
         # MNEMOSTACK_TENANT / recall.tenant via the config layer so a consumer
         # cannot "forget the argument" per call.
-        self.default_tenant = default_tenant
+        # "" is not a tenant — a blank config/flag value must not become a
+        # scope that silently matches nothing (and skips the guards below).
+        self.default_tenant = default_tenant or None
         # Deliberate cross-tenant tooling only. This is NOT a security control:
         # whoever constructs a Recaller holds the store credentials and can
         # query the store directly — the guard exists to turn an honest
         # misconfiguration into a loud error, not to stop an insider.
         self.allow_cross_tenant = allow_cross_tenant
-        #: Cache for the multi-tenant probe: None = not probed yet,
-        #: (True/False/"unknown") afterwards. One probe per recaller.
+        #: Multi-tenant probe cache. A POSITIVE result is permanent (a
+        #: collection does not stop holding several tenants); a negative or
+        #: "unknown" result expires after `_PROBE_TTL_S` — a long-lived process
+        #: must notice a second tenant ingested after startup, and a transient
+        #: probe failure must not disable the guard for the process lifetime.
         self._multi_tenant_probe: bool | str | None = None
+        self._probe_at: float = 0.0
+        self._probe_unknown_warned = False
         #: Arms already warned about being skipped under a tenant scope —
         #: one warning per (recaller, arm), not one per recall.
         self._tenant_skip_warned: set[str] = set()
@@ -538,9 +546,9 @@ class Recaller:
         crashing every legacy/custom-store deployment that cannot be
         inspected would punish exactly the users who have no tenants at all.
         """
-        store = self.vector
+        store = getattr(self, "vector", None)
         if store is None or not hasattr(store, "distinct_tenant_count"):
-            for retr in self.retrievers:
+            for retr in getattr(self, "retrievers", None) or []:
                 candidate = getattr(retr, "vector_store", None)
                 if candidate is not None and hasattr(candidate, "distinct_tenant_count"):
                     store = candidate
@@ -560,6 +568,23 @@ class Recaller:
             return "unknown"
         return n >= 2
 
+    _PROBE_TTL_S = 60.0
+    # Class-level defaults so an instance built without __init__ (tests and
+    # subclasses construct via Recaller.__new__) still has a complete tenant
+    # state. The mutable skip-warn set is created lazily per instance.
+    default_tenant: str | None = None
+    allow_cross_tenant: bool = False
+    _multi_tenant_probe: bool | str | None = None
+    _probe_at: float = 0.0
+    _probe_unknown_warned: bool = False
+
+    def _effective_tenant(self, tenant: str | None) -> str | None:
+        """The tenant a search actually runs under: the explicit per-call one,
+        else the construction-time default. Every public search surface
+        resolves through here, so a default can never apply to one entry
+        point and not another."""
+        return tenant if tenant is not None else self.default_tenant
+
     def _guard_tenantless_recall(self) -> None:
         """Fail closed: refuse a tenantless recall over a collection that
         verifiably holds several tenants. See :class:`CrossTenantRecallError`
@@ -567,8 +592,22 @@ class Recaller:
         (holders of the store credentials)."""
         if self.allow_cross_tenant:
             return
-        if self._multi_tenant_probe is None:
+        now = time.monotonic()
+        stale = (
+            self._multi_tenant_probe is None
+            or (self._multi_tenant_probe is not True and now - self._probe_at >= self._PROBE_TTL_S)
+        )
+        if stale:
             self._multi_tenant_probe = self._probe_multi_tenant()
+            self._probe_at = now
+            if self._multi_tenant_probe == "unknown" and not self._probe_unknown_warned:
+                self._probe_unknown_warned = True
+                logger.warning(
+                    "recall: could not determine whether the collection holds "
+                    "several tenants (store offers no tenant probe, or it "
+                    "failed); tenantless recall is NOT guarded. Scope recalls "
+                    "with a tenant (MNEMOSTACK_TENANT / recall.tenant) to be safe."
+                )
         if self._multi_tenant_probe is True:
             raise CrossTenantRecallError(
                 "recall without a tenant over a multi-tenant collection: the "
@@ -618,8 +657,7 @@ class Recaller:
         counter("mnemostack.recall.calls", 1)
         # Construction-time scope applies whenever the call does not name a
         # tenant itself; an explicit per-call tenant always wins.
-        if tenant is None:
-            tenant = self.default_tenant
+        tenant = self._effective_tenant(tenant)
         if tenant is None:
             self._guard_tenantless_recall()
         # Mutable state scoped to THIS public recall, handed to retrievers
@@ -885,6 +923,12 @@ class Recaller:
         """
         if not self.vector:
             return []
+        # A public search surface like recall(): same tenant resolution, same
+        # fail-closed guard — the answer generator's expansion retry reaches
+        # the collection through here.
+        tenant = self._effective_tenant(tenant)
+        if tenant is None:
+            self._guard_tenantless_recall()
         # Direct search surface (expansion retry, library callers) — must be
         # space-guarded like every other path that queries the collection.
         self._ensure_space_compat(tenant=tenant)
@@ -1097,8 +1141,9 @@ class Recaller:
             # never enter fusion. (The post-fusion filter_by_tenant backstop is
             # the final guarantee; this keeps the candidate pool tenant-clean.)
             if tenant is not None and not getattr(retr, "accepts_tenant", False):
-                if retr.name not in self._tenant_skip_warned:
-                    self._tenant_skip_warned.add(retr.name)
+                warned = self.__dict__.setdefault("_tenant_skip_warned", set())
+                if retr.name not in warned:
+                    warned.add(retr.name)
                     logger.warning(
                         "recall: arm '%s' cannot enforce a tenant filter and is "
                         "skipped under a tenant scope — its results would be "

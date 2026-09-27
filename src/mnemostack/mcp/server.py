@@ -274,7 +274,11 @@ def build_server(
         return principal
 
     def _tenant_of(principal: Any) -> str | None:
-        return principal.tenant if principal is not None else None
+        # Auth on: the key decides. Auth off: the configured scope — one
+        # resolution point for every tool, reads and writes alike.
+        if principal is not None:
+            return principal.tenant
+        return default_tenant or None
 
     # Lazy-initialize components so server boots even if e.g. GEMINI_API_KEY missing.
     # Tool calls can run concurrently; the lock makes each component initialize
@@ -354,6 +358,9 @@ def build_server(
                         docs=bm25_docs,
                         timestamp_key=timestamp_key,
                         timestamp_format=timestamp_format,
+                        # Same rule as serve: stamp only a scoped,
+                        # unauthenticated process's own corpus.
+                        tenant=None if auth_enabled else default_tenant,
                     )
                 )
         elif mode == "qdrant_bm25":
