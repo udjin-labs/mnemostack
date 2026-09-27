@@ -195,8 +195,18 @@ def synthesize(
     ):
         import copy
 
-        recaller = copy.copy(recaller)
-        recaller.allow_cross_tenant = True
+        inner = getattr(recaller, "recaller", None)
+        if inner is not None and hasattr(inner, "allow_cross_tenant"):
+            # A wrapper (QueryExpander) delegates the flag to the recaller it
+            # wraps: copy both, set the flag on the inner copy.
+            inner_copy = copy.copy(inner)
+            inner_copy.allow_cross_tenant = True
+            wrapper_copy: Any = copy.copy(recaller)
+            wrapper_copy.recaller = inner_copy
+            recaller = wrapper_copy
+        else:
+            recaller = copy.copy(recaller)
+            recaller.allow_cross_tenant = True
     raw_results = _query_recaller(
         recaller, entity, max_results, kwargs.get("filters"), tenant=tenant
     )

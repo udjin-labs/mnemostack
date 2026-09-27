@@ -955,3 +955,15 @@ def test_non_string_configured_tenant_is_rejected(bad):
 
     with pytest.raises(ValueError, match="tenant must be a string"):
         normalize_tenant(bad)
+
+
+def test_synthesize_opt_out_reaches_a_wrapped_recaller_without_mutating_it():
+    from mnemostack.recall.expansion import QueryExpander
+    from mnemostack.synthesis import synthesize
+
+    store = _FakeStore(tenants=2)
+    inner = Recaller(retrievers=[_StaticArm("vector", [_hit("a", "t1")], store=store)])
+    wrapped = QueryExpander(inner, llm=None)
+    synthesize("alpha", recaller=wrapped, allow_cross_tenant=True)  # must not raise
+    assert inner.allow_cross_tenant is False
+    assert wrapped.recaller is inner
