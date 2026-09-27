@@ -300,6 +300,11 @@ def classify_tenant_sources(sources: list[Any]) -> bool | str:
         if sample is None:
             unknown = True
             continue
+        # A source returning two values has already proven them distinct
+        # (the server's typed equality, or the docs probe's own dedup) —
+        # conclusive even if a value is unhashable here.
+        if len(sample) >= 2:
+            return True
         # Typed identity, as Qdrant compares tenant values: true != 1.
         try:
             union |= {(type(v), v) for v in sample}

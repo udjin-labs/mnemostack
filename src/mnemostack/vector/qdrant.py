@@ -94,10 +94,11 @@ def _hide_invalidated_condition() -> IsEmptyCondition:
 
 
 def tenant_sample(client: Any, collection: str) -> list[Any] | None:
-    """Up to two distinct ``tenant_id`` values the collection holds — the
-    empty set (no stamped point), one value, or two ("two or more"). The
-    SET, not a count, so a recaller reading several collections can tell
-    "one tenant each, the same one" from "one tenant each, different ones".
+    """Up to two distinct ``tenant_id`` values the collection holds, as a
+    list — empty (no stamped point), one value, or two ("two or more"; the
+    server has already told them apart under its typed equality). Values,
+    not a count, so a recaller reading several collections can tell "one
+    tenant each, the same one" from "one tenant each, different ones".
 
     Two ``limit=1`` scrolls, answered exactly by the server with or without
     a payload index on ``tenant_id``: any stamped point, then any stamped

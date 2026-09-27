@@ -1095,3 +1095,17 @@ def test_recall_config_new_field_keeps_positional_order():
     rc = RecallConfig(60, 25, 0.7)
     assert (rc.rrf_k, rc.top_k, rc.confidence_threshold) == (60, 25, 0.7)
     assert rc.tenant is None
+
+
+def test_two_values_from_one_source_are_conclusive_even_if_unhashable():
+    from mnemostack.recall.recaller import classify_tenant_sources
+
+    assert classify_tenant_sources([_SampleListStore(["a", ["b"]])]) is True
+
+
+class _SampleListStore:
+    def __init__(self, values):
+        self._values = values
+
+    def tenant_sample(self):
+        return list(self._values)
