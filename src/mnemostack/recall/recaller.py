@@ -751,15 +751,18 @@ class Recaller:
             with self._probe_lock:
                 if _stale():  # another thread may have refreshed meanwhile
                     verdict = self._probe_multi_tenant()
-                    self._probe_at = time.monotonic()
-                    if verdict == "unknown":
-                        self._warn_probe_unknown()
                     # Only a CONCLUSIVE answer clears a known multi-tenant
                     # verdict: a failed refresh (timeout, error) keeps the
                     # refusal and is retried after the next TTL, instead of
                     # reopening tenantless cross-tenant recall.
                     if not (self._multi_tenant_probe is True and verdict == "unknown"):
                         self._multi_tenant_probe = verdict
+                    # Publish the verdict BEFORE marking the cache fresh: a
+                    # reader that sees a fresh timestamp skips the lock, and
+                    # must never pair it with the previous verdict.
+                    self._probe_at = time.monotonic()
+                    if self._multi_tenant_probe == "unknown":
+                        self._warn_probe_unknown()
         if self._multi_tenant_probe is True:
             raise CrossTenantRecallError(
                 "recall without a tenant over a multi-tenant collection: the "
