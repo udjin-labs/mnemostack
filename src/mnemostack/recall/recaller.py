@@ -448,6 +448,11 @@ class Recaller:
         self.embedding = embedding_provider
         self.vector = vector_store
         self.bm25 = BM25(bm25_docs) if bm25_docs else None
+        # The own corpus is read by tenantless recalls (legacy BM25) and by the
+        # MCA prefilter: it answers the tenant probe from its own documents.
+        from .retrievers import _DocsTenantProbe
+
+        self._bm25_probe = _DocsTenantProbe(bm25_docs) if bm25_docs else None
         self.rrf_k = rrf_k
         self.retrievers = retrievers or []
         self.retriever_weights = dict(retriever_weights) if retriever_weights else {}
@@ -639,7 +644,10 @@ class Recaller:
         vector = getattr(self, "vector", None)
         if retrievers and getattr(self, "embedding", None) is None:
             vector = None
-        return tenant_probe_sources_of(vector, retrievers)
+        sources = tenant_probe_sources_of(vector, retrievers)
+        if self._bm25_probe is not None:
+            sources.append(self._bm25_probe)
+        return sources
 
     def _probe_multi_tenant(self, sources: list[Any] | None = None) -> bool | str:
         """Classify what a tenantless search would read — see
@@ -657,6 +665,7 @@ class Recaller:
     _multi_tenant_probe: bool | str | None = None
     _probe_at: float = 0.0
     _probe_lock: threading.Lock = _PROBE_LOCK
+    _bm25_probe: Any = None
 
     def _effective_tenant(self, tenant: str | None) -> str | None:
         """The tenant a search actually runs under: the explicit per-call one,

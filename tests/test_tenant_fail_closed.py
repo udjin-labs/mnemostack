@@ -889,3 +889,26 @@ def test_empty_tenant_env_clears_a_config_file_tenant(monkeypatch, tmp_path):
     assert Config.load(path=str(cfg_file)).recall.tenant is None
     monkeypatch.delenv("MNEMOSTACK_TENANT")
     assert Config.load(path=str(cfg_file)).recall.tenant == "from-file"
+
+
+def test_recaller_own_bm25_corpus_is_probed():
+    """bm25_docs given to the Recaller itself are searched by tenantless
+    recalls (legacy mode) and the MCA prefilter — their tenants count."""
+    docs = [
+        BM25Doc(id="a", text="alpha", payload={"tenant_id": "A"}),
+        BM25Doc(id="b", text="alpha", payload={"tenant_id": "B"}),
+    ]
+
+    class _Vec:
+        def search(self, *a, **k):
+            return []
+
+    class _Emb:
+        dimension = 3
+
+        def embed(self, text):
+            return [0.1, 0.2, 0.3]
+
+    r = Recaller(embedding_provider=_Emb(), vector_store=_Vec(), bm25_docs=docs)
+    with pytest.raises(CrossTenantRecallError):
+        r.recall("alpha")
