@@ -498,17 +498,22 @@ def test_probe_refresh_is_single_flight(monkeypatch):
     assert store.probes == 2  # initial + exactly one refresh
 
 
-def test_synthesis_clone_keeps_the_probe_store():
-    """Narrowing the arm set to arms that expose no store (BM25 loaded from
-    Qdrant) must not blind the guard."""
+def test_synthesis_clone_probes_exactly_the_kept_arms():
+    """A source filter keeping only an arm over a multi-tenant collection
+    still refuses (BM25 loaded from Qdrant declares its collection) — and one
+    keeping only a store-less arm is not vetoed by a collection it no longer
+    reads."""
     from mnemostack.synthesis import synthesize
 
-    store = _FakeStore(tenants=2)
-    vec = _StaticArm("vector", [_hit("a", "t1")], store=store)
-    bm25 = _StaticArm("bm25", [_hit("b", "t2")])  # exposes no vector_store
-    r = Recaller(retrievers=[vec, bm25])
+    s = _real_store([(1, "a"), (2, "b")])
+    vec = _StaticArm("vector", [], store=s)
+    qbm25 = BM25Retriever.from_qdrant(s.client, "probe")
     with pytest.raises(CrossTenantRecallError):
-        synthesize("alpha", recaller=r, sources=["bm25"])
+        synthesize("p1", recaller=Recaller(retrievers=[vec, qbm25]), sources=["bm25"])
+
+    file_bm25 = BM25Retriever([BM25Doc(id="d1", text="alpha notes")])
+    r = Recaller(retrievers=[vec, file_bm25])
+    synthesize("alpha", recaller=r, sources=["bm25"])  # must not raise
 
 
 def test_direct_retrievers_are_guarded_scoped_and_backstopped():

@@ -549,17 +549,16 @@ class Recaller:
 
     def tenant_probe_sources(self) -> list[Any]:
         """Every distinct store the fail-closed tenant probe must ask: the
-        recaller's own vector store, each arm's (``vector_store`` or a
-        declared ``tenant_probe_store``), and one carried over from the
-        recaller this one was rebuilt from. ALL of them — a recaller may
-        fuse arms over different collections, and any one of them holding
-        several tenants (or two holding one different tenant each) makes a
-        tenantless recall cross-tenant."""
+        recaller's own vector store and each arm's (``vector_store``, or a
+        ``tenant_probe_store`` an arm declares for a collection it read
+        through a raw client). Exactly the collections this recaller reads —
+        no more (asking an unrelated one would refuse a safe recall), no less
+        (any one of them holding several tenants, or two holding one
+        different tenant each, makes a tenantless recall cross-tenant)."""
         candidates = [getattr(self, "vector", None)]
         for r in getattr(self, "retrievers", None) or []:
             candidates.append(getattr(r, "vector_store", None))
             candidates.append(getattr(r, "tenant_probe_store", None))
-        candidates.append(self._tenant_probe_store)
         sources: list[Any] = []
         seen: set[int] = set()
         for store in candidates:
@@ -569,11 +568,6 @@ class Recaller:
                 seen.add(id(store))
                 sources.append(store)
         return sources
-
-    def tenant_probe_source(self) -> Any:
-        """First probe source, or ``None``."""
-        sources = self.tenant_probe_sources()
-        return sources[0] if sources else None
 
     def _probe_multi_tenant(self) -> bool | str:
         """Classify what a tenantless recall would read: True = two or more
@@ -623,10 +617,6 @@ class Recaller:
     _multi_tenant_probe: bool | str | None = None
     _probe_at: float = 0.0
     _probe_lock: threading.Lock = _PROBE_LOCK
-    #: Store the tenant probe should ask when neither `vector` nor any arm
-    #: exposes one — set on recallers rebuilt from another (the synthesis
-    #: source filter), so narrowing the arm set cannot blind the guard.
-    _tenant_probe_store: Any = None
 
     def _effective_tenant(self, tenant: str | None) -> str | None:
         """The tenant a search actually runs under: the explicit per-call one,

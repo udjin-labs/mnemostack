@@ -401,10 +401,9 @@ def _filter_recaller(recaller: Any, source_filter: set[str] | None) -> Any:
         default_tenant=getattr(recaller, "default_tenant", None),
         allow_cross_tenant=getattr(recaller, "allow_cross_tenant", False),
     )
-    # ... and the store its tenant probe asks: the kept arms may expose none
-    # (BM25 loaded from Qdrant), which would otherwise blind the guard.
-    source = getattr(recaller, "tenant_probe_source", None)
-    clone._tenant_probe_store = source() if callable(source) else None
+    # The clone's tenant probe asks exactly the kept arms' collections: each
+    # collection-backed arm declares its own store (BM25 loaded from Qdrant
+    # included), so an arm filtered out no longer vetoes the recall.
     return clone
 
 
