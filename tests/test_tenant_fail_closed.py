@@ -784,3 +784,41 @@ def test_synthesize_refuses_a_blank_explicit_tenant():
     arm = _StaticArm("vector", [_hit("m", "main")], tenant_capable=True)
     with pytest.raises(CrossTenantRecallError, match="blank tenant"):
         synthesize("q", recaller=Recaller(retrievers=[arm], default_tenant="main"), tenant=" ")
+
+
+def test_snapshot_probe_counts_an_empty_tenant_like_the_live_probe():
+    """A corpus mixing tenant_id="" and a real tenant is two groups — the
+    snapshot probe must agree with the live collection probe."""
+    docs = [
+        BM25Doc(id="e", text="alpha", payload={"tenant_id": ""}),
+        BM25Doc(id="a", text="alpha", payload={"tenant_id": "acme"}),
+    ]
+    from mnemostack.recall.retrievers import _DocsTenantProbe
+
+    assert _DocsTenantProbe(docs).tenant_sample() == {"", "acme"}
+
+
+@pytest.mark.parametrize("blank", ["", " ", "\t"])
+def test_file_key_store_refuses_blank_tenants_at_issue(tmp_path, blank):
+    from mnemostack.auth import FileKeyStore
+
+    with pytest.raises(ValueError, match="tenant is required"):
+        FileKeyStore(tmp_path / "keys.json").issue(blank, ["read"])
+
+
+def test_a_stored_whitespace_principal_does_not_verify(tmp_path):
+    """A record written before the issue-time check (or by hand) with a
+    whitespace-only tenant must not authenticate: its reads would be refused
+    while its writes would stamp the blank tenant."""
+    import json
+
+    from mnemostack.auth import FileKeyStore
+
+    ks = FileKeyStore(tmp_path / "keys.json")
+    _, raw = ks.issue("acme", ["read"])
+    data = json.loads((tmp_path / "keys.json").read_text())
+    recs = data if isinstance(data, list) else data.get("keys", data)
+    for rec in recs if isinstance(recs, list) else recs.values():
+        rec["tenant"] = "   "
+    (tmp_path / "keys.json").write_text(json.dumps(data))
+    assert FileKeyStore(tmp_path / "keys.json").verify(raw) is None

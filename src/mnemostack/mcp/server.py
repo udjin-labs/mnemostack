@@ -196,6 +196,11 @@ def build_server(
     Raises:
         ImportError: if fastmcp not installed (install with mnemostack[mcp])
     """
+    # One identity for every consumer: the BM25 corpus stamp, tool reads and
+    # writes. A blank configured default is no tenant (see normalize_tenant).
+    from ..config import normalize_tenant
+
+    default_tenant = normalize_tenant(default_tenant)
     if not _FASTMCP_AVAILABLE:
         raise ImportError("fastmcp not installed. Install with: pip install 'mnemostack[mcp]'")
     # Fail a schema-key misconfiguration at BOOT (HTTP does the same) —
@@ -278,9 +283,7 @@ def build_server(
         # resolution point for every tool, reads and writes alike.
         if principal is not None:
             return principal.tenant
-        from ..config import normalize_tenant
-
-        return normalize_tenant(default_tenant)
+        return default_tenant
 
     # Lazy-initialize components so server boots even if e.g. GEMINI_API_KEY missing.
     # Tool calls can run concurrently; the lock makes each component initialize

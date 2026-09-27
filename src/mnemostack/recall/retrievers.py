@@ -996,7 +996,9 @@ class _DocsTenantProbe:
         sample: set[Any] = set()
         for d in docs:
             tid = (d.payload or {}).get(TENANT_ID_KEY)
-            if tid is not None and tid != "":
+            # "" counts as a tenant, exactly as the live collection probe
+            # treats it — the corpus searches those documents too.
+            if tid is not None:
                 sample.add(tid)
                 if len(sample) >= 2:
                     break
