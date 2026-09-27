@@ -1028,3 +1028,18 @@ def test_a_wrapped_recallers_configured_opt_out_reaches_direct_retrievers():
     )
     direct = _StaticArm("vec2", [_hit("b", "t2")], store=_SampleStore({"t1", "t2"}))
     synthesize("alpha", recaller=QueryExpander(inner, llm=None), retrievers=[direct])  # no raise
+
+
+def test_failed_refresh_keeps_a_known_multi_tenant_verdict(monkeypatch):
+    """Positive, then the refresh probe fails with the data unchanged: the
+    refusal must hold, not reopen tenantless cross-tenant recall."""
+    store = _FakeStore(tenants=2)
+    r = Recaller(retrievers=[_StaticArm("vector", [_hit("a")], store=store)])
+    with pytest.raises(CrossTenantRecallError):
+        r.recall("q")
+    store._tenants = None  # the probe now fails
+    monkeypatch.setattr(Recaller, "_PROBE_TTL_S", 0.0)
+    with pytest.raises(CrossTenantRecallError):
+        r.recall("q")
+    store._tenants = 1  # a conclusive single-tenant answer clears it
+    assert [x.id for x in r.recall("q")] == ["a"]

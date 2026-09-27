@@ -489,7 +489,8 @@ class Recaller:
         #: `_PROBE_TTL_S`: a long-lived process must notice a second tenant
         #: ingested after startup, a transient probe failure must not disable
         #: the guard for the process lifetime, and a tenant removed with
-        #: tenant-rm must stop refusing recalls without a restart.
+        #: tenant-rm must stop refusing recalls without a restart. A known
+        #: multi-tenant verdict is cleared only by a conclusive probe.
         self._multi_tenant_probe: bool | str | None = None
         self._probe_at: float = 0.0
         self._probe_lock = threading.Lock()
@@ -749,10 +750,16 @@ class Recaller:
         if _stale():
             with self._probe_lock:
                 if _stale():  # another thread may have refreshed meanwhile
-                    self._multi_tenant_probe = self._probe_multi_tenant()
+                    verdict = self._probe_multi_tenant()
                     self._probe_at = time.monotonic()
-                    if self._multi_tenant_probe == "unknown":
+                    if verdict == "unknown":
                         self._warn_probe_unknown()
+                    # Only a CONCLUSIVE answer clears a known multi-tenant
+                    # verdict: a failed refresh (timeout, error) keeps the
+                    # refusal and is retried after the next TTL, instead of
+                    # reopening tenantless cross-tenant recall.
+                    if not (self._multi_tenant_probe is True and verdict == "unknown"):
+                        self._multi_tenant_probe = verdict
         if self._multi_tenant_probe is True:
             raise CrossTenantRecallError(
                 "recall without a tenant over a multi-tenant collection: the "
