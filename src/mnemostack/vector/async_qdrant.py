@@ -33,6 +33,7 @@ from .qdrant import (
     _hide_invalidated_condition,
     _stamp_tenant,
     _tenant_condition,
+    quantization_search_params,
 )
 
 
@@ -48,6 +49,8 @@ class AsyncVectorStore:
         await store.close()
     """
 
+    search_params: Any = None
+
     def __init__(
         self,
         collection: str,
@@ -55,11 +58,17 @@ class AsyncVectorStore:
         host: str = "http://localhost:6333",
         distance: Distance = Distance.COSINE,
         timeout: int = 30,
+        *,
+        quantization_rescore: bool | None = None,
+        quantization_oversampling: float | None = None,
     ):
         self.collection = collection
         self.dimension = dimension
         self.distance = distance
         self.client = AsyncQdrantClient(url=host, timeout=timeout)
+        self.search_params = quantization_search_params(
+            quantization_rescore, quantization_oversampling
+        )
 
     async def close(self) -> None:
         await self.client.close()
@@ -281,6 +290,7 @@ class AsyncVectorStore:
             limit=limit,
             query_filter=qfilter,
             with_payload=True,
+            **({"search_params": self.search_params} if self.search_params else {}),
         )
         hits = []
         for pt in result.points:

@@ -45,6 +45,7 @@ from mnemostack.config import (
     ensure_text_fields_mode,
     llm_kwargs,
     provider_kwargs,
+    quantization_kwargs,
     resolve_text_search_mode,
 )
 from mnemostack.embeddings import get_provider
@@ -833,6 +834,10 @@ class ServerConfig:
     #: Deliberate cross-tenant serving without auth. Not a security control —
     #: it only silences the fail-closed guard for tooling that means it.
     allow_cross_tenant: bool = False
+    #: Qdrant quantization search parameters for dense queries (vector.* in
+    #: the config). None = not sent. Appended at the tail.
+    quantization_rescore: bool | None = None
+    quantization_oversampling: float | None = None
 
     def __post_init__(self) -> None:
         # A blank tenant is no tenant: "" would stamp writes with an empty
@@ -886,6 +891,8 @@ class ServerConfig:
             auth_enabled=_env_bool("MNEMOSTACK_AUTH_ENABLED"),
             default_tenant=cfg.recall.tenant,
             allow_cross_tenant=_env_bool("MNEMOSTACK_ALLOW_CROSS_TENANT"),
+            quantization_rescore=cfg.vector.quantization_rescore,
+            quantization_oversampling=cfg.vector.quantization_oversampling,
             keys_file=os.environ.get("MNEMOSTACK_KEYS_FILE") or None,
             quotas_file=os.environ.get("MNEMOSTACK_QUOTAS_FILE") or None,
             text_key=cfg.recall.text_key,
@@ -1077,6 +1084,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         # carrying the named sparse vector the lexical arm searches.
         sparse_text=text_mode == "sparse",
         text_key=cfg.text_key,
+        **quantization_kwargs(cfg.quantization_rescore, cfg.quantization_oversampling),
     )
     # Dedicated short-timeout client for health/readiness pings — never the
     # recall store's client, whose timeout is sized for recall.

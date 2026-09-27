@@ -140,6 +140,23 @@ def tenant_sample(client: Any, collection: str) -> list[Any] | None:
         return None
 
 
+def quantization_search_params(
+    rescore: bool | None = None, oversampling: float | None = None
+) -> Any:
+    """``SearchParams`` carrying the quantization search knobs, or ``None``
+    when neither is set — then no ``search_params`` is sent at all and the
+    request is byte-identical to one built without this helper. A collection
+    without quantization ignores these parameters, so they can be configured
+    before quantization is enabled on it."""
+    if rescore is None and oversampling is None:
+        return None
+    from qdrant_client.models import QuantizationSearchParams, SearchParams
+
+    return SearchParams(
+        quantization=QuantizationSearchParams(rescore=rescore, oversampling=oversampling)
+    )
+
+
 class DimensionMismatchError(ValueError):
     """Existing collection stores vectors of a different size than the provider produces."""
 
@@ -200,6 +217,7 @@ class VectorStore:
     sparse_text = False
     text_key = "text"
     _sparse_encoder: SparseTextEncoder | None = None
+    search_params: Any = None
 
     def __init__(
         self,
@@ -211,11 +229,18 @@ class VectorStore:
         *,
         sparse_text: bool = False,
         text_key: str = "text",
+        quantization_rescore: bool | None = None,
+        quantization_oversampling: float | None = None,
     ):
         self.collection = collection
         self.dimension = dimension
         self.distance = distance
         self.client = QdrantClient(url=host, timeout=timeout)
+        #: Sent with dense queries only (the sparse space is not quantized);
+        #: None = no search_params at all, as before.
+        self.search_params = quantization_search_params(
+            quantization_rescore, quantization_oversampling
+        )
         #: Opt-in server-side lexical index: writes maintain a named sparse
         #: vector (see vector/sparse.py) next to the dense one, and
         #: ``sparse_search`` queries it. Off by default — collections and
@@ -1291,6 +1316,7 @@ class VectorStore:
             limit=limit,
             query_filter=qfilter,
             with_payload=True,
+            **({"search_params": self.search_params} if self.search_params else {}),
         )
         hits = []
         for pt in result.points:
