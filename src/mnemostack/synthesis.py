@@ -204,7 +204,10 @@ def synthesize(
             kwargs.get("filters"),
             tenant=tenant,
             allow_cross_tenant=bool(
-                kwargs.get("allow_cross_tenant", getattr(recaller, "allow_cross_tenant", False))
+                kwargs.get(
+                    "allow_cross_tenant",
+                    getattr(_innermost_recaller(recaller), "allow_cross_tenant", False),
+                )
             ),
         )
     )
@@ -431,19 +434,33 @@ def _result_source_enabled(result: RecallResult, source_filter: set[str] | None)
     return bool(sources & source_filter)
 
 
-def _with_cross_tenant_opt_out(recaller: Any) -> Any:
+def _innermost_recaller(recaller: Any) -> Any:
+    """The object a chain of QueryExpander wrappers finally delegates to —
+    where the fail-closed guard runs and its opt-out lives. Only real
+    QueryExpander instances are unwrapped (a mock or proxy that fabricates
+    a ``.recaller`` attribute is not a wrapper), and a cycle stops the walk."""
+    from .recall.expansion import QueryExpander
+
+    seen: set[int] = set()
+    while isinstance(recaller, QueryExpander) and id(recaller) not in seen:
+        seen.add(id(recaller))
+        recaller = recaller.recaller
+    return recaller
+
+
+def _with_cross_tenant_opt_out(recaller: Any, _seen: frozenset[int] = frozenset()) -> Any:
     """A copy of ``recaller`` whose fail-closed guard is opted out — the flag
-    set where the guard actually runs. A wrapper (anything exposing the
-    object it wraps as ``.recaller``, like QueryExpander) is copied level by
-    level down the chain and the flag lands on the copy of the innermost
-    object; the caller's objects are never mutated. On a duck-typed recaller
-    without a guard the flag is inert."""
+    set where the guard actually runs. QueryExpander wrappers are copied
+    level by level and the flag lands on the copy of the innermost object;
+    the caller's objects are never mutated. On a duck-typed recaller without
+    a guard the flag is inert."""
     import copy
 
+    from .recall.expansion import QueryExpander
+
     clone: Any = copy.copy(recaller)
-    inner = getattr(recaller, "recaller", None)
-    if inner is not None:
-        clone.recaller = _with_cross_tenant_opt_out(inner)
+    if isinstance(recaller, QueryExpander) and id(recaller) not in _seen:
+        clone.recaller = _with_cross_tenant_opt_out(recaller.recaller, _seen | {id(recaller)})
     else:
         clone.allow_cross_tenant = True
     return clone

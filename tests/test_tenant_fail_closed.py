@@ -981,3 +981,34 @@ def test_synthesize_opt_out_reaches_a_wrapped_recaller_without_mutating_it():
     duck = _Duck()
     synthesize("alpha", recaller=QueryExpander(duck, llm=None), allow_cross_tenant=True)
     assert not hasattr(duck, "allow_cross_tenant")
+
+
+def test_opt_out_walk_is_bounded_on_mocks_and_cycles():
+    from unittest.mock import MagicMock
+
+    from mnemostack.recall.expansion import QueryExpander
+    from mnemostack.synthesis import _innermost_recaller, _with_cross_tenant_opt_out
+
+    mock = MagicMock()
+    assert _innermost_recaller(mock) is mock
+    _with_cross_tenant_opt_out(mock)  # no RecursionError
+
+    inner = Recaller(retrievers=[])
+    qe = QueryExpander(inner, llm=None)
+    qe.recaller = qe  # a cycle
+    _with_cross_tenant_opt_out(qe)  # no RecursionError
+
+
+def test_a_wrapped_recallers_configured_opt_out_reaches_direct_retrievers():
+    """No synthesis-level flag: the wrapped recaller's own opt-out governs
+    the directly supplied retrievers too."""
+    from mnemostack.recall.expansion import QueryExpander
+    from mnemostack.synthesis import synthesize
+
+    store = _FakeStore(tenants=2)
+    inner = Recaller(
+        retrievers=[_StaticArm("vector", [_hit("a", "t1")], store=store)],
+        allow_cross_tenant=True,
+    )
+    direct = _StaticArm("vec2", [_hit("b", "t2")], store=_SampleStore({"t1", "t2"}))
+    synthesize("alpha", recaller=QueryExpander(inner, llm=None), retrievers=[direct])  # no raise
