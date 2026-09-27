@@ -79,6 +79,19 @@ def provider_kwargs(
     return kw
 
 
+def quantization_kwargs(rescore: Any = None, oversampling: Any = None) -> dict[str, Any]:
+    """VectorStore keyword arguments for the quantization search knobs — the
+    ONE place every dense-searching surface (HTTP server, MCP, CLI search /
+    answer / synthesize, inspector) takes them from, so a configured value
+    cannot reach one surface and silently miss another. Empty when unset."""
+    kw: dict[str, Any] = {}
+    if rescore is not None:
+        kw["quantization_rescore"] = rescore
+    if oversampling is not None:
+        kw["quantization_oversampling"] = oversampling
+    return kw
+
+
 def llm_kwargs(
     provider: str,
     *,
@@ -199,6 +212,12 @@ class VectorConfig:
     # Qdrant ping — kept separate from recall so a slow Qdrant fails a probe
     # promptly instead of hanging a worker for the recall client's full timeout.
     health_timeout: int = 2
+    # Qdrant quantization search parameters for dense queries — appended at
+    # the tail. None (default) sends no search_params at all, exactly as
+    # before; a collection without quantization ignores them, so they can be
+    # set ahead of enabling quantization on it.
+    quantization_rescore: bool | None = None
+    quantization_oversampling: float | None = None
 
 
 @dataclass
@@ -503,6 +522,22 @@ class Config:
                     "llm.timeout must be a positive integer number of "
                     f"seconds, got {llm_timeout!r}"
                 )
+        # Quantization knobs fail the load, not the first quantized query.
+        rescore = cfg.vector.quantization_rescore
+        if rescore is not None and not isinstance(rescore, bool):
+            raise ValueError(f"vector.quantization_rescore must be a boolean, got {rescore!r}")
+        oversampling = cfg.vector.quantization_oversampling
+        if oversampling is not None:
+            if isinstance(oversampling, bool) or not isinstance(oversampling, (int, float)):
+                raise ValueError(
+                    f"vector.quantization_oversampling must be a number, got {oversampling!r}"
+                )
+            if not math.isfinite(oversampling) or oversampling < 1.0:
+                raise ValueError(
+                    "vector.quantization_oversampling must be a finite number >= 1.0, "
+                    f"got {oversampling!r}"
+                )
+            cfg.vector.quantization_oversampling = float(oversampling)
         batch = cfg.embedding.batch_size
         if isinstance(batch, bool) or not isinstance(batch, int) or batch < 1:
             raise ValueError(
@@ -561,6 +596,8 @@ def _apply_env_overrides(cfg: Config) -> Config:
         MNEMOSTACK_VECTOR_HOST
         MNEMOSTACK_QDRANT_URL       (alias for VECTOR_HOST)
         MNEMOSTACK_VECTOR_COLLECTION
+        MNEMOSTACK_QUANTIZATION_RESCORE      (dense search: rescore quantized hits)
+        MNEMOSTACK_QUANTIZATION_OVERSAMPLING (dense search: candidate oversampling, >= 1.0)
         MNEMOSTACK_LLM_PROVIDER
         MNEMOSTACK_LLM              (alias for LLM_PROVIDER)
         MNEMOSTACK_LLM_MODEL
@@ -621,6 +658,16 @@ def _apply_env_overrides(cfg: Config) -> Config:
         cfg.vector.collection = collection
     if v := env.get("MNEMOSTACK_VECTOR_HEALTH_TIMEOUT"):
         cfg.vector.health_timeout = max(1, int(v))
+    if v := env.get("MNEMOSTACK_QUANTIZATION_RESCORE"):
+        low = v.strip().lower()
+        if low in {"1", "true", "yes", "on"}:
+            cfg.vector.quantization_rescore = True
+        elif low in {"0", "false", "no", "off"}:
+            cfg.vector.quantization_rescore = False
+        else:
+            raise ValueError(f"MNEMOSTACK_QUANTIZATION_RESCORE must be a boolean, got {v!r}")
+    if v := env.get("MNEMOSTACK_QUANTIZATION_OVERSAMPLING"):
+        cfg.vector.quantization_oversampling = float(v)
 
     # LLM
     llm_provider = env.get("MNEMOSTACK_LLM_PROVIDER") or env.get("MNEMOSTACK_LLM")
@@ -718,6 +765,8 @@ vector:
   overlap: 100
   window_size: 1
   health_timeout: 2         # seconds; HTTP server's Qdrant liveness/readiness ping
+  quantization_rescore: null      # dense search on a quantized collection; null = not sent
+  quantization_oversampling: null # e.g. 2.0 with rescore: true; null = not sent
 
 llm:
   provider: gemini

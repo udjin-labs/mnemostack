@@ -26,7 +26,7 @@ except ImportError:  # pragma: no cover
     StrictInt = int  # type: ignore[assignment, misc]
     _FASTMCP_AVAILABLE = False
 
-from ..config import Config, provider_kwargs
+from ..config import Config, provider_kwargs, quantization_kwargs
 from ..embeddings import get_provider
 from ..embeddings.roles import EmbeddingSpaceError
 from ..feedback import apply_feedback
@@ -148,6 +148,10 @@ def build_server(
     # positional-tail pin in test_provider_plumbing guards exactly this.
     default_tenant: str | None = None,
     allow_cross_tenant: bool = False,
+    # Qdrant quantization search parameters for dense queries. Appended at
+    # the tail — the positional-tail pin in test_provider_plumbing guards it.
+    quantization_rescore: bool | None = None,
+    quantization_oversampling: float | None = None,
 ) -> Any:
     """Build and return a configured FastMCP server.
 
@@ -326,6 +330,7 @@ def build_server(
                 host=qdrant_host,
                 sparse_text=mode == "sparse",
                 text_key=text_key,
+                **quantization_kwargs(quantization_rescore, quantization_oversampling),
             )
 
         return _component("vector", _make)
@@ -1336,6 +1341,8 @@ def main() -> None:
         default_tenant=cfg.recall.tenant,
         allow_cross_tenant=os.environ.get("MNEMOSTACK_ALLOW_CROSS_TENANT", "").strip().lower()
         in {"1", "true", "yes", "on"},
+        quantization_rescore=cfg.vector.quantization_rescore,
+        quantization_oversampling=cfg.vector.quantization_oversampling,
         qdrant_host=cfg.vector.host,
         memgraph_uri=cfg.graph.uri,
         graph_user=cfg.graph.user,

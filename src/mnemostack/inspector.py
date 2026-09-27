@@ -51,7 +51,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from mnemostack.auth import FileKeyStore
 
 from mnemostack import __version__
-from mnemostack.config import provider_kwargs
+from mnemostack.config import provider_kwargs, quantization_kwargs
 from mnemostack.embeddings import get_provider
 from mnemostack.embeddings.roles import (
     EmbeddingSpaceError,
@@ -424,7 +424,12 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
     # browse read-only Qdrant data. Build the provider lazily, only when a `?q=`
     # search must embed. The store's dimension is unused for browse/search here
     # (search is handed a precomputed vector), so a placeholder value is fine.
-    store = VectorStore(collection=cfg.collection, dimension=1, host=cfg.qdrant_url)
+    store = VectorStore(
+        collection=cfg.collection,
+        dimension=1,
+        host=cfg.qdrant_url,
+        **quantization_kwargs(cfg.quantization_rescore, cfg.quantization_oversampling),
+    )
     # A separate short-timeout client for reachability probes, so a slow or
     # blackholed Qdrant shows as "down" promptly instead of hanging the console for
     # the store's full (30s) client timeout.
@@ -774,6 +779,7 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
                         limit=limit,
                         query_filter=_legacy_only_filter(store, parsed),
                         with_payload=True,
+                        **({"search_params": store.search_params} if store.search_params else {}),
                     )
                     for pt in res.points:
                         rows.append(_row(pt.id, pt.payload or {}, score=pt.score, text_key=cfg.text_key))

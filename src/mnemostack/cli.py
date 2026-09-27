@@ -29,6 +29,7 @@ from .config import (
     model_kwargs,  # noqa: F401 — re-exported: tests patch cli.model_kwargs as a construction seam
     normalize_tenant,
     provider_kwargs,
+    quantization_kwargs,
 )
 from .embeddings import ProviderProbeError, get_provider, list_providers
 from .embeddings.roles import (
@@ -2091,6 +2092,7 @@ def cmd_search(args: argparse.Namespace) -> int:
         collection=args.collection,
         dimension=provider.dimension,
         host=args.qdrant,
+        **_quantization_store_kwargs(args),
     )
     if not store.collection_exists():
         print(
@@ -2177,6 +2179,7 @@ def cmd_synthesize(args: argparse.Namespace) -> int:
             collection=args.collection,
             dimension=provider.dimension if provider is not None else 1,
             host=args.qdrant,
+            **_quantization_store_kwargs(args),
         )
         if not store.collection_exists():
             print(
@@ -2213,6 +2216,7 @@ def cmd_answer(args: argparse.Namespace) -> int:
         collection=args.collection,
         dimension=provider.dimension,
         host=args.qdrant,
+        **_quantization_store_kwargs(args),
     )
     if not store.collection_exists():
         print(
@@ -2414,6 +2418,15 @@ def _indexing_store(args: argparse.Namespace, provider) -> VectorStore:
         host=args.qdrant,
         sparse_text=sparse,
         text_key=text_key,
+    )
+
+
+def _quantization_store_kwargs(args: argparse.Namespace) -> dict:
+    """VectorStore kwargs for the quantization search knobs, from the
+    invisible parser defaults (vector.* in the config / env). getattr:
+    programmatic callers build bare Namespaces without parser defaults."""
+    return quantization_kwargs(
+        getattr(args, "_quant_rescore", None), getattr(args, "_quant_oversampling", None)
     )
 
 
@@ -4014,6 +4027,10 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         help="Allow an UNSCOPED recall over a multi-tenant collection (no effect while a tenant is set via --tenant / recall.tenant / MNEMOSTACK_TENANT). Also MNEMOSTACK_ALLOW_CROSS_TENANT. Tooling inside the trust boundary; not a security control.",
     )
     p_search.set_defaults(_llm_host=cfg.llm.host, _llm_timeout=cfg.llm.timeout)
+    p_search.set_defaults(
+        _quant_rescore=cfg.vector.quantization_rescore,
+        _quant_oversampling=cfg.vector.quantization_oversampling,
+    )
     p_search.set_defaults(func=cmd_search)
 
     p_invalidate = sub.add_parser(
@@ -4105,6 +4122,10 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         help="Allow an UNSCOPED recall over a multi-tenant collection (no effect while a tenant is set via --tenant / recall.tenant / MNEMOSTACK_TENANT). Also MNEMOSTACK_ALLOW_CROSS_TENANT. Tooling inside the trust boundary; not a security control.",
     )
     p_synthesize.set_defaults(_llm_host=cfg.llm.host, _llm_timeout=cfg.llm.timeout)
+    p_synthesize.set_defaults(
+        _quant_rescore=cfg.vector.quantization_rescore,
+        _quant_oversampling=cfg.vector.quantization_oversampling,
+    )
     p_synthesize.set_defaults(func=cmd_synthesize)
 
     p_answer = sub.add_parser(
@@ -4213,6 +4234,10 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         help="Allow an UNSCOPED recall over a multi-tenant collection (no effect while a tenant is set via --tenant / recall.tenant / MNEMOSTACK_TENANT). Also MNEMOSTACK_ALLOW_CROSS_TENANT. Tooling inside the trust boundary; not a security control.",
     )
     p_answer.set_defaults(_llm_host=cfg.llm.host, _llm_timeout=cfg.llm.timeout)
+    p_answer.set_defaults(
+        _quant_rescore=cfg.vector.quantization_rescore,
+        _quant_oversampling=cfg.vector.quantization_oversampling,
+    )
     p_answer.set_defaults(func=cmd_answer)
 
     p_index = sub.add_parser("index", parents=[common], help="Index files into vector store")
@@ -4523,6 +4548,10 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         help="Allow an UNSCOPED recall over a multi-tenant collection (no effect while a tenant is set via --tenant / recall.tenant / MNEMOSTACK_TENANT). Also MNEMOSTACK_ALLOW_CROSS_TENANT. Tooling inside the trust boundary; not a security control.",
     )
     p_mcp.set_defaults(_llm_host=cfg.llm.host, _llm_timeout=cfg.llm.timeout)
+    p_mcp.set_defaults(
+        _quant_rescore=cfg.vector.quantization_rescore,
+        _quant_oversampling=cfg.vector.quantization_oversampling,
+    )
     p_mcp.set_defaults(func=cmd_mcp_serve)
 
     p_init = sub.add_parser(
@@ -4688,6 +4717,10 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         help="Allow an UNSCOPED recall over a multi-tenant collection (no effect while a tenant is set via --tenant / recall.tenant / MNEMOSTACK_TENANT). Also MNEMOSTACK_ALLOW_CROSS_TENANT. Tooling inside the trust boundary; not a security control.",
     )
     p_serve.set_defaults(_llm_host=cfg.llm.host, _llm_timeout=cfg.llm.timeout)
+    p_serve.set_defaults(
+        _quant_rescore=cfg.vector.quantization_rescore,
+        _quant_oversampling=cfg.vector.quantization_oversampling,
+    )
     p_serve.set_defaults(func=cmd_serve)
 
     p_inspect = sub.add_parser(
@@ -4729,6 +4762,10 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         "--quotas-file",
         default=None,
         help="Quota store path (default: $MNEMOSTACK_QUOTAS_FILE or ~/.config/mnemostack/quotas.json)",
+    )
+    p_inspect.set_defaults(
+        _quant_rescore=cfg.vector.quantization_rescore,
+        _quant_oversampling=cfg.vector.quantization_oversampling,
     )
     p_inspect.set_defaults(func=cmd_inspect)
 
@@ -4806,6 +4843,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
         llm_timeout=getattr(args, "_llm_timeout", None),
         default_tenant=normalize_tenant(getattr(args, "tenant", None)),
         allow_cross_tenant=_allow_cross_tenant(args),
+        quantization_rescore=getattr(args, "_quant_rescore", None),
+        quantization_oversampling=getattr(args, "_quant_oversampling", None),
         graph_user=_graph_auth(args)["user"],
         graph_password=_graph_auth(args)["password"],
         graph_database=_graph_auth(args)["database"],
@@ -4952,6 +4991,8 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         timestamp_format=_schema_fmt,
         text_search=_text_search_mode(),
         text_search_fields=dict(_text_search_fields()),
+        quantization_rescore=getattr(args, "_quant_rescore", None),
+        quantization_oversampling=getattr(args, "_quant_oversampling", None),
     )
     app = build_inspector_app(cfg)
     admin = cfg.auth_enabled
@@ -4995,6 +5036,8 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
         llm_timeout=getattr(args, "_llm_timeout", None),
         default_tenant=normalize_tenant(getattr(args, "tenant", None)),
         allow_cross_tenant=_allow_cross_tenant(args),
+        quantization_rescore=getattr(args, "_quant_rescore", None),
+        quantization_oversampling=getattr(args, "_quant_oversampling", None),
         qdrant_host=args.qdrant,
         memgraph_uri=args.memgraph_uri,
         graph_user=_graph_auth(args)["user"],

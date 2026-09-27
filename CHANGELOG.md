@@ -54,6 +54,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rejected at load. The graph arm remains tenant-incapable and is not
   probed by the guard: a tenantless recall over a graph holding several
   tenants is not refused — #194.
+- **Configurable Qdrant quantization search parameters** (#196). On a
+  quantized collection Qdrant scores candidates on the compressed vectors
+  unless told otherwise, which can lower recall quality. New
+  `vector.quantization_rescore` / `vector.quantization_oversampling`
+  (`MNEMOSTACK_QUANTIZATION_RESCORE` / `MNEMOSTACK_QUANTIZATION_OVERSAMPLING`,
+  `VectorStore(quantization_rescore=..., quantization_oversampling=...)`, the
+  same on `AsyncVectorStore`) are sent as `search_params` with every dense
+  query on every surface: HTTP server, inspector, MCP, and the CLI's
+  `search`, `answer`, `synthesize`, `serve`, `mcp-serve` and `inspect`. The
+  sparse lexical query never carries them. Unset (the default) sends no
+  `search_params` at all, so requests are unchanged. Values are validated at
+  config load (rescore a boolean, oversampling a finite number >= 1.0). A
+  collection without quantization ignores the parameters, so they can be
+  configured before quantization is enabled; `docs/recipes.md` has the
+  step-by-step order and rollback.
 
 ## [2.4.0] - 2026-09-04
 

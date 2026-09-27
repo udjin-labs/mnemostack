@@ -408,3 +408,32 @@ then create the server-side indexes once: `mnemostack text-index` (it indexes ev
 **3. A code-capable embedding model.** General-text embedding models are noticeably weaker on source code — prefer a model trained on code for the dense arm (any provider works; the [role-aware profile system](../docs/api-stability.md) applies the model's query/document transforms automatically). The stack is model-agnostic: pick the best code embedder available to you and set it with `--embedding-model` / `MNEMOSTACK_EMBEDDING_MODEL`.
 
 Notes: `--code` affects which files are walked and how code files are chunked — prose files keep the classic chunker, and the `index` command's existing machinery (`--prune`, `--refresh-payloads`, provenance `resolve`) applies to code chunks unchanged. Code chunks follow the run's scoping: a plain `index` writes them unscoped, so in a shared authenticated collection they will not be returned by tenant-filtered recall — index code into its own collection (as above), or pass `--tenant <id>` (which scopes ids, payload stamps, `--prune` and `--refresh-payloads` alike) if isolation is needed. Window chunking (`--window-size`) is a prose feature and does not apply to code files.
+
+## Quantizing a collection without losing recall quality
+
+Qdrant [quantization](https://qdrant.tech/documentation/guides/quantization/) keeps a compressed copy of every vector in RAM. It saves memory only when the original vectors move to disk at the same time (step 2); quantization alone adds the compressed copy next to the originals. With default search parameters, though, candidates are scored on the compressed vectors, and recall quality can drop. Two search parameters recover it: `rescore` re-scores the candidates with the original vectors, and `oversampling` fetches more candidates than requested (e.g. `2.0` = twice the limit) so the rescoring has something to choose from.
+
+mnemostack sends these parameters with every dense query when they are configured; unset (the default), no search parameters are sent at all. The sparse lexical arm is never quantized and never receives them.
+
+**1. Configure the search parameters first.** A collection without quantization ignores them, so this step changes nothing yet:
+
+```yaml
+vector:
+  quantization_rescore: true
+  quantization_oversampling: 2.0   # finite, >= 1.0
+```
+
+or `MNEMOSTACK_QUANTIZATION_RESCORE=true` and `MNEMOSTACK_QUANTIZATION_OVERSAMPLING=2.0`. Restart every consumer (`serve`, `mcp-serve`, `inspect`, and any SDK process building its own `VectorStore(quantization_rescore=..., quantization_oversampling=...)`).
+
+**2. Then enable quantization on the collection**, keeping the int8 copy in RAM and moving the originals to disk (mnemostack's dense vector is the unnamed one, hence the `""` key):
+
+```bash
+curl -X PATCH "$QDRANT_URL/collections/mnemostack" \
+  -H 'Content-Type: application/json' \
+  -d '{"vectors": {"": {"on_disk": true}},
+       "quantization_config": {"scalar": {"type": "int8", "quantile": 0.99, "always_ram": true}}}'
+```
+
+Qdrant builds the quantized copy in the background; the collection keeps serving meanwhile. Doing it in this order means no query ever runs against quantized vectors without rescoring. Rescoring now reads the original vectors from disk, so fast storage matters; measure latency on your own data before and after.
+
+**Rollback:** `-d '{"vectors": {"": {"on_disk": false}}, "quantization_config": "Disabled"}'` brings the originals back to RAM and removes the quantized copy; the configured search parameters can stay, they are ignored again.

@@ -339,6 +339,7 @@ Built-in profiles cover OpenClaw webchat and Telegram envelopes; pass `profiles=
 | `MNEMOSTACK_GRAPH_URI` / `MNEMOSTACK_MEMGRAPH_URI` | Memgraph bolt URI | Graph retriever / GraphStore |
 | `MNEMOSTACK_TENANT` | Tenant every recall is scoped to when the call names none (`recall.tenant` in the config, `--tenant` on the CLI) | Recall on every surface |
 | `MNEMOSTACK_ALLOW_CROSS_TENANT` | Deliberately allow tenantless recall over a multi-tenant collection (tooling inside the trust boundary; not a security control) | Recall / `serve` startup |
+| `MNEMOSTACK_QUANTIZATION_RESCORE` / `MNEMOSTACK_QUANTIZATION_OVERSAMPLING` | Qdrant quantization search parameters for dense queries (`vector.quantization_*` in the config); unset = not sent. See [the recipe](docs/recipes.md#quantizing-a-collection-without-losing-recall-quality) | Dense search on a quantized collection |
 | `MNEMOSTACK_LLM_HOST` / `MNEMOSTACK_LLM_TIMEOUT` | LLM endpoint (ollama: default inherits the embedding `--ollama-host`; openai: required base URL) and LLM request timeout | Answer / reranker / expansion LLM |
 | `MNEMOSTACK_LLM_API_KEY` | Bearer token for the `openai` LLM provider; unset or `none` = no auth header (keyless vLLM / llama.cpp) | Answer / reranker / expansion LLM |
 | `MNEMOSTACK_PROVIDER` / `MNEMOSTACK_EMBEDDING_PROVIDER` | Embedding provider | CLI / HTTP / MCP |
