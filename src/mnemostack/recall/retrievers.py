@@ -994,18 +994,27 @@ class _DocsTenantProbe:
         from ..vector.qdrant import TENANT_ID_KEY
 
         sample: set[Any] = set()
+        determined = True
         for d in docs:
             tid = (d.payload or {}).get(TENANT_ID_KEY)
             # "" counts as a tenant, exactly as the live collection probe
             # treats it — the corpus searches those documents too.
-            if tid is not None:
+            if tid is None:
+                continue
+            try:
                 sample.add(tid)
-                if len(sample) >= 2:
-                    break
-        self._sample = sample
+            except TypeError:
+                # An array/object tenant_id (foreign payloads Qdrant allows)
+                # is unhashable: the answer is undetermined, as the live
+                # probe reports it — never a construction crash.
+                determined = False
+                break
+            if len(sample) >= 2:
+                break
+        self._sample: set[Any] | None = sample if determined else None
 
-    def tenant_sample(self) -> set[Any]:
-        return set(self._sample)
+    def tenant_sample(self) -> set[Any] | None:
+        return None if self._sample is None else set(self._sample)
 
 
 class BM25Retriever(Retriever):

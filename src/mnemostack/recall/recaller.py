@@ -55,7 +55,9 @@ class CrossTenantRecallError(RuntimeError):
     is not covered. Build a new Recaller for a different configuration.
     The graph arm is not probed either: a tenantless recall reading a graph
     that holds several tenants is not refused (tenant-scoped graph recall is
-    tracked separately).
+    tracked separately). A ``sources`` filter in ``synthesize`` does not
+    narrow the probe of a recaller wrapped in a QueryExpander — it probes
+    every wrapped arm (a refusal, never a leak); filter before wrapping.
     """
 
 if TYPE_CHECKING:

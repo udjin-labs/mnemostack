@@ -1050,3 +1050,12 @@ def test_search_many_with_nothing_to_search_is_a_silent_no_op(vectors):
     store = _SampleStore({"x", "y"})
     r = Recaller(vector_store=store)
     assert r.search_many(vectors, limit=3) == []
+
+
+def test_unhashable_tenant_marker_degrades_to_unknown_not_a_crash():
+    docs = [
+        BM25Doc(id="a", text="alpha", payload={"tenant_id": ["x", "y"]}),
+        BM25Doc(id="b", text="alpha", payload={"tenant_id": "x"}),
+    ]
+    arm = BM25Retriever(docs)  # must not raise
+    assert arm.tenant_probe_store.tenant_sample() is None
