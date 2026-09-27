@@ -409,3 +409,86 @@ def test_the_cache_entry_is_isolated_from_the_first_caller_too():
     )
     assert again[0].score == 0.9  # the next request reads the cached recall...
     assert again[0].sources == ["vector"]  # ...not the last caller's edits
+
+
+# ---------- #204: answers that echo the prompt's `ID=` label ----------
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["ID=R3 ID=R1 ID=R2", "id=R3, id=R1, id=R2", "ID=R3: ID=R1: ID=R2:", "ID=R3 R1 ID=R2."],
+)
+def test_labelled_answers_resolve_in_every_spelling(sample_results, raw):
+    # R0..R3 label ids "1".."4"
+    out = Reranker(llm=FakeLLM(response=raw)).rerank("q", sample_results)
+    assert [r.id for r in out][:3] == ["4", "2", "3"]
+
+
+def test_a_raw_id_that_looks_like_a_label_still_resolves_exactly():
+    results = [
+        RecallResult(id="a", text="first", score=0.9, payload={}),
+        RecallResult(id="ID=R0", text="second", score=0.8, payload={}),
+    ]
+    # the raw id "ID=R0" must win over unwrapping it to ordinal R0 (= "a")
+    out = Reranker(llm=FakeLLM(response="ID=R0")).rerank("q", results)
+    assert [r.id for r in out] == ["ID=R0", "a"]
+
+
+def test_a_prefixed_answer_still_reranks(sample_results):
+    reranker = Reranker(llm=FakeLLM(response="ID=R2 ID=R0"))  # R0 = id "1"
+    out = reranker.rerank("capital of Germany", sample_results)
+    assert [r.id for r in out][:2] == ["3", "1"]
+
+
+def test_an_answer_matching_no_candidate_is_marked_on_the_trace(sample_results):
+    from mnemostack.recall.trace import RecallTrace, apply_rerank_safe
+
+    trace = RecallTrace()
+    out = apply_rerank_safe(Reranker(llm=FakeLLM(response="R99 X7")), "q", sample_results, trace)
+    assert out is sample_results  # original order kept
+    assert "reranker:fallback" in trace.degraded
+    assert trace.post_rerank is None
+
+
+def test_a_successful_rerank_is_not_marked(sample_results):
+    from mnemostack.recall.trace import RecallTrace, apply_rerank_safe
+
+    trace = RecallTrace()
+    apply_rerank_safe(Reranker(llm=FakeLLM(response="R1 R0")), "q", sample_results, trace)
+    assert "reranker:fallback" not in trace.degraded
+    assert [rid for rid, _ in trace.post_rerank][:2] == ["2", "1"]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    ["NONE", "none.", "RELEVANT_IDS: NONE", "RANKED_IDS:NONE", "NONE of these are relevant"],
+)
+def test_an_explicit_none_verdict_is_not_a_fallback(sample_results, answer):
+    from mnemostack.recall.trace import RecallTrace, apply_rerank_safe
+
+    trace = RecallTrace()
+    out = apply_rerank_safe(Reranker(llm=FakeLLM(response=answer)), "q", sample_results, trace)
+    assert [r.id for r in out] == ["1", "2", "3", "4"]  # order stands
+    assert "reranker:fallback" not in trace.degraded
+
+
+def test_none_breaks_the_full_reorder_contract_and_is_a_fallback(sample_results):
+    from mnemostack.recall.trace import RecallTrace, apply_rerank_safe
+
+    trace = RecallTrace()
+    reranker = Reranker(llm=FakeLLM(response="NONE"), rerank_mode="full_reorder")
+    out = apply_rerank_safe(reranker, "q", sample_results, trace)
+    assert out is sample_results
+    assert "reranker:fallback" in trace.degraded
+
+
+def test_labels_skip_a_raw_id_shaped_like_one():
+    results = [
+        RecallResult(id="a", text="first", score=0.9, payload={}),
+        RecallResult(id="ID=R0", text="second", score=0.8, payload={}),
+    ]
+    labels = Reranker._ordinal_ids(results)
+    assert "R0" not in labels  # else `ID=R0` would name two candidates
+    first = labels[0]
+    out = Reranker(llm=FakeLLM(response=f"ID=R1 ID={first}")).rerank("q", results)
+    assert [r.id for r in out] == ["ID=R0", "a"]

@@ -21,6 +21,10 @@ RERANK_MODE_RELEVANT_ONLY = "relevant_only"
 RERANK_MODE_FULL_REORDER = "full_reorder"
 RERANK_MODES = frozenset({RERANK_MODE_RELEVANT_ONLY, RERANK_MODE_FULL_REORDER})
 
+#: The `ID=` label the prompt puts before each candidate, when a model
+#: echoes it back in its answer.
+_ID_LABEL = re.compile(r"^id=", re.IGNORECASE)
+
 _RELEVANT_ONLY_PROMPT = """Rank these memories by how well they answer a query.
 
 QUERY: {query}
@@ -74,6 +78,12 @@ class Reranker:
             "full_reorder" (model should return every candidate ID once).
             Final filtering is still performed by callers via their limit.
     """
+
+    #: `rerank` returns the exact input list only when it keeps the original
+    #: order as a fallback (LLM error, or no answered id matched a
+    #: candidate) and a new list otherwise, so `apply_rerank_safe` marks the
+    #: fallback on the trace instead of letting it pass as a rerank.
+    fallback_keeps_input_object = True
 
     def __init__(
         self,
@@ -136,6 +146,13 @@ class Reranker:
             logger.warning("rerank failed, keeping original order: %s", resp.error)
             return results  # graceful fallback
 
+        if self.rerank_mode == RERANK_MODE_RELEVANT_ONLY and self._says_none(resp.text):
+            # A verdict the relevant_only prompt asks for ("nothing
+            # relevant"), not a failure: the order stands, as a NEW list,
+            # so it is not reported as a fallback. full_reorder allows NONE
+            # only for an empty list, which never reaches the LLM, so there
+            # it is a broken answer and falls back like one.
+            return list(results)
         ranked_ids = self._parse_ids(resp.text)
         if not ranked_ids:
             logger.warning("rerank produced no usable ids, keeping original order")
@@ -154,6 +171,16 @@ class Reranker:
                 return ordinal_map[rid]
             if rid in id_map:
                 return id_map[rid]
+            # Models sometimes echo the prompt's own label (`ID=R12:`); left
+            # wrapped, no token resolves and the rerank silently keeps the
+            # pipeline order. Unwrapped only after the exact lookups, so a
+            # raw id that itself looks like a label still wins.
+            bare = self._unlabel(rid)
+            if bare != rid:
+                if bare in ordinal_map:
+                    return ordinal_map[bare]
+                if bare in id_map:
+                    return id_map[bare]
             # Fuzzy fallback: longest full-id that starts with the candidate,
             # or that the candidate starts with. This catches composite ids
             # (paths / namespaced keys) when the LLM emits a shorter form.
@@ -214,12 +241,18 @@ class Reranker:
     @staticmethod
     def _ordinal_ids(results: list[RecallResult]) -> list[str]:
         raw_ids = {str(r.id) for r in results}
+        # A raw id shaped like an echoed label (`ID=R0`) would make the
+        # answer `ID=R0` ambiguous between that candidate and the one
+        # labelled R0, so labels skip those shapes too.
+        labelled_raw = {
+            rid[3:].rstrip(":").lower() for rid in raw_ids if rid.lower().startswith("id=")
+        }
         used: set[str] = set()
         prompt_ids: list[str] = []
         for i in range(len(results)):
             prefix = "R"
             prompt_id = f"{prefix}{i}"
-            while prompt_id in raw_ids or prompt_id in used:
+            while prompt_id in raw_ids or prompt_id in used or prompt_id.lower() in labelled_raw:
                 prefix += "R"
                 prompt_id = f"{prefix}{i}"
             used.add(prompt_id)
@@ -245,6 +278,22 @@ class Reranker:
         return prompt_template.format(query=query, memories=memories_str)
 
     @staticmethod
+    def _unlabel(token: str) -> str:
+        """``ID=R12:`` -> ``R12``: the prompt's candidate label, echoed."""
+        return _ID_LABEL.sub("", token).rstrip(":")
+
+    @staticmethod
+    def _says_none(raw: str) -> bool:
+        """Whether the answer is the prompt's explicit ``NONE`` verdict
+        (optionally after its ``RELEVANT_IDS:`` / ``RANKED_IDS:`` label, and
+        possibly followed by prose, e.g. "NONE of these are relevant")."""
+        first_line = raw.strip().split("\n", 1)[0]
+        return (
+            re.match(r"(?:(?:RELEVANT|RANKED)_IDS:?\s*)?NONE\b", first_line.strip(), re.I)
+            is not None
+        )
+
+    @staticmethod
     def _parse_ids(raw: str) -> list[str]:
         """Extract IDs from LLM output like '3 7 1' or 'NONE'.
 
@@ -259,7 +308,10 @@ class Reranker:
             return []
         # Take only the first line (LLM might add prose despite instructions)
         first_line = text.split("\n", 1)[0]
-        # Split on whitespace / commas; keep composite tokens intact
+        # Split on whitespace / commas; keep composite tokens intact. A token
+        # echoing the prompt's label form (`ID=R12:`) is kept as is here and
+        # unwrapped at resolution (see `_unlabel`), so a raw id that itself
+        # starts with `ID=` still resolves exactly.
         tokens = [t.strip().rstrip(".") for t in re.split(r"[\s,]+", first_line) if t.strip()]
         labels = {"RELEVANT_IDS", "RANKED_IDS", "NONE", ""}
         return [t for t in tokens if t.upper().rstrip(":") not in labels]
