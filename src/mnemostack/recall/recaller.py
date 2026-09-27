@@ -236,6 +236,84 @@ def derive_payload_schema(
     return out
 
 
+def tenant_probe_sources_of(vector: Any, retrievers: list[Any]) -> list[Any]:
+    """Every distinct store a fail-closed tenant probe must ask for a search
+    over ``vector`` and ``retrievers``: the vector store and each arm's
+    (``vector_store``, or a ``tenant_probe_store`` the arm declares — an
+    in-memory BM25 corpus declares its own documents). Exactly the data the
+    search reads — no more (asking an unrelated collection would refuse a
+    safe search), no less (any one holding several tenants, or two holding
+    one different tenant each, makes a tenantless search cross-tenant)."""
+    candidates = [vector]
+    for r in retrievers:
+        candidates.append(getattr(r, "vector_store", None))
+        candidates.append(getattr(r, "tenant_probe_store", None))
+    sources: list[Any] = []
+    seen: set[int] = set()
+    for store in candidates:
+        if store is None or id(store) in seen:
+            continue
+        if hasattr(store, "tenant_sample") or hasattr(store, "distinct_tenant_count"):
+            seen.add(id(store))
+            sources.append(store)
+    return sources
+
+
+def classify_tenant_sources(sources: list[Any]) -> bool | str:
+    """True = two or more distinct tenants across ``sources``, False = at most
+    one, "none" = nothing to probe, "unknown" = some source could not answer
+    and the rest do not already prove several tenants. Neither "none" nor
+    "unknown" fails closed: the guard exists for data it can inspect."""
+    if not sources:
+        return "none"
+    union: set[Any] = set()
+    unknown = False
+    for store in sources:
+        try:
+            if hasattr(store, "tenant_sample"):
+                sample = store.tenant_sample()
+            else:
+                n = store.distinct_tenant_count()
+                if hasattr(n, "close"):  # an async store's coroutine
+                    n.close()
+                    n = None
+                # A count cannot be unioned: each tenant of an unknown id
+                # gets a unique marker, so two such stores count as two.
+                sample = None if n is None else {object() for _ in range(min(n, 2))}
+        except Exception:
+            sample = None
+        if hasattr(sample, "close"):  # an async store on the sync path
+            sample.close()
+            sample = None
+        if sample is None:
+            unknown = True
+            continue
+        union |= set(sample)
+        if len(union) >= 2:
+            return True
+    return "unknown" if unknown else False
+
+
+def refuse_tenantless(retrievers: list[Any], *, allow_cross_tenant: bool = False) -> None:
+    """The fail-closed guard for a tenantless search over ``retrievers`` that
+    does not go through a Recaller (synthesis over directly supplied arms):
+    same verdicts, same refusal, same once-per-process warning — without
+    constructing a Recaller, whose schema derivation has nothing to do with
+    tenancy and can fail on its own."""
+    if allow_cross_tenant:
+        return
+    verdict = classify_tenant_sources(tenant_probe_sources_of(None, retrievers))
+    if verdict == "unknown":
+        Recaller._warn_probe_unknown()
+    if verdict is True:
+        raise CrossTenantRecallError(
+            "search without a tenant over multi-tenant data: the searched "
+            "collections hold several tenant_id values. Scope the search "
+            "(tenant=...) — or, for deliberate cross-tenant tooling, pass "
+            "allow_cross_tenant=True."
+        )
+
+
 class Recaller:
     """Hybrid recall: BM25 + semantic search + RRF fusion.
 
@@ -549,66 +627,18 @@ class Recaller:
         )
 
     def tenant_probe_sources(self) -> list[Any]:
-        """Every distinct store the fail-closed tenant probe must ask: the
-        recaller's own vector store and each arm's (``vector_store``, or a
-        ``tenant_probe_store`` an arm declares for a collection it read
-        through a raw client). Exactly the collections this recaller reads —
-        no more (asking an unrelated one would refuse a safe recall), no less
-        (any one of them holding several tenants, or two holding one
-        different tenant each, makes a tenantless recall cross-tenant)."""
-        candidates = [getattr(self, "vector", None)]
-        for r in getattr(self, "retrievers", None) or []:
-            candidates.append(getattr(r, "vector_store", None))
-            candidates.append(getattr(r, "tenant_probe_store", None))
-        sources: list[Any] = []
-        seen: set[int] = set()
-        for store in candidates:
-            if store is None or id(store) in seen:
-                continue
-            if hasattr(store, "tenant_sample") or hasattr(store, "distinct_tenant_count"):
-                seen.add(id(store))
-                sources.append(store)
-        return sources
+        """Every distinct store this recaller's fail-closed tenant probe must
+        ask — see :func:`tenant_probe_sources_of`."""
+        return tenant_probe_sources_of(
+            getattr(self, "vector", None), getattr(self, "retrievers", None) or []
+        )
 
     def _probe_multi_tenant(self, sources: list[Any] | None = None) -> bool | str:
-        """Classify what a tenantless recall would read: True = two or more
-        distinct tenants across all probe sources, False = at most one,
-        "none" = nothing to probe (no collection-backed arm: file BM25,
-        custom arms), "unknown" = some source could not answer and the rest
-        do not already prove several tenants. Neither "none" nor "unknown"
-        fails closed: the guard exists for stores it can inspect, and
-        crashing deployments that cannot be inspected would punish exactly
-        the users who have no tenants at all."""
-        if sources is None:
-            sources = self.tenant_probe_sources()
-        if not sources:
-            return "none"
-        union: set[Any] = set()
-        unknown = False
-        for store in sources:
-            try:
-                if hasattr(store, "tenant_sample"):
-                    sample = store.tenant_sample()
-                else:
-                    n = store.distinct_tenant_count()
-                    if hasattr(n, "close"):  # an async store's coroutine
-                        n.close()
-                        n = None
-                    # A count cannot be unioned: each tenant of an unknown id
-                    # gets a unique marker, so two such stores count as two.
-                    sample = None if n is None else {object() for _ in range(min(n, 2))}
-            except Exception:
-                sample = None
-            if hasattr(sample, "close"):  # an async store on the sync path
-                sample.close()
-                sample = None
-            if sample is None:
-                unknown = True
-                continue
-            union |= set(sample)
-            if len(union) >= 2:
-                return True
-        return "unknown" if unknown else False
+        """Classify what a tenantless search would read — see
+        :func:`classify_tenant_sources`."""
+        return classify_tenant_sources(
+            self.tenant_probe_sources() if sources is None else sources
+        )
 
     _PROBE_TTL_S = 60.0
     # Class-level defaults so an instance built without __init__ (tests and

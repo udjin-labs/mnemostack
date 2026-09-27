@@ -1048,6 +1048,11 @@ class BM25Retriever(Retriever):
             ]
             tenant_aware = True
         self.bm25 = BM25(docs, tokenizer=tokenizer, retokenize=retokenize)
+        # An in-memory corpus can answer the fail-closed tenant probe
+        # exactly, from the very documents it searches — whether built from
+        # files, from caller-supplied tenant-tagged docs, or from a Qdrant
+        # snapshot (points deleted since the load stay searchable here).
+        self.tenant_probe_store = _DocsTenantProbe(docs)
         self._set_name(name)
         #: The one payload key whose range filters may cross timestamp domains
         #: (see payload_matches) — a foreign collection's own schema — and how
@@ -1139,11 +1144,6 @@ class BM25Retriever(Retriever):
             # Qdrant payloads carry tenant_id — this corpus CAN be scoped.
             tenant_aware=True,
         )
-        # Declare the tenants of the corpus this arm actually SEARCHES — the
-        # snapshot loaded above, not the live collection: points deleted since
-        # the load are still searchable here, and a filtered load may hold a
-        # single tenant of a shared collection. Exact, and no network call.
-        retriever.tenant_probe_store = _DocsTenantProbe(docs)
         return retriever
 
     def search(self, query, limit=20, filters=None, tenant=None):

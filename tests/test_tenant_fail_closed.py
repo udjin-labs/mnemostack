@@ -822,3 +822,36 @@ def test_a_stored_whitespace_principal_does_not_verify(tmp_path):
         rec["tenant"] = "   "
     (tmp_path / "keys.json").write_text(json.dumps(data))
     assert FileKeyStore(tmp_path / "keys.json").verify(raw) is None
+
+
+# ============================================ PR #195 bot round 2 regressions
+
+
+def test_direct_retriever_probe_does_not_derive_a_schema():
+    """Directly supplied arms may declare conflicting schemas (the caller's
+    explicit override resolves them later); the tenant probe must not build
+    a Recaller whose schema derivation fails on its own."""
+    from mnemostack.synthesis import _query_retrievers
+
+    a = BM25Retriever([BM25Doc(id="1", text="alpha")], timestamp_key="created_at", name="bm25")
+    b = BM25Retriever([BM25Doc(id="2", text="alpha")], timestamp_key="updated_at", name="bm25b")
+    with pytest.raises(ValueError):  # the old probe path built exactly this
+        Recaller(retrievers=[a, b])
+    out = _query_retrievers([a, b], "alpha", 10, None, None)
+    assert {r.id for r in out} == {"1", "2"}
+
+
+def test_directly_built_tenant_tagged_bm25_corpus_is_probed():
+    docs = [
+        BM25Doc(id="a", text="alpha", payload={"tenant_id": "A"}),
+        BM25Doc(id="b", text="alpha", payload={"tenant_id": "B"}),
+    ]
+    arm = BM25Retriever(docs, tenant_aware=True)
+    with pytest.raises(CrossTenantRecallError):
+        Recaller(retrievers=[arm]).recall("alpha")
+
+
+def test_untagged_file_corpus_probe_is_empty_and_open():
+    arm = BM25Retriever([BM25Doc(id="d", text="alpha")])
+    assert arm.tenant_probe_store.tenant_sample() == set()
+    assert [r.id for r in Recaller(retrievers=[arm]).recall("alpha")] == ["d"]

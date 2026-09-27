@@ -497,7 +497,7 @@ def _query_retrievers(
     rules as the recaller path: the fail-closed guard when unscoped, the
     tenant handed only to arms that can enforce it (others are skipped),
     and the isolation backstop on the merged output."""
-    from .recall.recaller import Recaller
+    from .recall.recaller import refuse_tenantless
     from .recall.validity import filter_by_tenant
 
     # Same family-aware matching as the recaller path: a suffixed
@@ -512,9 +512,7 @@ def _query_retrievers(
     if not enabled:
         return []
     if tenant is None:
-        Recaller(
-            retrievers=enabled, allow_cross_tenant=allow_cross_tenant
-        )._guard_tenantless_recall()
+        refuse_tenantless(enabled, allow_cross_tenant=allow_cross_tenant)
     results: list[RecallResult] = []
     for retr in enabled:
         tkw: dict[str, Any] = {}
