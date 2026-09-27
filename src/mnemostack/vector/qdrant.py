@@ -118,6 +118,10 @@ def tenant_sample(client: Any, collection: str) -> set[Any] | None:
         if not first:
             return set()
         t1 = (first[0].payload or {}).get(TENANT_ID_KEY)
+        if t1 is None:
+            # Unreachable by the filter's semantics (IsEmpty excludes null);
+            # if a server ever disagrees, the answer is undetermined.
+            return None
         other, _ = client.scroll(
             collection_name=collection,
             scroll_filter=Filter(must_not=[stamped, _tenant_condition(t1)]),
