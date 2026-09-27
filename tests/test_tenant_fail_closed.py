@@ -855,3 +855,37 @@ def test_untagged_file_corpus_probe_is_empty_and_open():
     arm = BM25Retriever([BM25Doc(id="d", text="alpha")])
     assert arm.tenant_probe_store.tenant_sample() == set()
     assert [r.id for r in Recaller(retrievers=[arm]).recall("alpha")] == ["d"]
+
+
+# ============================================ PR #195 bot round 3 regressions
+
+
+def test_own_vector_store_is_probed_only_when_a_recall_can_search_it():
+    """Retrievers mode without an embedding never searches the recaller's own
+    vector store; with an embedding the low-confidence fallback does."""
+    multi = _SampleStore({"x", "y"})
+    file_bm25 = BM25Retriever([BM25Doc(id="d", text="alpha")])
+
+    no_embed = Recaller(vector_store=multi, retrievers=[file_bm25])
+    assert [r.id for r in no_embed.recall("alpha")] == ["d"]
+
+    class _Emb:
+        dimension = 3
+
+        def embed(self, text):
+            return [0.1, 0.2, 0.3]
+
+    with_embed = Recaller(embedding_provider=_Emb(), vector_store=multi, retrievers=[file_bm25])
+    with pytest.raises(CrossTenantRecallError):
+        with_embed.recall("alpha")
+
+
+def test_empty_tenant_env_clears_a_config_file_tenant(monkeypatch, tmp_path):
+    from mnemostack.config import Config
+
+    cfg_file = tmp_path / "cfg.yaml"
+    cfg_file.write_text("recall:\n  tenant: from-file\n")
+    monkeypatch.setenv("MNEMOSTACK_TENANT", "")
+    assert Config.load(path=str(cfg_file)).recall.tenant is None
+    monkeypatch.delenv("MNEMOSTACK_TENANT")
+    assert Config.load(path=str(cfg_file)).recall.tenant == "from-file"

@@ -628,10 +628,18 @@ class Recaller:
 
     def tenant_probe_sources(self) -> list[Any]:
         """Every distinct store this recaller's fail-closed tenant probe must
-        ask — see :func:`tenant_probe_sources_of`."""
-        return tenant_probe_sources_of(
-            getattr(self, "vector", None), getattr(self, "retrievers", None) or []
-        )
+        ask — see :func:`tenant_probe_sources_of`.
+
+        The recaller's own ``vector`` store counts only when a recall can
+        actually search it: in legacy mode (no arms), or in retrievers mode
+        with an embedding provider — the low-confidence vector fallback then
+        searches it directly. Without an embedding, retrievers mode never
+        touches it, and probing it would refuse a safe recall."""
+        retrievers = getattr(self, "retrievers", None) or []
+        vector = getattr(self, "vector", None)
+        if retrievers and getattr(self, "embedding", None) is None:
+            vector = None
+        return tenant_probe_sources_of(vector, retrievers)
 
     def _probe_multi_tenant(self, sources: list[Any] | None = None) -> bool | str:
         """Classify what a tenantless search would read — see

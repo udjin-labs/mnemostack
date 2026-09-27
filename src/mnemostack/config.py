@@ -658,8 +658,11 @@ def _apply_env_overrides(cfg: Config) -> Config:
     # Recall
     if v := env.get("MNEMOSTACK_BM25_PATHS"):
         cfg.recall.bm25_paths = [p for p in v.split(os.pathsep) if p]
-    if v := env.get("MNEMOSTACK_TENANT"):
-        cfg.recall.tenant = v
+    # PRESENCE decides, not truthiness: MNEMOSTACK_TENANT="" must be able to
+    # clear a tenant set in the config file (Config.load then maps the blank
+    # value to none via normalize_tenant).
+    if "MNEMOSTACK_TENANT" in env:
+        cfg.recall.tenant = env["MNEMOSTACK_TENANT"]
     if v := env.get("MNEMOSTACK_VECTOR_FLOOR"):
         cfg.recall.vector_floor = max(0, int(v))
     if v := env.get("MNEMOSTACK_RERANK_MODE"):
