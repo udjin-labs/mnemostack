@@ -5134,7 +5134,17 @@ def main(argv: list[str] | None = None) -> int:
                 graph_database=os.environ.get("MNEMOSTACK_GRAPH_DATABASE") or None,
             )
     else:
-        parser = build_parser(config_light=subcmd in {"keys", "quota"})
+        config_light = subcmd in {"keys", "quota"}
+        if not config_light:
+            # A config rejected at load (bad value, wrong type, malformed file):
+            # the CLI's error convention, not a traceback. Only the load is
+            # guarded, so a defect in build_parser still surfaces as one.
+            try:
+                Config.load()
+            except (ValueError, TypeError) as e:
+                print(f"error: invalid configuration: {e}", file=sys.stderr)
+                return 2
+        parser = build_parser(config_light=config_light)
     args = parser.parse_args(argv)
     try:
         return args.func(args)

@@ -590,8 +590,8 @@ def test_lifecycle_commands_tolerate_malformed_stack_config(monkeypatch, tmp_pat
     assert "config failed to load" in captured.err  # warned, not aborted
     assert out.exists()
     # sanity: a non-lifecycle command still fails loud on the same env
-    with pytest.raises(ValueError):  # Config.load: invalid literal for int()
-        cli.main(["search", "q"])
+    assert cli.main(["search", "q"]) == 2
+    assert "error: invalid configuration:" in capsys.readouterr().err
 
 
 def test_config_fallback_refuses_destructive_defaults(monkeypatch, tmp_path, capsys):

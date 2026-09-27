@@ -68,7 +68,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   config load (rescore a boolean, oversampling a finite number >= 1.0). A
   collection without quantization ignores the parameters, so they can be
   configured before quantization is enabled; `docs/recipes.md` has the
-  step-by-step order and rollback.
+  step-by-step order and rollback. The same checks apply to values passed
+  directly to `VectorStore` / `AsyncVectorStore`, and a non-numeric
+  `MNEMOSTACK_QUANTIZATION_OVERSAMPLING` names the variable in its error.
+- **An invalid configuration is a clean CLI error.** A config or env value
+  rejected at load (bad value or wrong type), a config file that is not
+  valid YAML, or one whose top level is not a mapping (`[]` and `false`
+  included; an empty, comment-only or `null` file is still an empty config)
+  now prints `error: invalid configuration: ...` and exits 2 instead of a
+  Python traceback.
 
 ## [2.4.0] - 2026-09-04
 

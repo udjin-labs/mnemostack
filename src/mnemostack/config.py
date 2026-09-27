@@ -481,7 +481,16 @@ class Config:
         file_path = _resolve_config_path(path)
         if file_path and file_path.exists():
             with open(file_path) as f:
-                data = _load_yaml_strict(f) or {}
+                try:
+                    data = _load_yaml_strict(f)
+                except yaml.YAMLError as e:
+                    raise ValueError(f"{file_path}: not valid YAML: {e}") from None
+            if data is None:  # empty, comment-only or `null`
+                data = {}
+            if not isinstance(data, dict):
+                raise ValueError(
+                    f"{file_path}: the config must be a mapping, got {type(data).__name__}"
+                )
             cfg = _merge_dict_into_config(cfg, data)
 
         # 2. Env vars (MNEMOSTACK_*)
@@ -667,7 +676,12 @@ def _apply_env_overrides(cfg: Config) -> Config:
         else:
             raise ValueError(f"MNEMOSTACK_QUANTIZATION_RESCORE must be a boolean, got {v!r}")
     if v := env.get("MNEMOSTACK_QUANTIZATION_OVERSAMPLING"):
-        cfg.vector.quantization_oversampling = float(v)
+        try:
+            cfg.vector.quantization_oversampling = float(v)
+        except ValueError:
+            raise ValueError(
+                f"MNEMOSTACK_QUANTIZATION_OVERSAMPLING must be a number, got {v!r}"
+            ) from None
 
     # LLM
     llm_provider = env.get("MNEMOSTACK_LLM_PROVIDER") or env.get("MNEMOSTACK_LLM")
