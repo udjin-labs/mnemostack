@@ -209,8 +209,10 @@ class Retriever(ABC):
     name: str = "retriever"
     #: For an arm that reads a collection through a raw client rather than
     #: a ``vector_store``: the object the recaller's fail-closed tenant probe
-    #: should ask about that collection (``tenant_sample()``). ``None`` =
-    #: the arm reads no collection of its own.
+    #: should ask about that collection (``tenant_sample()``: a list of up to
+    #: two DISTINCT tenant values, or ``None`` when undetermined — two values
+    #: are taken as proof of two tenants). ``None`` = the arm reads no
+    #: collection of its own.
     tenant_probe_store: Any = None
 
     def _set_name(self, name: str | None) -> None:
