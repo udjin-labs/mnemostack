@@ -6,7 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-- **Tenantless recall over a multi-tenant collection fails closed** (#193).
+## [2.5.0] - 2026-09-27
+
+- **Tenantless recall over a verifiably multi-tenant collection is refused** (#193).
   `Recaller.recall(tenant=None)` meant "all tenants", so a consumer wired
   straight to a shared collection that forgot the argument silently searched
   every tenant at once — observed in a real deployment answering from another
