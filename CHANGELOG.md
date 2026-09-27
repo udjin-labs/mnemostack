@@ -51,9 +51,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   whitespace-only CONFIGURED tenant is treated as none; an explicit blank
   per-call tenant is refused rather than defaulted; nonblank tenant ids are
   never rewritten; a non-string configured tenant (YAML `tenant: 123`) is
-  rejected at load. The graph arm remains tenant-incapable and is not
-  probed by the guard: a tenantless recall over a graph holding several
-  tenants is not refused — #194.
+  rejected at load. The graph is covered too (#194): the graph arm answers
+  the same probe for the nodes it reads (two `LIMIT 1` Cypher queries over
+  node `tenant` values; label-less, so on a single-tenant graph they scan
+  every node, once a minute per recaller), so a tenantless recall over a
+  graph holding several tenants, or one tenant in the graph and another in
+  a collection, is refused. The graph resurrection stage, which walks the
+  graph on its own, checks its graph together with the stores the recall
+  read and the tenants of the results it would add to (so a direct
+  `pipeline.apply(query, raw)` is covered too), and skips itself with a
+  warning when they hold several tenants or cannot all be checked, instead
+  of resurrecting any
+  tenant's nodes (the recaller's `allow_cross_tenant`, also through a
+  `QueryExpander`, lets it walk). An unreachable graph leaves the verdict
+  undetermined, as for a collection — but the graph itself is then not read
+  without a tenant: a tenantless recall, `synthesize` over direct arms and
+  the resurrection stage read the graph only under a verdict that proved
+  it and every other store they read single-tenant together, taken by a
+  probe the graph itself answered. A graph that was down when the verdict
+  was taken sits out until a verdict it answers (normally the next one,
+  a minute later; a store that cannot answer keeps it out too), rather than
+  being searched across tenants when it comes back. A collection that does
+  not exist yet counts as holding no tenant, so a populated graph over a
+  not-yet-ingested collection is read as before.
+  `TripleExtractor.extract_and_store` takes `tenant=` like every other
+  graph writer. `Pipeline.apply` takes `recaller=` (keyword-only), which
+  `recall_flow` now passes; a `Pipeline` subclass overriding `apply` needs
+  to accept it.
 - **Configurable Qdrant quantization search parameters** (#196). On a
   quantized collection Qdrant scores candidates on the compressed vectors
   unless told otherwise, which can lower recall quality. New

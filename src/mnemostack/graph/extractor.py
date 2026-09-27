@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+from typing import Any
 
 from ..llm.base import LLMProvider
 from .store import GraphStore, Triple
@@ -92,9 +93,15 @@ class TripleExtractor:
         graph: GraphStore,
         subject_label: str = "Entity",
         obj_label: str = "Entity",
+        tenant: str | None = None,
     ) -> list[Triple]:
-        """Extract triples and persist them in the graph. Returns added triples."""
+        """Extract triples and persist them in the graph. Returns added triples.
+
+        ``tenant`` writes them into that tenant's subgraph (see
+        ``GraphStore.add_triple``); None keeps the unscoped form."""
         triples = self.extract(text)
+        # Only pass tenant= when set, so a graph without the kwarg still works.
+        tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
         for t in triples:
             graph.add_triple(
                 subject=t.subject,
@@ -103,6 +110,7 @@ class TripleExtractor:
                 valid_from=t.valid_from,
                 subject_label=subject_label,
                 obj_label=obj_label,
+                **tkw,
             )
         return triples
 

@@ -531,7 +531,7 @@ def _query_retrievers(
     rules as the recaller path: the fail-closed guard when unscoped, the
     tenant handed only to arms that can enforce it (others are skipped),
     and the isolation backstop on the merged output."""
-    from .recall.recaller import refuse_tenantless
+    from .recall.recaller import graph_read_ok, refuse_tenantless
     from .recall.validity import filter_by_tenant
 
     # Same family-aware matching as the recaller path: a suffixed
@@ -545,8 +545,9 @@ def _query_retrievers(
     ]
     if not enabled:
         return []
+    gate: tuple[Any, frozenset[int]] = ("allowed", frozenset())
     if tenant is None:
-        refuse_tenantless(enabled, allow_cross_tenant=allow_cross_tenant)
+        gate = refuse_tenantless(enabled, allow_cross_tenant=allow_cross_tenant)
     results: list[RecallResult] = []
     for retr in enabled:
         tkw: dict[str, Any] = {}
@@ -554,6 +555,8 @@ def _query_retrievers(
             if not getattr(retr, "accepts_tenant", False):
                 continue  # cannot enforce the scope — same rule as the recaller
             tkw["tenant"] = tenant
+        elif not allow_cross_tenant and not graph_read_ok(retr, *gate):
+            continue  # a graph the guard's probe did not prove single-tenant
         try:
             results.extend(retr.search(entity, limit=max_results, filters=filters, **tkw))
         except TypeError:

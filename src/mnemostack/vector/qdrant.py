@@ -137,6 +137,12 @@ def tenant_sample(client: Any, collection: str) -> list[Any] | None:
         # under its typed equality (true vs 1), which a Python set would
         # collapse.
         return [t1, (other[0].payload or {}).get(TENANT_ID_KEY)]
+    except ValueError as exc:  # local mode: a collection that does not exist
+        return [] if "not found" in str(exc).lower() else None
+    except UnexpectedResponse as exc:
+        # A collection that does not exist (yet) holds no tenant: conclusive,
+        # the same answer collection_exists gives for it.
+        return [] if exc.status_code == 404 else None
     except Exception:
         return None
 

@@ -44,6 +44,8 @@ class _RecordingSession:
 
     def run(self, cypher, **params):
         self.calls.append((cypher, params))
+        if "n.tenant IS NOT NULL" in cypher:  # tenant probe: an untenanted graph
+            return _Result([])
         if "startNode(r)" in cypher:
             return _Result(self._rel_rows)
         return _Result(self._rows)
@@ -446,6 +448,9 @@ def test_resurrection_unscoped_has_no_tenant_predicate():
     driver.session.return_value = session
     stage = GraphResurrection(driver=driver, min_seed_len=3)
     out = stage.apply(PipelineContext(query="alice bob"), [])
-    assert all("tenant" not in c for c, _ in session.calls)
+    # The walk itself carries no tenant predicate (the fail-closed tenant
+    # probe that precedes it is a separate query).
+    walks = [c for c, _ in session.calls if "n.tenant IS NOT NULL" not in c]
+    assert walks and all("tenant" not in c for c in walks)
     injected = [r for r in out if r.payload.get("resurrected")]
     assert injected and "tenant_id" not in injected[0].payload
