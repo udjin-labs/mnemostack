@@ -46,7 +46,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   library, without mutating the caller's docs) so a scoped recall keeps its
   lexical arm, and the recaller logs once per arm when it has to skip an
   arm that cannot be tenant-scoped (previously silent). A blank or
-  whitespace-only tenant is treated as none on every entry point. The graph arm
+  whitespace-only CONFIGURED tenant is treated as none; an explicit blank
+  per-call tenant is refused rather than defaulted; nonblank tenant ids are
+  never rewritten. The graph arm
   remaining tenant-incapable is #194.
 
 ## [2.4.0] - 2026-09-04

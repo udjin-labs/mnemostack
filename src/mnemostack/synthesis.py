@@ -180,9 +180,14 @@ def synthesize(
     # One tenant for the whole report: the explicit argument, else the
     # supplied recaller's own scope. Both paths below run under it, and the
     # merged results are backstopped, so one report never mixes tenants.
-    from .config import normalize_tenant
+    from .recall.recaller import CrossTenantRecallError
 
-    tenant = normalize_tenant(kwargs.get("tenant")) or getattr(recaller, "default_tenant", None) or None
+    explicit = kwargs.get("tenant")
+    if isinstance(explicit, str) and not explicit.strip():
+        # Same rule as Recaller.recall: an explicit blank scope is refused,
+        # never treated as "no tenant" (which would fall back to a default).
+        raise CrossTenantRecallError("blank tenant: synthesize(tenant=...) is empty")
+    tenant = explicit or getattr(recaller, "default_tenant", None) or None
     # The synthesis-level opt-out governs a supplied recaller too: run a
     # shallow copy with the flag set, never mutate the caller's object.
     if kwargs.get("allow_cross_tenant") and recaller is not None and not getattr(

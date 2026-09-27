@@ -245,15 +245,15 @@ def resolve_text_search_mode(mode: str, bm25_paths: list[str] | None) -> str:
 
 
 def normalize_tenant(value: Any) -> Any:
-    """A blank or whitespace-only tenant is NO tenant. Every entry point a
-    tenant arrives through (env, config file, Recaller construction and
-    per-call argument, server, MCP, CLI) runs through here, so "" can
-    never become a scope that matches nothing and slips past the
-    fail-closed guard — or gets stamped onto writes. Non-strings pass
-    through unchanged."""
-    if isinstance(value, str):
-        value = value.strip()
-        return value or None
+    """A CONFIGURED tenant that is blank or whitespace-only is no tenant, so
+    a stray "" in a config file or flag can never become a scope that
+    matches nothing and slips past the fail-closed guard. Any other value
+    is returned VERBATIM — never stripped: a tenant id is an identity,
+    and "acme " rewritten to "acme" would make reads and writes disagree
+    (writes stamp the raw value). Explicit per-call tenants are not
+    normalized at all; a blank one is refused where it is used."""
+    if isinstance(value, str) and not value.strip():
+        return None
     return value
 
 

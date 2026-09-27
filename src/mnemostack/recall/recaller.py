@@ -625,9 +625,16 @@ class Recaller:
         else the construction-time default. Every public search surface
         resolves through here, so a default can never apply to one entry
         point and not another."""
-        from ..config import normalize_tenant
-
-        tenant = normalize_tenant(tenant)
+        # A per-call tenant is an IDENTITY (under auth: the key's principal),
+        # never rewritten: stripping "acme " to "acme" would read another
+        # tenant's data, and turning " " into "no tenant" would fall back to
+        # the configured default. A blank one is refused instead.
+        if isinstance(tenant, str) and not tenant.strip():
+            raise CrossTenantRecallError(
+                "blank tenant: a recall scoped to an empty or whitespace-only "
+                "tenant is refused rather than treated as unscoped or as the "
+                "configured default"
+            )
         return tenant if tenant is not None else self.default_tenant
 
     @staticmethod

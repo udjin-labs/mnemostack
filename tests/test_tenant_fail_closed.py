@@ -735,12 +735,31 @@ def test_synthesize_opt_out_governs_a_supplied_recaller_without_mutating_it():
 
 
 @pytest.mark.parametrize("blank", ["", "   "])
-def test_blank_per_call_and_default_tenants_are_unscoped_and_guarded(blank):
+def test_whitespace_default_tenant_is_unscoped_and_guarded(blank):
     store = _FakeStore(tenants=2)
     r = Recaller(retrievers=[_StaticArm("vector", [], store=store)], default_tenant=blank)
     assert r.default_tenant is None
     with pytest.raises(CrossTenantRecallError):
+        r.recall("q")
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_blank_per_call_tenant_is_refused_never_defaulted(blank):
+    """A per-call tenant is an identity (under auth, the key's principal): a
+    blank one must never fall back to the configured default tenant."""
+    arm = _StaticArm("vector", [_hit("m", "main")], tenant_capable=True)
+    r = Recaller(retrievers=[arm], default_tenant="main")
+    with pytest.raises(CrossTenantRecallError, match="blank tenant"):
         r.recall("q", tenant=blank)
+    assert arm.seen_tenants == []
+
+
+def test_per_call_tenant_is_never_rewritten():
+    """ "acme " is its own identity, not "acme"."""
+    arm = _StaticArm("vector", [_hit("a", "acme"), _hit("b", "acme ")], tenant_capable=True)
+    r = Recaller(retrievers=[arm])
+    assert [x.id for x in r.recall("q", tenant="acme ")] == ["b"]
+    assert arm.seen_tenants == ["acme "]
 
 
 def test_whitespace_tenant_from_env_is_no_tenant(monkeypatch):
@@ -748,3 +767,20 @@ def test_whitespace_tenant_from_env_is_no_tenant(monkeypatch):
 
     monkeypatch.setenv("MNEMOSTACK_TENANT", "   ")
     assert Config.load(path=None).recall.tenant is None
+
+
+def test_configured_tenant_keeps_nonblank_values_verbatim():
+    """Reads and writes must agree: a configured " acme " stays " acme "."""
+    from mnemostack.config import normalize_tenant
+
+    assert normalize_tenant(" acme ") == " acme "
+    assert normalize_tenant("  ") is None
+    assert Recaller(retrievers=[], default_tenant=" acme ").default_tenant == " acme "
+
+
+def test_synthesize_refuses_a_blank_explicit_tenant():
+    from mnemostack.synthesis import synthesize
+
+    arm = _StaticArm("vector", [_hit("m", "main")], tenant_capable=True)
+    with pytest.raises(CrossTenantRecallError, match="blank tenant"):
+        synthesize("q", recaller=Recaller(retrievers=[arm], default_tenant="main"), tenant=" ")
