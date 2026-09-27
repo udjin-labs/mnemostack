@@ -1198,8 +1198,8 @@ def build_server(
             try:
                 # Structured SPO query — the graph is tenant-scoped now, so under
                 # auth we confine the query to the caller's tenant (both endpoints
-                # pinned to `tenant`) rather than fail closed. Unscoped when auth
-                # is off (tenant=None).
+                # pinned to `tenant`) rather than fail closed. With auth off: the
+                # configured tenant scope, or unscoped when none is set.
                 tenant = _tenant_of(_authorize("read"))
                 from ..graph.factory import make_graph_store
 
@@ -1252,7 +1252,8 @@ def build_server(
             try:
                 # Structured write — stamp the caller's tenant so the triple lands
                 # in that tenant's isolated subgraph (its nodes/edges carry
-                # `tenant`), never a shared namespace. Unscoped when auth is off.
+                # `tenant`), never a shared namespace. With auth off: the
+                # configured tenant scope, or unscoped when none is set.
                 try:
                     tenant = _tenant_of(_authorize("write"))
                 except _AuthError as e:

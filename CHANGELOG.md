@@ -11,22 +11,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   straight to a shared collection that forgot the argument silently searched
   every tenant at once — observed in a real deployment answering from another
   tenant's corpus with full confidence. A tenantless recall now probes the
-  collection (Qdrant `tenant_id` facet, falling back to a bounded payload
-  scan when the field is unindexed; a positive answer is cached, a negative
-  or undetermined one re-checked every minute) and raises
-  `CrossTenantRecallError` when it holds more than one tenant — on every
-  public search surface (`recall`, `recall_async`, `search_many`, and so the
-  answer generator's expansion retry); single-tenant and legacy collections
-  behave exactly as before, and a probe that cannot answer logs a warning. The scope is set once, not per call: `Recaller(default_tenant=...)`,
+  collection (two `limit=1` server-side queries, exact with or without a
+  payload index on `tenant_id`; a positive answer is cached, a negative or
+  undetermined one re-checked every minute, one refresh at a time) and
+  raises `CrossTenantRecallError` when it holds more than one tenant — on
+  every public search surface (`recall`, `recall_async`, `search_many`, and
+  so the answer generator's expansion retry, plus `synthesize` with
+  directly supplied retrievers or a source filter); collections with a
+  single tenant, legacy points included, behave exactly as before, and a
+  probe that cannot answer logs a warning. HTTP reports the refusal as
+  `409` with the reason rather than a generic `500`. The scope is set once, not per call: `Recaller(default_tenant=...)`,
   `recall.tenant` in the config, `MNEMOSTACK_TENANT`, or `--tenant` on
   `search`/`answer`/`synthesize`/`serve`/`mcp-serve` — resolved once more at
   the top of `recall_flow`, so the pipeline stages (graph resurrection,
   learning state) and the post-pipeline backstop run under it too. On an
   unauthenticated `serve`/`mcp-serve` the scope is the surface's single
-  tenant-resolution point, covering writes as well as reads. An
-  unauthenticated `serve` refuses at startup to expose a multi-tenant
-  collection, and `synthesize` reports the refusal instead of printing an
-  empty report.
+  tenant-resolution point, covering writes as well as reads, and the CLI's
+  `feedback` and `resolve` default to the configured tenant too. Scoping
+  hides points without a `tenant_id`: stamp an existing collection with
+  `mnemostack tenant-migrate` first — a scoped `serve` warns at startup when
+  it finds unstamped points. An unauthenticated `serve` refuses at startup
+  to expose a multi-tenant collection, and `synthesize` reports the refusal
+  instead of printing an empty report.
   `allow_cross_tenant=True` / `--allow-cross-tenant` restores the old
   behavior for deliberate cross-tenant tooling — documented as operating
   inside the trust boundary, not as a security control (with auth on, the

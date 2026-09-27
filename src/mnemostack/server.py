@@ -835,6 +835,9 @@ class ServerConfig:
     allow_cross_tenant: bool = False
 
     def __post_init__(self) -> None:
+        # A blank tenant is no tenant: "" would stamp writes with an empty
+        # tenant_id, match nothing on reads, and slip past the startup gate.
+        self.default_tenant = self.default_tenant or None
         if self.rerank_mode not in RERANK_MODES:
             allowed = ", ".join(sorted(RERANK_MODES))
             raise ValueError(f"rerank_mode must be one of: {allowed}")
@@ -1265,6 +1268,20 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 "(recall.tenant / MNEMOSTACK_TENANT), or pass "
                 "--allow-cross-tenant if this exposure is deliberate."
             )
+    if not cfg.auth_enabled and cfg.default_tenant:
+        # Enabling a scope over data that predates it hides that data from
+        # every handler (recall, list, invalidate, delete) — say so at boot.
+        unstamped = getattr(store, "count_unstamped", lambda: None)()
+        if isinstance(unstamped, int) and unstamped > 0:
+            log.warning(
+                "serving scoped to tenant %r, but %d point(s) in the collection "
+                "carry no tenant_id and are invisible to this server (recall, "
+                "list, invalidate and delete alike). Stamp them with "
+                "`mnemostack tenant-migrate --tenant %s` if they belong to it.",
+                cfg.default_tenant,
+                unstamped,
+                cfg.default_tenant,
+            )
 
     from pathlib import Path
 
@@ -1438,7 +1455,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             x_api_key: str | None = Header(default=None, alias="X-API-Key"),
         ):
             if not cfg.auth_enabled:
-                return None  # auth off: unauthenticated, tenant-less (legacy)
+                return None  # auth off: no principal; _tenant_of applies the configured scope
             key = _extract_key(authorization, x_api_key)
             if not key:
                 raise HTTPException(status_code=401, detail="missing service key")
@@ -1724,6 +1741,9 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 True,  # record access here; /answer defers until it answers
                 req.retry_on_weak,
             )
+        except CrossTenantRecallError as exc:
+            # A misconfiguration the operator must fix, not a server fault.
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except Exception as exc:
             log.exception("recall endpoint failed")
             raise HTTPException(status_code=500, detail="recall failed") from exc
@@ -1810,6 +1830,8 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                     tenant=tenant,
                 )
             )
+        except CrossTenantRecallError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except Exception as exc:
             log.exception("answer endpoint failed")
             raise HTTPException(status_code=500, detail="answer failed") from exc
@@ -2275,7 +2297,9 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         key's tenant are deleted, and foreign or unknown ids are skipped
         indistinguishably (the count is not an existence oracle). Without
         auth every requested existing id is deleted (single-tenant
-        legacy). `index_root` narrows the operation to one indexing
+        legacy) — unless the server is scoped to a tenant
+        (`recall.tenant` / `MNEMOSTACK_TENANT`), in which case only that
+        tenant's points are. `index_root` narrows the operation to one indexing
         root's points, matching `/invalidate` — points carrying no
         `index_root` tag are not protected by the guard.
 

@@ -349,29 +349,6 @@ def test_unknown_probe_is_retried_and_warns_once(monkeypatch, caplog):
     assert r._probe_unknown_warned is True
 
 
-def test_distinct_tenant_count_falls_back_to_scroll_when_facet_is_rejected():
-    """A real server rejects faceting an unindexed tenant_id (collections
-    created before tenancy); the probe must fall back to a bounded scroll
-    instead of reporting "unknown" and leaving the guard open."""
-    from mnemostack.vector.qdrant import VectorStore
-
-    class _Pt:
-        def __init__(self, tid):
-            self.payload = {"tenant_id": tid} if tid else {}
-
-    class _Client:
-        def facet(self, **kw):
-            raise RuntimeError("No appropriate index for faceting: tenant_id")
-
-        def scroll(self, **kw):
-            return [_Pt(None), _Pt("a"), _Pt("a"), _Pt("b")], None
-
-    s = VectorStore.__new__(VectorStore)
-    s.client = _Client()
-    s.collection = "c"
-    assert s.distinct_tenant_count() == 2
-
-
 def test_synthesize_surfaces_the_refusal_instead_of_an_empty_report():
     from mnemostack.synthesis import synthesize
 
@@ -423,3 +400,161 @@ def test_unauth_scoped_server_stamps_writes_with_its_tenant(monkeypatch, tmp_pat
     assert resp.status_code == 200, resp.text
     pts, _ = store.client.scroll(collection_name=store.collection, limit=10)
     assert pts and all(p.payload.get("tenant_id") == "alpha" for p in pts)
+
+
+# ============================================== review round 2 regressions
+
+
+def _real_store(points):
+    """In-memory Qdrant with the given (id, tenant_or_None) points — the
+    probe is exercised against a real query engine, not a fake scroll."""
+    from qdrant_client import QdrantClient
+
+    from mnemostack.vector.qdrant import VectorStore
+
+    s = VectorStore(collection="probe", dimension=3)
+    s.client = QdrantClient(":memory:")
+    s.ensure_collection()
+    for pid, tenant in points:
+        payload = {"text": f"p{pid}"}
+        s.client.upsert(
+            collection_name="probe",
+            points=[
+                __import__("qdrant_client").models.PointStruct(
+                    id=pid,
+                    vector=[0.1, 0.2, 0.3],
+                    payload={**payload, **({"tenant_id": tenant} if tenant else {})},
+                )
+            ],
+        )
+    return s
+
+
+@pytest.mark.parametrize(
+    ("points", "expected"),
+    [
+        ([], 0),
+        ([(1, None), (2, None)], 0),  # legacy only
+        ([(1, "a"), (2, "a")], 1),
+        ([(1, None), (2, "a"), (3, "a")], 1),  # one tenant + legacy stays open
+        ([(1, "a"), (2, "b")], 2),
+        ([(1, None)] * 1 + [(i, "a") for i in range(2, 60)] + [(99, "b")], 2),
+    ],
+)
+def test_exact_probe_on_a_real_query_engine(points, expected):
+    """Two limit=1 scrolls answer exactly, with no cap: the second tenant is
+    found even when it sits behind many points of the first."""
+    assert _real_store(points).distinct_tenant_count() == expected
+
+
+def test_count_unstamped_counts_points_without_a_tenant():
+    s = _real_store([(1, None), (2, None), (3, "a")])
+    assert s.count_unstamped() == 2
+
+
+def test_probe_refresh_is_single_flight(monkeypatch):
+    """A stale cache under concurrent traffic re-probes once, not once per
+    thread."""
+    import threading
+
+    store = _FakeStore(tenants=1)
+    r = Recaller(retrievers=[_StaticArm("vector", [_hit("a")], store=store)])
+    r.recall("q")
+    monkeypatch.setattr(Recaller, "_PROBE_TTL_S", 3600.0)
+    r._probe_at = -1e9  # force stale
+    barrier = threading.Barrier(8)
+
+    def worker():
+        barrier.wait()
+        r.recall("q")
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    assert store.probes == 2  # initial + exactly one refresh
+
+
+def test_synthesis_clone_keeps_the_probe_store():
+    """Narrowing the arm set to arms that expose no store (BM25 loaded from
+    Qdrant) must not blind the guard."""
+    from mnemostack.synthesis import synthesize
+
+    store = _FakeStore(tenants=2)
+    vec = _StaticArm("vector", [_hit("a", "t1")], store=store)
+    bm25 = _StaticArm("bm25", [_hit("b", "t2")])  # exposes no vector_store
+    r = Recaller(retrievers=[vec, bm25])
+    with pytest.raises(CrossTenantRecallError):
+        synthesize("alpha", recaller=r, sources=["bm25"])
+
+
+def test_direct_retrievers_are_guarded_scoped_and_backstopped():
+    from mnemostack.synthesis import _query_retrievers
+
+    store = _FakeStore(tenants=2)
+    capable = _StaticArm(
+        "vector", [_hit("a", "t1"), _hit("b", "t2")], tenant_capable=True, store=store
+    )
+    incapable = _StaticArm("bm25", [_hit("c")])
+    # unscoped over a multi-tenant collection: refused
+    with pytest.raises(CrossTenantRecallError):
+        _query_retrievers([capable, incapable], "q", 10, None, None)
+    # scoped: the tenant reaches capable arms only, output is backstopped
+    out = _query_retrievers([capable, incapable], "q", 10, None, None, tenant="t1")
+    assert [x.id for x in out] == ["a"]
+    assert capable.seen_tenants == ["t1"]
+    assert incapable.seen_tenants == []
+
+
+def test_server_config_normalizes_a_blank_tenant():
+    pytest.importorskip("fastapi")
+    from mnemostack.server import ServerConfig
+
+    assert ServerConfig(provider_name="x", default_tenant="").default_tenant is None
+
+
+def test_scoped_server_warns_about_unstamped_points(monkeypatch, tmp_path):
+    pytest.importorskip("fastapi")
+    from test_remote_ingest import _ingest_app
+
+    import mnemostack.server as srv
+
+    # Capture the call itself: other tests leave global logging state behind
+    # (levels, propagation), which makes caplog order-dependent here.
+    messages = []
+    monkeypatch.setattr(srv.log, "warning", lambda msg, *a, **k: messages.append(msg % a))
+    monkeypatch.setattr(srv.VectorStore, "count_unstamped", lambda self: 5, raising=False)
+    _ingest_app(monkeypatch, tmp_path, auth=False, cfg_extra={"default_tenant": "alpha"})
+    assert any("tenant-migrate" in m and "5 point" in m for m in messages)
+
+
+def test_under_auth_the_key_decides_not_the_configured_scope(monkeypatch, tmp_path):
+    """default_tenant is the auth-OFF scope only: with auth on, writes land
+    in the key's tenant whatever the server config says."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from test_remote_ingest import _ingest_app
+
+    app, store, _emb, keys = _ingest_app(
+        monkeypatch, tmp_path, auth=True, cfg_extra={"default_tenant": "zzz"}
+    )
+    resp = TestClient(app).post(
+        "/memories",
+        json={"items": [{"text": "hello there"}]},
+        headers={"Authorization": f"Bearer {keys['write']}"},
+    )
+    assert resp.status_code == 200, resp.text
+    pts, _ = store.client.scroll(collection_name=store.collection, limit=10)
+    assert pts and all(p.payload.get("tenant_id") == "alpha" for p in pts)
+
+
+def test_cli_feedback_and_resolve_default_to_the_configured_tenant(monkeypatch):
+    from mnemostack.cli import build_parser
+
+    monkeypatch.setenv("MNEMOSTACK_TENANT", "t-env")
+    parser = build_parser()
+    fb = parser.parse_args(["feedback", "some-id", "--signal", "useful"])
+    assert fb.tenant == "t-env"
+    rs = parser.parse_args(["resolve", "some-id"])
+    assert rs.tenant == "t-env"

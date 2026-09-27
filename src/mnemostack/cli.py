@@ -3693,7 +3693,11 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         default=None,
         help="Where relative sources are looked up (default: the payload's own index_root)",
     )
-    p_resolve.add_argument("--tenant", default=None, help="Tenant scope for the lookup")
+    p_resolve.add_argument(
+        "--tenant",
+        default=cfg.recall.tenant,
+        help="Tenant scope for the lookup (default: recall.tenant / MNEMOSTACK_TENANT)",
+    )
     p_resolve.add_argument("--json", action="store_true", help="Emit the full resolution as JSON")
     p_resolve.set_defaults(func=cmd_resolve)
 
@@ -4408,10 +4412,11 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     )
     p_feedback.add_argument(
         "--tenant",
-        default=None,
+        default=cfg.recall.tenant,
         metavar="ID",
         help="Record the feedback into this tenant's learning-state partition "
-        "(default: unscoped / single-tenant)",
+        "(default: recall.tenant / MNEMOSTACK_TENANT, else unscoped) — the "
+        "same partition the scoped search/answer read",
     )
     p_feedback.add_argument("--json", action="store_true", help="JSON output")
     p_feedback.set_defaults(func=cmd_feedback)

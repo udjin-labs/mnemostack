@@ -179,7 +179,15 @@ def synthesize(
     raw_results = _query_recaller(recaller, entity, max_results, kwargs.get("filters"))
     raw_results.extend(
         _query_retrievers(
-            kwargs.get("retrievers"), entity, max_results, source_filter, kwargs.get("filters")
+            kwargs.get("retrievers"),
+            entity,
+            max_results,
+            source_filter,
+            kwargs.get("filters"),
+            tenant=kwargs.get("tenant") or getattr(recaller, "default_tenant", None) or None,
+            allow_cross_tenant=bool(
+                kwargs.get("allow_cross_tenant", getattr(recaller, "allow_cross_tenant", False))
+            ),
         )
     )
     raw_results = [r for r in raw_results if _result_source_enabled(r, source_filter)]
@@ -369,7 +377,7 @@ def _filter_recaller(recaller: Any, source_filter: set[str] | None) -> Any:
         for retr in retrievers
         if _source_enabled(str(getattr(retr, "name", "")).lower(), source_filter)
     ]
-    return Recaller(
+    clone = Recaller(
         retrievers=filtered,
         rrf_k=getattr(recaller, "rrf_k", 60),
         retriever_weights=getattr(recaller, "retriever_weights", None),
@@ -385,6 +393,11 @@ def _filter_recaller(recaller: Any, source_filter: set[str] | None) -> Any:
         default_tenant=getattr(recaller, "default_tenant", None),
         allow_cross_tenant=getattr(recaller, "allow_cross_tenant", False),
     )
+    # ... and the store its tenant probe asks: the kept arms may expose none
+    # (BM25 loaded from Qdrant), which would otherwise blind the guard.
+    source = getattr(recaller, "tenant_probe_source", None)
+    clone._tenant_probe_store = source() if callable(source) else None
+    return clone
 
 
 def _result_source_enabled(result: RecallResult, source_filter: set[str] | None) -> bool:
@@ -446,25 +459,48 @@ def _query_retrievers(
     max_results: int,
     source_filter: set[str] | None,
     filters: dict[str, Any] | None,
+    *,
+    tenant: str | None = None,
+    allow_cross_tenant: bool = False,
 ) -> list[RecallResult]:
+    """Query caller-supplied retrievers directly — under the same tenant
+    rules as the recaller path: the fail-closed guard when unscoped, the
+    tenant handed only to arms that can enforce it (others are skipped),
+    and the isolation backstop on the merged output."""
+    from .recall.recaller import Recaller
+    from .recall.validity import filter_by_tenant
+
+    if not retrievers:
+        return []
+    if tenant is None:
+        Recaller(
+            retrievers=list(retrievers), allow_cross_tenant=allow_cross_tenant
+        )._guard_tenantless_recall()
     results: list[RecallResult] = []
-    for retr in retrievers or []:
+    for retr in retrievers:
         name = str(getattr(retr, "name", "")).lower()
         # Same family-aware matching as the recaller path: a suffixed
         # multi-field arm ("qdrant_text:title") is part of the lexical
         # family the "bm25" umbrella selects.
         if not _source_enabled(name, source_filter):
             continue
+        tkw: dict[str, Any] = {}
+        if tenant is not None:
+            if not getattr(retr, "accepts_tenant", False):
+                continue  # cannot enforce the scope — same rule as the recaller
+            tkw["tenant"] = tenant
         try:
-            results.extend(retr.search(entity, limit=max_results, filters=filters))
+            results.extend(retr.search(entity, limit=max_results, filters=filters, **tkw))
         except TypeError:
+            if tkw:
+                continue  # a scoped arm that rejects `tenant` must not run unscoped
             try:
                 results.extend(retr.search(entity, limit=max_results))
             except Exception:
                 continue
         except Exception:
             continue
-    return results
+    return filter_by_tenant(results, tenant)
 
 
 def _facts_from_results(

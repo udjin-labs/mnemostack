@@ -27,6 +27,13 @@ from .validity import filter_by_tenant, filter_by_validity, keep_payload, numeri
 logger = logging.getLogger(__name__)
 
 
+#: Single-flight for tenant-probe refreshes: when a cached answer goes stale
+#: under concurrent traffic, one thread re-probes and the rest reuse its
+#: result instead of each hitting the store. Probes are rare and cheap, so
+#: one process-wide lock is enough.
+_PROBE_LOCK = threading.Lock()
+
+
 class CrossTenantRecallError(RuntimeError):
     """A tenantless recall was refused over a multi-tenant collection.
 
@@ -537,24 +544,30 @@ class Recaller:
             tenant=tenant,
         )
 
+    def tenant_probe_source(self) -> Any:
+        """The store the fail-closed tenant probe asks: the recaller's own
+        vector store, else the first arm's, else one carried over from the
+        recaller this one was rebuilt from. ``None`` = nothing to ask."""
+        candidates = [getattr(self, "vector", None)]
+        candidates += [
+            getattr(r, "vector_store", None) for r in getattr(self, "retrievers", None) or []
+        ]
+        candidates.append(self._tenant_probe_store)
+        for store in candidates:
+            if store is not None and hasattr(store, "distinct_tenant_count"):
+                return store
+        return None
+
     def _probe_multi_tenant(self) -> bool | str:
         """One-shot classification of the collection: True = holds two or
         more distinct ``tenant_id`` values, False = one or none, "unknown" =
-        the store cannot answer (no facet capability, transport failure, an
+        the store cannot answer (no probe capability, transport failure, an
         async-only store on the sync path). Unknown deliberately does NOT
         fail closed: the guard exists for stores we can actually inspect —
         crashing every legacy/custom-store deployment that cannot be
         inspected would punish exactly the users who have no tenants at all.
         """
-        store = getattr(self, "vector", None)
-        if store is None or not hasattr(store, "distinct_tenant_count"):
-            for retr in getattr(self, "retrievers", None) or []:
-                candidate = getattr(retr, "vector_store", None)
-                if candidate is not None and hasattr(candidate, "distinct_tenant_count"):
-                    store = candidate
-                    break
-            else:
-                store = None
+        store = self.tenant_probe_source()
         if store is None:
             return "unknown"
         try:
@@ -577,6 +590,10 @@ class Recaller:
     _multi_tenant_probe: bool | str | None = None
     _probe_at: float = 0.0
     _probe_unknown_warned: bool = False
+    #: Store the tenant probe should ask when neither `vector` nor any arm
+    #: exposes one — set on recallers rebuilt from another (the synthesis
+    #: source filter), so narrowing the arm set cannot blind the guard.
+    _tenant_probe_store: Any = None
 
     def _effective_tenant(self, tenant: str | None) -> str | None:
         """The tenant a search actually runs under: the explicit per-call one,
@@ -592,22 +609,28 @@ class Recaller:
         (holders of the store credentials)."""
         if self.allow_cross_tenant:
             return
-        now = time.monotonic()
-        stale = (
-            self._multi_tenant_probe is None
-            or (self._multi_tenant_probe is not True and now - self._probe_at >= self._PROBE_TTL_S)
-        )
-        if stale:
-            self._multi_tenant_probe = self._probe_multi_tenant()
-            self._probe_at = now
-            if self._multi_tenant_probe == "unknown" and not self._probe_unknown_warned:
-                self._probe_unknown_warned = True
-                logger.warning(
-                    "recall: could not determine whether the collection holds "
-                    "several tenants (store offers no tenant probe, or it "
-                    "failed); tenantless recall is NOT guarded. Scope recalls "
-                    "with a tenant (MNEMOSTACK_TENANT / recall.tenant) to be safe."
-                )
+        def _stale() -> bool:
+            return self._multi_tenant_probe is None or (
+                self._multi_tenant_probe is not True
+                and time.monotonic() - self._probe_at >= self._PROBE_TTL_S
+            )
+
+        if _stale():
+            with _PROBE_LOCK:
+                if _stale():  # another thread may have refreshed meanwhile
+                    self._multi_tenant_probe = self._probe_multi_tenant()
+                    self._probe_at = time.monotonic()
+                    if self._multi_tenant_probe == "unknown" and not self._probe_unknown_warned:
+                        self._probe_unknown_warned = True
+                        logger.warning(
+                            "recall: could not determine whether the collection "
+                            "holds several tenants (store offers no tenant probe, "
+                            "or it failed); tenantless recall is NOT guarded. If "
+                            "the collection is shared, scope recalls with a tenant "
+                            "(MNEMOSTACK_TENANT / recall.tenant) — after stamping "
+                            "existing points with `mnemostack tenant-migrate`, or "
+                            "the scope will hide them."
+                        )
         if self._multi_tenant_probe is True:
             raise CrossTenantRecallError(
                 "recall without a tenant over a multi-tenant collection: the "

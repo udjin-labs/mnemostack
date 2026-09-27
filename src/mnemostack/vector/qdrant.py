@@ -92,11 +92,6 @@ def _hide_invalidated_condition() -> IsEmptyCondition:
     return IsEmptyCondition(is_empty=PayloadField(key=_INVALIDATED_AT_KEY))
 
 
-#: Upper bound on points scanned by the tenant probe's scroll fallback —
-#: enough to see a second tenant in any realistic collection, small
-#: enough to stay a one-off startup/recall cost.
-_TENANT_PROBE_SCAN_CAP = 20_000
-
 
 class DimensionMismatchError(ValueError):
     """Existing collection stores vectors of a different size than the provider produces."""
@@ -520,50 +515,53 @@ class VectorStore:
         return info.points_count or 0
 
     def distinct_tenant_count(self, limit: int = 2) -> int | None:
-        """How many distinct ``tenant_id`` values the collection holds, up to
-        ``limit`` — the recaller's fail-closed guard only needs to know
-        "more than one?", so the default stops counting at 2.
+        """0, 1 or 2 — whether the collection holds no ``tenant_id``, exactly
+        one distinct value, or more than one ("2" means "two or more"; the
+        recaller's fail-closed guard only needs "more than one?").
 
-        The facet API answers only when ``tenant_id`` carries a payload index
-        (a real server rejects an unindexed facet); a collection created
-        before tenancy, or mounted from elsewhere, may lack it. The fallback
-        is a bounded payload scroll that stops as soon as ``limit`` distinct
-        values are seen. ``None`` means "could not determine" (transport
-        failure, or the scan cap reached without an answer); a collection
-        with no ``tenant_id`` at all returns 0.
+        Two ``limit=1`` scrolls, answered exactly by the server with or
+        without a payload index on ``tenant_id``: the first finds any stamped
+        point, the second any stamped point whose tenant differs from it. No
+        client-side scan, no cap, so a large collection costs the same as a
+        small one. ``None`` means the store could not answer (transport
+        failure); the caller treats that as unguardable, not as "one tenant".
+        ``limit`` is accepted for interface stability and ignored.
         """
-        want = max(2, limit)
+        del limit
+        stamped = IsEmptyCondition(is_empty=PayloadField(key=TENANT_ID_KEY))
         try:
-            res = self.client.facet(
+            first, _ = self.client.scroll(
                 collection_name=self.collection,
-                key=TENANT_ID_KEY,
-                limit=want,
+                scroll_filter=Filter(must_not=[stamped]),
+                with_payload=[TENANT_ID_KEY],
+                with_vectors=False,
+                limit=1,
             )
-            return len(res.hits)
+            if not first:
+                return 0
+            t1 = (first[0].payload or {}).get(TENANT_ID_KEY)
+            other, _ = self.client.scroll(
+                collection_name=self.collection,
+                scroll_filter=Filter(must_not=[stamped, _tenant_condition(t1)]),
+                with_payload=False,
+                with_vectors=False,
+                limit=1,
+            )
+            return 2 if other else 1
         except Exception:
-            pass
-        try:
-            seen: set[Any] = set()
-            offset: Any = None
-            scanned = 0
-            while scanned < _TENANT_PROBE_SCAN_CAP:
-                points, offset = self.client.scroll(
-                    collection_name=self.collection,
-                    with_payload=[TENANT_ID_KEY],
-                    with_vectors=False,
-                    limit=1000,
-                    offset=offset,
-                )
-                for pt in points:
-                    tid = (pt.payload or {}).get(TENANT_ID_KEY)
-                    if tid is not None:
-                        seen.add(tid)
-                        if len(seen) >= want:
-                            return len(seen)
-                scanned += len(points)
-                if offset is None or not points:
-                    return len(seen)
             return None
+
+    def count_unstamped(self) -> int | None:
+        """Points carrying no ``tenant_id`` — the data a tenant-scoped surface
+        cannot see until it is stamped (``mnemostack tenant-migrate``).
+        ``None`` when the store cannot answer."""
+        try:
+            return self.client.count(
+                collection_name=self.collection,
+                count_filter=Filter(
+                    must=[IsEmptyCondition(is_empty=PayloadField(key=TENANT_ID_KEY))]
+                ),
+            ).count
         except Exception:
             return None
 
