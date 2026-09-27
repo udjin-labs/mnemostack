@@ -364,13 +364,6 @@ def ensure_text_fields_mode(resolved_mode: str, fields: dict[str, float]) -> Non
 @dataclass
 class RecallConfig:
     rrf_k: int = 60
-    #: Tenant every recall runs under when the call itself does not name one.
-    #: Resolved here, in the config layer (MNEMOSTACK_TENANT env / this field),
-    #: and threaded to Recaller(default_tenant=...) on every construction
-    #: surface — set once, not per call. None = unscoped; over a collection
-    #: that holds several tenants an unscoped recall FAILS instead of
-    #: searching all of them (CrossTenantRecallError).
-    tenant: str | None = None
     top_k: int = 10
     confidence_threshold: float = 0.5
     bm25_paths: list[str] = field(default_factory=list)
@@ -406,6 +399,14 @@ class RecallConfig:
     #: any other weight is a static fusion override. Requires
     #: ``text_search: lexical`` (anything else fails loud at build time).
     text_search_fields: dict[str, float] = field(default_factory=dict)
+    #: Appended at the tail: RecallConfig may be built positionally.
+    #: Tenant every recall runs under when the call itself does not name one.
+    #: Resolved here, in the config layer (MNEMOSTACK_TENANT env / this field),
+    #: and threaded to Recaller(default_tenant=...) on every construction
+    #: surface — set once, not per call. None = unscoped; over a collection
+    #: that holds several tenants an unscoped recall FAILS instead of
+    #: searching all of them (CrossTenantRecallError).
+    tenant: str | None = None
 
 
 @dataclass

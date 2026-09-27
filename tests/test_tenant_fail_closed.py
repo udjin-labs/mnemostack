@@ -636,14 +636,14 @@ def test_bm25_from_qdrant_declares_its_collection_to_the_guard():
     a recaller holding only this arm must still be able to refuse."""
     s = _real_store([(1, "a"), (2, "b")])
     arm = BM25Retriever.from_qdrant(s.client, "probe")
-    assert arm.tenant_probe_store.tenant_sample() == {"a", "b"}
+    assert set(arm.tenant_probe_store.tenant_sample()) == {"a", "b"}
     with pytest.raises(CrossTenantRecallError):
         Recaller(retrievers=[arm]).recall("p1")
 
 
 def test_real_store_sample_returns_the_tenant_ids():
-    assert _real_store([(1, "a"), (2, "a")]).tenant_sample() == {"a"}
-    assert _real_store([(1, None)]).tenant_sample() == set()
+    assert set(_real_store([(1, "a"), (2, "a")]).tenant_sample()) == {"a"}
+    assert set(_real_store([(1, None)]).tenant_sample()) == set()
 
 
 def test_synthesize_tenant_scopes_the_supplied_recaller_too():
@@ -716,7 +716,7 @@ def test_bm25_snapshot_probe_describes_the_loaded_corpus_not_the_live_collection
         "probe",
         scroll_filter=Filter(must=[FieldCondition(key="tenant_id", match=MatchValue(value="a"))]),
     )
-    assert only_a.tenant_probe_store.tenant_sample() == {"a"}
+    assert set(only_a.tenant_probe_store.tenant_sample()) == {"a"}
     Recaller(retrievers=[only_a]).recall("p1")  # must not raise
 
 
@@ -807,7 +807,7 @@ def test_snapshot_probe_counts_an_empty_tenant_like_the_live_probe():
     ]
     from mnemostack.recall.retrievers import _DocsTenantProbe
 
-    assert _DocsTenantProbe(docs).tenant_sample() == {"", "acme"}
+    assert set(_DocsTenantProbe(docs).tenant_sample()) == {"", "acme"}
 
 
 @pytest.mark.parametrize("blank", ["", " ", "\t"])
@@ -865,7 +865,7 @@ def test_directly_built_tenant_tagged_bm25_corpus_is_probed():
 
 def test_untagged_file_corpus_probe_is_empty_and_open():
     arm = BM25Retriever([BM25Doc(id="d", text="alpha")])
-    assert arm.tenant_probe_store.tenant_sample() == set()
+    assert set(arm.tenant_probe_store.tenant_sample()) == set()
     assert [r.id for r in Recaller(retrievers=[arm]).recall("alpha")] == ["d"]
 
 
@@ -1073,4 +1073,25 @@ def test_unhashable_marker_never_hides_two_valid_tenants(order):
     docs = [
         BM25Doc(id=str(i), text="alpha", payload={"tenant_id": tid}) for i, tid in enumerate(order)
     ]
-    assert BM25Retriever(docs).tenant_probe_store.tenant_sample() == {"x", "y"}
+    assert set(BM25Retriever(docs).tenant_probe_store.tenant_sample()) == {"x", "y"}
+
+
+def test_typed_tenant_identity_true_and_one_are_two_tenants():
+    """Qdrant compares tenant values by type: boolean true and integer 1 are
+    different tenants and must not collapse into one."""
+    docs = [
+        BM25Doc(id="t", text="alpha", payload={"tenant_id": True}),
+        BM25Doc(id="1", text="alpha", payload={"tenant_id": 1}),
+    ]
+    arm = BM25Retriever(docs)
+    assert len(arm.tenant_probe_store.tenant_sample()) == 2
+    with pytest.raises(CrossTenantRecallError):
+        Recaller(retrievers=[arm]).recall("alpha")
+
+
+def test_recall_config_new_field_keeps_positional_order():
+    from mnemostack.config import RecallConfig
+
+    rc = RecallConfig(60, 25, 0.7)
+    assert (rc.rrf_k, rc.top_k, rc.confidence_threshold) == (60, 25, 0.7)
+    assert rc.tenant is None

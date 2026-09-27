@@ -993,7 +993,8 @@ class _DocsTenantProbe:
     def __init__(self, docs: list[BM25Doc]):
         from ..vector.qdrant import TENANT_ID_KEY
 
-        sample: set[Any] = set()
+        seen: set[tuple[type, Any]] = set()
+        sample: list[Any] = []
         determined = True
         for d in docs:
             tid = (d.payload or {}).get(TENANT_ID_KEY)
@@ -1002,7 +1003,11 @@ class _DocsTenantProbe:
             if tid is None:
                 continue
             try:
-                sample.add(tid)
+                # Keyed by (type, value): true and 1 are distinct tenants.
+                key = (type(tid), tid)
+                if key not in seen:
+                    seen.add(key)
+                    sample.append(tid)
             except TypeError:
                 # An array/object tenant_id (foreign payloads Qdrant allows)
                 # is unhashable: note it and keep scanning — two valid
@@ -1014,10 +1019,10 @@ class _DocsTenantProbe:
                 break
         # Undetermined only when the malformed markers leave the evidence
         # inconclusive; two valid tenants are conclusive regardless.
-        self._sample: set[Any] | None = sample if (determined or len(sample) >= 2) else None
+        self._sample: list[Any] | None = sample if (determined or len(sample) >= 2) else None
 
-    def tenant_sample(self) -> set[Any] | None:
-        return None if self._sample is None else set(self._sample)
+    def tenant_sample(self) -> list[Any] | None:
+        return None if self._sample is None else list(self._sample)
 
 
 class BM25Retriever(Retriever):

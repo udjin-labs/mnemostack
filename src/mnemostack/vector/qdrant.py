@@ -93,7 +93,7 @@ def _hide_invalidated_condition() -> IsEmptyCondition:
 
 
 
-def tenant_sample(client: Any, collection: str) -> set[Any] | None:
+def tenant_sample(client: Any, collection: str) -> list[Any] | None:
     """Up to two distinct ``tenant_id`` values the collection holds — the
     empty set (no stamped point), one value, or two ("two or more"). The
     SET, not a count, so a recaller reading several collections can tell
@@ -116,7 +116,7 @@ def tenant_sample(client: Any, collection: str) -> set[Any] | None:
             limit=1,
         )
         if not first:
-            return set()
+            return []
         t1 = (first[0].payload or {}).get(TENANT_ID_KEY)
         if t1 is None:
             # Unreachable by the filter's semantics (IsEmpty excludes null);
@@ -130,8 +130,11 @@ def tenant_sample(client: Any, collection: str) -> set[Any] | None:
             limit=1,
         )
         if not other:
-            return {t1}
-        return {t1, (other[0].payload or {}).get(TENANT_ID_KEY)}
+            return [t1]
+        # A LIST, not a set: the server already found the two values distinct
+        # under its typed equality (true vs 1), which a Python set would
+        # collapse.
+        return [t1, (other[0].payload or {}).get(TENANT_ID_KEY)]
     except Exception:
         return None
 
@@ -557,7 +560,7 @@ class VectorStore:
         info = self.client.get_collection(self.collection)
         return info.points_count or 0
 
-    def tenant_sample(self) -> set[Any] | None:
+    def tenant_sample(self) -> list[Any] | None:
         """Up to two distinct ``tenant_id`` values — see :func:`tenant_sample`."""
         return tenant_sample(self.client, self.collection)
 

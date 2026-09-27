@@ -278,7 +278,7 @@ def classify_tenant_sources(sources: list[Any]) -> bool | str:
     "unknown" fails closed: the guard exists for data it can inspect."""
     if not sources:
         return "none"
-    union: set[Any] = set()
+    union: set[tuple[type, Any]] = set()
     unknown = False
     for store in sources:
         try:
@@ -300,7 +300,12 @@ def classify_tenant_sources(sources: list[Any]) -> bool | str:
         if sample is None:
             unknown = True
             continue
-        union |= set(sample)
+        # Typed identity, as Qdrant compares tenant values: true != 1.
+        try:
+            union |= {(type(v), v) for v in sample}
+        except TypeError:
+            unknown = True
+            continue
         if len(union) >= 2:
             return True
     return "unknown" if unknown else False
