@@ -315,7 +315,8 @@ behave exactly as listed above.
   `build_bm25_docs`, the validity helpers (`filter_by_validity`, `is_current`,
   `valid_at`), the tenant backstop `filter_by_tenant`, and token helpers
   (`estimate_tokens`, `apply_token_budget`, `sum_tokens`, `TokenCounter`), and the
-  trace helpers (`RecallTrace`, `apply_rerank_safe`). `recall_flow` /
+  trace helpers (`RecallTrace`, `StageTrace`, `apply_rerank_safe`; `RecallTrace.stages`
+  and `loss_report()` are additive). `recall_flow` /
   `recall_flow_async` and `Recaller.recall` / `recall_async` take an **optional
   keyword `tenant=`** (additive, default `None`) that scopes retrieval to that
   tenant and applies `filter_by_tenant` as a backstop. Since #193, `None` no

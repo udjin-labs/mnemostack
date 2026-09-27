@@ -67,7 +67,7 @@ from .retrievers import (
 from .scoring_reranker import RelevanceScorer, ScoringReranker
 from .specificity import detect_placeholders, resolve_specificity
 from .tokens import TokenCounter, apply_token_budget, estimate_tokens, sum_tokens
-from .trace import DEGRADED_COUNTER, RecallTrace, RetrieverTrace, apply_rerank_safe
+from .trace import DEGRADED_COUNTER, RecallTrace, RetrieverTrace, StageTrace, apply_rerank_safe
 from .validity import filter_by_tenant, filter_by_validity, is_current, valid_at
 
 __all__ = [
@@ -78,6 +78,7 @@ __all__ = [
     "tokenize",
     "reciprocal_rank_fusion",
     "RecallTrace",
+    "StageTrace",
     "RetrieverTrace",
     "apply_rerank_safe",
     "DEGRADED_COUNTER",

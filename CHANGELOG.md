@@ -6,6 +6,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **Per-stage recall trace and loss report** (#200). `RecallTrace` recorded
+  the retriever inputs, the fused order and the reranker's order, but not
+  what the ranking pipeline did in between, so a memory that dropped out of
+  the top results could not be traced to the stage that pushed it out. With
+  a trace passed in, `Pipeline.apply` (and so `recall_flow`, the HTTP and
+  MCP `include_trace` responses) now records the order after every stage in
+  `trace.stages` (ids and scores only; with a tenant or `filters`, only
+  results inside that scope are recorded, checked per snapshot, so a
+  stage-injected record outside it never surfaces through the trace;
+  results are unchanged). When a weak-recall retry rewrites `fused` to the
+  merged order it returned, the first pass's order is kept in
+  `trace.first_pass_fused`. `RecallTrace.loss_report(expected_ids,
+  cutoffs=(1, 5, 10, 20, 30))` gives each expected id's position per
+  retriever and per checkpoint (fused, each stage, post-rerank), or `None`
+  when absent, and every move into or out of a top-k between consecutive
+  checkpoints as gains and losses (after a weak-recall retry the merged
+  order is the last checkpoint, `weak_retry_merge`). `StageTrace` is
+  exported from `mnemostack.recall`.
+
 ## [2.5.0] - 2026-09-27
 
 - **Tenantless recall over a verifiably multi-tenant collection is refused** (#193).

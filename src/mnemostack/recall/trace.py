@@ -80,6 +80,24 @@ class RetrieverTrace:
 
 
 @dataclass
+class StageTrace:
+    """The ranked order right after one ranking-pipeline stage."""
+
+    name: str
+    ranked: list[tuple[str, float]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "ranked": [[rid, round(score, 6)] for rid, score in self.ranked],
+        }
+
+
+#: Top-k boundaries a loss report watches by default.
+DEFAULT_LOSS_CUTOFFS = (1, 5, 10, 20, 30)
+
+
+@dataclass
 class RecallTrace:
     """Trace of one recall call: per-retriever inputs, fused output, degradations.
 
@@ -105,6 +123,13 @@ class RecallTrace:
     #: Routine signals — a stage that did not apply, not a fault. Same stable
     #: strings as `degraded`; classified by `_NON_DEGRADED_TAGS`.
     notes: list[str] = field(default_factory=list)
+    #: The order after each ranking-pipeline stage, in pipeline order —
+    #: between `fused` and `post_rerank`. Empty when no pipeline ran.
+    stages: list[StageTrace] = field(default_factory=list)
+    #: The first pass's fused order when a weak-recall retry merged a second
+    #: round in and rewrote `fused` to the order actually returned; None
+    #: otherwise. Lets `checkpoints` keep the first pass in pipeline order.
+    first_pass_fused: list[tuple[str, float]] | None = None
 
     def restrict_to_ids(self, allowed: Any) -> None:
         """Drop every trace entry whose id is outside ``allowed`` (tenant scrub).
@@ -118,6 +143,10 @@ class RecallTrace:
         for rt in self.retrievers:
             rt.ranked = [(rid, s) for rid, s in rt.ranked if str(rid) in allow]
         self.fused = [(rid, s) for rid, s in self.fused if str(rid) in allow]
+        for st in self.stages:
+            st.ranked = [(rid, s) for rid, s in st.ranked if str(rid) in allow]
+        if self.first_pass_fused is not None:
+            self.first_pass_fused = [(r, s) for r, s in self.first_pass_fused if str(r) in allow]
         if self.post_rerank is not None:
             self.post_rerank = [(rid, s) for rid, s in self.post_rerank if str(rid) in allow]
 
@@ -149,9 +178,88 @@ class RecallTrace:
             "degraded": list(self.degraded),
             "notes": list(self.notes),
         }
+        if self.stages:
+            d["stages"] = [st.to_dict() for st in self.stages]
+        if self.first_pass_fused is not None:
+            d["first_pass_fused"] = [[rid, round(score, 6)] for rid, score in self.first_pass_fused]
         if self.post_rerank is not None:
             d["post_rerank"] = [[rid, round(score, 6)] for rid, score in self.post_rerank]
         return d
+
+    def checkpoints(self) -> list[tuple[str, list[str]]]:
+        """The ranked id lists this trace holds, in pipeline order: ``fused``,
+        then ``stage:<name>`` for each pipeline stage (a repeated name gets a
+        ``#2``, ``#3`` suffix), then ``post_rerank`` when a reranker ran, then
+        ``weak_retry_merge`` when a weak-recall retry merged a second round in
+        (``fused`` is then the first pass's order)."""
+        retried = self.first_pass_fused is not None
+        first = self.first_pass_fused if self.first_pass_fused is not None else self.fused
+        out: list[tuple[str, list[str]]] = [("fused", [str(r) for r, _ in first])]
+        seen: dict[str, int] = {}
+        for st in self.stages:
+            seen[st.name] = seen.get(st.name, 0) + 1
+            label = f"stage:{st.name}" + (f"#{seen[st.name]}" if seen[st.name] > 1 else "")
+            out.append((label, [str(r) for r, _ in st.ranked]))
+        if self.post_rerank is not None:
+            out.append(("post_rerank", [str(r) for r, _ in self.post_rerank]))
+        if retried:
+            out.append(("weak_retry_merge", [str(r) for r, _ in self.fused]))
+        return out
+
+    def loss_report(
+        self, expected_ids: Any, cutoffs: tuple[int, ...] = DEFAULT_LOSS_CUTOFFS
+    ) -> dict[str, Any]:
+        """Where each expected id sat along the recall, and where it crossed a
+        top-k boundary.
+
+        ``positions`` maps each id to its 1-based rank per retriever (as a
+        candidate source, under ``retriever:<name>``) and per checkpoint (see
+        :meth:`checkpoints`), ``None`` when absent. ``gains`` / ``losses`` list
+        every move into / out of the top ``k`` between consecutive
+        checkpoints: ``{"id", "cutoff", "from", "to", "from_pos", "to_pos"}``.
+        Ids are compared as strings. Diagnostic only: nothing here changes a
+        result.
+        """
+        ids = [str(i) for i in expected_ids]
+        cps = self.checkpoints()
+        positions: dict[str, dict[str, int | None]] = {}
+        gains: list[dict[str, Any]] = []
+        losses: list[dict[str, Any]] = []
+
+        def rank(order: list[str], rid: str) -> int | None:
+            try:
+                return order.index(rid) + 1
+            except ValueError:
+                return None
+
+        for rid in ids:
+            per: dict[str, int | None] = {}
+            for rt in self.retrievers:
+                key = f"retriever:{rt.name}"
+                if rt.query is not None:
+                    key += f"[{rt.query}]"
+                if key not in per or per[key] is None:
+                    per[key] = rank([str(r) for r, _ in rt.ranked], rid)
+            for label, order in cps:
+                per[label] = rank(order, rid)
+            positions[rid] = per
+            for (a, order_a), (b, order_b) in zip(cps, cps[1:], strict=False):
+                pa, pb = rank(order_a, rid), rank(order_b, rid)
+                for k in cutoffs:
+                    was = pa is not None and pa <= k
+                    now = pb is not None and pb <= k
+                    if was == now:
+                        continue
+                    entry = {
+                        "id": rid,
+                        "cutoff": k,
+                        "from": a,
+                        "to": b,
+                        "from_pos": pa,
+                        "to_pos": pb,
+                    }
+                    (gains if now else losses).append(entry)
+        return {"positions": positions, "gains": gains, "losses": losses}
 
 
 def apply_rerank_safe(
