@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-09-27
+
 - **Per-stage recall trace and loss report** (#200). `RecallTrace` recorded
   the retriever inputs, the fused order and the reranker's order, but not
   what the ranking pipeline did in between, so a memory that dropped out of
