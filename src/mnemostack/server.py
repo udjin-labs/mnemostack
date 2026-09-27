@@ -837,7 +837,9 @@ class ServerConfig:
     def __post_init__(self) -> None:
         # A blank tenant is no tenant: "" would stamp writes with an empty
         # tenant_id, match nothing on reads, and slip past the startup gate.
-        self.default_tenant = self.default_tenant or None
+        from mnemostack.config import normalize_tenant
+
+        self.default_tenant = normalize_tenant(self.default_tenant)
         if self.rerank_mode not in RERANK_MODES:
             allowed = ", ".join(sorted(RERANK_MODES))
             raise ValueError(f"rerank_mode must be one of: {allowed}")

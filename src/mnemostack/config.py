@@ -244,6 +244,19 @@ def resolve_text_search_mode(mode: str, bm25_paths: list[str] | None) -> str:
     return mode
 
 
+def normalize_tenant(value: Any) -> Any:
+    """A blank or whitespace-only tenant is NO tenant. Every entry point a
+    tenant arrives through (env, config file, Recaller construction and
+    per-call argument, server, MCP, CLI) runs through here, so "" can
+    never become a scope that matches nothing and slips past the
+    fail-closed guard — or gets stamped onto writes. Non-strings pass
+    through unchanged."""
+    if isinstance(value, str):
+        value = value.strip()
+        return value or None
+    return value
+
+
 def parse_text_search_fields(value: Any) -> dict[str, float]:
     """Normalize ``recall.text_search_fields`` into ``{payload_field: weight}``.
 
@@ -460,6 +473,7 @@ class Config:
         cfg.recall.text_search_fields = parse_text_search_fields(
             cfg.recall.text_search_fields
         )
+        cfg.recall.tenant = normalize_tenant(cfg.recall.tenant)
 
         # Same startup-rejection contract for every source (file AND env): a
         # malformed embedding timeout must fail the load, not surface later

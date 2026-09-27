@@ -15,9 +15,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   payload index on `tenant_id`; a positive answer is cached, a negative or
   undetermined one re-checked every minute, one refresh at a time) and
   raises `CrossTenantRecallError` when what it would read holds more than
-  one tenant — every collection behind the recaller is asked, including the
-  one an in-memory BM25 arm was loaded from, and one tenant each in two
-  collections counts as two — on
+  one tenant — every collection behind the recaller is asked (an in-memory
+  BM25 arm answers for the corpus it actually loaded), and one tenant each in
+  two collections counts as two — on
   every public search surface (`recall`, `recall_async`, `search_many`, and
   so the answer generator's expansion retry, plus `synthesize`, whose
   `tenant=` scopes the supplied recaller and any directly supplied
@@ -45,8 +45,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unauthenticated surfaces (`BM25Retriever(docs, tenant=...)` in the
   library, without mutating the caller's docs) so a scoped recall keeps its
   lexical arm, and the recaller logs once per arm when it has to skip an
-  arm that cannot be tenant-scoped (previously silent). A blank tenant is
-  treated as none. The graph arm
+  arm that cannot be tenant-scoped (previously silent). A blank or
+  whitespace-only tenant is treated as none on every entry point. The graph arm
   remaining tenant-incapable is #194.
 
 ## [2.4.0] - 2026-09-04

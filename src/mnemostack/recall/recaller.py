@@ -383,9 +383,10 @@ class Recaller:
         # name a tenant explicitly runs under this one. Set it from
         # MNEMOSTACK_TENANT / recall.tenant via the config layer so a consumer
         # cannot "forget the argument" per call.
-        # "" is not a tenant — a blank config/flag value must not become a
-        # scope that silently matches nothing (and skips the guards below).
-        self.default_tenant = default_tenant or None
+        # A blank tenant is no tenant — see normalize_tenant.
+        from ..config import normalize_tenant
+
+        self.default_tenant = normalize_tenant(default_tenant)
         # Deliberate cross-tenant tooling only. This is NOT a security control:
         # whoever constructs a Recaller holds the store credentials and can
         # query the store directly — the guard exists to turn an honest
@@ -624,7 +625,26 @@ class Recaller:
         else the construction-time default. Every public search surface
         resolves through here, so a default can never apply to one entry
         point and not another."""
+        from ..config import normalize_tenant
+
+        tenant = normalize_tenant(tenant)
         return tenant if tenant is not None else self.default_tenant
+
+    @staticmethod
+    def _warn_probe_unknown() -> None:
+        """Once per process: the tenant probe could not answer, so a
+        tenantless search is not guarded."""
+        global _PROBE_UNKNOWN_WARNED
+        if _PROBE_UNKNOWN_WARNED:
+            return
+        _PROBE_UNKNOWN_WARNED = True
+        logger.warning(
+            "recall: could not determine whether the collection holds several "
+            "tenants (the tenant probe failed); tenantless recall is NOT "
+            "guarded. If the collection is shared, scope recalls with a tenant "
+            "(MNEMOSTACK_TENANT / recall.tenant) — after stamping existing "
+            "points with `mnemostack tenant-migrate`, or the scope will hide them."
+        )
 
     def _guard_tenantless_recall(self, sources: list[Any] | None = None) -> None:
         """Fail closed: refuse a tenantless recall over a collection that
@@ -641,6 +661,8 @@ class Recaller:
             return
         if sources is not None:
             verdict = self._probe_multi_tenant(sources)
+            if verdict == "unknown":
+                self._warn_probe_unknown()
             if verdict is True:
                 raise CrossTenantRecallError(
                     "search without a tenant over a multi-tenant collection: "
@@ -661,18 +683,8 @@ class Recaller:
                 if _stale():  # another thread may have refreshed meanwhile
                     self._multi_tenant_probe = self._probe_multi_tenant()
                     self._probe_at = time.monotonic()
-                    global _PROBE_UNKNOWN_WARNED
-                    if self._multi_tenant_probe == "unknown" and not _PROBE_UNKNOWN_WARNED:
-                        _PROBE_UNKNOWN_WARNED = True
-                        logger.warning(
-                            "recall: could not determine whether the collection "
-                            "holds several tenants (the tenant probe failed); "
-                            "tenantless recall is NOT guarded. If "
-                            "the collection is shared, scope recalls with a tenant "
-                            "(MNEMOSTACK_TENANT / recall.tenant) — after stamping "
-                            "existing points with `mnemostack tenant-migrate`, or "
-                            "the scope will hide them."
-                        )
+                    if self._multi_tenant_probe == "unknown":
+                        self._warn_probe_unknown()
         if self._multi_tenant_probe is True:
             raise CrossTenantRecallError(
                 "recall without a tenant over a multi-tenant collection: the "

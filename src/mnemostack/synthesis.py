@@ -180,7 +180,18 @@ def synthesize(
     # One tenant for the whole report: the explicit argument, else the
     # supplied recaller's own scope. Both paths below run under it, and the
     # merged results are backstopped, so one report never mixes tenants.
-    tenant = kwargs.get("tenant") or getattr(recaller, "default_tenant", None) or None
+    from .config import normalize_tenant
+
+    tenant = normalize_tenant(kwargs.get("tenant")) or getattr(recaller, "default_tenant", None) or None
+    # The synthesis-level opt-out governs a supplied recaller too: run a
+    # shallow copy with the flag set, never mutate the caller's object.
+    if kwargs.get("allow_cross_tenant") and recaller is not None and not getattr(
+        recaller, "allow_cross_tenant", False
+    ):
+        import copy
+
+        recaller = copy.copy(recaller)
+        recaller.allow_cross_tenant = True
     raw_results = _query_recaller(
         recaller, entity, max_results, kwargs.get("filters"), tenant=tenant
     )

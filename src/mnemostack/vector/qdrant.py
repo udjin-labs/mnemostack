@@ -136,25 +136,6 @@ def tenant_sample(client: Any, collection: str) -> set[Any] | None:
         return None
 
 
-class CollectionTenantProbe:
-    """The tenant probe for an arm that reads a collection through a raw
-    client rather than a VectorStore (``BM25Retriever.from_qdrant``): the
-    arm declares it as ``tenant_probe_store`` so the recaller's fail-closed
-    guard can see the collection the arm loaded."""
-
-    def __init__(self, client: Any, collection: str):
-        self.client = client
-        self.collection = collection
-
-    def tenant_sample(self) -> set[Any] | None:
-        return tenant_sample(self.client, self.collection)
-
-    def distinct_tenant_count(self, limit: int = 2) -> int | None:
-        del limit
-        sample = self.tenant_sample()
-        return None if sample is None else len(sample)
-
-
 class DimensionMismatchError(ValueError):
     """Existing collection stores vectors of a different size than the provider produces."""
 

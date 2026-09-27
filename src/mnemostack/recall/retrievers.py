@@ -986,6 +986,26 @@ class QdrantSparseRetriever(Retriever):
         ]
 
 
+class _DocsTenantProbe:
+    """Tenant probe over an in-memory corpus: the up-to-two distinct
+    ``tenant_id`` values its documents carry, computed once at load."""
+
+    def __init__(self, docs: list[BM25Doc]):
+        from ..vector.qdrant import TENANT_ID_KEY
+
+        sample: set[Any] = set()
+        for d in docs:
+            tid = (d.payload or {}).get(TENANT_ID_KEY)
+            if tid is not None and tid != "":
+                sample.add(tid)
+                if len(sample) >= 2:
+                    break
+        self._sample = sample
+
+    def tenant_sample(self) -> set[Any]:
+        return set(self._sample)
+
+
 class BM25Retriever(Retriever):
     """Exact token match via BM25."""
 
@@ -1117,12 +1137,11 @@ class BM25Retriever(Retriever):
             # Qdrant payloads carry tenant_id — this corpus CAN be scoped.
             tenant_aware=True,
         )
-        # The corpus is the WHOLE collection, every tenant's points included;
-        # declare where it came from so the recaller's fail-closed guard can
-        # probe it (this arm exposes no vector_store of its own).
-        from ..vector.qdrant import CollectionTenantProbe
-
-        retriever.tenant_probe_store = CollectionTenantProbe(client, collection_name)
+        # Declare the tenants of the corpus this arm actually SEARCHES — the
+        # snapshot loaded above, not the live collection: points deleted since
+        # the load are still searchable here, and a filtered load may hold a
+        # single tenant of a shared collection. Exact, and no network call.
+        retriever.tenant_probe_store = _DocsTenantProbe(docs)
         return retriever
 
     def search(self, query, limit=20, filters=None, tenant=None):

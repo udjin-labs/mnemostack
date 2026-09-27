@@ -278,7 +278,9 @@ def build_server(
         # resolution point for every tool, reads and writes alike.
         if principal is not None:
             return principal.tenant
-        return default_tenant or None
+        from ..config import normalize_tenant
+
+        return normalize_tenant(default_tenant)
 
     # Lazy-initialize components so server boots even if e.g. GEMINI_API_KEY missing.
     # Tool calls can run concurrently; the lock makes each component initialize

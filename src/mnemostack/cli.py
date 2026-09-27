@@ -27,6 +27,7 @@ from .config import (
     generate_example_config,
     llm_kwargs,
     model_kwargs,  # noqa: F401 — re-exported: tests patch cli.model_kwargs as a construction seam
+    normalize_tenant,
     provider_kwargs,
 )
 from .embeddings import ProviderProbeError, get_provider, list_providers
@@ -2470,7 +2471,7 @@ def _build_recaller(
                         docs=bm25_docs,
                         timestamp_key=timestamp_key,
                         timestamp_format=timestamp_format,
-                        tenant=getattr(args, "tenant", None) or None,
+                        tenant=normalize_tenant(getattr(args, "tenant", None)),
                     )
                 )
         elif mode == "qdrant_bm25" and store is not None:
@@ -2557,7 +2558,7 @@ def _build_recaller(
         # --tenant flag > MNEMOSTACK_TENANT / recall.tenant (folded into the
         # flag's default). getattr: programmatic callers construct bare
         # Namespaces without parser defaults.
-        default_tenant=getattr(args, "tenant", None) or None,
+        default_tenant=normalize_tenant(getattr(args, "tenant", None)),
         allow_cross_tenant=_allow_cross_tenant(args),
     )
 
@@ -4803,7 +4804,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         graph_uri=args.memgraph_uri,
         llm_host=getattr(args, "_llm_host", None),
         llm_timeout=getattr(args, "_llm_timeout", None),
-        default_tenant=getattr(args, "tenant", None) or None,
+        default_tenant=normalize_tenant(getattr(args, "tenant", None)),
         allow_cross_tenant=_allow_cross_tenant(args),
         graph_user=_graph_auth(args)["user"],
         graph_password=_graph_auth(args)["password"],
@@ -4992,7 +4993,7 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
         llm_model=_llm_model(args),
         llm_host=getattr(args, "_llm_host", None),
         llm_timeout=getattr(args, "_llm_timeout", None),
-        default_tenant=getattr(args, "tenant", None) or None,
+        default_tenant=normalize_tenant(getattr(args, "tenant", None)),
         allow_cross_tenant=_allow_cross_tenant(args),
         qdrant_host=args.qdrant,
         memgraph_uri=args.memgraph_uri,

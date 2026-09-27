@@ -681,3 +681,70 @@ def test_search_many_probes_only_the_store_it_searches():
     bad._ensure_space_compat = lambda tenant=None: None
     with pytest.raises(CrossTenantRecallError):
         bad.search_many([[0.1]], limit=3)
+
+
+# ============================================ PR #195 bot round 1 regressions
+
+
+def test_bm25_snapshot_probe_describes_the_loaded_corpus_not_the_live_collection():
+    """Points deleted after the load stay searchable in the snapshot, so the
+    guard must still see their tenant; and a filtered single-tenant load of
+    a shared collection must not be refused."""
+    from qdrant_client.models import FieldCondition, Filter, MatchValue, PointIdsList
+
+    s = _real_store([(1, "a"), (2, "b")])
+    arm = BM25Retriever.from_qdrant(s.client, "probe")
+    s.client.delete(collection_name="probe", points_selector=PointIdsList(points=[2]))
+    with pytest.raises(CrossTenantRecallError):  # B still in the snapshot
+        Recaller(retrievers=[arm]).recall("p2")
+
+    s2 = _real_store([(1, "a"), (2, "b")])
+    only_a = BM25Retriever.from_qdrant(
+        s2.client,
+        "probe",
+        scroll_filter=Filter(must=[FieldCondition(key="tenant_id", match=MatchValue(value="a"))]),
+    )
+    assert only_a.tenant_probe_store.tenant_sample() == {"a"}
+    Recaller(retrievers=[only_a]).recall("p1")  # must not raise
+
+
+def test_narrowed_probe_warns_when_undetermined(monkeypatch):
+    import mnemostack.recall.recaller as rec_mod
+
+    messages = []
+    monkeypatch.setattr(rec_mod.logger, "warning", lambda msg, *a, **k: messages.append(msg))
+    monkeypatch.setattr(rec_mod, "_PROBE_UNKNOWN_WARNED", False)
+
+    class _Broken(_SampleStore):
+        def search(self, vector, limit, filters=None, hide_invalidated=None, **kw):
+            return []
+
+    r = Recaller(vector_store=_Broken(None))
+    r._ensure_space_compat = lambda tenant=None: None
+    r.search_many([[0.1]], limit=3)
+    assert sum("could not determine" in m for m in messages) == 1
+
+
+def test_synthesize_opt_out_governs_a_supplied_recaller_without_mutating_it():
+    from mnemostack.synthesis import synthesize
+
+    store = _FakeStore(tenants=2)
+    r = Recaller(retrievers=[_StaticArm("vector", [_hit("a", "t1")], store=store)])
+    synthesize("alpha", recaller=r, allow_cross_tenant=True)  # must not raise
+    assert r.allow_cross_tenant is False
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_blank_per_call_and_default_tenants_are_unscoped_and_guarded(blank):
+    store = _FakeStore(tenants=2)
+    r = Recaller(retrievers=[_StaticArm("vector", [], store=store)], default_tenant=blank)
+    assert r.default_tenant is None
+    with pytest.raises(CrossTenantRecallError):
+        r.recall("q", tenant=blank)
+
+
+def test_whitespace_tenant_from_env_is_no_tenant(monkeypatch):
+    from mnemostack.config import Config
+
+    monkeypatch.setenv("MNEMOSTACK_TENANT", "   ")
+    assert Config.load(path=None).recall.tenant is None
