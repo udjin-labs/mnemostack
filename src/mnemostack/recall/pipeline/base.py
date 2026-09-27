@@ -65,6 +65,8 @@ class Pipeline:
         include_invalidated: bool = False,
         tenant: str | None = None,
         recaller: Any = None,
+        trace: Any = None,
+        trace_scope: Any = None,
     ) -> list[RecallResult]:
         context = PipelineContext(query=query)
         # Validity + tenant context for stages that reach back to the graph
@@ -84,6 +86,22 @@ class Pipeline:
             if self.stop_on_empty and not results:
                 break
             results = stage.apply(context, results)
+            if trace is not None:
+                # Diagnostic snapshot of the order this stage left (ids and
+                # scores only): where a result was lost, and to which stage.
+                # `trace_scope(result) -> bool` keeps it to the caller's scope.
+                from ..trace import StageTrace
+
+                trace.stages.append(
+                    StageTrace(
+                        stage.name,
+                        [
+                            (str(r.id), r.score)
+                            for r in results
+                            if trace_scope is None or trace_scope(r)
+                        ],
+                    )
+                )
         return results
 
     def apply_with_context(

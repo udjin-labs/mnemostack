@@ -80,6 +80,24 @@ def recall_flow(
     )
     results = recalled
     if pipeline is not None:
+        from .filters import result_passes_filters
+        from .validity import numeric_unit_for
+
+        _ts_key = getattr(recaller, "timestamp_key", "timestamp")
+        _unit = numeric_unit_for(getattr(recaller, "timestamp_format", "iso"))
+
+        def _in_scope(r) -> bool:
+            # The caller's scope, as the filter and the backstop below apply
+            # it: stage snapshots record only results inside it, checked
+            # while each result's payload is at hand, so a stage-injected
+            # record outside it never surfaces through the trace while an
+            # in-scope one a later stage drops still shows as a loss.
+            if tenant is not None and (r.payload or {}).get("tenant_id") != tenant:
+                return False
+            return not filters or result_passes_filters(
+                r, filters, timestamp_key=_ts_key, numeric_unit=_unit
+            )
+
         results = pipeline.apply(
             query,
             results,
@@ -90,6 +108,8 @@ def recall_flow(
             # recaller read, under its allow_cross_tenant — the real recaller,
             # not a QueryExpander wrapping it.
             recaller=_innermost_recaller(recaller),
+            trace=trace,
+            trace_scope=_in_scope if (tenant is not None or filters) else None,
         )
         if filters:
             # Pipeline stages may append candidates that never passed the
@@ -97,11 +117,6 @@ def recall_flow(
             # with no tenant/timestamp payload). Enforce the caller's scope
             # on the pipeline output too: anything that cannot be attributed
             # to the scope is dropped, not leaked.
-            from .filters import result_passes_filters
-            from .validity import numeric_unit_for
-
-            _ts_key = getattr(recaller, "timestamp_key", "timestamp")
-            _unit = numeric_unit_for(getattr(recaller, "timestamp_format", "iso"))
             results = [
                 r
                 for r in results

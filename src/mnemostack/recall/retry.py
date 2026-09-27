@@ -696,4 +696,8 @@ def _retrace(caller_trace: Any, final: list[Any]) -> None:
     """
     if caller_trace is None:
         return
+    # The first pass's order stays readable for the per-stage checkpoints,
+    # which it precedes (see RecallTrace.checkpoints).
+    if hasattr(caller_trace, "first_pass_fused") and caller_trace.first_pass_fused is None:
+        caller_trace.first_pass_fused = list(caller_trace.fused)
     caller_trace.fused = [(_memory_key(r.id), float(getattr(r, "score", 0.0))) for r in final]
