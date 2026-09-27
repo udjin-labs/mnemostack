@@ -376,6 +376,11 @@ def _filter_recaller(recaller: Any, source_filter: set[str] | None) -> Any:
         text_key=getattr(recaller, "text_key", "text"),
         timestamp_key=getattr(recaller, "timestamp_key", "timestamp"),
         timestamp_format=getattr(recaller, "timestamp_format", "iso"),
+        # ... and the ORIGINAL's tenant scope, for the same reason: a source
+        # filter must not silently widen a tenant-scoped recaller to all
+        # tenants (or re-arm the fail-closed guard the caller opted out of).
+        default_tenant=getattr(recaller, "default_tenant", None),
+        allow_cross_tenant=getattr(recaller, "allow_cross_tenant", False),
     )
 
 

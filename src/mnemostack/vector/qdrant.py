@@ -513,6 +513,26 @@ class VectorStore:
         info = self.client.get_collection(self.collection)
         return info.points_count or 0
 
+    def distinct_tenant_count(self, limit: int = 2) -> int | None:
+        """How many distinct ``tenant_id`` values the collection holds, up to
+        ``limit`` — the recaller's fail-closed guard only needs to know
+        "more than one?", so the default stops counting at 2.
+
+        Best-effort by design: ``None`` means "could not determine" (an older
+        server without the facet API, a transport error), and the caller must
+        treat unknown as unguardable rather than crash a legacy deployment.
+        A collection with no ``tenant_id`` at all returns 0.
+        """
+        try:
+            res = self.client.facet(
+                collection_name=self.collection,
+                key="tenant_id",
+                limit=max(2, limit),
+            )
+            return len(res.hits)
+        except Exception:
+            return None
+
     def retrieve_payload(
         self, point_id: str | int, *, tenant: str | None = None
     ) -> dict[str, Any] | None:

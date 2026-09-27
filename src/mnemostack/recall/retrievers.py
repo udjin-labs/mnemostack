@@ -1001,7 +1001,20 @@ class BM25Retriever(Retriever):
         timestamp_format: str = "iso",
         tenant_aware: bool = False,
         name: str | None = None,
+        tenant: str | None = None,
     ):
+        if tenant is not None:
+            # A file corpus has no tenant metadata of its own; stamping the
+            # docs with the owning tenant is what lets a tenant-scoped recall
+            # keep its lexical arm instead of losing it to the isolation
+            # backstop. setdefault: a doc that already carries a (different)
+            # tenant_id keeps it and is then excluded by the strict gate in
+            # search() — relabeling foreign data would be worse than losing it.
+            from ..vector.qdrant import TENANT_ID_KEY
+
+            for d in docs:
+                (d.payload if d.payload is not None else {}).setdefault(TENANT_ID_KEY, tenant)
+            tenant_aware = True
         self.bm25 = BM25(docs, tokenizer=tokenizer, retokenize=retokenize)
         self._set_name(name)
         #: The one payload key whose range filters may cross timestamp domains

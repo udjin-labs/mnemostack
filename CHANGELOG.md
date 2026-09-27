@@ -6,6 +6,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **Tenantless recall over a multi-tenant collection fails closed** (#193).
+  `Recaller.recall(tenant=None)` meant "all tenants", so a consumer wired
+  straight to a shared collection that forgot the argument silently searched
+  every tenant at once — observed in a real deployment answering from another
+  tenant's corpus with full confidence. A tenantless recall now probes the
+  collection once (Qdrant `tenant_id` facet, cached) and raises
+  `CrossTenantRecallError` when it verifiably holds more than one tenant;
+  single-tenant, legacy and uninspectable collections behave exactly as
+  before. The scope is set once, not per call: `Recaller(default_tenant=...)`,
+  `recall.tenant` in the config, `MNEMOSTACK_TENANT`, or `--tenant` on
+  `search`/`answer`/`synthesize`/`serve`/`mcp-serve`. An unauthenticated
+  `serve` refuses at startup to expose a multi-tenant collection.
+  `allow_cross_tenant=True` / `--allow-cross-tenant` restores the old
+  behavior for deliberate cross-tenant tooling — documented as operating
+  inside the trust boundary, not as a security control (with auth on, the
+  service key still decides the tenant and none of this applies). A
+  file-backed BM25 corpus can now be stamped with its owning tenant
+  (`BM25Retriever(docs, tenant=...)`) so a scoped recall keeps its lexical
+  arm, and the isolation backstop logs once per arm when it has to drop an
+  arm that cannot be tenant-scoped (previously silent). The graph arm
+  remaining tenant-incapable is #194.
+
 ## [2.4.0] - 2026-09-04
 
 - **New `openai` LLM provider — any OpenAI-compatible endpoint** (#187). The

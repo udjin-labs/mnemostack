@@ -122,6 +122,18 @@ class AsyncVectorStore:
         info = await self.client.get_collection(self.collection)
         return info.points_count or 0
 
+    async def distinct_tenant_count(self, limit: int = 2) -> int | None:
+        """Async mirror of ``VectorStore.distinct_tenant_count`` — see there."""
+        try:
+            res = await self.client.facet(
+                collection_name=self.collection,
+                key="tenant_id",
+                limit=max(2, limit),
+            )
+            return len(res.hits)
+        except Exception:
+            return None
+
     async def _assert_tenant_owned(self, ids: list[str | int], tenant: str) -> None:
         """Refuse to overwrite points already owned by a *different* tenant
         (async mirror of ``VectorStore._assert_tenant_owned``)."""

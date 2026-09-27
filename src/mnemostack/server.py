@@ -825,6 +825,13 @@ class ServerConfig:
     #: tail, like every knob above, to keep positional construction stable.
     llm_host: str | None = None
     llm_timeout: int | None = None
+    #: Tenant every recall runs under when auth is off (with auth on, the
+    #: service key decides and this is ignored per request). Appended at the
+    #: tail, like every knob above.
+    default_tenant: str | None = None
+    #: Deliberate cross-tenant serving without auth. Not a security control —
+    #: it only silences the fail-closed guard for tooling that means it.
+    allow_cross_tenant: bool = False
 
     def __post_init__(self) -> None:
         if self.rerank_mode not in RERANK_MODES:
@@ -871,6 +878,8 @@ class ServerConfig:
             retry_on_weak=_env_bool("MNEMOSTACK_RETRY_ON_WEAK"),
             retry_weak_below=_env_int("MNEMOSTACK_RETRY_WEAK_BELOW", 1),
             auth_enabled=_env_bool("MNEMOSTACK_AUTH_ENABLED"),
+            default_tenant=cfg.recall.tenant,
+            allow_cross_tenant=_env_bool("MNEMOSTACK_ALLOW_CROSS_TENANT"),
             keys_file=os.environ.get("MNEMOSTACK_KEYS_FILE") or None,
             quotas_file=os.environ.get("MNEMOSTACK_QUOTAS_FILE") or None,
             text_key=cfg.recall.text_key,
@@ -1233,7 +1242,24 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         text_key=cfg.text_key,
         timestamp_key=cfg.timestamp_key,
         timestamp_format=cfg.timestamp_format,
+        default_tenant=cfg.default_tenant,
+        allow_cross_tenant=cfg.allow_cross_tenant,
     )
+
+    # Fail before the first request, not on it: serving a multi-tenant
+    # collection without auth and without a tenant scope would answer every
+    # caller from every tenant at once. With auth on, the service key decides
+    # the tenant per request and this cannot happen.
+    if not cfg.auth_enabled and cfg.default_tenant is None and not cfg.allow_cross_tenant:
+        distinct = getattr(store, "distinct_tenant_count", lambda: None)()
+        if isinstance(distinct, int) and distinct >= 2:
+            raise ValueError(
+                "refusing to serve without auth: the collection holds "
+                f"{distinct}+ tenants and every request would search all of "
+                "them. Enable auth (--auth), scope the server to one tenant "
+                "(recall.tenant / MNEMOSTACK_TENANT), or pass "
+                "--allow-cross-tenant if this exposure is deliberate."
+            )
 
     from pathlib import Path
 

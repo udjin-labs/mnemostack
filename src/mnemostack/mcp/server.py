@@ -142,6 +142,12 @@ def build_server(
     # positional-tail pin in test_provider_plumbing guards exactly this.
     llm_host: str | None = None,
     llm_timeout: int | None = None,
+    # Tenant every recall runs under (MNEMOSTACK_TENANT / recall.tenant via
+    # the standalone main()); allow_cross_tenant silences the fail-closed
+    # guard for deliberate cross-tenant tooling. Appended at the tail — the
+    # positional-tail pin in test_provider_plumbing guards exactly this.
+    default_tenant: str | None = None,
+    allow_cross_tenant: bool = False,
 ) -> Any:
     """Build and return a configured FastMCP server.
 
@@ -408,6 +414,8 @@ def build_server(
             text_key=text_key,
             timestamp_key=timestamp_key,
             timestamp_format=timestamp_format,
+            default_tenant=default_tenant,
+            allow_cross_tenant=allow_cross_tenant,
         )
 
     def _get_recaller():
@@ -1312,6 +1320,9 @@ def main() -> None:
         llm_model=cfg.llm.model,
         llm_host=cfg.llm.host,
         llm_timeout=cfg.llm.timeout,
+        default_tenant=cfg.recall.tenant,
+        allow_cross_tenant=os.environ.get("MNEMOSTACK_ALLOW_CROSS_TENANT", "").strip().lower()
+        in {"1", "true", "yes", "on"},
         qdrant_host=cfg.vector.host,
         memgraph_uri=cfg.graph.uri,
         graph_user=cfg.graph.user,

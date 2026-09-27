@@ -344,6 +344,13 @@ def ensure_text_fields_mode(resolved_mode: str, fields: dict[str, float]) -> Non
 @dataclass
 class RecallConfig:
     rrf_k: int = 60
+    #: Tenant every recall runs under when the call itself does not name one.
+    #: Resolved here, in the config layer (MNEMOSTACK_TENANT env / this field),
+    #: and threaded to Recaller(default_tenant=...) on every construction
+    #: surface — set once, not per call. None = unscoped; over a collection
+    #: that holds several tenants an unscoped recall FAILS instead of
+    #: searching all of them (CrossTenantRecallError).
+    tenant: str | None = None
     top_k: int = 10
     confidence_threshold: float = 0.5
     bm25_paths: list[str] = field(default_factory=list)
@@ -537,6 +544,7 @@ def _apply_env_overrides(cfg: Config) -> Config:
         MNEMOSTACK_LLM_MODEL
         MNEMOSTACK_LLM_HOST         (LLM endpoint; ollama: default inherit MNEMOSTACK_OLLAMA_HOST, openai: required base URL)
         MNEMOSTACK_LLM_TIMEOUT
+        MNEMOSTACK_TENANT          (tenant every recall is scoped to; see recall.tenant)
         MNEMOSTACK_GRAPH_URI
         MNEMOSTACK_GRAPH_USER
         MNEMOSTACK_GRAPH_PASSWORD
@@ -636,6 +644,8 @@ def _apply_env_overrides(cfg: Config) -> Config:
     # Recall
     if v := env.get("MNEMOSTACK_BM25_PATHS"):
         cfg.recall.bm25_paths = [p for p in v.split(os.pathsep) if p]
+    if v := env.get("MNEMOSTACK_TENANT"):
+        cfg.recall.tenant = v
     if v := env.get("MNEMOSTACK_VECTOR_FLOOR"):
         cfg.recall.vector_floor = max(0, int(v))
     if v := env.get("MNEMOSTACK_RERANK_MODE"):
@@ -704,6 +714,7 @@ recall:
   confidence_threshold: 0.5
   bm25_paths: []
   vector_floor: 0
+  tenant: null            # scope every recall to this tenant (MNEMOSTACK_TENANT)
   rerank_mode: relevant_only  # relevant_only | full_reorder
   token_budget: null          # e.g. 2000 = trim recall results to ~2000 text tokens; 0/null = off
   # Payload schema of the collection recall reads (a pre-existing collection

@@ -318,7 +318,16 @@ behave exactly as listed above.
   trace helpers (`RecallTrace`, `apply_rerank_safe`). `recall_flow` /
   `recall_flow_async` and `Recaller.recall` / `recall_async` take an **optional
   keyword `tenant=`** (additive, default `None`) that scopes retrieval to that
-  tenant and applies `filter_by_tenant` as a backstop. `AnswerGenerator.generate`
+  tenant and applies `filter_by_tenant` as a backstop. Since #193, `None` no
+  longer means "search all tenants" unconditionally: the construction-time
+  scope (`Recaller(default_tenant=...)` / `recall.tenant` / `MNEMOSTACK_TENANT`)
+  applies first, and a recall that still has no tenant **raises
+  `CrossTenantRecallError`** when the collection verifiably holds more than one
+  `tenant_id` (one cached facet probe). Single-tenant, legacy and uninspectable
+  collections keep the exact prior behavior; `allow_cross_tenant=True` restores
+  it everywhere for deliberate cross-tenant tooling. This is a fail-closed guard
+  against misconfigured consumers, not a security boundary — the trust boundary
+  remains `serve --auth`, where the key decides the tenant. `AnswerGenerator.generate`
   (+ async) also takes `tenant=`, but it only scopes the method's **own** internal
   retry sub-recalls (expansion / inference) — it does **not** re-filter the
   `memories` you pass in. Pre-scope those yourself: feed `generate` the output of a

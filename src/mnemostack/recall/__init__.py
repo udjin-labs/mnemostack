@@ -47,7 +47,7 @@ from .pipeline import (
     resolve_access_bonus_max,
 )
 from .query_expansion import expand_query
-from .recaller import Recaller, RecallResult
+from .recaller import CrossTenantRecallError, Recaller, RecallResult
 from .render import compact_format, full_format
 from .reranker import RERANK_MODES, Reranker
 from .retrievers import (
@@ -95,6 +95,7 @@ __all__ = [
     "rewrite_followup",
     "extract_exact_tokens",
     "mca_prefilter",
+    "CrossTenantRecallError",
     "Recaller",
     "RecallResult",
     "compact_format",

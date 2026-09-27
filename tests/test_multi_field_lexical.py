@@ -543,7 +543,9 @@ def test_recaller_weights_key_per_arm():
         vector_store=s,
         fields={"title": 2.0, "text": 1.0},
     )
-    rec = Recaller(retrievers=arms, retriever_weights=weights)
+    # Deliberately mixed-tenant corpus exercising arm weights, not
+    # isolation — opt out of the tenantless fail-closed guard (#193).
+    rec = Recaller(retrievers=arms, retriever_weights=weights, allow_cross_tenant=True)
     assert rec._weight_for("qdrant_text:title", "postgres") == 2.0
     assert rec._weight_for("qdrant_text", "postgres") == 1.0
     results = rec.recall("postgres", limit=10)
