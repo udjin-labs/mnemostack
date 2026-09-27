@@ -444,7 +444,10 @@ def _innermost_recaller(recaller: Any) -> Any:
     seen: set[int] = set()
     while isinstance(recaller, QueryExpander) and id(recaller) not in seen:
         seen.add(id(recaller))
-        recaller = recaller.recaller
+        inner = getattr(recaller, "recaller", None)
+        if inner is None:  # e.g. a spec'd mock: isinstance holds, no instance field
+            break
+        recaller = inner
     return recaller
 
 
@@ -459,8 +462,9 @@ def _with_cross_tenant_opt_out(recaller: Any, _seen: frozenset[int] = frozenset(
     from .recall.expansion import QueryExpander
 
     clone: Any = copy.copy(recaller)
-    if isinstance(recaller, QueryExpander) and id(recaller) not in _seen:
-        clone.recaller = _with_cross_tenant_opt_out(recaller.recaller, _seen | {id(recaller)})
+    inner = getattr(recaller, "recaller", None)
+    if isinstance(recaller, QueryExpander) and inner is not None and id(recaller) not in _seen:
+        clone.recaller = _with_cross_tenant_opt_out(inner, _seen | {id(recaller)})
     else:
         clone.allow_cross_tenant = True
     return clone

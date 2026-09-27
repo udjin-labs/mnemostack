@@ -993,6 +993,10 @@ def test_opt_out_walk_is_bounded_on_mocks_and_cycles():
     assert _innermost_recaller(mock) is mock
     _with_cross_tenant_opt_out(mock)  # no RecursionError
 
+    spec_mock = MagicMock(spec=QueryExpander)  # isinstance holds, no .recaller
+    assert _innermost_recaller(spec_mock) is spec_mock
+    _with_cross_tenant_opt_out(spec_mock)  # no AttributeError
+
     inner = Recaller(retrievers=[])
     qe = QueryExpander(inner, llm=None)
     qe.recaller = qe  # a cycle
