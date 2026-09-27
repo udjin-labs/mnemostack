@@ -6,13 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.6.1] - 2026-09-27
+
 - **The LLM reranker accepts answers that echo its `ID=` label** (#204).
   The prompt labels each candidate `ID=R12: ...`; a model that answered in
   that form (`ID=R12 ID=R19`) had none of its ids matched, so the rerank
   silently kept the pipeline order. An answered id that matches no
   candidate as is is now retried without the label (and a trailing `:`),
   so a raw id that itself starts with `ID=` still resolves exactly (and
-  the prompt's labels never take a shape such a raw id has). A rerank that keeps the original order because the LLM
+  the prompt's labels never take a shape such a raw id has). A rerank that
+  keeps the original order because the LLM
   failed or no answered id matched a candidate is now marked
   `reranker:fallback` on the trace and in the degraded counter, as the
   scoring reranker's already was, instead of passing as a rerank; an
