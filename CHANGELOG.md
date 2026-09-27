@@ -15,16 +15,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `trace.stages` (ids and scores only; with a tenant or `filters`, only
   results inside that scope are recorded, checked per snapshot, so a
   stage-injected record outside it never surfaces through the trace;
-  results are unchanged). When
-  a weak-recall retry rewrites `fused` to the merged order it returned, the
-  first pass's order is kept in `trace.first_pass_fused`. `RecallTrace.loss_report(expected_ids,
+  results are unchanged). When a weak-recall retry rewrites `fused` to the
+  merged order it returned, the first pass's order is kept in
+  `trace.first_pass_fused`. `RecallTrace.loss_report(expected_ids,
   cutoffs=(1, 5, 10, 20, 30))` gives each expected id's position per
   retriever and per checkpoint (fused, each stage, post-rerank), or `None`
   when absent, and every move into or out of a top-k between consecutive
   checkpoints as gains and losses (after a weak-recall retry the merged
   order is the last checkpoint, `weak_retry_merge`). `StageTrace` is
   exported from `mnemostack.recall`.
-- **Tenantless recall over a multi-tenant collection fails closed** (#193).
+
+## [2.5.0] - 2026-09-27
+
+- **Tenantless recall over a verifiably multi-tenant collection is refused** (#193).
   `Recaller.recall(tenant=None)` meant "all tenants", so a consumer wired
   straight to a shared collection that forgot the argument silently searched
   every tenant at once — observed in a real deployment answering from another
