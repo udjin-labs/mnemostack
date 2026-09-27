@@ -338,15 +338,31 @@ def test_positive_probe_is_permanent(monkeypatch):
     assert store.probes == 1
 
 
-def test_unknown_probe_is_retried_and_warns_once(monkeypatch, caplog):
-    store = _FakeStore(tenants=None)
-    r = Recaller(retrievers=[_StaticArm("vector", [_hit("a")], store=store)])
+def test_unknown_probe_is_retried_and_warns_once_per_process(monkeypatch):
+    import mnemostack.recall.recaller as rec_mod
+
+    messages = []
+    monkeypatch.setattr(rec_mod.logger, "warning", lambda msg, *a, **k: messages.append(msg))
+    monkeypatch.setattr(rec_mod, "_PROBE_UNKNOWN_WARNED", False)
     monkeypatch.setattr(Recaller, "_PROBE_TTL_S", 0.0)
-    with caplog.at_level(logging.WARNING, logger="mnemostack.recall.recaller"):
-        r.recall("q")
-        r.recall("q")
-    assert store.probes == 2  # "unknown" is not cached for the process lifetime
-    assert r._probe_unknown_warned is True
+    store = _FakeStore(tenants=None)
+    for _ in range(3):  # fresh recallers, as synthesis builds them per call
+        Recaller(retrievers=[_StaticArm("vector", [_hit("a")], store=store)]).recall("q")
+    assert store.probes == 3  # "unknown" is never cached for good
+    assert sum("could not determine" in m for m in messages) == 1
+
+
+def test_nothing_to_probe_is_silent_and_open(monkeypatch):
+    """No collection-backed arm at all (file BM25 only): nothing can be
+    multi-tenant, so no probe, no warning, no refusal."""
+    import mnemostack.recall.recaller as rec_mod
+
+    messages = []
+    monkeypatch.setattr(rec_mod.logger, "warning", lambda msg, *a, **k: messages.append(msg))
+    monkeypatch.setattr(rec_mod, "_PROBE_UNKNOWN_WARNED", False)
+    bm25 = BM25Retriever([BM25Doc(id="d1", text="alpha")])
+    assert [x.id for x in Recaller(retrievers=[bm25]).recall("alpha")] == ["d1"]
+    assert not any("could not determine" in m for m in messages)
 
 
 def test_synthesize_surfaces_the_refusal_instead_of_an_empty_report():
@@ -456,8 +472,14 @@ def test_probe_refresh_is_single_flight(monkeypatch):
     """A stale cache under concurrent traffic re-probes once, not once per
     thread."""
     import threading
+    import time as _time
 
-    store = _FakeStore(tenants=1)
+    class _SlowStore(_FakeStore):
+        def distinct_tenant_count(self, limit=2):
+            _time.sleep(0.05)  # long enough for the threads to overlap
+            return super().distinct_tenant_count(limit)
+
+    store = _SlowStore(tenants=1)
     r = Recaller(retrievers=[_StaticArm("vector", [_hit("a")], store=store)])
     r.recall("q")
     monkeypatch.setattr(Recaller, "_PROBE_TTL_S", 3600.0)
@@ -558,3 +580,63 @@ def test_cli_feedback_and_resolve_default_to_the_configured_tenant(monkeypatch):
     assert fb.tenant == "t-env"
     rs = parser.parse_args(["resolve", "some-id"])
     assert rs.tenant == "t-env"
+
+
+# ============================================== review round 3 regressions
+
+
+class _SampleStore:
+    def __init__(self, tenants):
+        self._tenants = tenants
+
+    def tenant_sample(self):
+        return None if self._tenants is None else set(self._tenants)
+
+
+def test_every_probe_source_is_asked_and_samples_are_unioned():
+    """One tenant in each of two collections is still two tenants."""
+    a = _StaticArm("vec_a", [], store=_SampleStore({"x"}))
+    b = _StaticArm("vec_b", [], store=_SampleStore({"y"}))
+    with pytest.raises(CrossTenantRecallError):
+        Recaller(retrievers=[a, b]).recall("q")
+
+
+def test_same_single_tenant_across_sources_stays_open():
+    a = _StaticArm("vec_a", [_hit("1")], store=_SampleStore({"x"}))
+    b = _StaticArm("vec_b", [], store=_SampleStore({"x"}))
+    assert [r.id for r in Recaller(retrievers=[a, b]).recall("q")] == ["1"]
+
+
+def test_a_later_multi_tenant_source_is_not_missed():
+    a = _StaticArm("vec_a", [], store=_SampleStore(set()))
+    b = _StaticArm("vec_b", [], store=_SampleStore({"x", "y"}))
+    with pytest.raises(CrossTenantRecallError):
+        Recaller(retrievers=[a, b]).recall("q")
+
+
+def test_bm25_from_qdrant_declares_its_collection_to_the_guard():
+    """The in-memory corpus is the whole collection, every tenant included;
+    a recaller holding only this arm must still be able to refuse."""
+    s = _real_store([(1, "a"), (2, "b")])
+    arm = BM25Retriever.from_qdrant(s.client, "probe")
+    assert arm.tenant_probe_store.tenant_sample() == {"a", "b"}
+    with pytest.raises(CrossTenantRecallError):
+        Recaller(retrievers=[arm]).recall("p1")
+
+
+def test_real_store_sample_returns_the_tenant_ids():
+    assert _real_store([(1, "a"), (2, "a")]).tenant_sample() == {"a"}
+    assert _real_store([(1, None)]).tenant_sample() == set()
+
+
+def test_synthesize_tenant_scopes_the_supplied_recaller_too():
+    """One report, one tenant: the explicit tenant reaches the recaller, and
+    the merged results are backstopped."""
+    from mnemostack.synthesis import synthesize
+
+    rec_arm = _StaticArm("vector", [_hit("from_x", "x"), _hit("from_y", "y")], tenant_capable=True)
+    direct = _StaticArm("vector2", [_hit("d_x", "x")], tenant_capable=True)
+    r = Recaller(retrievers=[rec_arm], default_tenant="y")
+    synthesize("q", recaller=r, retrievers=[direct], tenant="x")
+    assert rec_arm.seen_tenants == ["x"]
+    assert direct.seen_tenants == ["x"]

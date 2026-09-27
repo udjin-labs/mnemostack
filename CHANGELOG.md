@@ -14,10 +14,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   collection (two `limit=1` server-side queries, exact with or without a
   payload index on `tenant_id`; a positive answer is cached, a negative or
   undetermined one re-checked every minute, one refresh at a time) and
-  raises `CrossTenantRecallError` when it holds more than one tenant — on
+  raises `CrossTenantRecallError` when what it would read holds more than
+  one tenant — every collection behind the recaller is asked, including the
+  one an in-memory BM25 arm was loaded from, and one tenant each in two
+  collections counts as two — on
   every public search surface (`recall`, `recall_async`, `search_many`, and
-  so the answer generator's expansion retry, plus `synthesize` with
-  directly supplied retrievers or a source filter); collections with a
+  so the answer generator's expansion retry, plus `synthesize`, whose
+  `tenant=` scopes the supplied recaller and any directly supplied
+  retrievers alike and backstops the merged report); collections with a
   single tenant, legacy points included, behave exactly as before, and a
   probe that cannot answer logs a warning. HTTP reports the refusal as
   `409` with the reason rather than a generic `500`. The scope is set once, not per call: `Recaller(default_tenant=...)`,

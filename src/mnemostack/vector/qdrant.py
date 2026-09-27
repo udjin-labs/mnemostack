@@ -93,6 +93,64 @@ def _hide_invalidated_condition() -> IsEmptyCondition:
 
 
 
+def tenant_sample(client: Any, collection: str) -> set[Any] | None:
+    """Up to two distinct ``tenant_id`` values the collection holds — the
+    empty set (no stamped point), one value, or two ("two or more"). The
+    SET, not a count, so a recaller reading several collections can tell
+    "one tenant each, the same one" from "one tenant each, different ones".
+
+    Two ``limit=1`` scrolls, answered exactly by the server with or without
+    a payload index on ``tenant_id``: any stamped point, then any stamped
+    point of a different tenant. Cheap with the index ``ensure_collection``
+    creates; on an unindexed foreign collection the server scans, so the
+    cost grows with the collection (tens of milliseconds at 200k points).
+    ``None`` means the store could not answer.
+    """
+    stamped = IsEmptyCondition(is_empty=PayloadField(key=TENANT_ID_KEY))
+    try:
+        first, _ = client.scroll(
+            collection_name=collection,
+            scroll_filter=Filter(must_not=[stamped]),
+            with_payload=[TENANT_ID_KEY],
+            with_vectors=False,
+            limit=1,
+        )
+        if not first:
+            return set()
+        t1 = (first[0].payload or {}).get(TENANT_ID_KEY)
+        other, _ = client.scroll(
+            collection_name=collection,
+            scroll_filter=Filter(must_not=[stamped, _tenant_condition(t1)]),
+            with_payload=[TENANT_ID_KEY],
+            with_vectors=False,
+            limit=1,
+        )
+        if not other:
+            return {t1}
+        return {t1, (other[0].payload or {}).get(TENANT_ID_KEY)}
+    except Exception:
+        return None
+
+
+class CollectionTenantProbe:
+    """The tenant probe for an arm that reads a collection through a raw
+    client rather than a VectorStore (``BM25Retriever.from_qdrant``): the
+    arm declares it as ``tenant_probe_store`` so the recaller's fail-closed
+    guard can see the collection the arm loaded."""
+
+    def __init__(self, client: Any, collection: str):
+        self.client = client
+        self.collection = collection
+
+    def tenant_sample(self) -> set[Any] | None:
+        return tenant_sample(self.client, self.collection)
+
+    def distinct_tenant_count(self, limit: int = 2) -> int | None:
+        del limit
+        sample = self.tenant_sample()
+        return None if sample is None else len(sample)
+
+
 class DimensionMismatchError(ValueError):
     """Existing collection stores vectors of a different size than the provider produces."""
 
@@ -514,42 +572,17 @@ class VectorStore:
         info = self.client.get_collection(self.collection)
         return info.points_count or 0
 
-    def distinct_tenant_count(self, limit: int = 2) -> int | None:
-        """0, 1 or 2 — whether the collection holds no ``tenant_id``, exactly
-        one distinct value, or more than one ("2" means "two or more"; the
-        recaller's fail-closed guard only needs "more than one?").
+    def tenant_sample(self) -> set[Any] | None:
+        """Up to two distinct ``tenant_id`` values — see :func:`tenant_sample`."""
+        return tenant_sample(self.client, self.collection)
 
-        Two ``limit=1`` scrolls, answered exactly by the server with or
-        without a payload index on ``tenant_id``: the first finds any stamped
-        point, the second any stamped point whose tenant differs from it. No
-        client-side scan, no cap, so a large collection costs the same as a
-        small one. ``None`` means the store could not answer (transport
-        failure); the caller treats that as unguardable, not as "one tenant".
-        ``limit`` is accepted for interface stability and ignored.
-        """
+    def distinct_tenant_count(self, limit: int = 2) -> int | None:
+        """0, 1 or 2 ("two or more") distinct ``tenant_id`` values; ``None``
+        when the store cannot answer. ``limit`` is accepted for interface
+        stability and ignored."""
         del limit
-        stamped = IsEmptyCondition(is_empty=PayloadField(key=TENANT_ID_KEY))
-        try:
-            first, _ = self.client.scroll(
-                collection_name=self.collection,
-                scroll_filter=Filter(must_not=[stamped]),
-                with_payload=[TENANT_ID_KEY],
-                with_vectors=False,
-                limit=1,
-            )
-            if not first:
-                return 0
-            t1 = (first[0].payload or {}).get(TENANT_ID_KEY)
-            other, _ = self.client.scroll(
-                collection_name=self.collection,
-                scroll_filter=Filter(must_not=[stamped, _tenant_condition(t1)]),
-                with_payload=False,
-                with_vectors=False,
-                limit=1,
-            )
-            return 2 if other else 1
-        except Exception:
-            return None
+        sample = self.tenant_sample()
+        return None if sample is None else len(sample)
 
     def count_unstamped(self) -> int | None:
         """Points carrying no ``tenant_id`` — the data a tenant-scoped surface

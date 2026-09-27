@@ -1102,7 +1102,7 @@ class BM25Retriever(Retriever):
             timestamp_key=timestamp_key,
             timestamp_format=timestamp_format,
         )
-        return cls(
+        retriever = cls(
             docs=docs,
             tokenizer=tokenizer or tokenize,
             retokenize=False,
@@ -1112,6 +1112,13 @@ class BM25Retriever(Retriever):
             # Qdrant payloads carry tenant_id — this corpus CAN be scoped.
             tenant_aware=True,
         )
+        # The corpus is the WHOLE collection, every tenant's points included;
+        # declare where it came from so the recaller's fail-closed guard can
+        # probe it (this arm exposes no vector_store of its own).
+        from ..vector.qdrant import CollectionTenantProbe
+
+        retriever.tenant_probe_store = CollectionTenantProbe(client, collection_name)
+        return retriever
 
     def search(self, query, limit=20, filters=None, tenant=None):
         # Same filter semantics the vector store applies natively. Without

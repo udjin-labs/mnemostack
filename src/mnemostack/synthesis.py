@@ -25,6 +25,7 @@ from .recall.retrievers import (
     VectorRetriever,
     chunk_filter_probe_via,
 )
+from .recall.validity import filter_by_tenant
 
 _TIMESTAMP_KEYS = ("timestamp", "created_at", "date", "time")
 _STOPWORDS = {
@@ -176,7 +177,13 @@ def synthesize(
     recaller = _filter_recaller(
         kwargs.get("recaller"), source_filter
     ) or _build_recaller_from_kwargs(source_filter, kwargs)
-    raw_results = _query_recaller(recaller, entity, max_results, kwargs.get("filters"))
+    # One tenant for the whole report: the explicit argument, else the
+    # supplied recaller's own scope. Both paths below run under it, and the
+    # merged results are backstopped, so one report never mixes tenants.
+    tenant = kwargs.get("tenant") or getattr(recaller, "default_tenant", None) or None
+    raw_results = _query_recaller(
+        recaller, entity, max_results, kwargs.get("filters"), tenant=tenant
+    )
     raw_results.extend(
         _query_retrievers(
             kwargs.get("retrievers"),
@@ -184,13 +191,14 @@ def synthesize(
             max_results,
             source_filter,
             kwargs.get("filters"),
-            tenant=kwargs.get("tenant") or getattr(recaller, "default_tenant", None) or None,
+            tenant=tenant,
             allow_cross_tenant=bool(
                 kwargs.get("allow_cross_tenant", getattr(recaller, "allow_cross_tenant", False))
             ),
         )
     )
     raw_results = [r for r in raw_results if _result_source_enabled(r, source_filter)]
+    raw_results = filter_by_tenant(raw_results, tenant)
 
     # Schema resolution: explicit kwargs win; otherwise the SUPPLIED recaller
     # — or, in the documented retrievers=[...] construction, the first
@@ -418,11 +426,14 @@ def _query_recaller(
     entity: str,
     max_results: int,
     filters: dict[str, Any] | None,
+    *,
+    tenant: str | None = None,
 ) -> list[RecallResult]:
     if recaller is None:
         return []
     from .recall.recaller import CrossTenantRecallError
 
+    tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
     try:
         return list(
             recaller.recall(
@@ -431,11 +442,15 @@ def _query_recaller(
                 vector_limit=max_results,
                 bm25_limit=max_results,
                 filters=filters,
+                **tkw,
             )
         )
     except CrossTenantRecallError:
         raise
     except TypeError:
+        if tkw:
+            # A recaller that cannot take the scope must not run unscoped.
+            return []
         try:
             return list(recaller.recall(entity, limit=max_results, filters=filters))
         except CrossTenantRecallError:
