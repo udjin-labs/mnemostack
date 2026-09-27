@@ -1076,7 +1076,8 @@ class Recaller:
         hit that recurs across expanded vectors can't be RRF-boosted into the
         merged result ahead of a valid single-vector hit.
         """
-        if not self.vector:
+        if not self.vector or not any(vectors):
+            # Nothing to search: no guard, no probes, no space check.
             return []
         # A public search surface like recall(): same tenant resolution, same
         # fail-closed guard — the answer generator's expansion retry reaches

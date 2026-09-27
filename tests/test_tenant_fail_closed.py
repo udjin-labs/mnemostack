@@ -1043,3 +1043,10 @@ def test_failed_refresh_keeps_a_known_multi_tenant_verdict(monkeypatch):
         r.recall("q")
     store._tenants = 1  # a conclusive single-tenant answer clears it
     assert [x.id for x in r.recall("q")] == ["a"]
+
+
+@pytest.mark.parametrize("vectors", [[], [[]], [[], []]])
+def test_search_many_with_nothing_to_search_is_a_silent_no_op(vectors):
+    store = _SampleStore({"x", "y"})
+    r = Recaller(vector_store=store)
+    assert r.search_many(vectors, limit=3) == []
