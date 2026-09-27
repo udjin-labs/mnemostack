@@ -337,6 +337,8 @@ Built-in profiles cover OpenClaw webchat and Telegram envelopes; pass `profiles=
 | `MNEMOSTACK_COLLECTION` | Qdrant collection name (default `mnemostack`) | CLI convenience |
 | `MNEMOSTACK_QDRANT_URL` | Qdrant URL (default `http://localhost:6333`) | Remote Qdrant |
 | `MNEMOSTACK_GRAPH_URI` / `MNEMOSTACK_MEMGRAPH_URI` | Memgraph bolt URI | Graph retriever / GraphStore |
+| `MNEMOSTACK_TENANT` | Tenant every recall is scoped to when the call names none (`recall.tenant` in the config, `--tenant` on the CLI) | Recall on every surface |
+| `MNEMOSTACK_ALLOW_CROSS_TENANT` | Deliberately allow tenantless recall over a multi-tenant collection (tooling inside the trust boundary; not a security control) | Recall / `serve` startup |
 | `MNEMOSTACK_LLM_HOST` / `MNEMOSTACK_LLM_TIMEOUT` | LLM endpoint (ollama: default inherits the embedding `--ollama-host`; openai: required base URL) and LLM request timeout | Answer / reranker / expansion LLM |
 | `MNEMOSTACK_LLM_API_KEY` | Bearer token for the `openai` LLM provider; unset or `none` = no auth header (keyless vLLM / llama.cpp) | Answer / reranker / expansion LLM |
 | `MNEMOSTACK_PROVIDER` / `MNEMOSTACK_EMBEDDING_PROVIDER` | Embedding provider | CLI / HTTP / MCP |
@@ -799,6 +801,8 @@ curl -s http://localhost:8000/feedback \
 
 `signal` is one of `useful`, `clicked`, or `irrelevant`; pass the `retrievers` list returned by `/recall` as `sources` so Q-learning can update the right source weights.
 The same state update is available from CLI as `mnemostack feedback ...` and from MCP as `mnemostack_feedback`.
+
+**Tenantless recall fails closed.** A recall that names no tenant — no `tenant=` argument, no `Recaller(default_tenant=...)`, no `MNEMOSTACK_TENANT` — is refused with `CrossTenantRecallError` when what it would read holds more than one `tenant_id` — every collection behind the recaller is asked, and one tenant each in two collections counts as two (two small server-side queries per collection, exact with or without a payload index; the answer is cached and re-checked every minute), instead of silently searching every tenant at once. An unauthenticated `serve` over such a collection refuses to start. Collections with a single tenant — including one tenant plus legacy points that carry no `tenant_id` — are unaffected, and `allow_cross_tenant=True` / `--allow-cross-tenant` / `MNEMOSTACK_ALLOW_CROSS_TENANT` restores the old behavior for deliberate cross-tenant tooling. A configured scope applies to the whole surface: on an unauthenticated `serve` or `mcp-serve` it scopes writes as well as reads (list, invalidate and delete included), the CLI's `search`, `answer`, `synthesize`, `feedback` and `resolve` default to it, and a file-backed BM25 corpus is stamped as that tenant's; `mnemostack index` takes its own explicit `--tenant`. **Scoping hides points that carry no `tenant_id`** — before switching an existing collection to a scope, stamp its points with `mnemostack tenant-migrate --tenant <id>` (a scoped `serve` warns at startup when it finds unstamped points). This guard catches misconfiguration; it is not a security boundary — whoever holds the store credentials can query the store directly, so untrusted consumers belong behind `serve --auth` below.
 
 **Multi-tenant auth.** By default the server is unauthenticated (single-tenant; put it behind your own auth layer). For a hard, per-tenant boundary, start it with `--auth` and issue service keys:
 

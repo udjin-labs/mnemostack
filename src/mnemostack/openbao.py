@@ -233,8 +233,8 @@ def _record_principal(rec: Any) -> Principal | None:
     if not isinstance(rec, dict):
         return None
     tenant = rec.get("tenant")
-    if not isinstance(tenant, str) or not tenant:
-        return None
+    if not isinstance(tenant, str) or not tenant.strip():
+        return None  # blank principals are malformed, as in the file store
     raw_scopes = rec.get("scopes")
     if not isinstance(raw_scopes, (list, str)):
         return None

@@ -102,7 +102,7 @@ def _is_usable_admin(rec: dict[str, Any]) -> bool:
     if not _is_well_formed_hash(rec.get("hash")):
         return False
     tenant = rec.get("tenant")
-    if not isinstance(tenant, str) or not tenant:
+    if not isinstance(tenant, str) or not tenant.strip():
         return False
     raw_scopes = rec.get("scopes")
     if not isinstance(raw_scopes, list):
@@ -314,8 +314,11 @@ class FileKeyStore:
             # constant-time compare so a timing side-channel can't probe hashes
             if hmac.compare_digest(stored, h):
                 tenant = rec.get("tenant")
-                if not isinstance(tenant, str) or not tenant:
-                    return None  # a malformed (non-string / empty) tenant denies
+                if not isinstance(tenant, str) or not tenant.strip():
+                    # A malformed (non-string / blank) tenant denies: a
+                    # whitespace-only principal would read nothing (recall
+                    # refuses a blank scope) while its writes stamp it.
+                    return None
                 # A persisted scopes value must be a list of strings. Anything else
                 # (a dict like {"admin": false}, a bare string, null) is a malformed
                 # record and denies — never normalize it, or e.g. a dict would
@@ -346,8 +349,8 @@ class FileKeyStore:
         The plaintext is returned ONCE and never stored — only its hash is
         persisted. Show it to the operator immediately; it can't be recovered.
         """
-        if not tenant:
-            raise ValueError("tenant is required")
+        if not isinstance(tenant, str) or not tenant.strip():
+            raise ValueError("tenant is required (a blank tenant is not a tenant)")
         norm = _normalize_scopes(scopes)
         key = _KEY_PREFIX + secrets.token_urlsafe(24)
         with self._locked():

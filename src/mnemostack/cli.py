@@ -27,6 +27,7 @@ from .config import (
     generate_example_config,
     llm_kwargs,
     model_kwargs,  # noqa: F401 — re-exported: tests patch cli.model_kwargs as a construction seam
+    normalize_tenant,
     provider_kwargs,
 )
 from .embeddings import ProviderProbeError, get_provider, list_providers
@@ -61,6 +62,7 @@ from .recall.pipeline import (
     default_state_path,
     resolve_access_bonus_max,
 )
+from .recall.recaller import CrossTenantRecallError
 from .synthesis import synthesize
 from .vector import VectorStore
 from .vector.patch import (
@@ -2415,6 +2417,16 @@ def _indexing_store(args: argparse.Namespace, provider) -> VectorStore:
     )
 
 
+def _allow_cross_tenant(args: argparse.Namespace) -> bool:
+    """The flag OR the documented env var — both spellings reach every
+    surface that builds a recaller or a server (search/answer/synthesize/
+    serve/mcp-serve), not just the env-driven entry points."""
+    # Parsed locally: mnemostack.server needs the optional [server] extra,
+    # and search/answer must not.
+    env = os.environ.get("MNEMOSTACK_ALLOW_CROSS_TENANT", "").strip().lower()
+    return bool(getattr(args, "allow_cross_tenant", False)) or env in {"1", "true", "yes", "on"}
+
+
 def _build_recaller(
     args: argparse.Namespace,
     provider,
@@ -2459,6 +2471,7 @@ def _build_recaller(
                         docs=bm25_docs,
                         timestamp_key=timestamp_key,
                         timestamp_format=timestamp_format,
+                        tenant=normalize_tenant(getattr(args, "tenant", None)),
                     )
                 )
         elif mode == "qdrant_bm25" and store is not None:
@@ -2542,6 +2555,11 @@ def _build_recaller(
         text_key=text_key,
         timestamp_key=timestamp_key,
         timestamp_format=timestamp_format,
+        # --tenant flag > MNEMOSTACK_TENANT / recall.tenant (folded into the
+        # flag's default). getattr: programmatic callers construct bare
+        # Namespaces without parser defaults.
+        default_tenant=normalize_tenant(getattr(args, "tenant", None)),
+        allow_cross_tenant=_allow_cross_tenant(args),
     )
 
 
@@ -3676,7 +3694,11 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         default=None,
         help="Where relative sources are looked up (default: the payload's own index_root)",
     )
-    p_resolve.add_argument("--tenant", default=None, help="Tenant scope for the lookup")
+    p_resolve.add_argument(
+        "--tenant",
+        default=cfg.recall.tenant,
+        help="Tenant scope for the lookup (default: recall.tenant / MNEMOSTACK_TENANT)",
+    )
     p_resolve.add_argument("--json", action="store_true", help="Emit the full resolution as JSON")
     p_resolve.set_defaults(func=cmd_resolve)
 
@@ -3981,6 +4003,16 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     _add_validity_recall_flags(p_search)
         # Not flags: config-file/env LLM host+timeout ride along so every
     # cmd_* that builds an LLM reads one place (_llm_build_kwargs).
+    p_search.add_argument(
+        "--tenant",
+        default=cfg.recall.tenant,
+        help="Scope every recall to this tenant (default: recall.tenant / MNEMOSTACK_TENANT). Over a multi-tenant collection an unscoped recall fails.",
+    )
+    p_search.add_argument(
+        "--allow-cross-tenant",
+        action="store_true",
+        help="Allow an UNSCOPED recall over a multi-tenant collection (no effect while a tenant is set via --tenant / recall.tenant / MNEMOSTACK_TENANT). Also MNEMOSTACK_ALLOW_CROSS_TENANT. Tooling inside the trust boundary; not a security control.",
+    )
     p_search.set_defaults(_llm_host=cfg.llm.host, _llm_timeout=cfg.llm.timeout)
     p_search.set_defaults(func=cmd_search)
 
@@ -4061,6 +4093,16 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         type=int,
         default=cfg.recall.vector_floor,
         help="Append missing top-N raw-vector candidates after fusion/rerank",
+    )
+    p_synthesize.add_argument(
+        "--tenant",
+        default=cfg.recall.tenant,
+        help="Scope every recall to this tenant (default: recall.tenant / MNEMOSTACK_TENANT). Over a multi-tenant collection an unscoped recall fails.",
+    )
+    p_synthesize.add_argument(
+        "--allow-cross-tenant",
+        action="store_true",
+        help="Allow an UNSCOPED recall over a multi-tenant collection (no effect while a tenant is set via --tenant / recall.tenant / MNEMOSTACK_TENANT). Also MNEMOSTACK_ALLOW_CROSS_TENANT. Tooling inside the trust boundary; not a security control.",
     )
     p_synthesize.set_defaults(_llm_host=cfg.llm.host, _llm_timeout=cfg.llm.timeout)
     p_synthesize.set_defaults(func=cmd_synthesize)
@@ -4160,6 +4202,16 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     )
     _add_validity_recall_flags(p_answer)
     p_answer.add_argument("--json", action="store_true", help="JSON output")
+    p_answer.add_argument(
+        "--tenant",
+        default=cfg.recall.tenant,
+        help="Scope every recall to this tenant (default: recall.tenant / MNEMOSTACK_TENANT). Over a multi-tenant collection an unscoped recall fails.",
+    )
+    p_answer.add_argument(
+        "--allow-cross-tenant",
+        action="store_true",
+        help="Allow an UNSCOPED recall over a multi-tenant collection (no effect while a tenant is set via --tenant / recall.tenant / MNEMOSTACK_TENANT). Also MNEMOSTACK_ALLOW_CROSS_TENANT. Tooling inside the trust boundary; not a security control.",
+    )
     p_answer.set_defaults(_llm_host=cfg.llm.host, _llm_timeout=cfg.llm.timeout)
     p_answer.set_defaults(func=cmd_answer)
 
@@ -4361,10 +4413,11 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     )
     p_feedback.add_argument(
         "--tenant",
-        default=None,
+        default=cfg.recall.tenant,
         metavar="ID",
         help="Record the feedback into this tenant's learning-state partition "
-        "(default: unscoped / single-tenant)",
+        "(default: recall.tenant / MNEMOSTACK_TENANT, else unscoped) — the "
+        "same partition the scoped search/answer read",
     )
     p_feedback.add_argument("--json", action="store_true", help="JSON output")
     p_feedback.set_defaults(func=cmd_feedback)
@@ -4458,6 +4511,16 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
             "SAME file `serve --quotas-file` uses so MCP writes obey the "
             "same per-tenant caps as HTTP writes."
         ),
+    )
+    p_mcp.add_argument(
+        "--tenant",
+        default=cfg.recall.tenant,
+        help="Scope every recall to this tenant (default: recall.tenant / MNEMOSTACK_TENANT). Over a multi-tenant collection an unscoped recall fails.",
+    )
+    p_mcp.add_argument(
+        "--allow-cross-tenant",
+        action="store_true",
+        help="Allow an UNSCOPED recall over a multi-tenant collection (no effect while a tenant is set via --tenant / recall.tenant / MNEMOSTACK_TENANT). Also MNEMOSTACK_ALLOW_CROSS_TENANT. Tooling inside the trust boundary; not a security control.",
     )
     p_mcp.set_defaults(_llm_host=cfg.llm.host, _llm_timeout=cfg.llm.timeout)
     p_mcp.set_defaults(func=cmd_mcp_serve)
@@ -4614,6 +4677,16 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     p_serve.add_argument(
         "--reload", action="store_true", help="Enable uvicorn auto-reload (dev only)"
     )
+    p_serve.add_argument(
+        "--tenant",
+        default=cfg.recall.tenant,
+        help="Scope every recall to this tenant (default: recall.tenant / MNEMOSTACK_TENANT). Over a multi-tenant collection an unscoped recall fails.",
+    )
+    p_serve.add_argument(
+        "--allow-cross-tenant",
+        action="store_true",
+        help="Allow an UNSCOPED recall over a multi-tenant collection (no effect while a tenant is set via --tenant / recall.tenant / MNEMOSTACK_TENANT). Also MNEMOSTACK_ALLOW_CROSS_TENANT. Tooling inside the trust boundary; not a security control.",
+    )
     p_serve.set_defaults(_llm_host=cfg.llm.host, _llm_timeout=cfg.llm.timeout)
     p_serve.set_defaults(func=cmd_serve)
 
@@ -4731,6 +4804,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
         graph_uri=args.memgraph_uri,
         llm_host=getattr(args, "_llm_host", None),
         llm_timeout=getattr(args, "_llm_timeout", None),
+        default_tenant=normalize_tenant(getattr(args, "tenant", None)),
+        allow_cross_tenant=_allow_cross_tenant(args),
         graph_user=_graph_auth(args)["user"],
         graph_password=_graph_auth(args)["password"],
         graph_database=_graph_auth(args)["database"],
@@ -4918,6 +4993,8 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
         llm_model=_llm_model(args),
         llm_host=getattr(args, "_llm_host", None),
         llm_timeout=getattr(args, "_llm_timeout", None),
+        default_tenant=normalize_tenant(getattr(args, "tenant", None)),
+        allow_cross_tenant=_allow_cross_tenant(args),
         qdrant_host=args.qdrant,
         memgraph_uri=args.memgraph_uri,
         graph_user=_graph_auth(args)["user"],
@@ -5018,7 +5095,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.func(args)
-    except (ProviderProbeError, EmbeddingSpaceError) as e:
+    except (ProviderProbeError, EmbeddingSpaceError, CrossTenantRecallError) as e:
         # Typed, operator-actionable refusals (dimension undiscoverable,
         # embedding spaces would mix) follow the CLI's error convention —
         # a clean message and exit 2, never a raw traceback.

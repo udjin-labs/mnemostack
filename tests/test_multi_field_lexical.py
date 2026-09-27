@@ -455,9 +455,14 @@ def test_direct_retriever_synthesis_matches_the_lexical_family():
     )
     # The "bm25" umbrella must select the suffixed arm on the DIRECT
     # retrievers path too, not only through a supplied Recaller.
-    hits = _query_retrievers([arm], "postgres", 10, {"bm25"}, None)
+    # Mixed-tenant seed corpus, non-isolation test — opt out of the
+    # tenantless fail-closed guard (#193).
+    hits = _query_retrievers([arm], "postgres", 10, {"bm25"}, None, allow_cross_tenant=True)
     assert {h.id for h in hits} == {1, 3}
-    assert _query_retrievers([arm], "postgres", 10, {"memgraph"}, None) == []
+    assert (
+        _query_retrievers([arm], "postgres", 10, {"memgraph"}, None, allow_cross_tenant=True)
+        == []
+    )
 
 
 def test_multi_field_arms_share_one_query_embedding():
@@ -543,7 +548,9 @@ def test_recaller_weights_key_per_arm():
         vector_store=s,
         fields={"title": 2.0, "text": 1.0},
     )
-    rec = Recaller(retrievers=arms, retriever_weights=weights)
+    # Deliberately mixed-tenant corpus exercising arm weights, not
+    # isolation — opt out of the tenantless fail-closed guard (#193).
+    rec = Recaller(retrievers=arms, retriever_weights=weights, allow_cross_tenant=True)
     assert rec._weight_for("qdrant_text:title", "postgres") == 2.0
     assert rec._weight_for("qdrant_text", "postgres") == 1.0
     results = rec.recall("postgres", limit=10)

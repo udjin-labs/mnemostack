@@ -707,6 +707,8 @@ These are the MCP-relevant environment variables read by `mnemostack mcp-serve` 
 | `MNEMOSTACK_MEMGRAPH_URI` | unset | Memgraph Bolt URI. If unset, graph tools are not registered. Alias of `MNEMOSTACK_GRAPH_URI`. |
 | `MNEMOSTACK_LLM_HOST` | unset | LLM endpoint. Ollama: defaults to inheriting the embedding Ollama host, so one GPU box serves both; set only for split deployments. `openai` provider: required base URL of the OpenAI-compatible endpoint. |
 | `MNEMOSTACK_LLM_API_KEY` | unset | Bearer token for the `openai` LLM provider. Unset or `none` sends no auth header (keyless vLLM / llama.cpp). |
+| `MNEMOSTACK_TENANT` | unset | Tenant every recall is scoped to when the call names none. Over a collection holding several tenants, an unscoped recall fails instead of searching all of them. |
+| `MNEMOSTACK_ALLOW_CROSS_TENANT` | unset | Deliberately allow tenantless recall over a multi-tenant collection (not a security control). |
 | `MNEMOSTACK_LLM_TIMEOUT` | provider default | LLM request timeout in seconds. Not inherited from the embedding timeout — generation is a different workload. |
 | `MNEMOSTACK_GRAPH_TIMEOUT` | `5.0` | Memgraph operation timeout in seconds. |
 | `MNEMOSTACK_BM25_PATHS` | unset | File or directory paths for BM25 exact-token retrieval, separated by `os.pathsep` (`:` on Unix, `;` on Windows). |

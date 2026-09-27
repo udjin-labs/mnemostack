@@ -25,6 +25,7 @@ from .recall.retrievers import (
     VectorRetriever,
     chunk_filter_probe_via,
 )
+from .recall.validity import filter_by_tenant
 
 _TIMESTAMP_KEYS = ("timestamp", "created_at", "date", "time")
 _STOPWORDS = {
@@ -176,13 +177,42 @@ def synthesize(
     recaller = _filter_recaller(
         kwargs.get("recaller"), source_filter
     ) or _build_recaller_from_kwargs(source_filter, kwargs)
-    raw_results = _query_recaller(recaller, entity, max_results, kwargs.get("filters"))
+    # One tenant for the whole report: the explicit argument, else the
+    # supplied recaller's own scope. Both paths below run under it, and the
+    # merged results are backstopped, so one report never mixes tenants.
+    from .recall.recaller import CrossTenantRecallError
+
+    explicit = kwargs.get("tenant")
+    if isinstance(explicit, str) and not explicit.strip():
+        # Same rule as Recaller.recall: an explicit blank scope is refused,
+        # never treated as "no tenant" (which would fall back to a default).
+        raise CrossTenantRecallError("blank tenant: synthesize(tenant=...) is empty")
+    tenant = explicit or getattr(recaller, "default_tenant", None) or None
+    # The synthesis-level opt-out governs a supplied recaller too: run a
+    # shallow copy with the flag set, never mutate the caller's object.
+    if kwargs.get("allow_cross_tenant") and recaller is not None:
+        recaller = _with_cross_tenant_opt_out(recaller)
+    raw_results = _query_recaller(
+        recaller, entity, max_results, kwargs.get("filters"), tenant=tenant
+    )
     raw_results.extend(
         _query_retrievers(
-            kwargs.get("retrievers"), entity, max_results, source_filter, kwargs.get("filters")
+            kwargs.get("retrievers"),
+            entity,
+            max_results,
+            source_filter,
+            kwargs.get("filters"),
+            tenant=tenant,
+            allow_cross_tenant=bool(
+                kwargs.get(
+                    "allow_cross_tenant",
+                    getattr(_innermost_recaller(recaller), "allow_cross_tenant", False),
+                )
+            ),
         )
     )
     raw_results = [r for r in raw_results if _result_source_enabled(r, source_filter)]
+    raw_results = filter_by_tenant(raw_results, tenant)
 
     # Schema resolution: explicit kwargs win; otherwise the SUPPLIED recaller
     # — or, in the documented retrievers=[...] construction, the first
@@ -290,6 +320,7 @@ def _build_recaller_from_kwargs(
                 docs=list(kwargs["bm25_docs"]),
                 timestamp_key=timestamp_key,
                 timestamp_format=timestamp_format,
+                tenant=kwargs.get("tenant"),
             )
         )
     memgraph_uri = kwargs.get("memgraph_uri")
@@ -330,6 +361,8 @@ def _build_recaller_from_kwargs(
         text_key=text_key,
         timestamp_key=timestamp_key,
         timestamp_format=timestamp_format,
+        default_tenant=kwargs.get("tenant"),
+        allow_cross_tenant=bool(kwargs.get("allow_cross_tenant", False)),
     )
 
 
@@ -366,7 +399,7 @@ def _filter_recaller(recaller: Any, source_filter: set[str] | None) -> Any:
         for retr in retrievers
         if _source_enabled(str(getattr(retr, "name", "")).lower(), source_filter)
     ]
-    return Recaller(
+    clone = Recaller(
         retrievers=filtered,
         rrf_k=getattr(recaller, "rrf_k", 60),
         retriever_weights=getattr(recaller, "retriever_weights", None),
@@ -376,7 +409,16 @@ def _filter_recaller(recaller: Any, source_filter: set[str] | None) -> Any:
         text_key=getattr(recaller, "text_key", "text"),
         timestamp_key=getattr(recaller, "timestamp_key", "timestamp"),
         timestamp_format=getattr(recaller, "timestamp_format", "iso"),
+        # ... and the ORIGINAL's tenant scope, for the same reason: a source
+        # filter must not silently widen a tenant-scoped recaller to all
+        # tenants (or re-arm the fail-closed guard the caller opted out of).
+        default_tenant=getattr(recaller, "default_tenant", None),
+        allow_cross_tenant=getattr(recaller, "allow_cross_tenant", False),
     )
+    # The clone's tenant probe asks exactly the kept arms' collections: each
+    # collection-backed arm declares its own store (BM25 loaded from Qdrant
+    # included), so an arm filtered out no longer vetoes the recall.
+    return clone
 
 
 def _result_source_enabled(result: RecallResult, source_filter: set[str] | None) -> bool:
@@ -392,14 +434,55 @@ def _result_source_enabled(result: RecallResult, source_filter: set[str] | None)
     return bool(sources & source_filter)
 
 
+def _innermost_recaller(recaller: Any) -> Any:
+    """The object a chain of QueryExpander wrappers finally delegates to —
+    where the fail-closed guard runs and its opt-out lives. Only real
+    QueryExpander instances are unwrapped (a mock or proxy that fabricates
+    a ``.recaller`` attribute is not a wrapper), and a cycle stops the walk."""
+    from .recall.expansion import QueryExpander
+
+    seen: set[int] = set()
+    while isinstance(recaller, QueryExpander) and id(recaller) not in seen:
+        seen.add(id(recaller))
+        inner = getattr(recaller, "recaller", None)
+        if inner is None:  # e.g. a spec'd mock: isinstance holds, no instance field
+            break
+        recaller = inner
+    return recaller
+
+
+def _with_cross_tenant_opt_out(recaller: Any, _seen: frozenset[int] = frozenset()) -> Any:
+    """A copy of ``recaller`` whose fail-closed guard is opted out — the flag
+    set where the guard actually runs. QueryExpander wrappers are copied
+    level by level and the flag lands on the copy of the innermost object;
+    the caller's objects are never mutated. On a duck-typed recaller without
+    a guard the flag is inert."""
+    import copy
+
+    from .recall.expansion import QueryExpander
+
+    clone: Any = copy.copy(recaller)
+    inner = getattr(recaller, "recaller", None)
+    if isinstance(recaller, QueryExpander) and inner is not None and id(recaller) not in _seen:
+        clone.recaller = _with_cross_tenant_opt_out(inner, _seen | {id(recaller)})
+    else:
+        clone.allow_cross_tenant = True
+    return clone
+
+
 def _query_recaller(
     recaller: Any,
     entity: str,
     max_results: int,
     filters: dict[str, Any] | None,
+    *,
+    tenant: str | None = None,
 ) -> list[RecallResult]:
     if recaller is None:
         return []
+    from .recall.recaller import CrossTenantRecallError
+
+    tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
     try:
         return list(
             recaller.recall(
@@ -408,14 +491,24 @@ def _query_recaller(
                 vector_limit=max_results,
                 bm25_limit=max_results,
                 filters=filters,
+                **tkw,
             )
         )
+    except CrossTenantRecallError:
+        raise
     except TypeError:
+        if tkw:
+            # A recaller that cannot take the scope must not run unscoped.
+            return []
         try:
             return list(recaller.recall(entity, limit=max_results, filters=filters))
+        except CrossTenantRecallError:
+            raise
         except TypeError:
             try:
                 return list(recaller.recall(entity, limit=max_results))
+            except CrossTenantRecallError:
+                raise
             except Exception:
                 return []
         except Exception:
@@ -430,25 +523,49 @@ def _query_retrievers(
     max_results: int,
     source_filter: set[str] | None,
     filters: dict[str, Any] | None,
+    *,
+    tenant: str | None = None,
+    allow_cross_tenant: bool = False,
 ) -> list[RecallResult]:
+    """Query caller-supplied retrievers directly — under the same tenant
+    rules as the recaller path: the fail-closed guard when unscoped, the
+    tenant handed only to arms that can enforce it (others are skipped),
+    and the isolation backstop on the merged output."""
+    from .recall.recaller import refuse_tenantless
+    from .recall.validity import filter_by_tenant
+
+    # Same family-aware matching as the recaller path: a suffixed
+    # multi-field arm ("qdrant_text:title") is part of the lexical family
+    # the "bm25" umbrella selects. Filter FIRST, so the guard below probes
+    # exactly the collections this synthesis will read.
+    enabled = [
+        r
+        for r in retrievers or []
+        if _source_enabled(str(getattr(r, "name", "")).lower(), source_filter)
+    ]
+    if not enabled:
+        return []
+    if tenant is None:
+        refuse_tenantless(enabled, allow_cross_tenant=allow_cross_tenant)
     results: list[RecallResult] = []
-    for retr in retrievers or []:
-        name = str(getattr(retr, "name", "")).lower()
-        # Same family-aware matching as the recaller path: a suffixed
-        # multi-field arm ("qdrant_text:title") is part of the lexical
-        # family the "bm25" umbrella selects.
-        if not _source_enabled(name, source_filter):
-            continue
+    for retr in enabled:
+        tkw: dict[str, Any] = {}
+        if tenant is not None:
+            if not getattr(retr, "accepts_tenant", False):
+                continue  # cannot enforce the scope — same rule as the recaller
+            tkw["tenant"] = tenant
         try:
-            results.extend(retr.search(entity, limit=max_results, filters=filters))
+            results.extend(retr.search(entity, limit=max_results, filters=filters, **tkw))
         except TypeError:
+            if tkw:
+                continue  # a scoped arm that rejects `tenant` must not run unscoped
             try:
                 results.extend(retr.search(entity, limit=max_results))
             except Exception:
                 continue
         except Exception:
             continue
-    return results
+    return filter_by_tenant(results, tenant)
 
 
 def _facts_from_results(

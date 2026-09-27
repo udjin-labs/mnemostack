@@ -318,7 +318,23 @@ behave exactly as listed above.
   trace helpers (`RecallTrace`, `apply_rerank_safe`). `recall_flow` /
   `recall_flow_async` and `Recaller.recall` / `recall_async` take an **optional
   keyword `tenant=`** (additive, default `None`) that scopes retrieval to that
-  tenant and applies `filter_by_tenant` as a backstop. `AnswerGenerator.generate`
+  tenant and applies `filter_by_tenant` as a backstop. Since #193, `None` no
+  longer means "search all tenants" unconditionally: the construction-time
+  scope (`Recaller(default_tenant=...)` / `recall.tenant` / `MNEMOSTACK_TENANT`)
+  applies first — in `Recaller.recall`, `search_many` and `recall_flow` alike —
+  and a search that still has no tenant **raises `CrossTenantRecallError`**
+  when the collection holds more than one `tenant_id` (two exact `limit=1`
+  server-side queries; cached and re-checked every minute). Single-tenant and legacy collections keep the exact
+  prior behavior (a probe that cannot answer at all logs a warning and does
+  not block); `allow_cross_tenant=True` restores
+  it everywhere for deliberate cross-tenant tooling. This is a fail-closed guard
+  against misconfigured consumers, not a security boundary — the trust boundary
+  remains `serve --auth`, where the key decides the tenant. The guard covers a
+  recaller **as configured**: replacing its internals after construction
+  (`bm25`, `retrievers`, `vector`, `embedding`) or mutating an in-memory corpus
+  in place is not covered — build a new `Recaller` instead. The graph arm is
+  not probed: a tenantless recall reading a graph that holds several tenants
+  is not refused (tenant-scoped graph recall is #194). `AnswerGenerator.generate`
   (+ async) also takes `tenant=`, but it only scopes the method's **own** internal
   retry sub-recalls (expansion / inference) — it does **not** re-filter the
   `memories` you pass in. Pre-scope those yourself: feed `generate` the output of a

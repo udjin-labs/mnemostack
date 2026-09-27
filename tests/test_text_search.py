@@ -249,7 +249,9 @@ def test_synthesize_source_bm25_selects_the_configured_lexical_arm():
     s = _store(sparse=True)
     _seed(s)
     r = QdrantSparseRetriever(vector_store=s)
-    rec = Recaller(retrievers=[r])
+    # Mixed-tenant seed corpus, non-isolation test — opt out of the
+    # tenantless fail-closed guard (#193).
+    rec = Recaller(retrievers=[r], allow_cross_tenant=True)
     assert _filter_recaller(rec, {"bm25"}).retrievers  # not dropped
     result = synthesize("postgres", sources=["bm25"], recaller=rec)
     assert result.facts  # sparse-arm facts survive the result-source filter

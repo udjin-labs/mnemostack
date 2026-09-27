@@ -54,6 +54,16 @@ def recall_flow(
     facts are dropped from the candidate pool (before the pipeline) so
     they never influence ranking — see `Recaller.recall`.
     """
+    # Resolve the recaller's construction-time tenant HERE, not only inside
+    # Recaller.recall: the pipeline stages (graph resurrection, IoR/Q-table
+    # state) and the post-pipeline isolation backstop below all read this
+    # variable, and a default applied only to the retrieval step would let
+    # them run unscoped.
+    # Duck-typed recallers are accepted here, so only a real string counts.
+    if tenant is None:
+        default = getattr(recaller, "default_tenant", None)
+        if isinstance(default, str) and default:
+            tenant = default
     raw_limit = max(limit * 3, 30) if pipeline is not None else limit
     recalled = recaller.recall(
         query,

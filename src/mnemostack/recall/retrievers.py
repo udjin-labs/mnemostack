@@ -207,6 +207,13 @@ class Retriever(ABC):
     """A ranked-list source. Called by Recaller for each query."""
 
     name: str = "retriever"
+    #: For an arm that reads a collection through a raw client rather than
+    #: a ``vector_store``: the object the recaller's fail-closed tenant probe
+    #: should ask about that collection (``tenant_sample()``: a list of up to
+    #: two DISTINCT tenant values, or ``None`` when undetermined — two values
+    #: are taken as proof of two tenants). ``None`` = the arm reads no
+    #: collection of its own.
+    tenant_probe_store: Any = None
 
     def _set_name(self, name: str | None) -> None:
         """Instance-level name override (shadows the class attribute).
@@ -981,6 +988,45 @@ class QdrantSparseRetriever(Retriever):
         ]
 
 
+class _DocsTenantProbe:
+    """Tenant probe over an in-memory corpus: the up-to-two distinct
+    ``tenant_id`` values its documents carry, computed once at load."""
+
+    def __init__(self, docs: list[BM25Doc]):
+        from ..vector.qdrant import TENANT_ID_KEY
+
+        seen: set[tuple[type, Any]] = set()
+        sample: list[Any] = []
+        determined = True
+        for d in docs:
+            tid = (d.payload or {}).get(TENANT_ID_KEY)
+            # "" counts as a tenant, exactly as the live collection probe
+            # treats it — the corpus searches those documents too.
+            if tid is None:
+                continue
+            try:
+                # Keyed by (type, value): true and 1 are distinct tenants.
+                key = (type(tid), tid)
+                if key not in seen:
+                    seen.add(key)
+                    sample.append(tid)
+            except TypeError:
+                # An array/object tenant_id (foreign payloads Qdrant allows)
+                # is unhashable: note it and keep scanning — two valid
+                # tenants later in the corpus still prove multi-tenancy,
+                # whatever the document order.
+                determined = False
+                continue
+            if len(sample) >= 2:
+                break
+        # Undetermined only when the malformed markers leave the evidence
+        # inconclusive; two valid tenants are conclusive regardless.
+        self._sample: list[Any] | None = sample if (determined or len(sample) >= 2) else None
+
+    def tenant_sample(self) -> list[Any] | None:
+        return None if self._sample is None else list(self._sample)
+
+
 class BM25Retriever(Retriever):
     """Exact token match via BM25."""
 
@@ -1001,8 +1047,31 @@ class BM25Retriever(Retriever):
         timestamp_format: str = "iso",
         tenant_aware: bool = False,
         name: str | None = None,
+        tenant: str | None = None,
     ):
+        if tenant:
+            # A file corpus has no tenant metadata of its own; stamping the
+            # docs with the owning tenant is what lets a tenant-scoped recall
+            # keep its lexical arm instead of losing it to the isolation
+            # backstop. The caller's docs are NOT mutated: each doc is copied
+            # with a stamped payload. A doc that already carries a (different)
+            # tenant_id keeps it and is then excluded by the strict gate in
+            # search() — relabeling foreign data would be worse than losing it.
+            from dataclasses import replace
+
+            from ..vector.qdrant import TENANT_ID_KEY
+
+            docs = [
+                replace(d, payload={TENANT_ID_KEY: tenant, **(d.payload or {})})
+                for d in docs
+            ]
+            tenant_aware = True
         self.bm25 = BM25(docs, tokenizer=tokenizer, retokenize=retokenize)
+        # An in-memory corpus can answer the fail-closed tenant probe
+        # exactly, from the very documents it searches — whether built from
+        # files, from caller-supplied tenant-tagged docs, or from a Qdrant
+        # snapshot (points deleted since the load stay searchable here).
+        self.tenant_probe_store = _DocsTenantProbe(docs)
         self._set_name(name)
         #: The one payload key whose range filters may cross timestamp domains
         #: (see payload_matches) — a foreign collection's own schema — and how
@@ -1084,7 +1153,7 @@ class BM25Retriever(Retriever):
             timestamp_key=timestamp_key,
             timestamp_format=timestamp_format,
         )
-        return cls(
+        retriever = cls(
             docs=docs,
             tokenizer=tokenizer or tokenize,
             retokenize=False,
@@ -1094,6 +1163,7 @@ class BM25Retriever(Retriever):
             # Qdrant payloads carry tenant_id — this corpus CAN be scoped.
             tenant_aware=True,
         )
+        return retriever
 
     def search(self, query, limit=20, filters=None, tenant=None):
         # Same filter semantics the vector store applies natively. Without

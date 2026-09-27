@@ -6,6 +6,55 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **Tenantless recall over a multi-tenant collection fails closed** (#193).
+  `Recaller.recall(tenant=None)` meant "all tenants", so a consumer wired
+  straight to a shared collection that forgot the argument silently searched
+  every tenant at once — observed in a real deployment answering from another
+  tenant's corpus with full confidence. A tenantless recall now probes the
+  collection (two `limit=1` server-side queries, exact with or without a
+  payload index on `tenant_id`; the answer is cached and re-checked every
+  minute, one refresh at a time) and
+  raises `CrossTenantRecallError` when what it would read holds more than
+  one tenant — every collection behind the recaller is asked (an in-memory
+  BM25 arm answers for the corpus it actually loaded), and one tenant each in
+  two collections counts as two — on
+  every public search surface of a recaller as configured — replacing its
+  internals after construction is not covered (`recall`, `recall_async`,
+  `search_many`, and
+  so the answer generator's expansion retry, plus `synthesize`, whose
+  `tenant=` scopes the supplied recaller and any directly supplied
+  retrievers alike and backstops the merged report); collections with a
+  single tenant, legacy points included, behave exactly as before, and a
+  probe that cannot answer logs a warning. HTTP reports the refusal as
+  `409` with the reason rather than a generic `500`. The scope is set once, not per call: `Recaller(default_tenant=...)`,
+  `recall.tenant` in the config, `MNEMOSTACK_TENANT`, or `--tenant` on
+  `search`/`answer`/`synthesize`/`serve`/`mcp-serve` — resolved once more at
+  the top of `recall_flow`, so the pipeline stages (graph resurrection,
+  learning state) and the post-pipeline backstop run under it too. On an
+  unauthenticated `serve`/`mcp-serve` the scope is the surface's single
+  tenant-resolution point, covering writes as well as reads, and the CLI's
+  `feedback` and `resolve` default to the configured tenant too. Scoping
+  hides points without a `tenant_id`: stamp an existing collection with
+  `mnemostack tenant-migrate` first — a scoped `serve` warns at startup when
+  it finds unstamped points. An unauthenticated `serve` refuses at startup
+  to expose a multi-tenant collection, and `synthesize` reports the refusal
+  instead of printing an empty report.
+  `allow_cross_tenant=True` / `--allow-cross-tenant` restores the old
+  behavior for deliberate cross-tenant tooling — documented as operating
+  inside the trust boundary, not as a security control (with auth on, the
+  service key still decides the tenant and none of this applies). A
+  file-backed BM25 corpus is stamped with the configured tenant on the
+  unauthenticated surfaces (`BM25Retriever(docs, tenant=...)` in the
+  library, without mutating the caller's docs) so a scoped recall keeps its
+  lexical arm, and the recaller logs once per arm when it has to skip an
+  arm that cannot be tenant-scoped (previously silent). A blank or
+  whitespace-only CONFIGURED tenant is treated as none; an explicit blank
+  per-call tenant is refused rather than defaulted; nonblank tenant ids are
+  never rewritten; a non-string configured tenant (YAML `tenant: 123`) is
+  rejected at load. The graph arm remains tenant-incapable and is not
+  probed by the guard: a tenantless recall over a graph holding several
+  tenants is not refused — #194.
+
 ## [2.4.0] - 2026-09-04
 
 - **New `openai` LLM provider — any OpenAI-compatible endpoint** (#187). The

@@ -142,6 +142,12 @@ def build_server(
     # positional-tail pin in test_provider_plumbing guards exactly this.
     llm_host: str | None = None,
     llm_timeout: int | None = None,
+    # Tenant every recall runs under (MNEMOSTACK_TENANT / recall.tenant via
+    # the standalone main()); allow_cross_tenant silences the fail-closed
+    # guard for deliberate cross-tenant tooling. Appended at the tail — the
+    # positional-tail pin in test_provider_plumbing guards exactly this.
+    default_tenant: str | None = None,
+    allow_cross_tenant: bool = False,
 ) -> Any:
     """Build and return a configured FastMCP server.
 
@@ -190,6 +196,11 @@ def build_server(
     Raises:
         ImportError: if fastmcp not installed (install with mnemostack[mcp])
     """
+    # One identity for every consumer: the BM25 corpus stamp, tool reads and
+    # writes. A blank configured default is no tenant (see normalize_tenant).
+    from ..config import normalize_tenant
+
+    default_tenant = normalize_tenant(default_tenant)
     if not _FASTMCP_AVAILABLE:
         raise ImportError("fastmcp not installed. Install with: pip install 'mnemostack[mcp]'")
     # Fail a schema-key misconfiguration at BOOT (HTTP does the same) —
@@ -268,7 +279,11 @@ def build_server(
         return principal
 
     def _tenant_of(principal: Any) -> str | None:
-        return principal.tenant if principal is not None else None
+        # Auth on: the key decides. Auth off: the configured scope — one
+        # resolution point for every tool, reads and writes alike.
+        if principal is not None:
+            return principal.tenant
+        return default_tenant
 
     # Lazy-initialize components so server boots even if e.g. GEMINI_API_KEY missing.
     # Tool calls can run concurrently; the lock makes each component initialize
@@ -348,6 +363,9 @@ def build_server(
                         docs=bm25_docs,
                         timestamp_key=timestamp_key,
                         timestamp_format=timestamp_format,
+                        # Same rule as serve: stamp only a scoped,
+                        # unauthenticated process's own corpus.
+                        tenant=None if auth_enabled else default_tenant,
                     )
                 )
         elif mode == "qdrant_bm25":
@@ -408,6 +426,8 @@ def build_server(
             text_key=text_key,
             timestamp_key=timestamp_key,
             timestamp_format=timestamp_format,
+            default_tenant=default_tenant,
+            allow_cross_tenant=allow_cross_tenant,
         )
 
     def _get_recaller():
@@ -1183,8 +1203,8 @@ def build_server(
             try:
                 # Structured SPO query — the graph is tenant-scoped now, so under
                 # auth we confine the query to the caller's tenant (both endpoints
-                # pinned to `tenant`) rather than fail closed. Unscoped when auth
-                # is off (tenant=None).
+                # pinned to `tenant`) rather than fail closed. With auth off: the
+                # configured tenant scope, or unscoped when none is set.
                 tenant = _tenant_of(_authorize("read"))
                 from ..graph.factory import make_graph_store
 
@@ -1237,7 +1257,8 @@ def build_server(
             try:
                 # Structured write — stamp the caller's tenant so the triple lands
                 # in that tenant's isolated subgraph (its nodes/edges carry
-                # `tenant`), never a shared namespace. Unscoped when auth is off.
+                # `tenant`), never a shared namespace. With auth off: the
+                # configured tenant scope, or unscoped when none is set.
                 try:
                     tenant = _tenant_of(_authorize("write"))
                 except _AuthError as e:
@@ -1312,6 +1333,9 @@ def main() -> None:
         llm_model=cfg.llm.model,
         llm_host=cfg.llm.host,
         llm_timeout=cfg.llm.timeout,
+        default_tenant=cfg.recall.tenant,
+        allow_cross_tenant=os.environ.get("MNEMOSTACK_ALLOW_CROSS_TENANT", "").strip().lower()
+        in {"1", "true", "yes", "on"},
         qdrant_host=cfg.vector.host,
         memgraph_uri=cfg.graph.uri,
         graph_user=cfg.graph.user,

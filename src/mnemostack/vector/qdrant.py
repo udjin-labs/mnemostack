@@ -92,6 +92,54 @@ def _hide_invalidated_condition() -> IsEmptyCondition:
     return IsEmptyCondition(is_empty=PayloadField(key=_INVALIDATED_AT_KEY))
 
 
+
+def tenant_sample(client: Any, collection: str) -> list[Any] | None:
+    """Up to two distinct ``tenant_id`` values the collection holds, as a
+    list — empty (no stamped point), one value, or two ("two or more"; the
+    server has already told them apart under its typed equality). Values,
+    not a count, so a recaller reading several collections can tell "one
+    tenant each, the same one" from "one tenant each, different ones".
+
+    Two ``limit=1`` scrolls, answered exactly by the server with or without
+    a payload index on ``tenant_id``: any stamped point, then any stamped
+    point of a different tenant. Cheap with the index ``ensure_collection``
+    creates; on an unindexed foreign collection the server scans, so the
+    cost grows with the collection (tens of milliseconds at 200k points).
+    ``None`` means the store could not answer.
+    """
+    stamped = IsEmptyCondition(is_empty=PayloadField(key=TENANT_ID_KEY))
+    try:
+        first, _ = client.scroll(
+            collection_name=collection,
+            scroll_filter=Filter(must_not=[stamped]),
+            with_payload=[TENANT_ID_KEY],
+            with_vectors=False,
+            limit=1,
+        )
+        if not first:
+            return []
+        t1 = (first[0].payload or {}).get(TENANT_ID_KEY)
+        if t1 is None:
+            # Unreachable by the filter's semantics (IsEmpty excludes null);
+            # if a server ever disagrees, the answer is undetermined.
+            return None
+        other, _ = client.scroll(
+            collection_name=collection,
+            scroll_filter=Filter(must_not=[stamped, _tenant_condition(t1)]),
+            with_payload=[TENANT_ID_KEY],
+            with_vectors=False,
+            limit=1,
+        )
+        if not other:
+            return [t1]
+        # A LIST, not a set: the server already found the two values distinct
+        # under its typed equality (true vs 1), which a Python set would
+        # collapse.
+        return [t1, (other[0].payload or {}).get(TENANT_ID_KEY)]
+    except Exception:
+        return None
+
+
 class DimensionMismatchError(ValueError):
     """Existing collection stores vectors of a different size than the provider produces."""
 
@@ -512,6 +560,32 @@ class VectorStore:
             ).count
         info = self.client.get_collection(self.collection)
         return info.points_count or 0
+
+    def tenant_sample(self) -> list[Any] | None:
+        """Up to two distinct ``tenant_id`` values — see :func:`tenant_sample`."""
+        return tenant_sample(self.client, self.collection)
+
+    def distinct_tenant_count(self, limit: int = 2) -> int | None:
+        """0, 1 or 2 ("two or more") distinct ``tenant_id`` values; ``None``
+        when the store cannot answer. ``limit`` is accepted for interface
+        stability and ignored."""
+        del limit
+        sample = self.tenant_sample()
+        return None if sample is None else len(sample)
+
+    def count_unstamped(self) -> int | None:
+        """Points carrying no ``tenant_id`` — the data a tenant-scoped surface
+        cannot see until it is stamped (``mnemostack tenant-migrate``).
+        ``None`` when the store cannot answer."""
+        try:
+            return self.client.count(
+                collection_name=self.collection,
+                count_filter=Filter(
+                    must=[IsEmptyCondition(is_empty=PayloadField(key=TENANT_ID_KEY))]
+                ),
+            ).count
+        except Exception:
+            return None
 
     def retrieve_payload(
         self, point_id: str | int, *, tenant: str | None = None

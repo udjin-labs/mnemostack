@@ -244,6 +244,26 @@ def resolve_text_search_mode(mode: str, bm25_paths: list[str] | None) -> str:
     return mode
 
 
+def normalize_tenant(value: Any) -> Any:
+    """A CONFIGURED tenant that is blank or whitespace-only is no tenant, so
+    a stray "" in a config file or flag can never become a scope that
+    matches nothing and slips past the fail-closed guard. Any other value
+    is returned VERBATIM — never stripped: a tenant id is an identity,
+    and "acme " rewritten to "acme" would make reads and writes disagree
+    (writes stamp the raw value). Explicit per-call tenants are not
+    normalized at all; a blank one is refused where it is used."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        # A YAML `tenant: 123` / `tenant: false` parses as int/bool; a tenant
+        # id is a string, and a non-string scope would let retrieval and the
+        # pipeline's isolation backstop resolve different tenants.
+        raise ValueError(f"tenant must be a string, got {type(value).__name__}: {value!r}")
+    if not value.strip():
+        return None
+    return value
+
+
 def parse_text_search_fields(value: Any) -> dict[str, float]:
     """Normalize ``recall.text_search_fields`` into ``{payload_field: weight}``.
 
@@ -379,6 +399,14 @@ class RecallConfig:
     #: any other weight is a static fusion override. Requires
     #: ``text_search: lexical`` (anything else fails loud at build time).
     text_search_fields: dict[str, float] = field(default_factory=dict)
+    #: Appended at the tail: RecallConfig may be built positionally.
+    #: Tenant every recall runs under when the call itself does not name one.
+    #: Resolved here, in the config layer (MNEMOSTACK_TENANT env / this field),
+    #: and threaded to Recaller(default_tenant=...) on every construction
+    #: surface — set once, not per call. None = unscoped; over a collection
+    #: that holds several tenants an unscoped recall FAILS instead of
+    #: searching all of them (CrossTenantRecallError).
+    tenant: str | None = None
 
 
 @dataclass
@@ -453,6 +481,7 @@ class Config:
         cfg.recall.text_search_fields = parse_text_search_fields(
             cfg.recall.text_search_fields
         )
+        cfg.recall.tenant = normalize_tenant(cfg.recall.tenant)
 
         # Same startup-rejection contract for every source (file AND env): a
         # malformed embedding timeout must fail the load, not surface later
@@ -537,6 +566,7 @@ def _apply_env_overrides(cfg: Config) -> Config:
         MNEMOSTACK_LLM_MODEL
         MNEMOSTACK_LLM_HOST         (LLM endpoint; ollama: default inherit MNEMOSTACK_OLLAMA_HOST, openai: required base URL)
         MNEMOSTACK_LLM_TIMEOUT
+        MNEMOSTACK_TENANT          (tenant every recall is scoped to; see recall.tenant)
         MNEMOSTACK_GRAPH_URI
         MNEMOSTACK_GRAPH_USER
         MNEMOSTACK_GRAPH_PASSWORD
@@ -636,6 +666,11 @@ def _apply_env_overrides(cfg: Config) -> Config:
     # Recall
     if v := env.get("MNEMOSTACK_BM25_PATHS"):
         cfg.recall.bm25_paths = [p for p in v.split(os.pathsep) if p]
+    # PRESENCE decides, not truthiness: MNEMOSTACK_TENANT="" must be able to
+    # clear a tenant set in the config file (Config.load then maps the blank
+    # value to none via normalize_tenant).
+    if "MNEMOSTACK_TENANT" in env:
+        cfg.recall.tenant = env["MNEMOSTACK_TENANT"]
     if v := env.get("MNEMOSTACK_VECTOR_FLOOR"):
         cfg.recall.vector_floor = max(0, int(v))
     if v := env.get("MNEMOSTACK_RERANK_MODE"):
@@ -704,6 +739,7 @@ recall:
   confidence_threshold: 0.5
   bm25_paths: []
   vector_floor: 0
+  tenant: null            # scope every recall to this tenant (MNEMOSTACK_TENANT)
   rerank_mode: relevant_only  # relevant_only | full_reorder
   token_budget: null          # e.g. 2000 = trim recall results to ~2000 text tokens; 0/null = off
   # Payload schema of the collection recall reads (a pre-existing collection

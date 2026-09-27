@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -24,6 +25,40 @@ from .trace import RecallTrace, RetrieverTrace
 from .validity import filter_by_tenant, filter_by_validity, keep_payload, numeric_unit_for
 
 logger = logging.getLogger(__name__)
+
+
+#: Fallback single-flight lock for recallers built without __init__; a
+#: normally constructed recaller has its own, so a slow store behind one
+#: recaller never delays another recaller's probe refresh.
+_PROBE_LOCK = threading.Lock()
+
+#: The "could not determine" warning is process-wide once: synthesis builds
+#: short-lived recallers per call, and a per-instance flag would repeat it.
+_PROBE_UNKNOWN_WARNED = False
+
+
+class CrossTenantRecallError(RuntimeError):
+    """A tenantless recall was refused over a multi-tenant collection.
+
+    Raised by the fail-closed guard: the collection holds more than one
+    ``tenant_id`` and neither the call nor the recaller names a tenant, so
+    proceeding would search every tenant at once. Scope the recall
+    (``tenant=...`` / ``Recaller(default_tenant=...)`` / ``MNEMOSTACK_TENANT``)
+    or, for deliberate cross-tenant tooling operating inside the trust
+    boundary, construct the recaller with ``allow_cross_tenant=True``.
+
+    Contract: the guard describes a recaller AS CONFIGURED. What it probes —
+    the arms, the own vector store and in-memory BM25 corpus, and the tenant
+    sets of in-memory corpora, captured when they are built — is fixed at
+    construction; replacing a recaller's internals afterwards (``bm25``,
+    ``retrievers``, ``vector``, ``embedding``) or mutating a corpus in place
+    is not covered. Build a new Recaller for a different configuration.
+    The graph arm is not probed either: a tenantless recall reading a graph
+    that holds several tenants is not refused (tenant-scoped graph recall is
+    tracked separately). A ``sources`` filter in ``synthesize`` does not
+    narrow the probe of a recaller wrapped in a QueryExpander — it probes
+    every wrapped arm (a refusal, never a leak); filter before wrapping.
+    """
 
 if TYPE_CHECKING:
     from ..llm.base import LLMProvider
@@ -213,6 +248,94 @@ def derive_payload_schema(
     return out
 
 
+def tenant_probe_sources_of(vector: Any, retrievers: list[Any]) -> list[Any]:
+    """Every distinct store a fail-closed tenant probe must ask for a search
+    over ``vector`` and ``retrievers``: the vector store and each arm's
+    (``vector_store``, or a ``tenant_probe_store`` the arm declares — an
+    in-memory BM25 corpus declares its own documents). Exactly the data the
+    search reads — no more (asking an unrelated collection would refuse a
+    safe search), no less (any one holding several tenants, or two holding
+    one different tenant each, makes a tenantless search cross-tenant)."""
+    candidates = [vector]
+    for r in retrievers:
+        candidates.append(getattr(r, "vector_store", None))
+        candidates.append(getattr(r, "tenant_probe_store", None))
+    sources: list[Any] = []
+    seen: set[int] = set()
+    for store in candidates:
+        if store is None or id(store) in seen:
+            continue
+        if hasattr(store, "tenant_sample") or hasattr(store, "distinct_tenant_count"):
+            seen.add(id(store))
+            sources.append(store)
+    return sources
+
+
+def classify_tenant_sources(sources: list[Any]) -> bool | str:
+    """True = two or more distinct tenants across ``sources``, False = at most
+    one, "none" = nothing to probe, "unknown" = some source could not answer
+    and the rest do not already prove several tenants. Neither "none" nor
+    "unknown" fails closed: the guard exists for data it can inspect."""
+    if not sources:
+        return "none"
+    union: set[tuple[type, Any]] = set()
+    unknown = False
+    for store in sources:
+        try:
+            if hasattr(store, "tenant_sample"):
+                sample = store.tenant_sample()
+            else:
+                n = store.distinct_tenant_count()
+                if hasattr(n, "close"):  # an async store's coroutine
+                    n.close()
+                    n = None
+                # A count cannot be unioned: each tenant of an unknown id
+                # gets a unique marker, so two such stores count as two.
+                sample = None if n is None else {object() for _ in range(min(n, 2))}
+        except Exception:
+            sample = None
+        if hasattr(sample, "close"):  # an async store on the sync path
+            sample.close()
+            sample = None
+        if sample is None:
+            unknown = True
+            continue
+        # A source returning two values has already proven them distinct
+        # (the server's typed equality, or the docs probe's own dedup) —
+        # conclusive even if a value is unhashable here.
+        if len(sample) >= 2:
+            return True
+        # Typed identity, as Qdrant compares tenant values: true != 1.
+        try:
+            union |= {(type(v), v) for v in sample}
+        except TypeError:
+            unknown = True
+            continue
+        if len(union) >= 2:
+            return True
+    return "unknown" if unknown else False
+
+
+def refuse_tenantless(retrievers: list[Any], *, allow_cross_tenant: bool = False) -> None:
+    """The fail-closed guard for a tenantless search over ``retrievers`` that
+    does not go through a Recaller (synthesis over directly supplied arms):
+    same verdicts, same refusal, same once-per-process warning — without
+    constructing a Recaller, whose schema derivation has nothing to do with
+    tenancy and can fail on its own."""
+    if allow_cross_tenant:
+        return
+    verdict = classify_tenant_sources(tenant_probe_sources_of(None, retrievers))
+    if verdict == "unknown":
+        Recaller._warn_probe_unknown()
+    if verdict is True:
+        raise CrossTenantRecallError(
+            "search without a tenant over multi-tenant data: the searched "
+            "collections hold several tenant_id values. Scope the search "
+            "(tenant=...) — or, for deliberate cross-tenant tooling, pass "
+            "allow_cross_tenant=True."
+        )
+
+
 class Recaller:
     """Hybrid recall: BM25 + semantic search + RRF fusion.
 
@@ -311,6 +434,8 @@ class Recaller:
         text_key: str | None = None,
         timestamp_key: str | None = None,
         timestamp_format: str | None = None,
+        default_tenant: str | None = None,
+        allow_cross_tenant: bool = False,
     ):
         """Two modes:
 
@@ -345,6 +470,11 @@ class Recaller:
         self.embedding = embedding_provider
         self.vector = vector_store
         self.bm25 = BM25(bm25_docs) if bm25_docs else None
+        # The own corpus is read by tenantless recalls (legacy BM25) and by the
+        # MCA prefilter: it answers the tenant probe from its own documents.
+        from .retrievers import _DocsTenantProbe
+
+        self._bm25_probe = _DocsTenantProbe(bm25_docs) if bm25_docs else None
         self.rrf_k = rrf_k
         self.retrievers = retrievers or []
         self.retriever_weights = dict(retriever_weights) if retriever_weights else {}
@@ -354,6 +484,31 @@ class Recaller:
         self.fallback_threshold = fallback_threshold
         self.mca_prefilter_enabled = mca_prefilter
         self.vector_floor = max(0, int(vector_floor))
+        # Tenant scope resolved at construction: every recall that does not
+        # name a tenant explicitly runs under this one. Set it from
+        # MNEMOSTACK_TENANT / recall.tenant via the config layer so a consumer
+        # cannot "forget the argument" per call.
+        # A blank tenant is no tenant — see normalize_tenant.
+        from ..config import normalize_tenant
+
+        self.default_tenant = normalize_tenant(default_tenant)
+        # Deliberate cross-tenant tooling only. This is NOT a security control:
+        # whoever constructs a Recaller holds the store credentials and can
+        # query the store directly — the guard exists to turn an honest
+        # misconfiguration into a loud error, not to stop an insider.
+        self.allow_cross_tenant = allow_cross_tenant
+        #: Multi-tenant probe cache. Every verdict expires after
+        #: `_PROBE_TTL_S`: a long-lived process must notice a second tenant
+        #: ingested after startup, a transient probe failure must not disable
+        #: the guard for the process lifetime, and a tenant removed with
+        #: tenant-rm must stop refusing recalls without a restart. A known
+        #: multi-tenant verdict is cleared only by a conclusive probe.
+        self._multi_tenant_probe: bool | str | None = None
+        self._probe_at: float = 0.0
+        self._probe_lock = threading.Lock()
+        #: Arms already warned about being skipped under a tenant scope —
+        #: one warning per (recaller, arm), not one per recall.
+        self._tenant_skip_warned: set[str] = set()
         # Payload schema for the legacy vector paths, the in-memory filter
         # mirrors, and the post-pipeline backstop. When omitted, the schema
         # DECLARED by retrievers-mode sources applies, resolved per-field so
@@ -499,6 +654,137 @@ class Recaller:
             tenant=tenant,
         )
 
+    def tenant_probe_sources(self) -> list[Any]:
+        """Every distinct store this recaller's fail-closed tenant probe must
+        ask — see :func:`tenant_probe_sources_of`.
+
+        The recaller's own ``vector`` store counts only when a recall can
+        actually search it: in legacy mode (no arms), or in retrievers mode
+        with an embedding provider — the low-confidence vector fallback then
+        searches it directly. Without an embedding, retrievers mode never
+        touches it, and probing it would refuse a safe recall."""
+        retrievers = getattr(self, "retrievers", None) or []
+        vector = getattr(self, "vector", None)
+        if retrievers and getattr(self, "embedding", None) is None:
+            vector = None
+        sources = tenant_probe_sources_of(vector, retrievers)
+        # The own BM25 corpus is searched in legacy mode (no arms) and by the
+        # MCA prefilter; in retrievers mode without MCA nothing reads it.
+        if self._bm25_probe is not None and (
+            not retrievers or getattr(self, "mca_prefilter_enabled", False)
+        ):
+            sources.append(self._bm25_probe)
+        return sources
+
+    def _probe_multi_tenant(self, sources: list[Any] | None = None) -> bool | str:
+        """Classify what a tenantless search would read — see
+        :func:`classify_tenant_sources`."""
+        return classify_tenant_sources(
+            self.tenant_probe_sources() if sources is None else sources
+        )
+
+    _PROBE_TTL_S = 60.0
+    # Class-level defaults so an instance built without __init__ (tests and
+    # subclasses construct via Recaller.__new__) still has a complete tenant
+    # state. The mutable skip-warn set is created lazily per instance.
+    default_tenant: str | None = None
+    allow_cross_tenant: bool = False
+    _multi_tenant_probe: bool | str | None = None
+    _probe_at: float = 0.0
+    _probe_lock: threading.Lock = _PROBE_LOCK
+    _bm25_probe: Any = None
+
+    def _effective_tenant(self, tenant: str | None) -> str | None:
+        """The tenant a search actually runs under: the explicit per-call one,
+        else the construction-time default. Every public search surface
+        resolves through here, so a default can never apply to one entry
+        point and not another."""
+        # A per-call tenant is an IDENTITY (under auth: the key's principal),
+        # never rewritten: stripping "acme " to "acme" would read another
+        # tenant's data, and turning " " into "no tenant" would fall back to
+        # the configured default. A blank one is refused instead.
+        if isinstance(tenant, str) and not tenant.strip():
+            raise CrossTenantRecallError(
+                "blank tenant: a recall scoped to an empty or whitespace-only "
+                "tenant is refused rather than treated as unscoped or as the "
+                "configured default"
+            )
+        return tenant if tenant is not None else self.default_tenant
+
+    @staticmethod
+    def _warn_probe_unknown() -> None:
+        """Once per process: the tenant probe could not answer, so a
+        tenantless search is not guarded."""
+        global _PROBE_UNKNOWN_WARNED
+        if _PROBE_UNKNOWN_WARNED:
+            return
+        _PROBE_UNKNOWN_WARNED = True
+        logger.warning(
+            "recall: could not determine whether the collection holds several "
+            "tenants (the tenant probe failed); tenantless recall is NOT "
+            "guarded. If the collection is shared, scope recalls with a tenant "
+            "(MNEMOSTACK_TENANT / recall.tenant) — after stamping existing "
+            "points with `mnemostack tenant-migrate`, or the scope will hide them."
+        )
+
+    def _guard_tenantless_recall(self, sources: list[Any] | None = None) -> None:
+        """Fail closed: refuse a tenantless recall over a collection that
+        verifiably holds several tenants. See :class:`CrossTenantRecallError`
+        for who this protects (misconfigured consumers) and who it does not
+        (holders of the store credentials).
+
+        ``sources`` narrows the probe to exactly the stores an operation
+        reads (``search_many`` reads only the recaller's own vector store):
+        probing a collection the operation never touches would refuse a safe
+        search. A narrowed probe is not cached — it serves rare paths, and
+        the cache belongs to the full-recall answer."""
+        if self.allow_cross_tenant:
+            return
+        if sources is not None:
+            verdict = self._probe_multi_tenant(sources)
+            if verdict == "unknown":
+                self._warn_probe_unknown()
+            if verdict is True:
+                raise CrossTenantRecallError(
+                    "search without a tenant over a multi-tenant collection: "
+                    "the collection holds several tenant_id values. Scope the "
+                    "search (tenant=..., Recaller(default_tenant=...), "
+                    "MNEMOSTACK_TENANT or recall.tenant) — or, for deliberate "
+                    "cross-tenant tooling, construct with allow_cross_tenant=True."
+                )
+            return
+        def _stale() -> bool:
+            return (
+                self._multi_tenant_probe is None
+                or time.monotonic() - self._probe_at >= self._PROBE_TTL_S
+            )
+
+        if _stale():
+            with self._probe_lock:
+                if _stale():  # another thread may have refreshed meanwhile
+                    verdict = self._probe_multi_tenant()
+                    # Only a CONCLUSIVE answer clears a known multi-tenant
+                    # verdict: a failed refresh (timeout, error) keeps the
+                    # refusal and is retried after the next TTL, instead of
+                    # reopening tenantless cross-tenant recall.
+                    if not (self._multi_tenant_probe is True and verdict == "unknown"):
+                        self._multi_tenant_probe = verdict
+                    # Publish the verdict BEFORE marking the cache fresh: a
+                    # reader that sees a fresh timestamp skips the lock, and
+                    # must never pair it with the previous verdict.
+                    self._probe_at = time.monotonic()
+                    if self._multi_tenant_probe == "unknown":
+                        self._warn_probe_unknown()
+        if self._multi_tenant_probe is True:
+            raise CrossTenantRecallError(
+                "recall without a tenant over a multi-tenant collection: the "
+                "collection holds several tenant_id values, and a tenantless "
+                "recall would search all of them at once. Scope the recall "
+                "(tenant=..., Recaller(default_tenant=...), MNEMOSTACK_TENANT "
+                "or recall.tenant in the config) — or, for deliberate "
+                "cross-tenant tooling, construct with allow_cross_tenant=True."
+            )
+
     def recall(
         self,
         query: str,
@@ -536,6 +822,11 @@ class Recaller:
         3x candidate pool absorbs this in practice.
         """
         counter("mnemostack.recall.calls", 1)
+        # Construction-time scope applies whenever the call does not name a
+        # tenant itself; an explicit per-call tenant always wins.
+        tenant = self._effective_tenant(tenant)
+        if tenant is None:
+            self._guard_tenantless_recall()
         # Mutable state scoped to THIS public recall, handed to retrievers
         # advertising `accepts_recall_scope`. Query expansion re-runs every
         # retriever once per variant — state that must span the whole recall
@@ -797,8 +1088,21 @@ class Recaller:
         hit that recurs across expanded vectors can't be RRF-boosted into the
         merged result ahead of a valid single-vector hit.
         """
-        if not self.vector:
+        if not self.vector or not any(vectors):
+            # Nothing to search: no guard, no probes, no space check.
             return []
+        # A public search surface like recall(): same tenant resolution, same
+        # fail-closed guard — the answer generator's expansion retry reaches
+        # the collection through here.
+        tenant = self._effective_tenant(tenant)
+        if tenant is None:
+            # Only the collection this surface actually searches.
+            self._guard_tenantless_recall(
+                sources=[self.vector]
+                if hasattr(self.vector, "tenant_sample")
+                or hasattr(self.vector, "distinct_tenant_count")
+                else []
+            )
         # Direct search surface (expansion retry, library callers) — must be
         # space-guarded like every other path that queries the collection.
         self._ensure_space_compat(tenant=tenant)
@@ -1011,6 +1315,17 @@ class Recaller:
             # never enter fusion. (The post-fusion filter_by_tenant backstop is
             # the final guarantee; this keeps the candidate pool tenant-clean.)
             if tenant is not None and not getattr(retr, "accepts_tenant", False):
+                warned = self.__dict__.setdefault("_tenant_skip_warned", set())
+                if retr.name not in warned:
+                    warned.add(retr.name)
+                    logger.warning(
+                        "recall: arm '%s' cannot enforce a tenant filter and is "
+                        "skipped under a tenant scope — its results would be "
+                        "dropped by the isolation backstop anyway. Stamp the "
+                        "corpus with tenant_id (BM25) or see the tenant-scoped "
+                        "graph issue to regain the arm.",
+                        retr.name,
+                    )
                 return retr, [], None, 0.0
             try:
                 # Graph facts carry no validity payload, so filter_by_validity
