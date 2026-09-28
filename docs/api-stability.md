@@ -331,8 +331,11 @@ behave exactly as listed above.
   it everywhere for deliberate cross-tenant tooling. This is a guard against
   misconfigured consumers, not a security boundary: it refuses only data
   verifiably holding several tenants — a probe that cannot answer lets the
-  search through, and a verdict is reused for a minute — so the trust boundary
-  remains `serve --auth` (the key decides the tenant) or an explicit tenant. The guard covers a
+  search through, and a verdict is re-checked after a minute but kept while a
+  refresh cannot answer. The trust boundary remains `serve --auth` (the key
+  decides the tenant): a construction-time or configured tenant confines a
+  recaller to one tenant but is not access control, and a per-call `tenant=`
+  is taken as given. The guard covers a
   recaller **as configured**: replacing its internals after construction
   (`bm25`, `retrievers`, `vector`, `embedding`) or mutating an in-memory corpus
   in place is not covered — build a new `Recaller` instead. The graph arm is

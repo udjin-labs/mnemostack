@@ -20,8 +20,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `GraphStore.tenant_sample()` is the graph's probe. Like the recall guard,
   this catches misconfiguration and is not a security boundary: it refuses
   only a graph verifiably holding several tenants — a probe that cannot
-  answer lets the query through, and a single-tenant answer is reused for
-  a minute — so untrusted clients need `--auth` or an explicit tenant.
+  answer lets the query through, and a sample is re-checked after a minute
+  but kept while refreshes cannot answer — so untrusted clients need
+  `--auth` (a server-configured tenant confines the server to one tenant
+  but is not access control).
 
 ## [2.6.1] - 2026-09-27
 
