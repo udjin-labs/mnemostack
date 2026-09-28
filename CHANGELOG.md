@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.6.2] - 2026-09-28
+
 - **Tenantless graph reads outside recall are guarded too** (#207). The MCP
   `mnemostack_graph_query` tool, with auth off and no tenant configured,
   queried the graph unscoped and returned every tenant's triples while
