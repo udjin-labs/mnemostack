@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **Tenantless graph reads outside recall fail closed too** (#207). The MCP
+  `mnemostack_graph_query` tool, with auth off and no tenant configured,
+  queried the graph unscoped and returned every tenant's triples while
+  `mnemostack_search` on the same server refused. It now refuses when the
+  graph holds several tenants (same two-query probe as the recall guard,
+  re-checked every minute; a graph that cannot answer does not refuse, and
+  `allow_cross_tenant` restores the old behavior). The unauthenticated
+  `serve` startup check, which looked only at the collection, now also runs
+  the recall guard over everything a tenantless recall reads, so a
+  multi-tenant graph, or one tenant in the graph and another in the
+  collection, refuses at startup rather than on every request.
+  `GraphStore.tenant_sample()` is the graph's probe.
+
 ## [2.6.1] - 2026-09-27
 
 - **The LLM reranker accepts answers that echo its `ID=` label** (#204).

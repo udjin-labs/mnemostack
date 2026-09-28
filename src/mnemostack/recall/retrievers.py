@@ -1340,6 +1340,25 @@ def graph_valid_clause(var: str, as_of: str | None, include_invalidated: bool = 
     return graph_as_of_predicate(var)
 
 
+def graph_tenant_values(session: Any) -> list[Any] | None:
+    """Up to two distinct node ``tenant`` values, over an open Bolt session:
+    any stamped node, then any stamped node of a different tenant (two
+    ``LIMIT 1`` queries). ``[]`` = no stamped node; ``None`` = an answer the
+    query's own filter rules out (the store has not answered). Errors are the
+    caller's to classify."""
+    first = session.run("MATCH (n) WHERE n.tenant IS NOT NULL RETURN n.tenant AS t LIMIT 1").data()
+    if not first:
+        return []
+    t1 = first[0].get("t")
+    if t1 is None:
+        return None
+    other = session.run(
+        "MATCH (n) WHERE n.tenant IS NOT NULL AND n.tenant <> $t1 RETURN n.tenant AS t LIMIT 1",
+        t1=t1,
+    ).data()
+    return [t1] if not other else [t1, other[0].get("t")]
+
+
 def graph_tenant_sample(component: Any) -> list[Any] | None:
     """Up to two distinct ``tenant`` values on the graph nodes ``component``
     (a graph arm or stage owning a lazy Bolt driver) reads: the graph twin of
@@ -1361,25 +1380,10 @@ def graph_tenant_sample(component: Any) -> list[Any] | None:
     session_kwargs = {"database": database} if database else {}
     try:
         with driver.session(**session_kwargs) as session:
-            first = session.run(
-                "MATCH (n) WHERE n.tenant IS NOT NULL RETURN n.tenant AS t LIMIT 1"
-            ).data()
-            if not first:
-                bolt_mark_recovered(component)
-                return []
-            t1 = first[0].get("t")
-            if t1 is None:
-                # Unreachable by the query (IS NOT NULL); a store that
-                # disagrees has not answered — but it did respond.
-                bolt_mark_recovered(component)
-                return None
-            other = session.run(
-                "MATCH (n) WHERE n.tenant IS NOT NULL AND n.tenant <> $t1 "
-                "RETURN n.tenant AS t LIMIT 1",
-                t1=t1,
-            ).data()
+            sample = graph_tenant_values(session)
+        # The store responded, conclusively or not.
         bolt_mark_recovered(component)
-        return [t1] if not other else [t1, other[0].get("t")]
+        return sample
     except Exception as exc:
         if _is_unreachable(exc):
             trip_bolt_cooldown(component, exc)
