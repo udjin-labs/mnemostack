@@ -334,9 +334,9 @@ behave exactly as listed above.
   search through. A verdict is re-checked after a minute; a refresh that
   cannot answer keeps a known multi-tenant verdict, while a single-tenant one
   turns undetermined (and a graph arm sits out until a probe answers). The trust boundary remains `serve --auth` (the key
-  decides the tenant): a construction-time or configured tenant confines a
-  recaller to one tenant but is not access control, and a per-call `tenant=`
-  is taken as given. The guard covers a
+  decides the tenant): a construction-time or configured tenant is only a
+  default scope, which a per-call `tenant=` overrides and which is taken as
+  given — neither is access control. The guard covers a
   recaller **as configured**: replacing its internals after construction
   (`bm25`, `retrievers`, `vector`, `embedding`) or mutating an in-memory corpus
   in place is not covered — build a new `Recaller` instead. The graph arm is
