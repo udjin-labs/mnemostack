@@ -328,9 +328,15 @@ behave exactly as listed above.
   server-side queries; cached and re-checked every minute). Single-tenant and legacy collections keep the exact
   prior behavior (a probe that cannot answer at all logs a warning and does
   not block); `allow_cross_tenant=True` restores
-  it everywhere for deliberate cross-tenant tooling. This is a fail-closed guard
-  against misconfigured consumers, not a security boundary — the trust boundary
-  remains `serve --auth`, where the key decides the tenant. The guard covers a
+  it everywhere for deliberate cross-tenant tooling. This is a guard against
+  misconfigured consumers, not a security boundary: it refuses only data
+  verifiably holding several tenants — a probe that cannot answer lets the
+  search through. A verdict is re-checked after a minute; a refresh that
+  cannot answer keeps a known multi-tenant verdict, while a single-tenant one
+  turns undetermined (and a graph arm sits out until a probe answers). The trust boundary remains `serve --auth` (the key
+  decides the tenant): a construction-time or configured tenant is only a
+  default scope, which a per-call `tenant=` overrides and which is taken as
+  given — neither is access control. The guard covers a
   recaller **as configured**: replacing its internals after construction
   (`bm25`, `retrievers`, `vector`, `embedding`) or mutating an in-memory corpus
   in place is not covered — build a new `Recaller` instead. The graph arm is

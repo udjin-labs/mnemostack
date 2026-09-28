@@ -6,7 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-- **Tenantless graph reads outside recall fail closed too** (#207). The MCP
+- **Tenantless graph reads outside recall are guarded too** (#207). The MCP
   `mnemostack_graph_query` tool, with auth off and no tenant configured,
   queried the graph unscoped and returned every tenant's triples while
   `mnemostack_search` on the same server refused. It now refuses when the
@@ -17,7 +17,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the recall guard over everything a tenantless recall reads, so a
   multi-tenant graph, or one tenant in the graph and another in the
   collection, refuses at startup rather than on every request.
-  `GraphStore.tenant_sample()` is the graph's probe.
+  `GraphStore.tenant_sample()` is the graph's probe. Like the recall guard,
+  this catches misconfiguration and is not a security boundary: it refuses
+  only a graph verifiably holding several tenants — a probe that cannot
+  answer lets the query through, and a sample is re-checked after a minute
+  but kept while refreshes cannot answer — so untrusted clients need
+  `--auth` (with auth off, a server-configured tenant confines the server
+  to one tenant but is not access control).
 
 ## [2.6.1] - 2026-09-27
 

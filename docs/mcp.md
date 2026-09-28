@@ -467,7 +467,7 @@ The tenant's storage quota is enforced before any write — the tool reads the q
 
 **Purpose:** Query the knowledge graph with optional subject-predicate-object filters and point-in-time validity.
 
-**Tenancy:** scoped to the caller's tenant under auth, else to the configured tenant. With neither, a query over a graph holding several tenants is refused (`ok: false`) unless `MNEMOSTACK_ALLOW_CROSS_TENANT` is set; a graph that cannot answer the tenant probe is not refused on that account.
+**Tenancy:** scoped to the caller's tenant under auth, else to the configured tenant. With neither, a query over a graph holding several tenants is refused (`ok: false`) unless `MNEMOSTACK_ALLOW_CROSS_TENANT` is set. This catches misconfiguration and is not a security boundary: a graph that cannot answer the tenant probe is not refused on that account, and a probe's answer is re-checked after a minute but kept while the graph cannot answer. For untrusted clients run with `--auth`: with auth off, a configured tenant confines the server to one tenant but is not access control (with auth on, the key decides the tenant).
 
 **Input parameters:**
 
