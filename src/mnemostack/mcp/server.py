@@ -1188,6 +1188,21 @@ def build_server(
     # ---------- graph tools (optional) ----------
 
     if memgraph_uri:
+        # Conclusive tenant samples of the graph, re-checked every minute
+        # (the recall guard's cadence); an undetermined answer is not kept.
+        _graph_sample: dict[str, Any] = {"value": None, "at": float("-inf")}
+
+        def _graph_multi_tenant(gs: Any) -> bool:
+            import time as _time
+
+            now = _time.monotonic()
+            if _graph_sample["value"] is None or now - _graph_sample["at"] >= 60.0:
+                sample = gs.tenant_sample()
+                if sample is not None:
+                    _graph_sample["value"] = sample
+                    _graph_sample["at"] = now
+            value = _graph_sample["value"]
+            return value is not None and len(value) >= 2
 
         @mcp.tool()
         def mnemostack_graph_query(
@@ -1220,15 +1235,31 @@ def build_server(
                     password=graph_password,
                     database=graph_database,
                 )
-                triples = gs.query_triples(
-                    subject=subject,
-                    predicate=predicate,
-                    obj=obj,
-                    as_of=as_of,
-                    limit=limit,
-                    tenant=tenant,
-                )
-                gs.close()
+                try:
+                    # Fail closed like recall: an unscoped query over a
+                    # graph holding several tenants would return all of
+                    # them. A graph that cannot answer does not refuse.
+                    if tenant is None and not allow_cross_tenant and _graph_multi_tenant(gs):
+                        return {
+                            "ok": False,
+                            "error": (
+                                "graph query without a tenant over a graph holding "
+                                "several tenants. Scope the server (--tenant / "
+                                "MNEMOSTACK_TENANT), enable auth, or set "
+                                "MNEMOSTACK_ALLOW_CROSS_TENANT for deliberate "
+                                "cross-tenant tooling."
+                            ),
+                        }
+                    triples = gs.query_triples(
+                        subject=subject,
+                        predicate=predicate,
+                        obj=obj,
+                        as_of=as_of,
+                        limit=limit,
+                        tenant=tenant,
+                    )
+                finally:
+                    gs.close()
                 return {
                     "ok": True,
                     "count": len(triples),

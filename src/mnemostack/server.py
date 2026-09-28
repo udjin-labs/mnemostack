@@ -1278,6 +1278,22 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 "(recall.tenant / MNEMOSTACK_TENANT), or pass "
                 "--allow-cross-tenant if this exposure is deliberate."
             )
+        # Then everything a tenantless recall reads, together — the graph
+        # included, and one tenant in the graph plus another in the
+        # collection counting as two — exactly as the recall guard will on
+        # the first request (whose verdict this also warms).
+        guard = getattr(recaller, "_guard_tenantless_recall", None)
+        try:
+            if callable(guard):
+                guard()
+        except CrossTenantRecallError:
+            raise CrossTenantRecallError(
+                "refusing to serve without auth: the stores a recall reads "
+                "(collection, graph) hold several tenants together and every "
+                "request would search all of them. Enable auth (--auth), scope "
+                "the server to one tenant (recall.tenant / MNEMOSTACK_TENANT), "
+                "or pass --allow-cross-tenant if this exposure is deliberate."
+            ) from None
     if not cfg.auth_enabled and cfg.default_tenant:
         # Enabling a scope over data that predates it hides that data from
         # every handler (recall, list, invalidate, delete) — say so at boot.

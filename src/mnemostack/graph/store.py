@@ -88,6 +88,18 @@ class GraphStore:
     def close(self) -> None:
         self.driver.close()
 
+    def tenant_sample(self) -> list[Any] | None:
+        """Up to two distinct node ``tenant`` values in this graph (see
+        ``recall.retrievers.graph_tenant_values``), or ``None`` when the graph
+        could not answer — the fail-closed tenant guard's probe interface."""
+        from ..recall.retrievers import graph_tenant_values
+
+        try:
+            with self.driver.session(database=self.database) as session:
+                return graph_tenant_values(session)
+        except Exception:
+            return None
+
     def health_check(self) -> tuple[bool, str]:
         try:
             with self.driver.session(database=self.database) as session:
