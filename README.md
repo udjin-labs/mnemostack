@@ -15,6 +15,13 @@ The same engine backs other retrieval-heavy work: RAG over mixed corpora, multi-
 
 **Status:** Actively developed — public API is stable; new functionality lands additively in minor releases. Breaking changes are rare and called out in [CHANGELOG.md](CHANGELOG.md).
 
+**Upgrading to 3.0:** Qdrant 1.20+ is required. The `lexical` and
+`qdrant_bm25` text-search modes and `recall.text_search_fields` were removed.
+For server-side BM25, upgrade Qdrant, run `mnemostack text-index` with your
+collection configuration, and set `recall.text_search: native_bm25`.
+See [the 3.0.0 changelog](CHANGELOG.md#300---2026-10-28) for Python API removals
+and the new LLM options environment variable.
+
 ## Quickstart: agent memory over MCP
 
 The fastest on-ramp is the MCP server — it gives Claude Desktop, Claude Code, Cursor, ChatGPT, or another MCP-capable agent durable memory in a few commands. Building an app instead of wiring up an agent? Use the [HTTP API or the Python library](#three-ways-to-use-mnemostack) over the same collection.
