@@ -30,6 +30,7 @@ _OPENER = urllib.request.build_opener(_NoRedirect)
 #: surface would otherwise grow another positional-tail knob just to carry
 #: it. Same pattern as ``GEMINI_API_KEY`` in the gemini provider.
 API_KEY_ENV = "MNEMOSTACK_LLM_API_KEY"
+OPTIONS_ENV = "MNEMOSTACK_LLM_OPTIONS"
 
 # Bound successful response bodies too, not only HTTP error details. A
 # misconfigured or hostile compatible endpoint must not be able to exhaust the
@@ -56,6 +57,8 @@ class OpenAICompatLLM(LLMProvider):
     ``token_param="max_completion_tokens"`` to rename the budget field and
     ``options={"temperature": None}`` to drop a field; ``options`` values
     otherwise override the defaults (same idea as ``OllamaLLM.options``).
+    Set ``MNEMOSTACK_LLM_OPTIONS`` to a JSON object for CLI, HTTP, and MCP
+    deployments. Explicit constructor options take precedence over that env var.
     Gateways normally translate these quirks themselves (LiteLLM's
     ``drop_params``), so the defaults stay the fields every compatible
     server implements.
@@ -104,6 +107,13 @@ class OpenAICompatLLM(LLMProvider):
         self.host = host
         self.timeout = timeout
         self.token_param = token_param
+        if options is None and (raw_options := os.environ.get(OPTIONS_ENV)):
+            try:
+                options = json.loads(raw_options)
+            except (ValueError, TypeError):
+                raise ValueError(f"{OPTIONS_ENV} must be a JSON object") from None
+            if not isinstance(options, dict):
+                raise ValueError(f"{OPTIONS_ENV} must be a JSON object")
         self.options = dict(options or {})
         key = api_key if api_key is not None else os.environ.get(API_KEY_ENV)
         if key and key.lower() != "none":

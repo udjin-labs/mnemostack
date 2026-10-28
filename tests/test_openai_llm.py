@@ -16,7 +16,17 @@ import pytest
 
 from mnemostack.config import llm_kwargs
 from mnemostack.llm import get_llm, list_llms
-from mnemostack.llm.openai_compat import API_KEY_ENV, MAX_RESPONSE_BYTES, OpenAICompatLLM
+from mnemostack.llm.openai_compat import (
+    API_KEY_ENV,
+    MAX_RESPONSE_BYTES,
+    OPTIONS_ENV,
+    OpenAICompatLLM,
+)
+
+
+@pytest.fixture(autouse=True)
+def isolate_provider_options(monkeypatch):
+    monkeypatch.delenv(OPTIONS_ENV, raising=False)
 
 
 class _FakeResponse(io.BytesIO):
@@ -161,6 +171,31 @@ def test_generate_payload_shape(monkeypatch):
 
 
 # ------------------------------------------------------------ error paths
+
+
+def test_reasoning_controls_from_environment_reach_gateway(monkeypatch):
+    monkeypatch.setenv(OPTIONS_ENV, json.dumps({
+        "reasoning_effort": "none", "chat_template_kwargs": {"enable_thinking": False},
+    }))
+    captured = _capture(monkeypatch)
+    response = get_llm("openai", **llm_kwargs("openai", model="model", llm_host="http://gateway")).generate("Rank candidates")
+    assert response.ok
+    assert captured["body"]["reasoning_effort"] == "none"
+    assert captured["body"]["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_explicit_options_override_environment(monkeypatch):
+    monkeypatch.setenv(OPTIONS_ENV, '{"reasoning_effort":"none"}')
+    captured = _capture(monkeypatch)
+    OpenAICompatLLM(model="model", host="http://gateway", options={}).generate("Question")
+    assert "reasoning_effort" not in captured["body"]
+
+
+@pytest.mark.parametrize("value", ["invalid", "[]", "null", "false", '"private-value"'])
+def test_malformed_options_fail_without_echoing_values(monkeypatch, value):
+    monkeypatch.setenv(OPTIONS_ENV, value)
+    with pytest.raises(ValueError, match=f"^{OPTIONS_ENV} must be a JSON object$"):
+        OpenAICompatLLM(model="model", host="http://gateway")
 
 
 def test_http_error_surfaces_body_snippet_without_raising(monkeypatch):
