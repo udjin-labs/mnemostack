@@ -42,7 +42,6 @@ from mnemostack import __version__
 from mnemostack.access import record_access
 from mnemostack.config import (
     Config,
-    ensure_text_fields_mode,
     llm_kwargs,
     provider_kwargs,
     quantization_kwargs,
@@ -95,6 +94,7 @@ from mnemostack.recall import (
     BM25Retriever,
     CrossTenantRecallError,
     MemgraphRetriever,
+    QdrantNativeBM25Retriever,
     QdrantSparseRetriever,
     Recaller,
     RecallTrace,
@@ -103,7 +103,6 @@ from mnemostack.recall import (
     TemporalRetriever,
     VectorRetriever,
     build_full_pipeline,
-    build_qdrant_text_arms,
     chunk_filter_probe_via,
     normalize_access_bonus_max,
     recall_flow,
@@ -784,8 +783,6 @@ class ServerConfig:
     timestamp_key: str = "timestamp"
     timestamp_format: str = "iso"
     text_search: str = "auto"
-    # Multi-field lexical arms: payload field -> fusion weight (lexical only).
-    text_search_fields: dict[str, float] = field(default_factory=dict)
     # Citation resolution allowlist (GET /resolve): the corpus directories
     # this process may read. The stored index_root is payload data and cannot
     # be its own security boundary — EMPTY (default) disables resolution on
@@ -899,7 +896,6 @@ class ServerConfig:
             timestamp_key=cfg.recall.timestamp_key,
             timestamp_format=cfg.recall.timestamp_format,
             text_search=cfg.recall.text_search,
-            text_search_fields=dict(cfg.recall.text_search_fields),
             resolve_roots=_resolve_roots_env(),
         )
 
@@ -1074,7 +1070,6 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         ),
     )
     text_mode = resolve_text_search_mode(cfg.text_search, cfg.bm25_paths)
-    ensure_text_fields_mode(text_mode, cfg.text_search_fields)
     store = VectorStore(
         collection=cfg.collection,
         dimension=provider.dimension,
@@ -1162,7 +1157,6 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         return ok
 
     lexical_arms: list[Retriever] = []
-    lexical_weights: dict[str, float] = {}
     if text_mode == "bm25":
         bm25_docs = _build_bm25_docs(cfg.bm25_paths)
         if bm25_docs:
@@ -1177,41 +1171,15 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                     tenant=None if cfg.auth_enabled else cfg.default_tenant,
                 )
             )
-    elif text_mode == "qdrant_bm25":
-        # In-process BM25 whose corpus scrolls straight out of the collection's
-        # payloads — fine to ~100K chunks (the in-process ceiling), no files.
-        # On a FRESH deployment the collection may not exist yet (the write
-        # surface bootstraps it lazily): skip the arm instead of crashing the
-        # boot — the corpus is a startup snapshot anyway, so the arm joins on
-        # the restart after first ingest. Qdrant-down at boot keeps its
-        # historical behavior (this mode always required a reachable server).
-        if store.collection_exists():
-            lexical_arms.append(
-                BM25Retriever.from_qdrant(
-                    store.client,
-                    cfg.collection,
-                    text_key=cfg.text_key,
-                    timestamp_key=cfg.timestamp_key,
-                    timestamp_format=cfg.timestamp_format,
-                )
+    elif text_mode == "native_bm25":
+        lexical_arms.append(
+            QdrantNativeBM25Retriever(
+                vector_store=store,
+                text_key=cfg.text_key,
+                timestamp_key=cfg.timestamp_key,
+                timestamp_format=cfg.timestamp_format,
             )
-        else:
-            log.info(
-                "text_search=qdrant_bm25: collection %r does not exist yet — "
-                "starting without the BM25 arm (it loads on the next restart "
-                "after first ingest)",
-                cfg.collection,
-            )
-    elif text_mode == "lexical":
-        arms, lexical_weights = build_qdrant_text_arms(
-            embedding=provider,
-            vector_store=store,
-            text_key=cfg.text_key,
-            timestamp_key=cfg.timestamp_key,
-            timestamp_format=cfg.timestamp_format,
-            fields=cfg.text_search_fields,
         )
-        lexical_arms.extend(arms)
     elif text_mode == "sparse":
         lexical_arms.append(
             QdrantSparseRetriever(
@@ -1256,7 +1224,6 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     recaller = Recaller(
         retrievers=retrievers,
         vector_floor=cfg.vector_floor,
-        retriever_weights=lexical_weights or None,
         text_key=cfg.text_key,
         timestamp_key=cfg.timestamp_key,
         timestamp_format=cfg.timestamp_format,
@@ -1937,10 +1904,6 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         route on purpose: FastAPI runs it on the threadpool, so the
         embedding round-trips never block the event loop.
 
-        Mode note: under `text_search=qdrant_bm25` the in-process BM25
-        corpus is a startup snapshot — new memories join the vector arm
-        immediately but that lexical arm only after a restart (the same
-        pre-existing behavior as CLI ingest while the server runs).
         """
         # Pydantic enforces shapes/caps; the reserved-namespace rule and
         # cross-field constraints live in the shared validator so the MCP
@@ -2231,10 +2194,6 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         is not an existence oracle). Re-sending the same content to
         `/memories` reactivates an invalidated memory.
 
-        Scope note: vector and temporal recall honor the marker
-        immediately; an in-process BM25 corpus built from Qdrant payloads
-        (`text_search=qdrant_bm25`) reflects it only after a restart.
-
         Source scope is FIRST-RETRACTION-WINS: a point this source already
         had invalidated is not restamped by a later source-scoped call
         (and is not counted in `requested`), because `invalidated_at`
@@ -2329,14 +2288,9 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         root's points, matching `/invalidate` — points carrying no
         `index_root` tag are not protected by the guard.
 
-        Erasure scope: the deletion is immediate for vector and temporal
-        recall (they read Qdrant live). An in-process BM25 corpus built
-        from Qdrant payloads (`text_search=qdrant_bm25`) is a startup
-        snapshot and can keep serving the deleted text until the server
-        restarts — for erasure requests on such deployments, restart (or
-        rebuild the corpus) to complete the erasure. Graph facts written
-        via `/triples` are separate records and are not deleted by this
-        endpoint.
+        Erasure is immediate for every Qdrant-backed recall arm. Graph facts
+        written via `/triples` are separate records and are not deleted by
+        this endpoint.
         """
         problem = _selector_problem(req.ids, req.source)
         if problem is None:

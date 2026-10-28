@@ -199,7 +199,7 @@ def trip_bolt_cooldown(component: Any, reason: BaseException | str) -> None:
 #: and the no-vector fallback), and the source filters partition by base
 #: name — a BM25 arm named "vector" would masquerade through both.
 _RESERVED_RETRIEVER_NAMES = frozenset(
-    {"vector", "bm25", "sparse", "qdrant_text", "memgraph", "temporal", "hyde", "mca"}
+    {"vector", "bm25", "sparse", "memgraph", "temporal", "hyde", "mca"}
 )
 
 
@@ -557,376 +557,10 @@ def bm25_docs_from_qdrant(
     return docs
 
 
-class QdrantTextRetriever(Retriever):
-    """Lexical-gated dense search — the scalable replacement for in-process BM25.
-
-    Instead of holding a lexical corpus in client memory (the in-process BM25's
-    documented "<100K documents" ceiling), the GATE runs inside Qdrant: the
-    query's salient tokens become a full-text ``MatchText`` should-clause, and
-    dense similarity ranks *within* the lexically-matching subset. Exact-token
-    recall (IDs, error codes, names) at any collection size, no reindex — the
-    one server-side prerequisite is a full-text payload index on the text
-    field (``VectorStore.ensure_text_index()`` / ``mnemostack text-index``);
-    without it a real server rejects MatchText filters.
-
-    Scoring note: the gate FILTERS, it does not score (Qdrant's full-text
-    match carries no relevance weight) — ranking inside the gate is dense
-    similarity. For server-side lexical *scoring*, see
-    ``QdrantSparseRetriever``.
-    """
-
-    name = "qdrant_text"
-
-    accepts_as_of = True
-    accepts_include_invalidated = True
-    accepts_tenant = True
-
-    def __init__(
-        self,
-        embedding: EmbeddingProvider,
-        vector_store: VectorStore,
-        *,
-        text_key: str = "text",
-        gate_key: str | None = None,
-        timestamp_key: str = "timestamp",
-        timestamp_format: str = "iso",
-        max_gate_tokens: int = 8,
-        min_token_len: int = 3,
-        name: str | None = None,
-    ):
-        self.embedding = embedding
-        self.vector_store = vector_store
-        self._space_guard = SpaceGuard(vector_store, embedding)
-        self.text_key = text_key
-        # The field the MatchText gate runs on. Distinct from text_key on
-        # purpose: an arm gating on a title/heading field must still RETURN
-        # the chunk body (text_key) — otherwise a point surfaced only by the
-        # title arm would carry its title as the result text into fusion and
-        # synthesis. Needs a full-text index on THIS field on real servers.
-        self.gate_key = gate_key or text_key
-        self.timestamp_key = timestamp_key
-        self.timestamp_format = timestamp_format
-        self.max_gate_tokens = max_gate_tokens
-        self.min_token_len = min_token_len
-        self._set_name(name)
-
-    def _gate_tokens(self, query: str) -> list[str]:
-        """Salient tokens for the lexical gate: exact technical tokens first
-        (IDs, IPs, versions — the queries this arm exists for), then content
-        words, longest first (a cheap rarity proxy with no corpus statistics),
-        capped so a verbose query can't turn the gate into match-anything."""
-        from .mca_prefilter import extract_exact_tokens
-        from .pipeline.stages import STOPWORDS
-
-        exact = extract_exact_tokens(query)
-        words = [
-            t
-            for t in tokenize(query)
-            if len(t) >= self.min_token_len and t not in STOPWORDS
-        ]
-        # Deterministic across processes: length desc (rarity proxy), then
-        # lexicographic — a set() sort keyed on length alone would let hash
-        # seeds decide which same-length tokens make the capped gate.
-        rest = sorted(set(words) - set(exact), key=lambda t: (-len(t), t))
-        return (exact + rest)[: self.max_gate_tokens]
-
-    def explain_empty(self, query: str) -> str | None:
-        # Instance name, not the class literal: each multi-field arm must
-        # report ITS OWN empty-gate verdict in traces.
-        return f"{self.name}:no_tokens" if not self._gate_tokens(query) else None
-
-    def search(
-        self, query, limit=20, filters=None, as_of=None, include_invalidated=False, tenant=None
-    ):
-        tokens = self._gate_tokens(query)
-        if not tokens:
-            return []
-        self._space_guard.ensure()
-        vec = embed_query_via(self.embedding, query)
-        if not vec:
-            return []
-        filters = convert_timestamp_filter(
-            filters, timestamp_key=self.timestamp_key, timestamp_format=self.timestamp_format
-        )
-        tkw = {"tenant": tenant} if tenant is not None else {}
-        hits = self.vector_store.search(
-            vec,
-            limit=limit,
-            filters=filters,
-            hide_invalidated=as_of is None and not include_invalidated,
-            text_any=tokens,
-            text_any_key=self.gate_key,
-            **tkw,
-        )
-        return [
-            RecallResult(
-                id=h.id,
-                text=(h.payload or {}).get(self.text_key, ""),
-                score=h.score,
-                payload=dict(h.payload or {}),
-                # The instance name, not the class literal: multi-field arms
-                # must stay distinguishable in result sources and telemetry.
-                sources=[self.name],
-            )
-            for h in hits
-        ]
-
-
-class _SharedQueryEmbedding(EmbeddingProvider):
-    """Memoizing wrapper shared by the arms of one multi-field lexical set.
-
-    The arms differ only in their MatchText gate field — the query vector is
-    identical, yet each ``search()`` would embed the query independently
-    (concurrently, from the recaller's thread pool): N fields = N identical
-    billable provider requests per recall. One bounded memo collapses them to
-    one. Scoped to the factory's arm set on purpose — nothing outside the
-    multi-field feature changes behavior.
-
-    Role note: the arms reach this wrapper through ``embed_query``. For a
-    declaratively-profiled inner provider that inherits the base role
-    methods, the transform applies exactly once (in the inherited
-    ``embed_query``) and lands in the memoized ``embed`` — the memo key is
-    the already-transformed inference input. An inner provider that
-    OVERRIDES a role method (native backend query/document task types) is
-    delegated to directly instead, memoized under a role-tagged key —
-    otherwise the base implementation would route around its override and
-    embed queries in the wrong mode.
-    """
-
-    _MAX_ENTRIES = 32
-    #: Memo entries expire on the same bounded-freshness contract as
-    #: SpaceGuard verdicts: after a tag repoint or collection recreation, a
-    #: recurring query's cached vector (from the OLD weights) must not be
-    #: searched against the new vectors indefinitely — recomputing the
-    #: fingerprint on the hot path would be far costlier than re-embedding
-    #: one query every few minutes. The memo's expiry is deliberately NOT
-    #: synchronized with guard revalidation: an entry can outlive a guard
-    #: recheck by up to this TTL, which is exactly the staleness the
-    #: read-side guard itself permits between its own revalidations — the
-    #: system-wide freshness bound is max(guard TTL, memo TTL), both 300s,
-    #: never worse than the documented contract.
-    _MEMO_TTL_S = 300.0
-
-    def __init__(self, embedding: EmbeddingProvider):
-        self._embedding = embedding
-        self._lock = threading.Lock()
-        self._memo: dict[Any, tuple[float, list[float]]] = {}
-        self._inflight: dict[Any, tuple[threading.Event, list[list[float]]]] = {}
-
-    def embed(self, text: str) -> list[float]:
-        return self._single_flight(text, lambda: self._embedding.embed(text))
-
-    def _inner_overrides(self, name: str) -> bool:
-        method = getattr(type(self._embedding), name, None)
-        return method is not None and method is not getattr(EmbeddingProvider, name)
-
-    # The role methods below spell out the declarative fallback instead of
-    # calling super(): the base defaults dispatch through OVERRIDDEN
-    # counterparts, and this wrapper overrides all four for memoization —
-    # super() would bounce between the base singular/batch defaults forever.
-
-    def embed_query(self, text: str) -> list[float]:
-        if self._inner_overrides("embed_query"):
-            return self._single_flight(
-                ("native", "query", text), lambda: self._embedding.embed_query(text)
-            )
-        if self._inner_overrides("embed_queries"):
-            return self._single_flight(
-                ("native", "query", text),
-                lambda: next(iter(self._embedding.embed_queries([text])), []),
-            )
-        return self.embed(self.profile.apply_query(text))
-
-    def embed_queries(self, texts: list[str]) -> list[list[float]]:
-        if self._inner_overrides("embed_queries"):
-            return self._embedding.embed_queries(texts)
-        if self._inner_overrides("embed_query"):
-            return [self.embed_query(t) for t in texts]
-        return self.embed_batch([self.profile.apply_query(t) for t in texts])
-
-    def embed_document(self, text: str) -> list[float]:
-        if self._inner_overrides("embed_document"):
-            return self._single_flight(
-                ("native", "document", text), lambda: self._embedding.embed_document(text)
-            )
-        if self._inner_overrides("embed_documents"):
-            return self._single_flight(
-                ("native", "document", text),
-                lambda: next(iter(self._embedding.embed_documents([text])), []),
-            )
-        return self.embed(self.profile.apply_document(text))
-
-    def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        if self._inner_overrides("embed_documents"):
-            return self._embedding.embed_documents(texts)
-        if self._inner_overrides("embed_document"):
-            return [self.embed_document(t) for t in texts]
-        return self.embed_batch([self.profile.apply_document(t) for t in texts])
-
-    def _single_flight(self, key: Any, compute: Callable[[], list[float]]) -> list[float]:
-        # Single-flight: the arms run CONCURRENTLY from the recaller's thread
-        # pool, so a plain check-then-compute memo lets every arm miss before
-        # any result lands — N identical billable requests on every new query,
-        # exactly what this wrapper exists to prevent. The first caller for a
-        # key becomes the leader; concurrent callers wait on its event.
-        with self._lock:
-            memo_entry = self._memo.get(key)
-            if memo_entry is not None:
-                stamp, cached = memo_entry
-                if time.monotonic() - stamp <= self._MEMO_TTL_S:
-                    return cached
-                # Expired: recompute so a repointed tag / recreated
-                # collection stops being served a stale vector.
-                self._memo.pop(key, None)
-            entry = self._inflight.get(key)
-            if entry is None:
-                entry = (threading.Event(), [])
-                self._inflight[key] = entry
-                leader = True
-            else:
-                leader = False
-        event, box = entry
-        if not leader:
-            event.wait()
-            return box[0] if box else []
-        vec: list[float] = []  # empty = the providers' own failure contract
-        try:
-            vec = compute()
-        finally:
-            with self._lock:
-                box.append(vec)
-                # Failures (empty vectors) are NOT memoized: a transient
-                # provider outage must not pin the lexical arms dead for
-                # this query until 32 other queries evict the entry.
-                if vec:
-                    if len(self._memo) >= self._MAX_ENTRIES:
-                        # FIFO eviction — a tiny bound is plenty; this only
-                        # exists to stop growth.
-                        self._memo.pop(next(iter(self._memo)))
-                    self._memo[key] = (time.monotonic(), vec)
-                self._inflight.pop(key, None)
-            event.set()
-        return vec
-
-    def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        return self._embedding.embed_batch(texts)
-
-    @property
-    def dimension(self) -> int:
-        return self._embedding.dimension
-
-    @property
-    def name(self) -> str:
-        return self._embedding.name
-
-    @property
-    def profile(self):
-        # Delegate instead of re-resolving from `name`: an instance-level
-        # profile override on the wrapped provider must win here too. A
-        # duck-typed inner without profiles keeps today's identity behavior.
-        prof = getattr(self._embedding, "profile", None)
-        if prof is not None:
-            return prof
-        from ..embeddings.profiles import IDENTITY_PROFILE
-
-        return IDENTITY_PROFILE
-
-    @profile.setter
-    def profile(self, value) -> None:
-        self._embedding.profile = value
-
-    def _legacy_space_compatible(self) -> bool:
-        # Forwarded: the wrapper overrides role methods for memoization only
-        # — the base override-detection heuristic would wrongly answer False
-        # for it. The INNER provider's answer is the truth.
-        method = getattr(self._embedding, "_legacy_space_compatible", None)
-        return method() if method is not None else True
-
-    def document_space_fingerprint(self) -> str:
-        # Forwarded so the wrapped provider's own fingerprint extras
-        # (e.g. HuggingFace pooling) are not lost; a duck-typed inner falls
-        # back to the base computation over the delegated name/profile.
-        method = getattr(self._embedding, "document_space_fingerprint", None)
-        if method is not None:
-            return method()
-        return super().document_space_fingerprint()
-
-    def query_profile_fingerprint(self) -> str:
-        method = getattr(self._embedding, "query_profile_fingerprint", None)
-        if method is not None:
-            return method()
-        return super().query_profile_fingerprint()
-
-    def health_check(self) -> tuple[bool, str]:
-        return self._embedding.health_check()
-
-
-def build_qdrant_text_arms(
-    embedding: EmbeddingProvider,
-    vector_store: VectorStore,
-    *,
-    text_key: str = "text",
-    timestamp_key: str = "timestamp",
-    timestamp_format: str = "iso",
-    fields: dict[str, float] | None = None,
-) -> tuple[list[QdrantTextRetriever], dict[str, float]]:
-    """Construct the lexical-gated arm set for ``text_search: lexical``.
-
-    The single shared builder for every surface (HTTP server, MCP, CLI).
-    Without ``fields`` (the default) it returns the one historical arm gating
-    on ``text_key``. With ``fields`` ({payload_field: fusion_weight}) each
-    field becomes its own arm: gating on that field, returning chunk text
-    from ``text_key``, named ``qdrant_text`` for the ``text_key`` field
-    (continuity: an existing deployment adding a title arm keeps the body
-    arm's learned profile) and ``qdrant_text:<field>`` otherwise.
-
-    Returns ``(arms, weights)`` where ``weights`` maps arm name -> fusion
-    weight for ``Recaller(retriever_weights=...)``. Weight 1.0 entries are
-    OMITTED on purpose: a static override always beats the adaptive
-    (Q-learning) profile, so default-weight arms stay adaptive.
-    """
-    from ..config import parse_text_search_fields
-
-    # Validate at THIS public boundary too, not only in Config.load: a
-    # programmatic caller (ServerConfig/build_server/library use) passing
-    # weight 0/-1/NaN would satisfy the type annotation while RRF clamps the
-    # arm to zero — a silently omitted arm instead of a loud config error.
-    fields = parse_text_search_fields(fields)
-    if not fields:
-        fields = {text_key: 1.0}
-    if len(fields) > 1:
-        # The arms run concurrently and embed the SAME query — share one
-        # memoized provider so N fields cost one embedding call per recall.
-        embedding = _SharedQueryEmbedding(embedding)
-    arms: list[QdrantTextRetriever] = []
-    weights: dict[str, float] = {}
-    for gate_field, weight in fields.items():
-        arm_name = (
-            QdrantTextRetriever.name
-            if gate_field == text_key
-            else f"{QdrantTextRetriever.name}:{gate_field}"
-        )
-        arms.append(
-            QdrantTextRetriever(
-                embedding=embedding,
-                vector_store=vector_store,
-                text_key=text_key,
-                gate_key=gate_field,
-                timestamp_key=timestamp_key,
-                timestamp_format=timestamp_format,
-                name=arm_name,
-            )
-        )
-        if weight != 1.0:
-            weights[arm_name] = float(weight)
-    return arms, weights
-
-
 class QdrantSparseRetriever(Retriever):
     """Server-side lexical scoring over Qdrant sparse vectors.
 
-    The counterpart to ``QdrantTextRetriever`` for deployments that CAN
-    (re)index: writes maintain a sparse tf encoding of each chunk's text
+    Writes maintain a sparse tf encoding of each chunk's text
     (``VectorStore(sparse_text=True)``), Qdrant's ``Modifier.IDF`` supplies
     collection-wide term weighting at query time, and this retriever ranks by
     that tf·idf-like score — true lexical *scoring* (not just a gate) with no
@@ -973,6 +607,60 @@ class QdrantSparseRetriever(Retriever):
             query,
             limit=limit,
             filters=filters,
+            hide_invalidated=as_of is None and not include_invalidated,
+            **tkw,
+        )
+        return [
+            RecallResult(
+                id=h.id,
+                text=(h.payload or {}).get(self.text_key, ""),
+                score=h.score,
+                payload=dict(h.payload or {}),
+                sources=[self.name],
+            )
+            for h in hits
+        ]
+
+
+class QdrantNativeBM25Retriever(Retriever):
+    """Server-side BM25 over a Qdrant 1.20+ scored full-text index."""
+
+    # Keep selectors and result consumers on the existing lexical family.
+    name = "bm25"
+
+    accepts_as_of = True
+    accepts_include_invalidated = True
+    accepts_tenant = True
+
+    def __init__(
+        self,
+        vector_store: VectorStore,
+        *,
+        text_key: str = "text",
+        timestamp_key: str = "timestamp",
+        timestamp_format: str = "iso",
+    ):
+        try:
+            from qdrant_client.models import TextQuery  # noqa: F401
+        except ImportError as exc:
+            raise RuntimeError("native_bm25 requires qdrant-client>=1.20.0") from exc
+        self.vector_store = vector_store
+        self.text_key = text_key
+        self.timestamp_key = timestamp_key
+        self.timestamp_format = timestamp_format
+
+    def search(
+        self, query, limit=20, filters=None, as_of=None, include_invalidated=False, tenant=None
+    ):
+        filters = convert_timestamp_filter(
+            filters, timestamp_key=self.timestamp_key, timestamp_format=self.timestamp_format
+        )
+        tkw = {"tenant": tenant} if tenant is not None else {}
+        hits = self.vector_store.native_bm25_search(
+            query,
+            limit=limit,
+            filters=filters,
+            text_key=self.text_key,
             hide_invalidated=as_of is None and not include_invalidated,
             **tkw,
         )

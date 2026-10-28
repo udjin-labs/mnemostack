@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from mnemostack.embeddings.base import EmbeddingProvider
-from mnemostack.embeddings.profiles import EMBEDDING_SPACE_KEY, EmbeddingProfile
+from mnemostack.embeddings.profiles import EMBEDDING_SPACE_KEY
 from mnemostack.embeddings.roles import (
     check_document_space,
     document_space_fingerprint_via,
@@ -542,23 +542,6 @@ def test_ineligible_arm_does_not_veto_tenant_recall():
         recaller.recall("вопрос")  # unscoped: every arm enforced
 
 
-def test_native_document_override_is_not_legacy_compatible():
-    # Pre-fingerprint points came through the NEUTRAL primitives — a
-    # provider with a native document role does not reproduce them.
-    from mnemostack.recall.retrievers import _SharedQueryEmbedding
-
-    class _NativeDoc(_AsymmetricProvider):
-        def embed_document(self, text):
-            return [9.9]
-
-    assert _NativeDoc()._legacy_space_compatible() is False
-    assert _AsymmetricProvider()._legacy_space_compatible() is True
-    # The memo wrapper overrides role methods for caching only — it must
-    # forward the INNER provider's answer, not its own overrides.
-    assert _SharedQueryEmbedding(_AsymmetricProvider())._legacy_space_compatible() is True
-    assert _SharedQueryEmbedding(_NativeDoc())._legacy_space_compatible() is False
-
-
 def test_ingestor_stamps_the_guard_validated_fingerprint():
     # The stamp must be the fingerprint the guard validated; the only other
     # resolution per flush is the post-embedding SANDWICH comparison — no
@@ -855,20 +838,6 @@ def test_local_weights_signature_detects_same_size_content_swap(tmp_path):
     assert _local_weights_signature(tmp_path) not in (sig_a, sig_b)
 
 
-def test_shared_query_embedding_memo_expires():
-    from mnemostack.recall.retrievers import _SharedQueryEmbedding
-
-    inner = _AsymmetricProvider()
-    shim = _SharedQueryEmbedding(inner)
-    shim._MEMO_TTL_S = 0.0  # every hit is expired → recompute
-    shim.embed_query("q")
-    shim.embed_query("q")
-    assert inner.seen == ["query: q", "query: q"]  # no stale reuse
-
-
-# ---------------------------------------------------- provider integrations
-
-
 def test_ollama_provider_uses_profile_known_dimension():
     from mnemostack.embeddings.ollama import OllamaProvider
 
@@ -971,70 +940,6 @@ def test_recaller_fails_closed_on_unresolvable_fingerprint_and_retries():
     # Nothing was cached — after the provider recovers, recall works.
     provider.fail = False
     assert recaller.recall("вопрос") == []
-
-
-def test_shared_query_embedding_forwards_profile_and_fingerprints():
-    from mnemostack.recall.retrievers import _SharedQueryEmbedding
-
-    inner = _AsymmetricProvider()
-    shim = _SharedQueryEmbedding(inner)
-    assert shim.profile is inner.profile
-    assert shim.document_space_fingerprint() == inner.document_space_fingerprint()
-    assert shim.query_profile_fingerprint() == inner.query_profile_fingerprint()
-    # Role method inherited from the base class lands in the memoized embed
-    # with the transform already applied — exactly once.
-    vec = shim.embed_query("надо найти")
-    assert vec == [1.0, 2.0]
-    assert inner.seen == ["query: надо найти"]
-    shim.embed_query("надо найти")
-    assert inner.seen == ["query: надо найти"]  # memo hit, no second call
-
-
-def test_shared_query_embedding_delegates_native_role_overrides():
-    # An inner provider with NATIVE query/document task types must have its
-    # own role methods called (memoized), not be routed around via the base
-    # transform + neutral embed.
-    from mnemostack.recall.retrievers import _SharedQueryEmbedding
-
-    class _NativeRoles(EmbeddingProvider):
-        def __init__(self):
-            self.calls: list[tuple[str, str]] = []
-
-        def embed(self, text):
-            self.calls.append(("embed", text))
-            return [1.0]
-
-        def embed_batch(self, texts):
-            return [self.embed(t) for t in texts]
-
-        def embed_query(self, text):
-            self.calls.append(("embed_query", text))
-            return [2.0]
-
-        def embed_document(self, text):
-            self.calls.append(("embed_document", text))
-            return [3.0]
-
-        @property
-        def dimension(self):
-            return 1
-
-        @property
-        def name(self):
-            return "custom:native-task-types"
-
-    inner = _NativeRoles()
-    shim = _SharedQueryEmbedding(inner)
-    assert shim.embed_query("q") == [2.0]
-    assert shim.embed_query("q") == [2.0]  # memo hit
-    assert inner.calls == [("embed_query", "q")]
-    assert shim.embed_document("q") == [3.0]  # role-tagged key: no collision
-    assert shim.embed("q") == [1.0]
-    assert inner.calls == [
-        ("embed_query", "q"),
-        ("embed_document", "q"),
-        ("embed", "q"),
-    ]
 
 
 def test_recaller_refuses_recall_across_embedding_spaces():
@@ -1237,19 +1142,6 @@ def test_recaller_allows_matching_and_identity_legacy_spaces():
         vector_store=_Vec([{"text": "legacy raw point"}]),
     )
     assert qwen_legacy_ok.recall("вопрос") == []
-
-
-def test_shared_query_embedding_with_instance_profile_override():
-    from mnemostack.recall.retrievers import _SharedQueryEmbedding
-
-    inner = _AsymmetricProvider()
-    inner.profile = EmbeddingProfile(
-        name="custom", version=1, model_patterns=(),
-        query_transform={"kind": "prefix", "prefix": "X>"},
-    )
-    shim = _SharedQueryEmbedding(inner)
-    shim.embed_query("q")
-    assert inner.seen == ["X>q"]
 
 
 def test_hyde_embeds_hypothetical_as_document():

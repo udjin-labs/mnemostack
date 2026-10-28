@@ -131,14 +131,11 @@ this is purely additive. See [Multi-tenancy & authentication](#multi-tenancy--au
 collection recall reads — mounts a pre-existing collection with its own field
 names / numeric epoch timestamps; `timestamp_format` ∈ `iso|epoch|epoch_ms`),
 `recall.text_search` (lexical-arm selector ∈
-`auto|off|bm25|qdrant_bm25|lexical|sparse` — the mode names and their
-semantics are the stable contract; `QdrantTextRetriever` /
+`auto|off|bm25|native_bm25|sparse` — the mode names and
+their semantics are the stable contract; `QdrantNativeBM25Retriever` /
 `QdrantSparseRetriever` / `SparseTextEncoder` class shapes are 🟡
 experimental; `sparse` writes are maintained by the SYNC `VectorStore`
 only — `AsyncVectorStore` does not write sparse encodings),
-`recall.text_search_fields` (multi-field lexical arms: payload field →
-fusion weight, `lexical` mode only; when set it replaces the arm set, and
-arm names follow `qdrant_text[:<field>]`),
 `embedding.ollama_host` / `MNEMOSTACK_OLLAMA_HOST` / `--ollama-host` (now
 wired through every provider factory — CLI, HTTP server, MCP, inspector;
 explicit flag > env > config > the native `OLLAMA_HOST` variable >

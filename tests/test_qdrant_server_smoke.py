@@ -1,9 +1,8 @@
 """Smoke tests against a REAL Qdrant server (not the in-memory local client).
 
 The regular suite runs on ``QdrantClient(":memory:")``, whose semantics
-diverge from real servers exactly where the text-search arms live: payload
-full-text indexes (local mode matches without one, servers REQUIRE it for
-MatchText), ``update_collection`` (servers refuse adding a sparse space
+diverge from real servers exactly where the text-search arms live: scored
+full-text indexes, ``update_collection`` (servers refuse adding a sparse space
 post-hoc), and version-dependent ``update_vectors`` behavior. These tests
 replay the release-verification scenarios against an actual server.
 
@@ -22,6 +21,13 @@ import uuid
 import pytest
 
 from mnemostack.vector import VectorStore
+
+try:
+    from qdrant_client.models import TextQuery as _TextQuery  # noqa: F401
+
+    _HAS_NATIVE_BM25 = True
+except ImportError:
+    _HAS_NATIVE_BM25 = False
 
 SERVER_URL = os.environ.get("MNEMOSTACK_TEST_QDRANT_URL", "").strip()
 
@@ -142,23 +148,15 @@ def test_sparse_tenant_boundary(collection_name):
     assert [h.id for h in s.sparse_search("postgres", limit=5, tenant="acme")] == [1]
 
 
-def test_matchtext_gate_against_a_real_text_index(collection_name):
-    # The scenario local mode CANNOT represent: a real server requires the
-    # full-text payload index before it accepts MatchText filters.
+def test_native_bm25_against_a_real_scored_text_index(collection_name):
     s = _sparse_store(collection_name)
     _seed(s)
-    s.ensure_text_index()
-    assert {h.id for h in s.search(_V1, limit=5, text_any=["postgres"])} == {1, 3}
-    # any-of semantics across tokens
-    assert {h.id for h in s.search(_V1, limit=5, text_any=["kubernetes", "backup"])} == {1, 2}
-
-
-def test_gate_composes_with_tenant(collection_name):
-    s = _sparse_store(collection_name)
-    _seed(s)
-    s.ensure_text_index()
-    hits = s.search(_V1, limit=5, text_any=["postgres"], tenant="acme")
-    assert [h.id for h in hits] == [1]
+    s.ensure_text_index()  # existing lexical-mode index, scoring disabled
+    s.ensure_text_index(scoring=True)
+    hits = s.native_bm25_search("postgres backup", limit=5)
+    assert [h.id for h in hits][:2] == [1, 3]
+    assert hits[0].score > hits[1].score
+    assert [h.id for h in s.native_bm25_search("postgres", tenant="acme")] == [1]
 
 
 def test_scroll_preserves_dense_vector_in_named_layout(collection_name):
@@ -180,19 +178,6 @@ def test_server_refuses_post_hoc_sparse_space(collection_name):
     )
     with pytest.raises(RuntimeError, match="refused to add"):
         upgraded.ensure_collection()
-
-
-def test_multi_field_gate_against_real_text_indexes(collection_name):
-    # Multi-field lexical arms: each gate field needs its OWN full-text index
-    # on a real server — and gating on a title field must still return hits
-    # whose bodies never mention the token.
-    s = _sparse_store(collection_name)
-    s.upsert(30, _V1, {"title": "postgres servers", "text": "backup runbook"})
-    s.upsert(31, _V2, {"title": "network map", "text": "postgres in body only"})
-    s.ensure_text_index()  # body field ("text")
-    s.ensure_text_index("title")
-    assert {h.id for h in s.search(_V1, limit=5, text_any=["postgres"], text_any_key="title")} == {30}
-    assert {h.id for h in s.search(_V1, limit=5, text_any=["postgres"], text_any_key="text")} == {31}
 
 
 def test_coverage_gap_and_backfill_flow(collection_name):

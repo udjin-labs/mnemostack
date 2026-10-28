@@ -77,7 +77,7 @@ Save as `docker-compose.yml` and keep secrets in `.env` or your deployment secre
 ```yaml
 services:
   qdrant:
-    image: qdrant/qdrant:v1.18.3  # match your qdrant-client: same major, minor within 1
+    image: qdrant/qdrant:v1.20.0  # match your qdrant-client: same major, minor within 1
     restart: unless-stopped
     volumes:
       - qdrant_storage:/qdrant/storage
@@ -436,7 +436,7 @@ For multi-tenant deployments, use the built-in **service-key auth** instead of t
 
 Index a corpus **for a tenant** with `mnemostack index --tenant <id>` (the fixed-window indexer, mirroring `index-markdown --tenant`): ids, payload stamps, prune and payload refresh are all scoped, so operator-indexed documents and the same documents written through `/memories` land on the same points instead of two parallel copies. `--recreate` is refused under a tenant (it drops the whole shared collection — prune the tenant's sources instead), and the tenant's storage quota applies: point the run at the same quota store (`--quotas-file` / `MNEMOSTACK_QUOTAS_FILE`) and a run that would push the tenant past `--max-points` is refused before a single embedding call. That check is on the run's **gross** growth, not the net after `--prune`, because the points are written before the prune runs — a tenant sitting at its cap re-indexing an edited corpus needs the cap raised for the run. Pre-existing collections created before this release should also run `mnemostack payload-index source --schema keyword` once — the source-scoped lifecycle endpoints and the listing filter on `source`, and an unindexed filter is a collection scan per call (new collections index it automatically).
 
-`GET /memories?source=…` answers the other half — "what do you hold from this source, and does it still match what I have" — returning `{id, content_hash, timestamp, indexed_at}` per point, ordered by id, paginated with `after` (`limit` up to 500) and gated by the `read` scope. `after` is the last id of the previous page and is validated in the same id domain as the lifecycle selectors (a malformed cursor is a `400`, not an empty page). Like any id cursor, it assumes the store yields a stable order across calls — Qdrant does; a CUSTOM store whose iteration order can change between calls cannot be paginated correctly by any cursor and must not back this endpoint (the source-scoped lifecycle calls are unaffected: each re-selects from the start and passes no cursor). `timestamp` comes back in the deployment's own domain — an ISO string under the default `recall.timestamp_format: iso`, a number under `epoch`/`epoch_ms`. It deliberately returns **no memory text**: the check exists so a client can detect divergence between its own state and the service's, and it must not become a second read channel for memory content with its own scope semantics. `content_hash` is the source snapshot recorded at ingest; points stored before that feature return `null`. All three source-capable endpoints — the listing, `POST /invalidate` and `DELETE /memories` — accept the same `index_root` owner guard, which skips points owned by a different indexing root (a point carrying no `index_root` tag is not protected by it, and is still selected under any guard). `DELETE /memories` carries its bounded id list in a JSON request body; verify that every reverse proxy and ingress on the deployment path preserves DELETE bodies before relying on it for erasure. One scoping note on the serialization contract: the in-process same-tenant write lock covers `POST /memories` against itself — lifecycle calls racing a concurrent re-remember of the same content are best-effort, like cross-worker writers. For right-to-erasure requests note the lexical-arm caveat: under `text_search=qdrant_bm25` the in-process BM25 corpus is a startup snapshot and can keep serving deleted text until the server restarts — restart after processing an erasure to complete it. Graph facts written via `/triples` are separate records (retract them with the graph invalidation API), and file-backed BM25 corpora (`bm25_paths`) are operator-owned files outside the erasure surface. Writes are additionally bounded per tenant: the storage quota (`mnemostack quota set <tenant> --max-points N`) is enforced before any `/memories` write (`507 Insufficient Storage` when exceeded — embedding is paid by the SERVER, so cap every external tenant), and the per-tenant rate limit (`--max-rps`) applies to all authenticated calls (`429`). Client metadata cannot set server-owned payload keys (`tenant_id`, underscore-prefixed structural keys, `tags`/`timestamp` which have dedicated capped fields, the lifecycle marker `invalidated_at` — retraction goes through the invalidate API — and the deployment's configured `recall.text_key`/`timestamp_key`; all rejected with `400`). Metadata `valid_from`/`valid_until` must parse as ISO-8601 (`current` allowed for `valid_until`), numbers must fit signed int64 and be finite, and nesting depth is capped — all rejected with `400` before any embedding cost, and duplicate content re-sent to `/memories` is detected against the store and costs zero embedding calls. If you run `mcp-serve` next to `serve`, give it the same quota store (`mcp-serve --quotas-file` / `MNEMOSTACK_QUOTAS_FILE`) so the MCP remember tool enforces the same caps. Two operational notes: same-tenant writes are serialized within one process, but across multiple workers/processes the storage quota stays a best-effort guardrail (concurrent near-cap writers can land slightly over; the count-before-write contract documented since the quota shipped) and a concurrent duplicate may pay embedding twice while still storing one point. Under `text_search=qdrant_bm25` the in-process BM25 corpus is a startup snapshot: remotely written memories join the vector arm immediately but that lexical arm only after a restart — the same behavior CLI ingest has always had against a running server. The operator endpoints stay **unauthenticated even under `--auth`** — `/health`, `/healthz`, `/readyz`, `/status`, `/metrics` expose version, dependency reachability, and counters; protect them at your proxy (or bind to a trusted interface) if that's sensitive. (Auth is off by default — single-tenant deployments are unaffected.) You can still additionally inject a tenant filter at a reverse proxy for defense-in-depth. Upgrade note: on 0.5.0 and earlier, several retrievers ignored `filters=` entirely — see the Security section of the changelog.
+`GET /memories?source=…` answers the other half — "what do you hold from this source, and does it still match what I have" — returning `{id, content_hash, timestamp, indexed_at}` per point, ordered by id, paginated with `after` (`limit` up to 500) and gated by the `read` scope. `after` is the last id of the previous page and is validated in the same id domain as the lifecycle selectors (a malformed cursor is a `400`, not an empty page). Like any id cursor, it assumes the store yields a stable order across calls — Qdrant does; a CUSTOM store whose iteration order can change between calls cannot be paginated correctly by any cursor and must not back this endpoint (the source-scoped lifecycle calls are unaffected: each re-selects from the start and passes no cursor). `timestamp` comes back in the deployment's own domain — an ISO string under the default `recall.timestamp_format: iso`, a number under `epoch`/`epoch_ms`. It deliberately returns **no memory text**: the check exists so a client can detect divergence between its own state and the service's, and it must not become a second read channel for memory content with its own scope semantics. `content_hash` is the source snapshot recorded at ingest; points stored before that feature return `null`. All three source-capable endpoints — the listing, `POST /invalidate` and `DELETE /memories` — accept the same `index_root` owner guard, which skips points owned by a different indexing root (a point carrying no `index_root` tag is not protected by it, and is still selected under any guard). `DELETE /memories` carries its bounded id list in a JSON request body; verify that every reverse proxy and ingress on the deployment path preserves DELETE bodies before relying on it for erasure. One scoping note on the serialization contract: the in-process same-tenant write lock covers `POST /memories` against itself — lifecycle calls racing a concurrent re-remember of the same content are best-effort, like cross-worker writers. Graph facts written via `/triples` are separate records (retract them with the graph invalidation API), and file-backed BM25 corpora (`bm25_paths`) are operator-owned files outside the erasure surface. Writes are additionally bounded per tenant: the storage quota (`mnemostack quota set <tenant> --max-points N`) is enforced before any `/memories` write (`507 Insufficient Storage` when exceeded — embedding is paid by the SERVER, so cap every external tenant), and the per-tenant rate limit (`--max-rps`) applies to all authenticated calls (`429`). Client metadata cannot set server-owned payload keys (`tenant_id`, underscore-prefixed structural keys, `tags`/`timestamp` which have dedicated capped fields, the lifecycle marker `invalidated_at` — retraction goes through the invalidate API — and the deployment's configured `recall.text_key`/`timestamp_key`; all rejected with `400`). Metadata `valid_from`/`valid_until` must parse as ISO-8601 (`current` allowed for `valid_until`), numbers must fit signed int64 and be finite, and nesting depth is capped — all rejected with `400` before any embedding cost, and duplicate content re-sent to `/memories` is detected against the store and costs zero embedding calls. If you run `mcp-serve` next to `serve`, give it the same quota store (`mcp-serve --quotas-file` / `MNEMOSTACK_QUOTAS_FILE`) so the MCP remember tool enforces the same caps. Two operational notes: same-tenant writes are serialized within one process, but across multiple workers/processes the storage quota stays a best-effort guardrail (concurrent near-cap writers can land slightly over; the count-before-write contract documented since the quota shipped) and a concurrent duplicate may pay embedding twice while still storing one point. The operator endpoints stay **unauthenticated even under `--auth`** — `/health`, `/healthz`, `/readyz`, `/status`, `/metrics` expose version, dependency reachability, and counters; protect them at your proxy (or bind to a trusted interface) if that's sensitive. (Auth is off by default — single-tenant deployments are unaffected.) You can still additionally inject a tenant filter at a reverse proxy for defense-in-depth. Upgrade note: on 0.5.0 and earlier, several retrievers ignored `filters=` entirely — see the Security section of the changelog.
 
 ### External key store (OpenBao / Vault-compatible)
 
@@ -702,13 +702,13 @@ arm; pick by collection size and whether you can re-index:
 | Mode | Corpus lives | Scoring | Scale | Reindex needed |
 |---|---|---|---|---|
 | `bm25` (auto-default with `bm25_paths`) | client RAM, from files | true BM25 | <~100K | — |
-| `qdrant_bm25` | client RAM, scrolled from payloads | true BM25 | <~100K | no |
-| `lexical` | Qdrant full-text index | dense (gate filters, doesn't score) | any | **no** |
+| `native_bm25` | Qdrant full-text index | native BM25 | any | no |
 | `sparse` | Qdrant sparse vectors | server tf·idf-like (IDF modifier) | any | **yes** (space written at ingest) |
 
-- `lexical` needs the full-text payload index on a real server: run
-  `mnemostack text-index` once (idempotent, non-destructive — safe on a
-  mounted pre-existing collection; it indexes every configured gate field).
+- `native_bm25` requires Qdrant server and client 1.20 or newer. Run
+  `mnemostack text-index` once to enable BM25 scoring on the existing text
+  payload. Existing points become searchable without re-uploading data or
+  creating sparse vectors. New writes are visible immediately.
 - The same trap applies to **payload filters** (`filters={...}` on
   `/recall`, the MCP tools, or library calls): a real server evaluates a
   filter on an unindexed field by scanning candidate payloads — a
@@ -731,44 +731,18 @@ arm; pick by collection size and whether you can re-index:
   mnemostack payload-index source --schema keyword
   mnemostack payload-index index_root --schema keyword
   ```
-- **Multi-field lexical arms** (`recall.text_search_fields`, env
-  `MNEMOSTACK_TEXT_SEARCH_FIELDS="title:2.0,text:1.0"`): title/heading
-  fields are usually far more precise lexical signals than chunk bodies —
-  each configured payload field becomes its own gated arm (gating on that
-  field, still returning chunk text from `text_key`), fused with the given
-  weight:
-
-  ```yaml
-  recall:
-    text_search: lexical
-    text_search_fields:
-      title: 2.0   # gate on the title field, boost its arm in fusion
-      text: 1.0    # keep the body arm (weight 1.0 stays adaptive)
-  ```
-
-  When set, this REPLACES the arm set — list `text_key` explicitly if the
-  body arm should stay. Arms are named `qdrant_text` (the `text_key` field)
-  and `qdrant_text:<field>`, so weights, the adaptive profile, and
-  trace/degraded telemetry stay per-arm; `--source bm25` still selects the
-  whole lexical family. Requires `text_search: lexical` (anything else
-  fails loud at startup), and every gate field needs its own full-text
-  index (`mnemostack text-index` creates them all; `doctor` live-checks
-  each). Points without the gate field simply never match that arm.
-- `sparse` is the strongest lexical arm at scale: new collections indexed
+- `sparse` is an alternative scored lexical arm at scale: new collections indexed
   under this mode get the sparse space automatically. Switching an existing
   dense collection requires a **re-index into a collection created under
   sparse mode** — Qdrant servers cannot add a new sparse space to an existing
-  collection (CI-verified against real servers v1.15.4 and v1.18.3; the
-  attempt fails loudly, never silently). `mnemostack sparse-backfill` is for the OTHER gap: a collection
+  collection; the attempt fails loudly, never silently. `mnemostack
+  sparse-backfill` is for the OTHER gap: a collection
   that already has the space but holds points written dense-only (e.g.
   through the async store) — it writes the missing encodings without
   re-embedding anything.
-- Server version minimums for the new arms: full-text `MatchText` filtering
-  is long-standing, the sparse IDF modifier needs Qdrant server ≥ 1.10, and
-  the coverage check (`has_vector`) needs ≥ 1.13 — the compose example pins
-  `v1.18.3`; pick the tag matching your installed `qdrant-client` (same
-  major, minor within 1). CI replays the real-server scenarios against both
-  `v1.15.4` and `v1.18.3`.
+- Native BM25 requires Qdrant 1.20. The compose example and minimum Python
+  client version are pinned to 1.20. The sparse coverage check uses the same
+  supported server baseline.
 - All modes respect the tenant boundary and validity view exactly like dense
   search, and follow the configured payload schema.
 - **`sparse` writes are sync-only today**: `AsyncVectorStore` does not
@@ -835,7 +809,7 @@ Before upgrade:
 Pin Qdrant versions in compose instead of using `latest` in production:
 
 ```yaml
-image: qdrant/qdrant:v1.18.3  # match your qdrant-client: same major, minor within 1
+image: qdrant/qdrant:v1.20.0  # match your qdrant-client: same major, minor within 1
 ```
 
 Read Qdrant release notes before upgrading. Test snapshots and collection compatibility on staging.

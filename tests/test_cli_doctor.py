@@ -325,3 +325,36 @@ def test_doctor_warns_when_no_payload_indexes_without_flipping_exit(patched, cap
     assert rc == 0  # informational warn never flips the exit code
     assert "qdrant.payload_indexes" in out
     assert "mnemostack payload-index" in out
+
+
+@pytest.mark.parametrize("scoring, expected_rc", [(True, 0), (False, 2)])
+def test_doctor_checks_native_bm25_scoring(patched, capsys, scoring, expected_rc):
+    from types import SimpleNamespace
+
+    from qdrant_client.models import PayloadSchemaType
+
+    cfg = Config()
+    cfg.recall.text_search = "native_bm25"
+    patched(
+        cfg=cfg,
+        provider=_FakeProvider(dim=8, healthy=True),
+        qdrant_cls=_fake_qdrant_cls(
+            reachable=True,
+            exists=True,
+            count=5,
+            size=8,
+            payload_schema={
+                "text": SimpleNamespace(
+                    data_type=PayloadSchemaType.TEXT,
+                    params=SimpleNamespace(scoring=scoring),
+                )
+            },
+        ),
+        llm=_FakeLLM(healthy=True),
+    )
+    cli._payload_schema.cache_clear()
+    rc = cli.cmd_doctor(_args())
+    out = capsys.readouterr().out
+    assert rc == expected_rc
+    assert "BM25" in out
+    cli._payload_schema.cache_clear()
