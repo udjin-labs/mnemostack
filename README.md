@@ -29,7 +29,7 @@ Run a local Qdrant for the vector store:
 
 ```bash
 # tag rule: match your installed qdrant-client - same major, minor within 1
-docker run -p 6333:6333 qdrant/qdrant:v1.18.3
+docker run -p 6333:6333 qdrant/qdrant:v1.20.0
 ```
 
 Optional: run Memgraph for graph-backed memory:
@@ -342,9 +342,11 @@ Built-in profiles cover OpenClaw webchat and Telegram envelopes; pass `profiles=
 | `MNEMOSTACK_QUANTIZATION_RESCORE` / `MNEMOSTACK_QUANTIZATION_OVERSAMPLING` | Qdrant quantization search parameters for dense queries (`vector.quantization_*` in the config); unset = not sent. See [the recipe](docs/recipes.md#quantizing-a-collection-without-losing-recall-quality) | Dense search on a quantized collection |
 | `MNEMOSTACK_LLM_HOST` / `MNEMOSTACK_LLM_TIMEOUT` | LLM endpoint (ollama: default inherits the embedding `--ollama-host`; openai: required base URL) and LLM request timeout | Answer / reranker / expansion LLM |
 | `MNEMOSTACK_LLM_API_KEY` | Bearer token for the `openai` LLM provider; unset or `none` = no auth header (keyless vLLM / llama.cpp) | Answer / reranker / expansion LLM |
+| `MNEMOSTACK_LLM_OPTIONS` | JSON payload options for the `openai` provider, e.g. `{"reasoning_effort":"none","chat_template_kwargs":{"enable_thinking":false}}`; explicit constructor options override the environment | Answer / reranker / expansion LLM |
 | `MNEMOSTACK_PROVIDER` / `MNEMOSTACK_EMBEDDING_PROVIDER` | Embedding provider | CLI / HTTP / MCP |
 | `MNEMOSTACK_LLM` / `MNEMOSTACK_LLM_PROVIDER` | LLM provider | Answer generation / reranking |
 | `MNEMOSTACK_BM25_PATHS` | BM25 corpus paths separated by `os.pathsep` (`:` on Unix) | CLI / HTTP / MCP BM25 retriever |
+| `MNEMOSTACK_TEXT_SEARCH` | Lexical arm: `auto`, `off`, `bm25`, `native_bm25`, or `sparse` | CLI / HTTP / MCP recall |
 | `MNEMOSTACK_AUTO_RECORD_IOR` | `true`/`false` toggle for HTTP recall exposure logging | HTTP stateful pipeline |
 | `MNEMOSTACK_EMBEDDING_MODEL` / `MNEMOSTACK_LLM_MODEL` | Override the embedding / LLM model name | CLI / HTTP / MCP |
 | `MNEMOSTACK_VECTOR_HOST` / `MNEMOSTACK_VECTOR_COLLECTION` | Aliases for the Qdrant URL / collection | CLI / HTTP / MCP |
@@ -420,7 +422,7 @@ Run a local Qdrant for the vector store:
 
 ```bash
 # tag rule: match your installed qdrant-client - same major, minor within 1
-docker run -p 6333:6333 qdrant/qdrant:v1.18.3
+docker run -p 6333:6333 qdrant/qdrant:v1.20.0
 ```
 
 Optionally a Memgraph for the knowledge graph:
@@ -925,7 +927,7 @@ If you run an OpenClaw-style assistant with its own `scripts/recall.sh` or simil
 
    ```bash
    # tag rule: match your installed qdrant-client - same major, minor within 1
-   docker run -d -p 6333:6333 --name qdrant qdrant/qdrant:v1.18.3
+   docker run -d -p 6333:6333 --name qdrant qdrant/qdrant:v1.20.0
    docker run -d -p 7687:7687 --name memgraph memgraph/memgraph:latest   # optional
    ```
 

@@ -370,7 +370,7 @@ def _build_recaller_from_kwargs(
 #: whatever recall.text_search chose (in-process BM25, the Qdrant-gated dense
 #: retriever, or sparse scoring) answers to it — operators select "the lexical
 #: arm", not an implementation name.
-_LEXICAL_SOURCE_ALIASES = {"bm25", "qdrant_text", "sparse"}
+_LEXICAL_SOURCE_ALIASES = {"bm25", "sparse"}
 
 
 def _expand_source_filter(source_filter: set[str] | None) -> set[str] | None:
@@ -383,8 +383,7 @@ def _source_enabled(name: str, source_filter: set[str] | None) -> bool:
     source_filter = _expand_source_filter(source_filter)
     if source_filter is None:
         return True
-    # Multi-field arms carry suffixed names ("qdrant_text:title") — the
-    # base name is the selectable family, the suffix is the field.
+    # Custom arms may carry suffixed names; the base is the selectable family.
     return name in source_filter or name.partition(":")[0] in source_filter
 
 
@@ -426,8 +425,7 @@ def _result_source_enabled(result: RecallResult, source_filter: set[str] | None)
         return True
     source_filter = _expand_source_filter(source_filter) or source_filter
     sources = {str(s).lower() for s in (getattr(result, "sources", []) or [])}
-    # Suffixed multi-field arm sources ("qdrant_text:title") select by their
-    # base family name too.
+    # Suffixed custom arm sources select by their base family name too.
     sources |= {s.partition(":")[0] for s in sources}
     if "graph" in source_filter:
         source_filter = {*source_filter, "memgraph"}
@@ -535,7 +533,7 @@ def _query_retrievers(
     from .recall.validity import filter_by_tenant
 
     # Same family-aware matching as the recaller path: a suffixed
-    # multi-field arm ("qdrant_text:title") is part of the lexical family
+    # custom suffixed arms remain part of their lexical family
     # the "bm25" umbrella selects. Filter FIRST, so the guard below probes
     # exactly the collections this synthesis will read.
     enabled = [

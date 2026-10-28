@@ -7,6 +7,7 @@ from mnemostack.vector.patch import PayloadPatch, apply_patches_via
 
 def _store(dim: int = 2):
     from qdrant_client import QdrantClient
+    from qdrant_client.models import Distance, VectorParams
 
     from mnemostack.vector.qdrant import VectorStore
 
@@ -17,7 +18,7 @@ def _store(dim: int = 2):
     s.sparse_text = False
     s.client.create_collection(
         collection_name=s.collection,
-        vectors_config={"size": dim, "distance": "Cosine"},
+        vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
     )
     return s
 

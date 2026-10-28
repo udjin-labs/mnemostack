@@ -46,7 +46,7 @@ DEGRADED_COUNTER = "mnemostack.recall.degraded"
 _NON_DEGRADED_TAGS = frozenset({"temporal:no_parse", "weak_retry:no_variants"})
 
 #: Same classification for tags with a DYNAMIC prefix — each multi-field
-#: lexical arm reports its own gate verdict ("qdrant_text:title:no_tokens"),
+#: a lexical arm may report its own empty-query verdict ("bm25:no_tokens"),
 #: so an exact set can't name them; the shape is what's routine.
 _NON_DEGRADED_SUFFIXES = (":no_tokens",)
 

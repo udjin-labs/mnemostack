@@ -1036,49 +1036,6 @@ def test_triples_validity_bounds_must_parse(monkeypatch, tmp_path):
     assert ok.status_code == 200 and added[0]["valid_until"] == "current"
 
 
-def test_qdrant_bm25_mode_boots_without_a_collection(monkeypatch, tmp_path):
-    """Bot-R2 P1: a fresh deployment must be able to START in qdrant_bm25
-    mode — the arm is skipped (startup-snapshot semantics) instead of the
-    boot crashing on the missing collection."""
-    import mnemostack.server as srv
-
-    emb = _CountingEmbedding()
-    store = VectorStore(collection="freshb", dimension=3)
-    store.client = QdrantClient(":memory:")  # no ensure_collection: fresh
-    monkeypatch.setattr(srv, "VectorStore", lambda **_: store)
-    monkeypatch.setattr(srv, "get_provider", lambda _n, **_k: emb)
-
-    class _Probe:
-        def get_collections(self):
-            return object()
-
-    monkeypatch.setattr(srv, "_make_probe_client", lambda *_a, **_k: _Probe())
-    for name in ("Recaller", "VectorRetriever", "MemgraphRetriever", "TemporalRetriever"):
-        monkeypatch.setattr(srv, name, lambda **_: object())
-
-    def _must_not_build(*_a, **_k):  # pragma: no cover
-        raise AssertionError("BM25 corpus must not load from a missing collection")
-
-    monkeypatch.setattr(srv.BM25Retriever, "from_qdrant", _must_not_build)
-    monkeypatch.setattr(srv, "build_full_pipeline", lambda **_: object())
-    monkeypatch.setattr(srv, "FileStateStore", lambda path: object())
-
-    def _no_llm(*_a, **_k):
-        raise RuntimeError("no llm")
-
-    monkeypatch.setattr(srv, "get_llm", _no_llm)
-    app = build_app(
-        ServerConfig(
-            provider_name="fake", llm_name="fake", graph_uri=None,
-            text_search="qdrant_bm25",
-        )
-    )
-    # Boot succeeded; the first write then bootstraps the collection.
-    client = TestClient(app)
-    r = client.post("/memories", json={"items": [{"text": "first"}]})
-    assert r.status_code == 200 and r.json()["stored"] == 1
-
-
 # --------------------------------------------------- bot round-3 batch pins
 
 

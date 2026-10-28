@@ -16,7 +16,7 @@ Run Qdrant for vector storage:
 
 ```bash
 # tag rule: match your installed qdrant-client - same major, minor within 1
-docker run -p 6333:6333 qdrant/qdrant:v1.18.3
+docker run -p 6333:6333 qdrant/qdrant:v1.20.0
 ```
 
 Optional: run Memgraph to enable graph tools:
@@ -756,7 +756,7 @@ Fix:
 
 ```bash
 # tag rule: match your installed qdrant-client - same major, minor within 1
-docker run -p 6333:6333 qdrant/qdrant:v1.18.3
+docker run -p 6333:6333 qdrant/qdrant:v1.20.0
 mnemostack health --provider gemini --collection my-memory --qdrant http://localhost:6333
 ```
 

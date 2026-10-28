@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams
 
 from mnemostack.recall import MemgraphRetriever, chunk_filter_probe_via
 from mnemostack.vector import VectorStore
@@ -281,7 +282,7 @@ def test_chunk_filter_probe_via_answers_from_the_store():
     s.dimension = 2
     s.client = QdrantClient(":memory:")
     s.client.create_collection(
-        collection_name="join", vectors_config={"size": 2, "distance": "Cosine"}
+        collection_name="join", vectors_config=VectorParams(size=2, distance=Distance.COSINE)
     )
     from qdrant_client.models import PointStruct
 
@@ -459,7 +460,8 @@ def test_any_matching_point_respects_validity_views():
     s.dimension = 2
     s.client = QdrantClient(":memory:")
     s.client.create_collection(
-        collection_name="validity", vectors_config={"size": 2, "distance": "Cosine"}
+        collection_name="validity",
+        vectors_config=VectorParams(size=2, distance=Distance.COSINE),
     )
     s.client.upsert(
         "validity",
@@ -520,7 +522,8 @@ def test_as_of_probe_scans_past_the_first_pages():
     s.dimension = 2
     s.client = QdrantClient(":memory:")
     s.client.create_collection(
-        collection_name="asof-deep", vectors_config={"size": 2, "distance": "Cosine"}
+        collection_name="asof-deep",
+        vectors_config=VectorParams(size=2, distance=Distance.COSINE),
     )
     points = [
         PointStruct(

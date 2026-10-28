@@ -434,7 +434,7 @@ def _doctor_qdrant(
             "create indexes for the fields recall filters on: "
             "`mnemostack payload-index <field> --schema keyword|datetime|...`",
         )
-    if text_search == "lexical":
+    if text_search == "native_bm25":
         schema = getattr(info, "payload_schema", None) or {}
         # Every configured gate field needs its own full-text index — a
         # multi-field layout with only the body field indexed would leave
@@ -442,18 +442,24 @@ def _doctor_qdrant(
         missing = []
         for gate_field in _lexical_gate_fields():
             field_info = schema.get(gate_field)
-            if (
+            is_text = (
                 field_info is not None
                 and "text" in str(getattr(field_info, "data_type", field_info)).lower()
-            ):
-                add("qdrant.text_index", "ok", f"full-text index on '{gate_field}'")
+            )
+            params = getattr(field_info, "params", None)
+            has_scoring = bool(getattr(params, "scoring", None))
+            if is_text and has_scoring:
+                detail = f"full-text index on '{gate_field}'"
+                detail += " with BM25 scoring"
+                add("qdrant.text_index", "ok", detail)
             else:
                 missing.append(gate_field)
         for gate_field in missing:
             add(
                 "qdrant.text_index",
                 "misconfig",
-                f"text_search=lexical but no full-text index on '{gate_field}'",
+                f"text_search=native_bm25 but no BM25-scored full-text index "
+                f"on '{gate_field}'",
                 "run `mnemostack text-index` once against this collection",
             )
 
@@ -1534,44 +1540,26 @@ def cmd_quota_rm(args: argparse.Namespace) -> int:
 
 
 def cmd_text_index(args: argparse.Namespace) -> int:
-    """Create the full-text payload index the lexical text-search mode needs.
+    """Create the full-text payload index the configured text-search mode needs.
 
     Idempotent and non-destructive (safe on a pre-existing/mounted
-    collection): a real Qdrant server REQUIRES this index before it will
-    accept MatchText filters, which `recall.text_search: lexical` relies on.
+    collection). It enables native BM25 scoring on the configured text field.
     """
     gate_fields = _lexical_gate_fields()
-    configured_fields = dict(_text_search_fields())
-    if configured_fields:
-        # Fields configured: refuse the same pairing the servers refuse to
-        # boot on BEFORE mutating Qdrant — indexing the field keys and then
-        # printing "lexical is ready" under text_search=sparse/off would be
-        # a partial configuration change with a false success message.
-        from mnemostack.config import ensure_text_fields_mode, resolve_text_search_mode
-
-        try:
-            rc = Config.load().recall
-            ensure_text_fields_mode(
-                resolve_text_search_mode(rc.text_search, rc.bm25_paths),
-                configured_fields,
-            )
-        except ValueError as e:
-            print(f"error: {e}", file=sys.stderr)
-            return 2
     store = VectorStore(collection=args.collection, dimension=1, host=args.qdrant)
     try:
         if not store.collection_exists():
             print(f"error: collection '{args.collection}' does not exist", file=sys.stderr)
             return 1
         for gate_field in gate_fields:
-            store.ensure_text_index(gate_field)
+            store.ensure_text_index(gate_field, scoring=True)
     except Exception as e:  # noqa: BLE001
         print(f"error: cannot create text index: {e}", file=sys.stderr)
         return 1
     listed = ", ".join(f"'{f}'" for f in gate_fields)
     print(
-        f"full-text index ensured on payload field(s) {listed} of "
-        f"'{args.collection}' — `recall.text_search: lexical` is ready"
+        f"full-text index with BM25 scoring ensured on payload field(s) {listed} of "
+        f"'{args.collection}' — `recall.text_search: native_bm25` is ready"
     )
     return 0
 
@@ -1582,7 +1570,7 @@ def cmd_payload_index(args: argparse.Namespace) -> int:
     A real Qdrant server evaluates a `filters={...}` condition on an
     unindexed field by scanning candidate payloads — a full-collection
     penalty invisible locally, where the in-memory client matches without
-    indexes (the same trap `text-index` documents for MatchText).
+    indexes (the same operational trap `text-index` documents).
     Idempotent and non-destructive: safe on a pre-existing/mounted
     collection.
     """
@@ -1601,8 +1589,7 @@ def cmd_payload_index(args: argparse.Namespace) -> int:
         if args.schema == "text":
             print(
                 "error: full-text indexes have their own command — run "
-                "`mnemostack text-index` (it indexes every configured "
-                "lexical gate field)",
+                "`mnemostack text-index` (it enables native BM25 scoring)",
                 file=sys.stderr,
             )
             return 2
@@ -1693,12 +1680,8 @@ def cmd_resolve(args: argparse.Namespace) -> int:
 
 
 def _lexical_gate_fields() -> list[str]:
-    """The payload fields the lexical arm(s) gate on: the configured
-    text_search_fields keys, or just text_key when unset. These are the
-    fields that need a full-text index on a real server (text-index creates
-    them, doctor live-checks them)."""
-    fields = [k for k, _ in _text_search_fields()]
-    return fields or [_payload_schema()[0]]
+    """The configured text payload field used by native BM25."""
+    return [_payload_schema()[0]]
 
 
 def cmd_sparse_backfill(args: argparse.Namespace) -> int:
@@ -1795,22 +1778,6 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             f"invalid text_search '{cfg.recall.text_search}'",
             "set recall.text_search to one of: " + ", ".join(TEXT_SEARCH_MODES),
         )
-    # text_search_fields only drives the `lexical` mode — configured with any
-    # other mode it would be silently ignored (the servers refuse to boot on
-    # this contradiction; doctor must show the same verdict, not a green).
-    if cfg.recall.text_search_fields:
-        from mnemostack.config import ensure_text_fields_mode, resolve_text_search_mode
-
-        try:
-            ensure_text_fields_mode(
-                resolve_text_search_mode(cfg.recall.text_search, cfg.recall.bm25_paths),
-                cfg.recall.text_search_fields,
-            )
-        except ValueError as e:
-            add("config.text_search_fields", "misconfig", str(e))
-        else:
-            listed = ", ".join(f"{k}={v:g}" for k, v in cfg.recall.text_search_fields.items())
-            add("config.text_search_fields", "ok", listed)
     if cfg.recall.timestamp_format in _TR.TIMESTAMP_FORMATS:
         add("config.timestamp_format", "ok", cfg.recall.timestamp_format)
     else:
@@ -2161,17 +2128,15 @@ def cmd_synthesize(args: argparse.Namespace) -> int:
         _text_search_mode(), list(getattr(args, "bm25_path", []) or [])
     )
     _lexical_selected = _source_enabled_for_cli("bm25", source_filter)
-    # `lexical` embeds the query, so it needs the provider; `qdrant_bm25` and
-    # `sparse` only need a reachable store — constructing an embedding
+    # Qdrant lexical modes only need a reachable store — constructing an embedding
     # provider for them would demand API keys a payload-only operation never
     # uses. ALL Qdrant-backed modes get the same loud collection preflight
     # (a typo'd collection must exit 2, not degrade to an empty report).
     _needs_provider = (
         _source_enabled_for_cli("vector", source_filter)
         or _source_enabled_for_cli("temporal", source_filter)
-        or (_lexical_selected and _lexical_mode == "lexical")
     )
-    _needs_store_only = _lexical_selected and _lexical_mode in ("qdrant_bm25", "sparse")
+    _needs_store_only = _lexical_selected and _lexical_mode in ("native_bm25", "sparse")
     if _needs_provider:
         provider = get_provider(args.provider, **_provider_kwargs_from_args(args))
     if _needs_provider or _needs_store_only:
@@ -2342,7 +2307,7 @@ def _normalize_source_filter(sources: list[str] | None) -> set[str] | None:
 def _source_enabled_for_cli(name: str, source_filter: set[str] | None) -> bool:
     if source_filter is not None and "bm25" in source_filter:
         # "bm25" selects the configured LEXICAL ARM, whichever mode it is.
-        source_filter = source_filter | {"qdrant_text", "sparse"}
+        source_filter = source_filter | {"sparse"}
     return source_filter is None or name in source_filter
 
 
@@ -2393,18 +2358,6 @@ def _text_search_mode() -> str:
         return "auto"
 
 
-@functools.lru_cache(maxsize=1)
-def _text_search_fields() -> tuple[tuple[str, float], ...]:
-    """recall.text_search_fields from config/env, as a tuple so the cached
-    value cannot be mutated by a caller.
-
-    Unlike _payload_schema this does NOT fall back on a broken config: a
-    malformed fields value degrading `serve`/`text-index` to the body-only
-    arm would be exactly the silent no-op the fields contract forbids —
-    the error propagates (matching the servers, which refuse to boot)."""
-    return tuple(Config.load().recall.text_search_fields.items())
-
-
 def _indexing_store(args: argparse.Namespace, provider) -> VectorStore:
     """The write-side VectorStore for index commands. Under
     ``recall.text_search: sparse`` it maintains the sparse text space (the
@@ -2447,8 +2400,11 @@ def _build_recaller(
     source_filter: set[str] | None = None,
 ) -> Recaller:
     """Build the same retriever-mode Recaller used by the service surfaces."""
-    from mnemostack.config import ensure_text_fields_mode, resolve_text_search_mode
-    from mnemostack.recall import QdrantSparseRetriever, build_qdrant_text_arms
+    from mnemostack.config import resolve_text_search_mode
+    from mnemostack.recall import (
+        QdrantNativeBM25Retriever,
+        QdrantSparseRetriever,
+    )
 
     text_key, timestamp_key, timestamp_format = _payload_schema()
     schema_kw = {
@@ -2458,8 +2414,6 @@ def _build_recaller(
     }
     bm25_paths = list(getattr(args, "bm25_path", []) or [])
     mode = resolve_text_search_mode(_text_search_mode(), bm25_paths)
-    ensure_text_fields_mode(mode, dict(_text_search_fields()))
-    lexical_weights: dict[str, float] = {}
     retrievers: list[Retriever] = []
     if (
         provider is not None
@@ -2487,26 +2441,10 @@ def _build_recaller(
                         tenant=normalize_tenant(getattr(args, "tenant", None)),
                     )
                 )
-        elif mode == "qdrant_bm25" and store is not None:
+        elif mode == "native_bm25" and store is not None:
             retrievers.append(
-                BM25Retriever.from_qdrant(
-                    store.client,
-                    args.collection,
-                    text_key=schema_kw["text_key"],
-                    timestamp_key=schema_kw["timestamp_key"],
-                    timestamp_format=schema_kw["timestamp_format"],
-                )
+                QdrantNativeBM25Retriever(vector_store=store, **schema_kw)
             )
-        elif mode == "lexical" and provider is not None and store is not None:
-            arms, lexical_weights = build_qdrant_text_arms(
-                embedding=provider,
-                vector_store=store,
-                text_key=schema_kw["text_key"],
-                timestamp_key=schema_kw["timestamp_key"],
-                timestamp_format=schema_kw["timestamp_format"],
-                fields=dict(_text_search_fields()),
-            )
-            retrievers.extend(arms)
         elif mode == "sparse":
             sparse_store = VectorStore(
                 collection=args.collection,
@@ -2564,7 +2502,6 @@ def _build_recaller(
         query_expansion=query_expansion,
         expansion_llm=expansion_llm,
         vector_floor=max(0, int(getattr(args, "vector_floor", 0))),
-        retriever_weights=lexical_weights or None,
         text_key=text_key,
         timestamp_key=timestamp_key,
         timestamp_format=timestamp_format,
@@ -2754,13 +2691,11 @@ def cmd_index(args: argparse.Namespace) -> int:
                     )
                 # Code metadata is AUTHORITATIVE like the snapshot below —
                 # applied after enrichment so an enricher key collision can't
-                # clobber the language, the lexical-gate token field, or
+                # clobber the language, the identifier-token field, or
                 # fabricate a symbol on a chunk the chunker left unnamed.
                 payload["language"] = cc.language
                 payload["chunk_kind"] = "code"
-                # Identifier subtokens for a lexical arm
-                # (text_search_fields={"code_tokens": ...}) — one
-                # space-joined string, matching MatchText gating.
+                # Identifier subtokens retained as searchable payload metadata.
                 payload["code_tokens"] = " ".join(cc.tokens)
                 if cc.symbol is not None:
                     payload["symbol"] = cc.symbol
@@ -2769,8 +2704,7 @@ def cmd_index(args: argparse.Namespace) -> int:
                 # Ownership record (mirrors _enrich_keys/_md_keys): names
                 # exactly what the code path wrote, so a later refresh
                 # WITHOUT --code deletes the stale code metadata instead of
-                # leaving the point falsely code-marked and lexically
-                # searchable through code_tokens.
+                # leaving stale code metadata on the point.
                 from .code import CODE_OWNED_KEYS
 
                 payload["_code_keys"] = sorted(k for k in CODE_OWNED_KEYS if k in payload)
@@ -3665,8 +3599,8 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     p_text_index = sub.add_parser(
         "text-index",
         parents=[common],
-        help="Create the full-text payload index `recall.text_search: lexical` "
-        "requires on a real Qdrant server (idempotent, non-destructive)",
+        help="Create the BM25-scored full-text index used by native_bm25 "
+        "on a real Qdrant server (idempotent, non-destructive)",
     )
     p_text_index.set_defaults(func=cmd_text_index)
 
@@ -4272,8 +4206,7 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
             "chunked at top-level definition boundaries instead of fixed "
             "character windows. Code chunks carry language/symbol metadata "
             "and a code_tokens payload field with identifier subtokens "
-            "(camelCase/snake_case split) for lexical search via "
-            "recall.text_search_fields. Boundary detection is heuristic: a "
+            "(camelCase/snake_case split). Boundary detection is heuristic: a "
             "missed boundary degrades to plain character chunking, never "
             "worse. Prose files (.md/.txt) keep the classic chunker."
         ),
@@ -4876,7 +4809,6 @@ def cmd_serve(args: argparse.Namespace) -> int:
         timestamp_key=_schema_ts,
         timestamp_format=_schema_fmt,
         text_search=_text_search_mode(),
-        text_search_fields=dict(_text_search_fields()),
         resolve_roots=[
             p for p in os.environ.get("MNEMOSTACK_RESOLVE_ROOTS", "").split(os.pathsep) if p
         ],
@@ -4995,7 +4927,6 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         timestamp_key=_schema_ts,
         timestamp_format=_schema_fmt,
         text_search=_text_search_mode(),
-        text_search_fields=dict(_text_search_fields()),
         quantization_rescore=getattr(args, "_quant_rescore", None),
         quantization_oversampling=getattr(args, "_quant_oversampling", None),
     )
@@ -5070,7 +5001,6 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
         timestamp_key=_schema_ts,
         timestamp_format=_schema_fmt,
         text_search=_text_search_mode(),
-        text_search_fields=dict(_text_search_fields()) or None,
         resolve_roots=[
             p for p in os.environ.get("MNEMOSTACK_RESOLVE_ROOTS", "").split(os.pathsep) if p
         ],

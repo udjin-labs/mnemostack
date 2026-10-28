@@ -69,7 +69,7 @@ if TYPE_CHECKING:
 #: identifiers. A CLOSED set on purpose: it is what makes the encoded
 #: namespace below provably disjoint from the passthrough one.
 _LITERAL_METRIC_NAMES = frozenset(
-    {"vector", "bm25", "sparse", "qdrant_text", "memgraph", "temporal", "hyde", "mca"}
+    {"vector", "bm25", "sparse", "memgraph", "temporal", "hyde", "mca"}
 )
 
 
@@ -78,7 +78,7 @@ def _metric_name(retriever_name: str) -> str:
     operator-configured payload fields (and the public ``name=`` override
     accepts any non-empty string), so characters outside the Prometheus
     identifier grammar must not reach the metric name — a colon
-    ("qdrant_text:title") is reserved for recording rules, a slash would be
+    (for example, "bm25:title") is reserved for recording rules, a slash would be
     rejected by the scrape outright.
 
     The mapping is injective by construction, in two DISJOINT namespaces:
@@ -1452,7 +1452,7 @@ class Recaller:
             elapsed_ms = (time.monotonic() - start) * 1000.0
             # Per-retriever latency — exposed in /metrics as
             # mnemostack_recall_<name>_latency_ms{...}. Suffixed multi-field
-            # arm names ("qdrant_text:title") are sanitized: a colon inside a
+            # suffixed arm names are sanitized: a colon inside a
             # Prometheus metric NAME collides with the recording-rule
             # convention (traces/weights keep the exact name — only the
             # metric identifier is normalized).

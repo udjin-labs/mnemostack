@@ -346,11 +346,11 @@ def test_mark_routes_dynamic_no_tokens_tags_to_notes(monkeypatch):
     calls: list[tuple] = []
     monkeypatch.setattr(trace_mod, "counter", lambda *a, **k: calls.append(a))
     trace = RecallTrace()
-    trace.mark("qdrant_text:title:no_tokens")
-    trace.mark("qdrant_text:no_tokens")
+    trace.mark("bm25:title:no_tokens")
+    trace.mark("bm25:no_tokens")
 
-    assert trace.notes == ["qdrant_text:title:no_tokens", "qdrant_text:no_tokens"]
-    assert trace.degraded == ["qdrant_text:title:no_tokens", "qdrant_text:no_tokens"]
+    assert trace.notes == ["bm25:title:no_tokens", "bm25:no_tokens"]
+    assert trace.degraded == ["bm25:title:no_tokens", "bm25:no_tokens"]
     assert calls == []
 
 

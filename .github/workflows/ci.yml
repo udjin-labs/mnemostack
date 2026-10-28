@@ -72,7 +72,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e '.[dev]'
-          pip install 'qdrant-client==1.14.3'
+          pip install 'qdrant-client==1.20.0'
       - name: Pytest (minimum deps)
         run: pytest -q
 
@@ -83,20 +83,14 @@ jobs:
     # BOTH sides of the pair are PINNED: a floating client silently drifts
     # into officially-unsupported client/server combinations (minor-version
     # difference > 1) and turns the smoke into a non-reproducible check.
-    # Pairs: the declared client MINIMUM against the newest server in its
-    # support window, that server with its version-ALIGNED client, and the
-    # docs-pinned current server with its aligned client.
+    # The declared client minimum and docs-pinned server are one aligned pair.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - server: v1.15.4   # newest server the minimum client supports
-            client: 1.14.3    # declared dependency minimum
-          - server: v1.15.4
-            client: 1.15.1    # version-aligned with that server
-          - server: v1.18.3   # deployment docs' compose pin
-            client: 1.18.0    # version-aligned with that server
+          - server: v1.20.0   # deployment docs' compose pin
+            client: 1.20.0    # declared dependency minimum
     services:
       qdrant:
         image: qdrant/qdrant:${{ matrix.server }}

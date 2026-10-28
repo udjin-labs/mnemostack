@@ -1,9 +1,7 @@
-"""Scalable text search over Qdrant — lexical-gated dense + sparse scoring.
+"""Scalable scored text search over Qdrant.
 
-Contract under test: both arms replace the in-process BM25 at scale — the
-lexical gate filters inside Qdrant (MatchText) with dense ranking, the sparse
-arm scores lexically on the server (tf values + IDF modifier) — and both are
-payload-schema-aware, tenant-safe, and selectable via recall.text_search.
+Native BM25 and sparse scoring stay in Qdrant, respect the payload schema and
+tenant boundary, and remain selectable through ``recall.text_search``.
 """
 
 from __future__ import annotations
@@ -13,9 +11,23 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import Distance
 
 from mnemostack.config import TEXT_SEARCH_MODES, resolve_text_search_mode
-from mnemostack.recall.retrievers import QdrantSparseRetriever, QdrantTextRetriever
+from mnemostack.recall.retrievers import (
+    QdrantNativeBM25Retriever,
+    QdrantSparseRetriever,
+)
 from mnemostack.vector import VectorStore
 from mnemostack.vector.sparse import SparseTextEncoder, token_index
+
+try:
+    from qdrant_client.models import TextQuery as _TextQuery  # noqa: F401
+
+    _HAS_NATIVE_BM25 = True
+except ImportError:
+    _HAS_NATIVE_BM25 = False
+
+requires_native_bm25 = pytest.mark.skipif(
+    not _HAS_NATIVE_BM25, reason="requires qdrant-client>=1.20.0"
+)
 
 _V1 = [1.0, 0.0, 0.0, 0.0]
 _V2 = [0.0, 1.0, 0.0, 0.0]
@@ -94,48 +106,25 @@ def test_sparse_search_empty_query_tokens_is_empty():
 # ---------- vector store: lexical gate ----------
 
 
-def test_text_any_gate_restricts_dense_search():
-    s = _store()
-    _seed(s)
-    hits = s.search(_V1, limit=5, text_any=["postgres"])
-    assert {h.id for h in hits} == {1, 3}
-    # composes with the tenant boundary
-    hits = s.search(_V1, limit=5, text_any=["postgres"], tenant="acme")
-    assert [h.id for h in hits] == [1]
-    # any-of semantics: either token admits
-    hits = s.search(_V1, limit=5, text_any=["kubernetes", "backup"])
-    assert {h.id for h in hits} == {1, 2}
-
-
 def test_ensure_text_index_is_idempotent():
     s = _store()
     s.ensure_text_index()
     s.ensure_text_index("text")  # second run must not raise
 
 
+@requires_native_bm25
+def test_native_bm25_store_search_ranks_and_filters():
+    s = _store()
+    s.ensure_text_index(scoring=True)
+    _seed(s)
+    hits = s.native_bm25_search("postgres backup", limit=5)
+    assert [h.id for h in hits][:2] == [1, 3]
+    assert hits[0].score > hits[1].score
+    assert [h.id for h in s.native_bm25_search("postgres", tenant="acme")] == [1]
+    assert s.native_bm25_search("   ") == []
+
+
 # ---------- retrievers ----------
-
-
-def test_qdrant_text_retriever_gates_and_ranks():
-    s = _store(text_key="content")
-    _seed(s, text_key="content")
-    r = QdrantTextRetriever(
-        embedding=_FakeEmbedder(), vector_store=s, text_key="content"
-    )
-    hits = r.search("how do I restore the postgres backup", limit=5)
-    assert hits and all("postgres" in h.text or "backup" in h.text for h in hits)
-    assert all(h.sources == ["qdrant_text"] for h in hits)
-    assert 2 not in {h.id for h in hits}  # kubernetes chunk gated out
-
-
-def test_qdrant_text_retriever_gate_tokens():
-    r = QdrantTextRetriever(embedding=_FakeEmbedder(), vector_store=_store())
-    toks = r._gate_tokens("what is the IP 10.0.0.5 of the staging postgres server")
-    assert "10.0.0.5" in toks  # exact technical token always in the gate
-    assert "the" not in toks and "is" not in toks  # stopwords never
-    assert len(toks) <= r.max_gate_tokens
-    assert r.explain_empty("что это") is not None  # nothing salient -> named reason
-    assert r.search("что это", limit=5) == []
 
 
 def test_qdrant_sparse_retriever_end_to_end():
@@ -151,6 +140,18 @@ def test_qdrant_sparse_retriever_end_to_end():
 def test_qdrant_sparse_retriever_requires_sparse_store():
     with pytest.raises(ValueError, match="sparse_text=True"):
         QdrantSparseRetriever(vector_store=_store(sparse=False))
+
+
+@requires_native_bm25
+def test_qdrant_native_bm25_retriever_end_to_end():
+    s = _store(text_key="content")
+    s.ensure_text_index("content", scoring=True)
+    _seed(s, text_key="content")
+    r = QdrantNativeBM25Retriever(vector_store=s, text_key="content")
+    hits = r.search("postgres backup", limit=5, tenant="acme")
+    assert [h.id for h in hits] == [1]
+    assert hits[0].sources == ["bm25"]
+    assert hits[0].text.startswith("postgres backup")
 
 
 def test_retrievers_declare_the_schema():
@@ -177,14 +178,14 @@ def test_resolve_text_search_mode():
     assert resolve_text_search_mode("sparse", []) == "sparse"
     with pytest.raises(ValueError, match="text_search"):
         resolve_text_search_mode("fulltext", [])
-    assert set(TEXT_SEARCH_MODES) >= {"auto", "off", "bm25", "qdrant_bm25", "lexical", "sparse"}
+    assert set(TEXT_SEARCH_MODES) == {"auto", "off", "bm25", "native_bm25", "sparse"}
 
 
 def test_text_search_env_override(monkeypatch):
     from mnemostack.config import Config
 
-    monkeypatch.setenv("MNEMOSTACK_TEXT_SEARCH", "lexical")
-    assert Config.load().recall.text_search == "lexical"
+    monkeypatch.setenv("MNEMOSTACK_TEXT_SEARCH", "native_bm25")
+    assert Config.load().recall.text_search == "native_bm25"
 
 
 def test_doctor_flags_invalid_text_search(monkeypatch, capsys):
@@ -204,26 +205,6 @@ def test_doctor_flags_invalid_text_search(monkeypatch, capsys):
     assert "fulltext" in out and rc == 2
 
 
-def test_cli_build_recaller_lexical_mode(monkeypatch):
-    import argparse
-
-    import mnemostack.cli as cli
-
-    monkeypatch.setenv("MNEMOSTACK_TEXT_SEARCH", "lexical")
-    cli._text_search_mode.cache_clear()
-    cli._payload_schema.cache_clear()
-    store = _store()
-    rec = cli._build_recaller(
-        argparse.Namespace(collection="ts", qdrant="http://x", bm25_path=[]),
-        _FakeEmbedder(),
-        store,
-    )
-    names = {type(r).__name__ for r in rec.retrievers}
-    assert "QdrantTextRetriever" in names and "BM25Retriever" not in names
-    cli._text_search_mode.cache_clear()
-    cli._payload_schema.cache_clear()
-
-
 def test_cli_text_index_command(monkeypatch, capsys):
     import argparse
 
@@ -234,7 +215,28 @@ def test_cli_text_index_command(monkeypatch, capsys):
     cli._payload_schema.cache_clear()
     rc = cli.cmd_text_index(argparse.Namespace(collection="ts", qdrant="http://x"))
     assert rc == 0
-    assert "full-text index ensured" in capsys.readouterr().out
+    assert "full-text index with BM25 scoring ensured" in capsys.readouterr().out
+
+
+@requires_native_bm25
+def test_cli_text_index_enables_scoring_for_native_bm25(monkeypatch, capsys):
+    import argparse
+
+    import mnemostack.cli as cli
+
+    store = _store()
+    calls = []
+    monkeypatch.setattr(store, "ensure_text_index", lambda field, **kw: calls.append((field, kw)))
+    monkeypatch.setattr(cli, "VectorStore", lambda **_: store)
+    monkeypatch.setenv("MNEMOSTACK_TEXT_SEARCH", "native_bm25")
+    cli._text_search_mode.cache_clear()
+    cli._payload_schema.cache_clear()
+    rc = cli.cmd_text_index(argparse.Namespace(collection="ts", qdrant="http://x"))
+    assert rc == 0
+    assert calls == [("text", {"scoring": True})]
+    assert "with BM25 scoring" in capsys.readouterr().out
+    cli._text_search_mode.cache_clear()
+    cli._payload_schema.cache_clear()
 
 
 # ---------- review-driven regressions ----------
@@ -295,14 +297,7 @@ def test_sparse_backfill_covers_preexisting_dense_only_points():
     assert [h.id for h in hits][:1] == [1]  # now fully covered
 
 
-def test_search_rejects_explicitly_empty_text_any():
-    s = _store()
-    _seed(s)
-    with pytest.raises(ValueError, match="text_any"):
-        s.search(_V1, limit=5, text_any=[])
-
-
-def test_cli_build_recaller_sparse_and_qdrant_bm25_modes(monkeypatch):
+def test_cli_build_recaller_server_side_modes(monkeypatch):
     import argparse
 
     import mnemostack.cli as cli
@@ -310,7 +305,11 @@ def test_cli_build_recaller_sparse_and_qdrant_bm25_modes(monkeypatch):
     store = _store(sparse=True)
     _seed(store)
     monkeypatch.setattr(cli, "VectorStore", lambda **kw: store)
-    for mode, expected in (("sparse", "QdrantSparseRetriever"), ("qdrant_bm25", "BM25Retriever")):
+    modes = [
+        ("sparse", "QdrantSparseRetriever"),
+        ("native_bm25", "QdrantNativeBM25Retriever"),
+    ]
+    for mode, expected in modes:
         monkeypatch.setenv("MNEMOSTACK_TEXT_SEARCH", mode)
         cli._text_search_mode.cache_clear()
         cli._payload_schema.cache_clear()
@@ -411,15 +410,7 @@ def test_sparse_backfill_command_ignores_dense_dimension(monkeypatch, capsys):
     assert "3 point(s)" in capsys.readouterr().out
 
 
-def test_gate_token_tiebreak_is_deterministic():
-    r = QdrantTextRetriever(
-        embedding=_FakeEmbedder(), vector_store=_store(), max_gate_tokens=3
-    )
-    toks = r._gate_tokens("zebra amber corgi delta")  # all len 5, no exacts
-    assert toks == sorted(toks)  # lexicographic among equal lengths — no hash order
-
-
-def test_qdrant_bm25_is_tenant_aware_but_file_bm25_is_not():
+def test_bm25_from_qdrant_is_tenant_aware_but_file_bm25_is_not():
     from mnemostack.recall.bm25 import BM25Doc
     from mnemostack.recall.retrievers import BM25Retriever
 
@@ -489,7 +480,7 @@ def test_sparse_space_with_uncovered_points_still_demands_backfill():
     sparse_store.ensure_sparse_space()  # now clean
 
 
-def test_qdrant_bm25_keeps_native_integer_ids():
+def test_bm25_from_qdrant_keeps_native_integer_ids():
     from mnemostack.recall.retrievers import bm25_docs_from_qdrant
 
     s = _store()

@@ -21,7 +21,6 @@ from qdrant_client.models import (
     FilterSelector,
     HasVectorCondition,
     IsEmptyCondition,
-    MatchText,
     MatchValue,
     Modifier,
     PayloadField,
@@ -455,19 +454,30 @@ class VectorStore:
                 f"Re-index with --recreate or switch the embedding model."
             )
 
-    def ensure_text_index(self, text_key: str | None = None) -> None:
-        """Create the full-text payload index MatchText filtering REQUIRES on a
-        real Qdrant server (word tokenizer, lowercased — matching the lexical
-        arm's expectations). Idempotent; non-destructive on existing data, so
+    def ensure_text_index(
+        self, text_key: str | None = None, *, scoring: bool = False
+    ) -> None:
+        """Create the full-text payload index native BM25 requires on a real
+        Qdrant server. Idempotent; non-destructive on existing data, so
         it's safe to run against a pre-existing (mounted) collection. The local
         in-memory client matches text without an index, hence tests pass either
         way — production servers do not."""
+        schema_kwargs: dict[str, Any] = {
+            "type": TextIndexType.TEXT,
+            "tokenizer": TokenizerType.WORD,
+            "lowercase": True,
+        }
+        if scoring:
+            fields = getattr(TextIndexParams, "model_fields", None)
+            if fields is None:  # Pydantic v1
+                fields = getattr(TextIndexParams, "__fields__", {})
+            if "scoring" not in fields:
+                raise RuntimeError("native_bm25 requires qdrant-client>=1.20.0")
+            schema_kwargs["scoring"] = True
         self.client.create_payload_index(
             collection_name=self.collection,
             field_name=text_key or self.text_key,
-            field_schema=TextIndexParams(
-                type=TextIndexType.TEXT, tokenizer=TokenizerType.WORD, lowercase=True
-            ),
+            field_schema=TextIndexParams(**schema_kwargs),
         )
 
     def index_payload_field(self, field: str, schema: PayloadSchemaType) -> None:
@@ -1311,8 +1321,6 @@ class VectorStore:
         *,
         hide_invalidated: bool = False,
         tenant: str | None = None,
-        text_any: list[str] | None = None,
-        text_any_key: str | None = None,
     ) -> list[Hit]:
         """Semantic search with optional payload filters.
 
@@ -1328,8 +1336,6 @@ class VectorStore:
             filters,
             tenant=tenant,
             hide_invalidated=hide_invalidated,
-            text_any=text_any,
-            text_any_key=text_any_key,
         )
         result = self.client.query_points(
             collection_name=self.collection,
@@ -1353,34 +1359,13 @@ class VectorStore:
         *,
         tenant: str | None,
         hide_invalidated: bool,
-        text_any: list[str] | None = None,
-        text_any_key: str | None = None,
     ) -> Filter | None:
-        """The full server-side filter: caller filters + tenant boundary +
-        validity view + optional lexical gate. ``text_any`` restricts to points
-        whose text field full-text-matches AT LEAST ONE token — expressed as a
-        nested should-clause inside the outer must, so it composes with the
-        other conditions without weakening them (a bare top-level ``should``
-        next to ``must`` would become optional)."""
+        """The full server-side filter: caller filters, tenant, and validity."""
         must: list[Any] = list(self._build_filter(filters).must or []) if filters else []
         if tenant is not None:
             must.append(_tenant_condition(tenant))
         if hide_invalidated:
             must.append(_hide_invalidated_condition())
-        if text_any is not None and not text_any:
-            # An explicitly EMPTY gate is a caller bug: "match at least one of
-            # zero tokens" silently degrades to match-all — refuse loudly.
-            raise ValueError("text_any must contain at least one token (or be None)")
-        if text_any:
-            gate_key = text_any_key or self.text_key
-            must.append(
-                Filter(
-                    should=[
-                        FieldCondition(key=gate_key, match=MatchText(text=token))
-                        for token in text_any
-                    ]
-                )
-            )
         return Filter(must=must) if must else None
 
     def sparse_search(
@@ -1414,6 +1399,43 @@ class VectorStore:
             collection_name=self.collection,
             query=SparseVector(indices=indices, values=values),
             using=SPARSE_TEXT_VECTOR,
+            limit=limit,
+            query_filter=qfilter,
+            with_payload=True,
+        )
+        hits = []
+        for pt in result.points:
+            if pt.score < min_score:
+                continue
+            pid = str(pt.id) if isinstance(pt.id, UUID) else pt.id
+            hits.append(Hit(id=pid, score=pt.score, payload=pt.payload or {}))
+        return hits
+
+    def native_bm25_search(
+        self,
+        query_text: str,
+        limit: int = 10,
+        filters: dict[str, Any] | None = None,
+        min_score: float = 0.0,
+        *,
+        text_key: str | None = None,
+        hide_invalidated: bool = False,
+        tenant: str | None = None,
+    ) -> list[Hit]:
+        """BM25 ranking over a Qdrant 1.20+ scored full-text index."""
+        if not query_text.strip():
+            return []
+        try:
+            from qdrant_client.models import TextQuery
+        except ImportError as exc:
+            raise RuntimeError("native_bm25 requires qdrant-client>=1.20.0") from exc
+        qfilter = self._assemble_filter(
+            filters, tenant=tenant, hide_invalidated=hide_invalidated
+        )
+        result = self.client.query_points(
+            collection_name=self.collection,
+            query=TextQuery(text=query_text),
+            using=text_key or self.text_key,
             limit=limit,
             query_filter=qfilter,
             with_payload=True,

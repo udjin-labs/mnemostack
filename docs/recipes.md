@@ -393,19 +393,7 @@ mnemostack index ./my-repo --code --prune --collection my-code
 
 Re-runs are cheap: unchanged files are skipped by content-derived ids, unchanged payloads cost zero writes, and `--prune` removes chunks that edits no longer produce.
 
-**2. An identifier-aware lexical arm.** Dense vectors alone miss exact-identifier queries, and a plain full-text index can't see inside `parseHttpRequest`. Every code chunk therefore carries `code_tokens` — its identifiers split on `camelCase`/`snake_case` boundaries (full identifiers kept too, so exact-name queries still gate). Wire it as an extra lexical arm with the existing multi-field mechanism:
-
-```yaml
-recall:
-  text_search: lexical
-  text_search_fields:
-    text: 1.0
-    code_tokens: 1.5
-```
-
-then create the server-side indexes once: `mnemostack text-index` (it indexes every configured gate field). Gating is **exact-subtoken** matching, deliberately: a query containing "http" or "request" gate-matches `parseHttpRequest` because those exact parts are in `code_tokens` — but there is no stemming or morphology, so "parsing" does not match `parse`, and "timestamps" does not match `timestamp`. The lexical arm is a precision complement for identifier-shaped queries; the dense arm remains responsible for natural-language phrasing.
-
-**3. A code-capable embedding model.** General-text embedding models are noticeably weaker on source code — prefer a model trained on code for the dense arm (any provider works; the [role-aware profile system](../docs/api-stability.md) applies the model's query/document transforms automatically). The stack is model-agnostic: pick the best code embedder available to you and set it with `--embedding-model` / `MNEMOSTACK_EMBEDDING_MODEL`.
+**2. A code-capable embedding model.** General-text embedding models are noticeably weaker on source code — prefer a model trained on code for the dense arm (any provider works; the [role-aware profile system](../docs/api-stability.md) applies the model's query/document transforms automatically). The stack is model-agnostic: pick the best code embedder available to you and set it with `--embedding-model` / `MNEMOSTACK_EMBEDDING_MODEL`.
 
 Notes: `--code` affects which files are walked and how code files are chunked — prose files keep the classic chunker, and the `index` command's existing machinery (`--prune`, `--refresh-payloads`, provenance `resolve`) applies to code chunks unchanged. Code chunks follow the run's scoping: a plain `index` writes them unscoped, so in a shared authenticated collection they will not be returned by tenant-filtered recall — index code into its own collection (as above), or pass `--tenant <id>` (which scopes ids, payload stamps, `--prune` and `--refresh-payloads` alike) if isolation is needed. Window chunking (`--window-size`) is a prose feature and does not apply to code files.
 

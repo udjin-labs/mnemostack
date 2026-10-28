@@ -41,18 +41,8 @@ bound it: the ceiling (``access_bonus_max``, 0.25 by default, and 0
 removes the signal from ranking entirely), saturation in the counter, and
 the fact that only points actually handed to the caller are recorded.
 
-**Where it does not take effect.** Under ``text_search=qdrant_bm25`` the
-lexical arm serves each point's payload from the corpus snapshot taken at
-startup. Recording writes the store correctly — the counter accumulates,
-and the values are right for anything the vector arm returns — but a point
-returned ONLY by that arm keeps presenting its startup payload to the
-freshness stage, so its own reinforcement does not reach ranking until the
-service restarts. This is the same startup-snapshot property already
-documented for invalidation and deletion on that arm, not a new one, and
-refreshing the in-process corpus per recall is deliberately not attempted:
-the snapshot is what makes that arm cheap. A deployment that wants
-reinforcement to steer a purely lexical recall has to restart to pick it
-up.
+**Where it does not take effect.** Under ``text_search=bm25`` the file-backed
+lexical arm is outside Qdrant, so access recording cannot update that corpus.
 
 It only affects recalls that run the pipeline (``full_pipeline``, the
 default on `/recall` and `/answer`); raw RRF output is unaffected.

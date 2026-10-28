@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **Native Qdrant BM25 text search.** `recall.text_search: native_bm25`
+  ranks the configured text payload directly on a Qdrant 1.20+ scored
+  full-text index. It needs no client-side corpus or extra sparse vectors,
+  respects the same filters, tenant scope, and validity view as other Qdrant
+  retrievers, and keeps the existing `bm25` result/source contract.
+  `mnemostack text-index` enables scoring on existing payload data, and
+  `doctor` reports a text index without BM25 scoring as misconfigured.
+- **BREAKING: Qdrant 1.20 is now required.** The service-level `lexical` and
+  `qdrant_bm25` modes, plus `recall.text_search_fields`, were removed.
+  Use `native_bm25` for server-side BM25, `sparse` for the existing sparse
+  scorer, or `bm25` for a file-backed in-process corpus. Existing `lexical`
+  deployments must run `mnemostack text-index` and switch the mode to
+  `native_bm25` after upgrading Qdrant.
+
 ## [2.6.2] - 2026-09-28
 
 - **Tenantless graph reads outside recall are guarded too** (#207). The MCP
