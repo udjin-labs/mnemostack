@@ -428,7 +428,7 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
         collection=cfg.collection,
         dimension=1,
         host=cfg.qdrant_url,
-        **quantization_kwargs(cfg.quantization_rescore, cfg.quantization_oversampling),
+        **quantization_kwargs(cfg.quantization_rescore, cfg.quantization_oversampling, cfg.hnsw_ef),
     )
     # A separate short-timeout client for reachability probes, so a slow or
     # blackholed Qdrant shows as "down" promptly instead of hanging the console for

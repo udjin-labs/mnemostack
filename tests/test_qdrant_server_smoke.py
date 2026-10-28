@@ -159,6 +159,17 @@ def test_native_bm25_against_a_real_scored_text_index(collection_name):
     assert [h.id for h in s.native_bm25_search("postgres", tenant="acme")] == [1]
 
 
+def test_dense_search_accepts_hnsw_depth_and_rescoring(collection_name):
+    store = VectorStore(
+        collection=collection_name, dimension=4, host=SERVER_URL,
+        hnsw_ef=256, quantization_rescore=True, quantization_oversampling=2.0,
+    )
+    store.ensure_collection()
+    _seed(store)
+    assert [h.id for h in store.search(_V1, tenant="acme")] == [1, 2]
+    assert store.search_params.hnsw_ef == 256
+
+
 def test_scroll_preserves_dense_vector_in_named_layout(collection_name):
     s = _sparse_store(collection_name)
     _seed(s)

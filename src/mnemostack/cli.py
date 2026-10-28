@@ -2379,7 +2379,8 @@ def _quantization_store_kwargs(args: argparse.Namespace) -> dict:
     invisible parser defaults (vector.* in the config / env). getattr:
     programmatic callers build bare Namespaces without parser defaults."""
     return quantization_kwargs(
-        getattr(args, "_quant_rescore", None), getattr(args, "_quant_oversampling", None)
+        getattr(args, "_quant_rescore", None), getattr(args, "_quant_oversampling", None),
+        getattr(args, "_hnsw_ef", None),
     )
 
 
@@ -3964,6 +3965,7 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     p_search.set_defaults(
         _quant_rescore=cfg.vector.quantization_rescore,
         _quant_oversampling=cfg.vector.quantization_oversampling,
+        _hnsw_ef=cfg.vector.hnsw_ef,
     )
     p_search.set_defaults(func=cmd_search)
 
@@ -4059,6 +4061,7 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     p_synthesize.set_defaults(
         _quant_rescore=cfg.vector.quantization_rescore,
         _quant_oversampling=cfg.vector.quantization_oversampling,
+        _hnsw_ef=cfg.vector.hnsw_ef,
     )
     p_synthesize.set_defaults(func=cmd_synthesize)
 
@@ -4171,6 +4174,7 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     p_answer.set_defaults(
         _quant_rescore=cfg.vector.quantization_rescore,
         _quant_oversampling=cfg.vector.quantization_oversampling,
+        _hnsw_ef=cfg.vector.hnsw_ef,
     )
     p_answer.set_defaults(func=cmd_answer)
 
@@ -4484,6 +4488,7 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     p_mcp.set_defaults(
         _quant_rescore=cfg.vector.quantization_rescore,
         _quant_oversampling=cfg.vector.quantization_oversampling,
+        _hnsw_ef=cfg.vector.hnsw_ef,
     )
     p_mcp.set_defaults(func=cmd_mcp_serve)
 
@@ -4653,6 +4658,7 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     p_serve.set_defaults(
         _quant_rescore=cfg.vector.quantization_rescore,
         _quant_oversampling=cfg.vector.quantization_oversampling,
+        _hnsw_ef=cfg.vector.hnsw_ef,
     )
     p_serve.set_defaults(func=cmd_serve)
 
@@ -4699,6 +4705,7 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     p_inspect.set_defaults(
         _quant_rescore=cfg.vector.quantization_rescore,
         _quant_oversampling=cfg.vector.quantization_oversampling,
+        _hnsw_ef=cfg.vector.hnsw_ef,
     )
     p_inspect.set_defaults(func=cmd_inspect)
 
@@ -4778,6 +4785,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         allow_cross_tenant=_allow_cross_tenant(args),
         quantization_rescore=getattr(args, "_quant_rescore", None),
         quantization_oversampling=getattr(args, "_quant_oversampling", None),
+        hnsw_ef=getattr(args, "_hnsw_ef", None),
         graph_user=_graph_auth(args)["user"],
         graph_password=_graph_auth(args)["password"],
         graph_database=_graph_auth(args)["database"],
@@ -4929,6 +4937,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         text_search=_text_search_mode(),
         quantization_rescore=getattr(args, "_quant_rescore", None),
         quantization_oversampling=getattr(args, "_quant_oversampling", None),
+        hnsw_ef=getattr(args, "_hnsw_ef", None),
     )
     app = build_inspector_app(cfg)
     admin = cfg.auth_enabled
@@ -4974,6 +4983,7 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
         allow_cross_tenant=_allow_cross_tenant(args),
         quantization_rescore=getattr(args, "_quant_rescore", None),
         quantization_oversampling=getattr(args, "_quant_oversampling", None),
+        hnsw_ef=getattr(args, "_hnsw_ef", None),
         qdrant_host=args.qdrant,
         memgraph_uri=args.memgraph_uri,
         graph_user=_graph_auth(args)["user"],

@@ -713,6 +713,7 @@ These are the MCP-relevant environment variables read by `mnemostack mcp-serve` 
 | `MNEMOSTACK_ALLOW_CROSS_TENANT` | unset | Deliberately allow tenantless recall over a multi-tenant collection (not a security control). |
 | `MNEMOSTACK_QUANTIZATION_RESCORE` | unset | Qdrant quantization search: rescore candidates with the original vectors. Dense queries only; unset = not sent. See [the recipe](recipes.md#quantizing-a-collection-without-losing-recall-quality). |
 | `MNEMOSTACK_QUANTIZATION_OVERSAMPLING` | unset | Qdrant quantization search: candidate oversampling factor (finite, >= 1.0). Dense queries only; unset = not sent. |
+| `MNEMOSTACK_HNSW_EF` | unset | Positive integer HNSW search depth. Higher values trade search effort for candidate recall, with or without quantization. Dense queries only. |
 | `MNEMOSTACK_LLM_TIMEOUT` | provider default | LLM request timeout in seconds. Not inherited from the embedding timeout — generation is a different workload. |
 | `MNEMOSTACK_GRAPH_TIMEOUT` | `5.0` | Memgraph operation timeout in seconds. |
 | `MNEMOSTACK_BM25_PATHS` | unset | File or directory paths for BM25 exact-token retrieval, separated by `os.pathsep` (`:` on Unix, `;` on Windows). |

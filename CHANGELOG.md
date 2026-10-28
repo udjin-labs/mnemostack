@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Add `vector.hnsw_ef` / `MNEMOSTACK_HNSW_EF` for query-time HNSW depth
+  across CLI, HTTP, MCP, inspector, and synchronous/asynchronous vector
+  stores. Unset values preserve Qdrant defaults. Document an opt-in
+  TurboQuant 8-bit profile with rescoring and retained original vectors.
+
 ## [3.0.0] - 2026-10-28
 
 - **Native Qdrant BM25 text search** (#211). `recall.text_search: native_bm25`

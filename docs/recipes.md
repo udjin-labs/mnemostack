@@ -425,3 +425,59 @@ curl -X PATCH "$QDRANT_URL/collections/mnemostack" \
 Qdrant builds the quantized copy in the background; the collection keeps serving meanwhile. Doing it in this order means no query ever runs against quantized vectors without rescoring. Rescoring now reads the original vectors from disk, so fast storage matters; measure latency on your own data before and after.
 
 **Rollback:** `-d '{"vectors": {"": {"on_disk": false}}, "quantization_config": "Disabled"}'` brings the originals back to RAM and removes the quantized copy; the configured search parameters can stay, they are ignored again.
+
+### General-purpose TurboQuant 8-bit profile
+
+Qdrant 1.20 supports a pinned TurboQuant 8-bit copy with full-precision
+originals on disk. This profile is independent of document type. It is
+opt-in, not a new default. Compare retrieval quality and latency on an
+isolated collection copy before changing a live collection.
+
+Configure the consumers first:
+
+```yaml
+vector:
+  hnsw_ef: 256
+  quantization_rescore: true
+  quantization_oversampling: 2.0
+```
+
+The environment equivalents are `MNEMOSTACK_HNSW_EF=256`,
+`MNEMOSTACK_QUANTIZATION_RESCORE=true`, and
+`MNEMOSTACK_QUANTIZATION_OVERSAMPLING=2.0`. SDK users pass `hnsw_ef=256`
+alongside the quantization arguments to `VectorStore` or `AsyncVectorStore`.
+The same settings reach CLI search, HTTP, MCP, and inspector dense queries.
+BM25 and sparse queries do not receive them. Unset `hnsw_ef` keeps Qdrant's
+default; a positive integer overrides the query-time search depth.
+Increasing it can improve candidate recall at additional search cost,
+even on an unquantized collection. It does not change index construction.
+
+On the isolated copy, apply this collection configuration separately:
+
+```bash
+curl -X PATCH "$QDRANT_URL/collections/$COLLECTION" \
+  -H 'Content-Type: application/json' \
+  -d '{"vectors": {"": {"memory": "cold"}},
+       "hnsw_config": {"memory": "cached"},
+       "quantization_config": {"turbo": {"bits": "bits8", "memory": "pinned"}}}'
+```
+
+Wait for indexing and quantization to finish before measuring. Keep the
+original vectors: rescoring needs them. The compressed copy is about one
+quarter of float32 vector size, but it is additional storage, not fourfold
+total disk savings. Cold originals can still enter the OS page cache, so
+this profile does not impose a hard RAM limit. Measure warm and cold
+latency and the full workload, not only isolated query timings.
+
+A local pilot on 20,000 stored 3,072-dimensional vectors selected ef=256
+and oversampling=2 using 200 document-as-query probes. On 300 other probes,
+the combined TurboQuant profile retained 99.52% of exact top-20 neighbors
+versus 98.90% for float32 HNSW with ef=128 on the same graph. Warm sequential
+gRPC median latency was 2.19 ms versus 2.53 ms. This compares combined
+settings, not quantization alone. It is neighbor fidelity, not measured
+answer accuracy or a production latency guarantee.
+
+To undo the storage profile, restore the collection's previous vector and
+HNSW memory settings and set `quantization_config` to `"Disabled"`.
+Unset `hnsw_ef` too if the previous query-depth behavior is required.
+MnemoStack does not change collection storage automatically.
