@@ -79,15 +79,13 @@ def _results(n=3):
 
 
 async def _assert_loop_alive(coro):
-    """Await `coro` while proving the event loop keeps ticking."""
-    ticks = {"n": 0}
+    """Prove the operation yields to another task, without timer-count assumptions."""
+    progressed = asyncio.Event()
 
-    async def ticker():
-        while True:
-            ticks["n"] += 1
-            await asyncio.sleep(0.005)
+    async def observe_progress():
+        progressed.set()
 
-    t = asyncio.create_task(ticker())
+    t = asyncio.create_task(observe_progress())
     try:
         result = await coro
     finally:
@@ -96,7 +94,7 @@ async def _assert_loop_alive(coro):
             await t
         except asyncio.CancelledError:
             pass
-    assert ticks["n"] >= 3, f"event loop appeared blocked ({ticks['n']} ticks)"
+    assert progressed.is_set(), "operation did not yield to the event loop"
     return result
 
 

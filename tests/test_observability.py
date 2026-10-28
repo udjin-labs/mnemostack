@@ -181,23 +181,32 @@ def test_snapshot_survives_concurrent_writes():
     # thread could raise "dictionary changed size during iteration". Reading a
     # snapshot must never raise regardless of concurrent writers.
     import threading
+    from concurrent.futures import ThreadPoolExecutor
 
     rec = InMemoryRecorder()
-    stop = threading.Event()
+    rec.record_counter("seed", 1)
+    barrier = threading.Barrier(2, timeout=5)
+    rounds = 32
 
     def writer():
-        i = 0
-        while not stop.is_set():
+        for i in range(rounds):
+            barrier.wait()
             rec.record_counter(f"mnemostack.test.metric_{i}", 1)
-            i += 1
+            barrier.wait()
 
-    t = threading.Thread(target=writer)
-    t.start()
-    try:
-        for _ in range(2000):
-            # Iterating the snapshot must not raise even as keys are added.
-            total = sum(rec.snapshot_counters().values())
-            assert total >= 0
-    finally:
-        stop.set()
-        t.join()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(writer)
+        try:
+            for i in range(rounds):
+                snapshot = rec.snapshot_counters()
+                values = iter(snapshot.values())
+                assert next(values) == 1
+                # Add a new live key after iteration starts, before it resumes.
+                # A live-dict iterator must fail here; a snapshot stays stable.
+                barrier.wait()
+                barrier.wait()
+                assert sum(values) == i
+                assert len(snapshot) == i + 1
+            future.result(timeout=5)
+        finally:
+            barrier.abort()
