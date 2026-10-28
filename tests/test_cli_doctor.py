@@ -42,7 +42,7 @@ class _FakeLLM:
 
 def _fake_qdrant_cls(
     *, reachable=True, exists=True, count=5, size=8, created=None, coll_error=None,
-    payload_schema=None,
+    payload_schema=None, memory=None, memory_error=None, memory_calls=None,
 ):
     """A QdrantClient stand-in. `created` (a list) records ensure_collection-style
     side effects so a test can assert the diagnostic never creates a collection.
@@ -75,6 +75,19 @@ def _fake_qdrant_cls(
                     "payload_schema": dict(payload_schema or {}),
                 },
             )()
+
+        @property
+        def http(self):
+            from types import SimpleNamespace
+
+            def request(**kwargs):
+                if memory_calls is not None:
+                    memory_calls.append(kwargs)
+                if memory_error is not None:
+                    raise memory_error
+                return {"result": memory}
+
+            return SimpleNamespace(client=SimpleNamespace(request=request))
 
         # A diagnostic must never call these; present so a call would be visible.
         def create_collection(self, *a, **k):  # pragma: no cover - must not run
@@ -130,6 +143,85 @@ def test_doctor_all_healthy(patched, capsys):
     assert rc == 0
     assert "doctor: healthy" in out
     assert "[OK" in out
+
+
+def _memory_counters(disk=1000, ram=100, cached=200, expected=300):
+    return dict(disk_bytes=disk, ram_bytes=ram, cached_bytes=cached, expected_cache_bytes=expected)
+
+
+def test_doctor_memory_json_is_collection_wide_and_read_only(patched, capsys):
+    calls = []
+    created = []
+    data = {
+        "total": _memory_counters(),
+        "vectors": [{"name": "semantic", "storage": _memory_counters(),
+                     "quantized": _memory_counters(250, 250, 0, 0)}],
+        "sparse_vectors": [{"name": "keywords", "index": _memory_counters()}],
+        "payload_index": [{"name": "tenant", "usage": _memory_counters(50, 10, 20, 30)}],
+        "payload": _memory_counters(),
+        "other": {"id_tracker": _memory_counters()},
+    }
+    patched(provider=_FakeProvider(), llm=_FakeLLM(), qdrant_cls=_fake_qdrant_cls(
+        memory=data, memory_calls=calls, created=created,
+    ))
+    assert cli.cmd_doctor(_args(json=True)) == 0
+    report = json.loads(capsys.readouterr().out)
+    check = next(x for x in report["checks"] if x["section"] == "qdrant.memory")
+    assert check["status"] == "ok"
+    assert check["data"]["total"] == data["total"]
+    assert "vectors.semantic.quantized" in check["data"]["components"]
+    assert "sparse_vectors.keywords.index" in check["data"]["components"]
+    assert check["data"]["components"]["payload_index.tenant.usage"] == _memory_counters(50, 10, 20, 30)
+    assert "not process RSS" in check["detail"]
+    assert len(calls) == 1 and calls[0]["method"] == "GET"
+    assert calls[0]["path_params"] == {"collection_name": "mnemostack"}
+    assert created == []
+
+
+@pytest.mark.parametrize("total", [None, {}, {"disk_bytes": True}, _memory_counters(ram=-1)])
+def test_doctor_invalid_memory_warns_without_failing(patched, capsys, total):
+    patched(provider=_FakeProvider(), llm=_FakeLLM(), qdrant_cls=_fake_qdrant_cls(memory={"total": total}))
+    assert cli.cmd_doctor(_args(json=True)) == 0
+    report = json.loads(capsys.readouterr().out)
+    check = next(x for x in report["checks"] if x["section"] == "qdrant.memory")
+    assert check["status"] == "warn" and "data" not in check
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_doctor_incomplete_memory_warns_without_exposing_paths(patched, capsys, json_output):
+    patched(provider=_FakeProvider(), llm=_FakeLLM(), qdrant_cls=_fake_qdrant_cls(
+        memory={"total": _memory_counters(), "warnings": ["cannot measure /private/storage/segment"]},
+    ))
+    assert cli.cmd_doctor(_args(json=json_output)) == 0
+    out = capsys.readouterr().out
+    assert "incomplete collection estimates" in out
+    assert "/private/storage" not in out
+    if json_output:
+        check = next(x for x in json.loads(out)["checks"] if x["section"] == "qdrant.memory")
+        assert check["status"] == "warn"
+        assert check["data"]["total"] == _memory_counters()
+    else:
+        assert "[WARN" in out
+
+
+def test_doctor_memory_failure_never_echoes_response(patched, capsys):
+    patched(provider=_FakeProvider(), llm=_FakeLLM(), qdrant_cls=_fake_qdrant_cls(
+        memory_error=RuntimeError("private response text"),
+    ))
+    assert cli.cmd_doctor(_args()) == 0
+    out = capsys.readouterr().out
+    assert "memory estimates unavailable (RuntimeError)" in out
+    assert "private response text" not in out
+
+
+def test_missing_collection_does_not_request_memory(patched, capsys):
+    calls = []
+    patched(provider=_FakeProvider(), llm=_FakeLLM(), qdrant_cls=_fake_qdrant_cls(
+        exists=False, memory_calls=calls,
+    ))
+    assert cli.cmd_doctor(_args()) == 0
+    capsys.readouterr()
+    assert calls == []
 
 
 def test_doctor_qdrant_down_exit_1(patched, capsys):

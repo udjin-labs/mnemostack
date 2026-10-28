@@ -275,6 +275,72 @@ _DOCTOR_MARKERS = {
 }
 
 
+def _doctor_qdrant_memory(add, client, collection: str) -> None:
+    """Informational, collection-wide memory estimates; never change storage.
+
+    Use the existing client's HTTP transport to retain authentication, TLS,
+    URL prefix, and timeout. The generated SDK has no memory endpoint yet.
+    """
+    fields = ("disk_bytes", "ram_bytes", "cached_bytes", "expected_cache_bytes")
+
+    def counters(value):
+        if not isinstance(value, dict):
+            return None
+        if any(type(value.get(key)) is not int or value[key] < 0 for key in fields):
+            return None
+        return {key: value[key] for key in fields}
+
+    try:
+        response = client.http.client.request(
+            type_=dict, method="GET", url="/collections/{collection_name}/memory",
+            path_params={"collection_name": collection},
+        )
+        result = response.get("result") if isinstance(response, dict) else None
+        total = counters(result.get("total")) if isinstance(result, dict) else None
+        if not isinstance(result, dict) or total is None:
+            raise ValueError("invalid memory counters")
+    except Exception as exc:  # noqa: BLE001 - optional observability must not fail recall readiness
+        add(
+            "qdrant.memory", "warn",
+            f"collection memory estimates unavailable ({type(exc).__name__})",
+            "check collection memory endpoint support and read permissions; recall may still work",
+        )
+        return
+
+    components = {}
+    for family in ("vectors", "sparse_vectors", "payload_index"):
+        entries = result.get(family, [])
+        if not isinstance(entries, list):
+            continue
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                continue
+            label = str(entry.get("name", index))
+            direct = counters(entry)
+            if direct is not None:
+                components[f"{family}.{label}"] = direct
+            for part in ("storage", "index", "quantized", "usage"):
+                values = counters(entry.get(part))
+                if values is not None:
+                    components[f"{family}.{label}.{part}"] = values
+    payload = counters(result.get("payload"))
+    if payload is not None:
+        components["payload"] = payload
+    other = result.get("other", {})
+    tracker = counters(other.get("id_tracker")) if isinstance(other, dict) else None
+    if tracker is not None:
+        components["id_tracker"] = tracker
+    incomplete = bool(result.get("warnings"))
+    add(
+        "qdrant.memory", "warn" if incomplete else "ok",
+        f"{'incomplete collection' if incomplete else 'collection'} estimates: disk={total['disk_bytes']} B, "
+        f"heap RAM={total['ram_bytes']} B, page cache={total['cached_bytes']} B, "
+        f"expected cache={total['expected_cache_bytes']} B (not process RSS)",
+        "page cache is evictable; cold data can become cached; estimates are not a RAM limit",
+        data={"total": total, "components": components},
+    )
+
+
 def _doctor_qdrant(
     add,
     url: str,
@@ -366,6 +432,7 @@ def _doctor_qdrant(
         add("qdrant", "warn", detail + " (empty — no data indexed)")
     else:
         add("qdrant", "ok", detail)
+    _doctor_qdrant_memory(add, client, collection)
     # Live readiness for the configured lexical arm — the enum being valid
     # says nothing about the COLLECTION being ready; a green doctor followed
     # by a permanently-degraded lexical arm is exactly the false signal a
@@ -1733,8 +1800,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     cfg = Config.load()
     checks: list[dict[str, Any]] = []
 
-    def add(section: str, status: str, detail: str, hint: str | None = None) -> None:
-        checks.append({"section": section, "status": status, "detail": detail, "hint": hint})
+    def add(
+        section: str, status: str, detail: str, hint: str | None = None,
+        *, data: dict[str, Any] | None = None,
+    ) -> None:
+        check: dict[str, Any] = {"section": section, "status": status, "detail": detail, "hint": hint}
+        if data is not None:
+            check["data"] = data
+        checks.append(check)
 
     add("mnemostack", "ok", f"version {__version__}")
     add("python", "ok", platform.python_version())

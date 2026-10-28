@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Add informational collection memory estimates to `doctor`, including
+  heap RAM, page cache, disk usage, and JSON component counters. Missing
+  telemetry warns without changing the diagnostic exit code.
+
 - Add `vector.hnsw_ef` / `MNEMOSTACK_HNSW_EF` for query-time HNSW depth
   across CLI, HTTP, MCP, inspector, and synchronous/asynchronous vector
   stores. Unset values preserve Qdrant defaults. Document an opt-in
