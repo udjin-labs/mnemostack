@@ -252,7 +252,7 @@ def _capture(sink):
     return _fake
 
 
-QUANT = {"quantization_rescore": True, "quantization_oversampling": 2.0}
+QUANT = {"quantization_rescore": True, "quantization_oversampling": 2.0, "hnsw_ef": 256}
 
 
 def test_server_forwards_from_env(isolated_env):
@@ -261,6 +261,7 @@ def test_server_forwards_from_env(isolated_env):
 
     isolated_env.setenv("MNEMOSTACK_QUANTIZATION_RESCORE", "1")
     isolated_env.setenv("MNEMOSTACK_QUANTIZATION_OVERSAMPLING", "2.0")
+    isolated_env.setenv("MNEMOSTACK_HNSW_EF", "256")
     cfg = srv.ServerConfig.from_env()
     assert (cfg.quantization_rescore, cfg.quantization_oversampling) == (True, 2.0)
 
@@ -340,6 +341,7 @@ def test_cli_dense_commands_forward(isolated_env, argv):
 
     isolated_env.setenv("MNEMOSTACK_QUANTIZATION_RESCORE", "true")
     isolated_env.setenv("MNEMOSTACK_QUANTIZATION_OVERSAMPLING", "2")
+    isolated_env.setenv("MNEMOSTACK_HNSW_EF", "256")
     seen: dict = {}
     isolated_env.setattr(cli, "get_provider", lambda *_a, **_k: MagicMock(dimension=4))
     isolated_env.setattr(cli, "VectorStore", _capture(seen))
@@ -371,18 +373,19 @@ def test_cli_serve_inspect_and_mcp_serve_forward(isolated_env):
 
     isolated_env.setenv("MNEMOSTACK_QUANTIZATION_RESCORE", "true")
     isolated_env.setenv("MNEMOSTACK_QUANTIZATION_OVERSAMPLING", "2")
+    isolated_env.setenv("MNEMOSTACK_HNSW_EF", "256")
     got: dict = {}
 
     def _app(cfg):
-        got["serve"] = (cfg.quantization_rescore, cfg.quantization_oversampling)
+        got["serve"] = (cfg.quantization_rescore, cfg.quantization_oversampling, cfg.hnsw_ef)
         raise _Stop
 
     def _inspector(cfg):
-        got["inspect"] = (cfg.quantization_rescore, cfg.quantization_oversampling)
+        got["inspect"] = (cfg.quantization_rescore, cfg.quantization_oversampling, cfg.hnsw_ef)
         raise _Stop
 
     def _mcp(**kwargs):
-        got["mcp-serve"] = (kwargs["quantization_rescore"], kwargs["quantization_oversampling"])
+        got["mcp-serve"] = (kwargs["quantization_rescore"], kwargs["quantization_oversampling"], kwargs["hnsw_ef"])
         raise _Stop
 
     isolated_env.setattr(srv, "build_app", _app)
@@ -392,4 +395,83 @@ def test_cli_serve_inspect_and_mcp_serve_forward(isolated_env):
         args = cli.build_parser().parse_args([cmd])
         with pytest.raises(_Stop):
             args.func(args)
-    assert got == {name: (True, 2.0) for name in ("serve", "inspect", "mcp-serve")}
+    assert got == {name: (True, 2.0, 256) for name in ("serve", "inspect", "mcp-serve")}
+
+
+@pytest.mark.parametrize("value", [0, -1, True, False, 1.5, "256", 2**64])
+def test_hnsw_ef_invalid_sdk_values_create_no_client(monkeypatch, value):
+    import mnemostack.vector.async_qdrant as aq
+    import mnemostack.vector.qdrant as q
+
+    monkeypatch.setattr(q, "QdrantClient", lambda **kw: pytest.fail("client created"))
+    monkeypatch.setattr(aq, "AsyncQdrantClient", lambda **kw: pytest.fail("client created"))
+    for store in (VectorStore, AsyncVectorStore):
+        with pytest.raises(ValueError, match="hnsw_ef"):
+            store(collection="c", dimension=4, hnsw_ef=value)
+
+
+@pytest.mark.parametrize("literal", ["0", "-1", "true", "false", "1.5", "'256'", str(2**64)])
+def test_hnsw_ef_invalid_yaml(isolated_env, tmp_path, literal):
+    path = tmp_path / "config.yaml"
+    path.write_text(f"vector:\n  hnsw_ef: {literal}\n")
+    with pytest.raises(ValueError, match="vector.hnsw_ef"):
+        Config.load(path)
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "true", "1.5", "abc", str(2**64)])
+def test_hnsw_ef_invalid_env_is_clean_cli_error(isolated_env, capsys, value):
+    import mnemostack.cli as cli
+
+    isolated_env.setenv("MNEMOSTACK_HNSW_EF", value)
+    assert cli.main(["health"]) == 2
+    err = capsys.readouterr().err
+    assert "HNSW_EF" in err or "vector.hnsw_ef" in err
+
+
+def test_hnsw_ef_config_default_yaml_and_env(isolated_env, tmp_path):
+    assert Config.load().vector.hnsw_ef is None
+    path = tmp_path / "config.yaml"
+    path.write_text("vector:\n  hnsw_ef: 128\n")
+    assert Config.load(path).vector.hnsw_ef == 128
+    isolated_env.setenv("MNEMOSTACK_HNSW_EF", "256")
+    assert Config.load(path).vector.hnsw_ef == 256
+
+
+def test_hnsw_ef_dense_and_sparse_query_params():
+    s = _store(sparse=True, hnsw_ef=256)
+    s.search(VEC)
+    assert s.client.query_points.call_args.kwargs["search_params"] == SearchParams(hnsw_ef=256)
+    s.sparse_search("postgres")
+    assert "search_params" not in s.client.query_points.call_args.kwargs
+
+
+def test_hnsw_ef_async_constructor_and_query(monkeypatch):
+    import mnemostack.vector.async_qdrant as aq
+
+    client = MagicMock()
+    client.query_points = AsyncMock(return_value=MagicMock(points=[]))
+    monkeypatch.setattr(aq, "AsyncQdrantClient", lambda **kw: client)
+    store = AsyncVectorStore(collection="c", dimension=4, hnsw_ef=256)
+    asyncio.run(store.search(VEC))
+    assert client.query_points.call_args.kwargs["search_params"] == SearchParams(hnsw_ef=256)
+
+
+def test_hnsw_ef_combines_with_quantization():
+    assert quantization_search_params(True, 2.0, 256) == SearchParams(
+        hnsw_ef=256, quantization=QuantizationSearchParams(rescore=True, oversampling=2.0)
+    )
+
+
+def test_hnsw_ef_sync_constructor(monkeypatch):
+    import mnemostack.vector.qdrant as q
+
+    monkeypatch.setattr(q, "QdrantClient", lambda **kw: MagicMock())
+    store = VectorStore(collection="c", dimension=4, hnsw_ef=256)
+    assert store.search_params == SearchParams(hnsw_ef=256)
+
+
+def test_native_bm25_never_carries_dense_params():
+    s = _store(hnsw_ef=256, rescore=True, oversampling=2.0)
+    s.ensure_text_index(scoring=True)
+    assert [h.id for h in s.native_bm25_search("postgres")] == [1]
+    assert "search_params" not in s.client.query_points.call_args.kwargs

@@ -79,8 +79,10 @@ def provider_kwargs(
     return kw
 
 
-def quantization_kwargs(rescore: Any = None, oversampling: Any = None) -> dict[str, Any]:
-    """VectorStore keyword arguments for the quantization search knobs — the
+def quantization_kwargs(
+    rescore: Any = None, oversampling: Any = None, hnsw_ef: Any = None
+) -> dict[str, Any]:
+    """VectorStore keyword arguments for dense search tuning — the
     ONE place every dense-searching surface (HTTP server, MCP, CLI search /
     answer / synthesize, inspector) takes them from, so a configured value
     cannot reach one surface and silently miss another. Empty when unset."""
@@ -89,6 +91,8 @@ def quantization_kwargs(rescore: Any = None, oversampling: Any = None) -> dict[s
         kw["quantization_rescore"] = rescore
     if oversampling is not None:
         kw["quantization_oversampling"] = oversampling
+    if hnsw_ef is not None:
+        kw["hnsw_ef"] = hnsw_ef
     return kw
 
 
@@ -218,6 +222,8 @@ class VectorConfig:
     # set ahead of enabling quantization on it.
     quantization_rescore: bool | None = None
     quantization_oversampling: float | None = None
+    # Query-time HNSW candidate depth, independent of quantization.
+    hnsw_ef: int | None = None
 
 
 @dataclass
@@ -419,6 +425,11 @@ class Config:
                     f"seconds, got {llm_timeout!r}"
                 )
         # Quantization knobs fail the load, not the first quantized query.
+        ef = cfg.vector.hnsw_ef
+        if ef is not None and (
+            isinstance(ef, bool) or not isinstance(ef, int) or not 1 <= ef <= 2**64 - 1
+        ):
+            raise ValueError("vector.hnsw_ef must be a positive 64-bit integer")
         rescore = cfg.vector.quantization_rescore
         if rescore is not None and not isinstance(rescore, bool):
             raise ValueError(f"vector.quantization_rescore must be a boolean, got {rescore!r}")
@@ -494,6 +505,7 @@ def _apply_env_overrides(cfg: Config) -> Config:
         MNEMOSTACK_VECTOR_COLLECTION
         MNEMOSTACK_QUANTIZATION_RESCORE      (dense search: rescore quantized hits)
         MNEMOSTACK_QUANTIZATION_OVERSAMPLING (dense search: candidate oversampling, >= 1.0)
+        MNEMOSTACK_HNSW_EF          (dense search: positive integer candidate depth)
         MNEMOSTACK_LLM_PROVIDER
         MNEMOSTACK_LLM              (alias for LLM_PROVIDER)
         MNEMOSTACK_LLM_MODEL
@@ -554,6 +566,11 @@ def _apply_env_overrides(cfg: Config) -> Config:
         cfg.vector.collection = collection
     if v := env.get("MNEMOSTACK_VECTOR_HEALTH_TIMEOUT"):
         cfg.vector.health_timeout = max(1, int(v))
+    if v := env.get("MNEMOSTACK_HNSW_EF"):
+        try:
+            cfg.vector.hnsw_ef = int(v)
+        except ValueError:
+            raise ValueError("MNEMOSTACK_HNSW_EF must be a positive 64-bit integer") from None
     if v := env.get("MNEMOSTACK_QUANTIZATION_RESCORE"):
         low = v.strip().lower()
         if low in {"1", "true", "yes", "on"}:
@@ -659,6 +676,7 @@ vector:
   health_timeout: 2         # seconds; HTTP server's Qdrant liveness/readiness ping
   quantization_rescore: null      # dense search on a quantized collection; null = not sent
   quantization_oversampling: null # e.g. 2.0 with rescore: true; null = not sent
+  hnsw_ef: null                 # positive integer; null keeps Qdrant's default
 
 llm:
   provider: gemini

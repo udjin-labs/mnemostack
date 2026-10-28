@@ -835,6 +835,7 @@ class ServerConfig:
     #: the config). None = not sent. Appended at the tail.
     quantization_rescore: bool | None = None
     quantization_oversampling: float | None = None
+    hnsw_ef: int | None = None
 
     def __post_init__(self) -> None:
         # A blank tenant is no tenant: "" would stamp writes with an empty
@@ -890,6 +891,7 @@ class ServerConfig:
             allow_cross_tenant=_env_bool("MNEMOSTACK_ALLOW_CROSS_TENANT"),
             quantization_rescore=cfg.vector.quantization_rescore,
             quantization_oversampling=cfg.vector.quantization_oversampling,
+            hnsw_ef=cfg.vector.hnsw_ef,
             keys_file=os.environ.get("MNEMOSTACK_KEYS_FILE") or None,
             quotas_file=os.environ.get("MNEMOSTACK_QUOTAS_FILE") or None,
             text_key=cfg.recall.text_key,
@@ -1079,7 +1081,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         # carrying the named sparse vector the lexical arm searches.
         sparse_text=text_mode == "sparse",
         text_key=cfg.text_key,
-        **quantization_kwargs(cfg.quantization_rescore, cfg.quantization_oversampling),
+        **quantization_kwargs(cfg.quantization_rescore, cfg.quantization_oversampling, cfg.hnsw_ef),
     )
     # Dedicated short-timeout client for health/readiness pings — never the
     # recall store's client, whose timeout is sized for recall.

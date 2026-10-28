@@ -61,6 +61,7 @@ class AsyncVectorStore:
         *,
         quantization_rescore: bool | None = None,
         quantization_oversampling: float | None = None,
+        hnsw_ef: int | None = None,
     ):
         self.collection = collection
         self.dimension = dimension
@@ -68,7 +69,7 @@ class AsyncVectorStore:
         # Validated before the client exists: a rejected value must not leave
         # an unclosable async client behind.
         self.search_params = quantization_search_params(
-            quantization_rescore, quantization_oversampling
+            quantization_rescore, quantization_oversampling, hnsw_ef
         )
         self.client = AsyncQdrantClient(url=host, timeout=timeout)
 

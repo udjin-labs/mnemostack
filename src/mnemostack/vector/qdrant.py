@@ -147,15 +147,20 @@ def tenant_sample(client: Any, collection: str) -> list[Any] | None:
 
 
 def quantization_search_params(
-    rescore: bool | None = None, oversampling: float | None = None
+    rescore: bool | None = None, oversampling: float | None = None,
+    hnsw_ef: int | None = None,
 ) -> Any:
-    """``SearchParams`` carrying the quantization search knobs, or ``None``
-    when neither is set — then no ``search_params`` is sent at all and the
+    """``SearchParams`` carrying dense search tuning, or ``None``
+    when all knobs are unset — then no ``search_params`` is sent at all and the
     request is byte-identical to one built without this helper. A collection
-    without quantization ignores these parameters, so they can be configured
-    before quantization is enabled on it."""
-    if rescore is None and oversampling is None:
+    without quantization ignores the quantization knobs. HNSW depth applies without
+    quantization and trades search effort for candidate recall."""
+    if rescore is None and oversampling is None and hnsw_ef is None:
         return None
+    if hnsw_ef is not None and (
+        isinstance(hnsw_ef, bool) or not isinstance(hnsw_ef, int) or not 1 <= hnsw_ef <= 2**64 - 1
+    ):
+        raise ValueError("hnsw_ef must be a positive 64-bit integer")
     # SDK callers bypass Config.load's checks; without these a bad value would
     # surface only at query time, as a server error (or silently, for NaN).
     if rescore is not None and not isinstance(rescore, bool):
@@ -172,7 +177,11 @@ def quantization_search_params(
     from qdrant_client.models import QuantizationSearchParams, SearchParams
 
     return SearchParams(
-        quantization=QuantizationSearchParams(rescore=rescore, oversampling=oversampling)
+        hnsw_ef=hnsw_ef,
+        quantization=(
+            QuantizationSearchParams(rescore=rescore, oversampling=oversampling)
+            if rescore is not None or oversampling is not None else None
+        ),
     )
 
 
@@ -250,6 +259,7 @@ class VectorStore:
         text_key: str = "text",
         quantization_rescore: bool | None = None,
         quantization_oversampling: float | None = None,
+        hnsw_ef: int | None = None,
     ):
         self.collection = collection
         self.dimension = dimension
@@ -258,7 +268,7 @@ class VectorStore:
         #: None = no search_params at all, as before. Built (and validated)
         #: before the client, so a rejected value leaves nothing to close.
         self.search_params = quantization_search_params(
-            quantization_rescore, quantization_oversampling
+            quantization_rescore, quantization_oversampling, hnsw_ef
         )
         self.client = QdrantClient(url=host, timeout=timeout)
         #: Opt-in server-side lexical index: writes maintain a named sparse

@@ -151,6 +151,7 @@ def build_server(
     # the tail — the positional-tail pin in test_provider_plumbing guards it.
     quantization_rescore: bool | None = None,
     quantization_oversampling: float | None = None,
+    hnsw_ef: int | None = None,
 ) -> Any:
     """Build and return a configured FastMCP server.
 
@@ -316,7 +317,7 @@ def build_server(
                 host=qdrant_host,
                 sparse_text=mode == "sparse",
                 text_key=text_key,
-                **quantization_kwargs(quantization_rescore, quantization_oversampling),
+                **quantization_kwargs(quantization_rescore, quantization_oversampling, hnsw_ef),
             )
 
         return _component("vector", _make)
@@ -1355,6 +1356,7 @@ def main() -> None:
         in {"1", "true", "yes", "on"},
         quantization_rescore=cfg.vector.quantization_rescore,
         quantization_oversampling=cfg.vector.quantization_oversampling,
+        hnsw_ef=cfg.vector.hnsw_ef,
         qdrant_host=cfg.vector.host,
         memgraph_uri=cfg.graph.uri,
         graph_user=cfg.graph.user,
