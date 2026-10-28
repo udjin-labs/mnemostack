@@ -6,7 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-- **Native Qdrant BM25 text search.** `recall.text_search: native_bm25`
+## [3.0.0] - 2026-10-28
+
+- **Native Qdrant BM25 text search** (#211). `recall.text_search: native_bm25`
   ranks the configured text payload directly on a Qdrant 1.20+ scored
   full-text index. It needs no client-side corpus or extra sparse vectors,
   respects the same filters, tenant scope, and validity view as other Qdrant
@@ -19,6 +21,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   scorer, or `bm25` for a file-backed in-process corpus. Existing `lexical`
   deployments must run `mnemostack text-index` and switch the mode to
   `native_bm25` after upgrading Qdrant.
+- **Removed legacy Python text-search APIs** (#211).
+  `QdrantTextRetriever` and `build_qdrant_text_arms` are no longer exported
+  from `mnemostack.recall`; `RecallConfig.text_search_fields` was removed
+  with the legacy modes. Use the `native_bm25` configuration and
+  `recall.text_key` for the payload field to index and search.
+- **OpenAI-compatible LLM options from the environment** (#212).
+  `MNEMOSTACK_LLM_OPTIONS` accepts a JSON object of request options for the
+  `openai` provider across CLI, HTTP, and MCP deployments, including
+  `reasoning_effort` and gateway-specific `chat_template_kwargs`.
+  Explicit constructor `options` take precedence over the environment;
+  malformed JSON and non-object values fail at provider construction.
 
 ## [2.6.2] - 2026-09-28
 
