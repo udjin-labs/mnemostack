@@ -601,6 +601,14 @@ Health checks differ by entrypoint:
 
 For production monitoring, use `/healthz` for liveness and `/readyz` for readiness probes, and combine with periodic CLI `mnemostack health` for full validation (collection exists, point count non-zero).
 
+`doctor` also reports `qdrant.memory`: collection-wide estimates for disk,
+heap RAM, resident page cache, and expected cache. JSON output includes byte
+counters and available component breakdowns. These estimates are not process
+RSS or a RAM limit; cold data can enter the evictable OS page cache. An
+unavailable memory endpoint produces a warning without changing doctor's exit code.
+On non-Unix Qdrant hosts, the API reports zero cached bytes regardless of residency.
+The diagnostic does not change collection memory placement or quantization.
+
 ### Prometheus metrics
 
 The HTTP server exposes Prometheus text metrics:
