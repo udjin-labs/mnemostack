@@ -469,13 +469,13 @@ total disk savings. Cold originals can still enter the OS page cache, so
 this profile does not impose a hard RAM limit. Measure warm and cold
 latency and the full workload, not only isolated query timings.
 
-A local pilot on 20,000 stored 3,072-dimensional vectors selected ef=256
-and oversampling=2 using 200 document-as-query probes. On 300 other probes,
-the combined TurboQuant profile retained 99.52% of exact top-20 neighbors
-versus 98.90% for float32 HNSW with ef=128 on the same graph. Warm sequential
-gRPC median latency was 2.19 ms versus 2.53 ms. This compares combined
-settings, not quantization alone. It is neighbor fidelity, not measured
-answer accuracy or a production latency guarantee.
+Validation on five vector sets (16,916–20,000 points, 512–3,072 dimensions)
+at a 1 GiB limit completed 10,240 requests without errors. Compared with
+cached float32 at ef=128, this profile used 2–20% less peak memory including
+file cache, with no lower recall of exact top-20 neighbors on any set.
+Sequential p95 increased by 0.4–1.1 ms; concurrency-four p95 differed by
+less than 0.3 ms. This compares complete profiles, not quantization alone,
+and measures neighbor fidelity, not answer accuracy or a production guarantee.
 
 To undo the storage profile, restore the collection's previous vector and
 HNSW memory settings and set `quantization_config` to `"Disabled"`.

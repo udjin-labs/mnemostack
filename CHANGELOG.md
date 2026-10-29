@@ -17,6 +17,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   across CLI, HTTP, MCP, inspector, and synchronous/asynchronous vector
   stores. Unset values preserve Qdrant defaults. Document an opt-in
   TurboQuant 8-bit profile with rescoring and retained original vectors.
+  Validation on five vector sets at a 1 GiB limit showed 2–20% lower peak
+  memory with no loss of exact-neighbor recall; sequential p95 increased
+  by 0.4–1.1 ms. These results compare complete profiles, not quantization alone.
 
 ## [3.0.0] - 2026-10-28
 
