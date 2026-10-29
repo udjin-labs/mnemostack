@@ -98,13 +98,33 @@ DEFAULT_LOSS_CUTOFFS = (1, 5, 10, 20, 30)
 
 
 @dataclass
+class BudgetTrace:
+    """Scoped orders immediately before and after one token-budget cut."""
+
+    limit: int
+    used: int | None
+    before: list[tuple[str, float]]
+    after: list[tuple[str, float]]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "limit": self.limit,
+            "used": self.used,
+            "before": [[rid, round(score, 6)] for rid, score in self.before],
+            "after": [[rid, round(score, 6)] for rid, score in self.after],
+        }
+
+
+@dataclass
 class RecallTrace:
     """Trace of one recall call: per-retriever inputs, fused output, degradations.
 
     `fused` is the order recall returned (post-fusion, post-vector-floor);
     `post_rerank` is the reranker's order when a reranker ran. The final
-    response list may still differ if vector-floor re-appends items after
-    rerank. Tags are stable strings. `notes` is the AUTHORITATIVE list of
+    response list may still differ after vector-floor and token-budget
+    processing. `budget` records the final token-budget cut; `retry_budget`
+    records an accepted retry's cut without replacing the first pass.
+    Tags are stable strings. `notes` is the AUTHORITATIVE list of
     routine stage-did-not-apply signals ("temporal:no_parse" — any query
     without a parseable date; "<arm>:no_tokens" — a lexical arm whose gate
     found no usable tokens). `degraded` carries components that actually
@@ -130,6 +150,47 @@ class RecallTrace:
     #: round in and rewrote `fused` to the order actually returned; None
     #: otherwise. Lets `checkpoints` keep the first pass in pipeline order.
     first_pass_fused: list[tuple[str, float]] | None = None
+    budget: BudgetTrace | None = None
+    retry_budget: BudgetTrace | None = None
+
+    def record_budget(
+        self,
+        before: list[RecallResult],
+        after: list[RecallResult],
+        limit: int,
+        used: int,
+        *,
+        recaller: Any,
+        tenant: str | None = None,
+        filters: dict[str, Any] | None = None,
+        retry: bool = False,
+    ) -> None:
+        """Project scoped records without recounting tokens or retaining payloads."""
+        from .filters import result_passes_filters
+        from .validity import numeric_unit_for
+
+        if tenant is None:
+            default = getattr(recaller, "default_tenant", None)
+            if isinstance(default, str) and default:
+                tenant = default
+        timestamp_key = getattr(recaller, "timestamp_key", "timestamp")
+        unit = numeric_unit_for(getattr(recaller, "timestamp_format", "iso"))
+
+        def project(results: list[RecallResult]) -> list[tuple[str, float]]:
+            return [
+                (str(r.id), float(r.score))
+                for r in results
+                if (tenant is None or (getattr(r, "payload", None) or {}).get("tenant_id") == tenant)
+                and result_passes_filters(r, filters, timestamp_key=timestamp_key, numeric_unit=unit)
+            ]
+
+        scoped_before, scoped_after = project(before), project(after)
+        redacted = len(scoped_before) != len(before) or len(scoped_after) != len(after)
+        snapshot = BudgetTrace(limit, None if redacted else used, scoped_before, scoped_after)
+        if retry:
+            self.retry_budget = snapshot
+        else:
+            self.budget = snapshot
 
     def restrict_to_ids(self, allowed: Any) -> None:
         """Drop every trace entry whose id is outside ``allowed`` (tenant scrub).
@@ -149,6 +210,13 @@ class RecallTrace:
             self.first_pass_fused = [(r, s) for r, s in self.first_pass_fused if str(r) in allow]
         if self.post_rerank is not None:
             self.post_rerank = [(rid, s) for rid, s in self.post_rerank if str(rid) in allow]
+        for snapshot in (self.budget, self.retry_budget):
+            if snapshot is not None:
+                before = [(r, s) for r, s in snapshot.before if str(r) in allow]
+                after = [(r, s) for r, s in snapshot.after if str(r) in allow]
+                if len(before) != len(snapshot.before) or len(after) != len(snapshot.after):
+                    snapshot.used = None
+                snapshot.before, snapshot.after = before, after
 
     def mark(self, tag: str) -> None:
         # One classification: `notes` is AUTHORITATIVE for routine signals
@@ -184,14 +252,19 @@ class RecallTrace:
             d["first_pass_fused"] = [[rid, round(score, 6)] for rid, score in self.first_pass_fused]
         if self.post_rerank is not None:
             d["post_rerank"] = [[rid, round(score, 6)] for rid, score in self.post_rerank]
+        for key in ("budget", "retry_budget"):
+            snapshot = getattr(self, key)
+            if snapshot is not None:
+                d[key] = snapshot.to_dict()
         return d
 
     def checkpoints(self) -> list[tuple[str, list[str]]]:
         """The ranked id lists this trace holds, in pipeline order: ``fused``,
         then ``stage:<name>`` for each pipeline stage (a repeated name gets a
         ``#2``, ``#3`` suffix), then ``post_rerank`` when a reranker ran, then
-        ``weak_retry_merge`` when a weak-recall retry merged a second round in
-        (``fused`` is then the first pass's order)."""
+        ``pre_budget`` and ``post_budget`` when a budget was applied.
+        An accepted retry adds ``retry_pre_budget`` when budgeted, then
+        ``weak_retry_merge`` (``fused`` is then the first pass's order)."""
         retried = self.first_pass_fused is not None
         first = self.first_pass_fused if self.first_pass_fused is not None else self.fused
         out: list[tuple[str, list[str]]] = [("fused", [str(r) for r, _ in first])]
@@ -202,7 +275,12 @@ class RecallTrace:
             out.append((label, [str(r) for r, _ in st.ranked]))
         if self.post_rerank is not None:
             out.append(("post_rerank", [str(r) for r, _ in self.post_rerank]))
+        if self.budget is not None:
+            out.append(("pre_budget", [str(r) for r, _ in self.budget.before]))
+            out.append(("post_budget", [str(r) for r, _ in self.budget.after]))
         if retried:
+            if self.retry_budget is not None:
+                out.append(("retry_pre_budget", [str(r) for r, _ in self.retry_budget.before]))
             out.append(("weak_retry_merge", [str(r) for r, _ in self.fused]))
         return out
 

@@ -312,6 +312,7 @@ def retry_weak_recall(
         pool: list[Any] = [_FloorPool(floor_pool)] if floor_pool else []
         merged = apply_floor(merged, pool + results + merged)
 
+    before_budget = merged
     if budget:
         # Re-applied to the MERGED list: each variant's own flow capped
         # its own results, and concatenating two lists that each fit the
@@ -356,6 +357,12 @@ def retry_weak_recall(
             # else again.
             result.floor_score = floor
         return results, True
+    if budget and caller_trace is not None:
+        caller_trace.record_budget(
+            before_budget, merged, budget, _tokens,
+            recaller=recaller, tenant=flow_kwargs.get("tenant"),
+            filters=flow_kwargs.get("filters"), retry=True,
+        )
     gained = len(merged) - original_count
     if gained <= 0:
         final = results if not merged else merged
