@@ -525,6 +525,7 @@ def expand_remote_items(
     entries: list[tuple[IngestItem, bool]],
     *,
     chunk_size: int = REMOTE_CHUNK_SIZE,
+    secret_policy: str = "off",
 ) -> tuple[list[IngestItem], list[int]]:
     """Expand ``(item, chunk?)`` pairs into flat ingest items.
 
@@ -538,6 +539,11 @@ def expand_remote_items(
     ``REMOTE_MAX_CHUNKS_PER_REQUEST`` — embedding work per request is
     bounded; the caller splits the request instead.
     """
+    from .ingest_policy import SecretPolicy
+
+    policy = SecretPolicy(secret_policy)
+    for item, _do_chunk in entries:
+        policy.check_item(item)
     flat: list[IngestItem] = []
     origins: list[int] = []
     for idx, (item, do_chunk) in enumerate(entries):
@@ -1024,6 +1030,7 @@ def ingest_remote_items(
     text_key: str = "text",
     timestamp_key: str = "timestamp",
     timestamp_format: str = "iso",
+    secret_policy: str = "off",
 ) -> list[RemoteMemoryResult]:
     """Ingest client-supplied items with store-backed duplicate detection.
 
@@ -1050,6 +1057,11 @@ def ingest_remote_items(
     Validation (`validate_remote_item`) is the CALLER's obligation — this
     function trusts its items are within caps and clean of reserved keys.
     """
+    from .ingest_policy import SecretPolicy
+
+    policy = SecretPolicy(secret_policy)
+    for item in items:
+        policy.check_item(item)
     ensure_remote_schema_keys(text_key, timestamp_key)
     # First remote write on a fresh deployment must not require an operator
     # ingest to have created the collection. Bootstrap runs ONCE per store
@@ -1917,6 +1929,7 @@ class Ingestor:
         enrich: Callable[[IngestItem], dict[str, Any]] | None = None,
         tenant: str | None = None,
         max_points: int | None = None,
+        secret_policy: str = "off",
     ):
         self.embedding = embedding
         self.store = vector_store
@@ -1942,6 +1955,9 @@ class Ingestor:
         self.window_size = window_size
         self.window_separator = window_separator
         self.enrich = enrich
+        from .ingest_policy import SecretPolicy
+
+        self.secret_policy = SecretPolicy(secret_policy)
         self._seen = _SeenCache(seen_cache_size) if skip_seen else None
         # Self-guarding writes: every flush revalidates UNCONDITIONALLY
         # (recheck_seconds=0, same policy as the markdown sync) that the
@@ -1963,7 +1979,10 @@ class Ingestor:
         """
         stats = IngestStats()
         buffer: list[tuple[str, IngestItem]] = []
-        for item in _iter_window_items(items, self.window_size, self.window_separator):
+        for item in _iter_window_items(
+            self.secret_policy.checked_items(items), self.window_size, self.window_separator
+        ):
+            self.secret_policy.check_item(item)
             stats.seen += 1
             pid = stable_chunk_id(item.source, item.offset, item.text, tenant=self.tenant)
             if self.skip_seen and self._seen is not None and pid in self._seen:
@@ -2014,7 +2033,10 @@ class Ingestor:
         """
         buffer: list[tuple[str, IngestItem]] = []
         total_seen = 0
-        for item in _iter_window_items(item_iter, self.window_size, self.window_separator):
+        for item in _iter_window_items(
+            self.secret_policy.checked_items(item_iter), self.window_size, self.window_separator
+        ):
+            self.secret_policy.check_item(item)
             total_seen += 1
             pid = stable_chunk_id(item.source, item.offset, item.text, tenant=self.tenant)
             if self.skip_seen and self._seen is not None and pid in self._seen:
@@ -2095,6 +2117,7 @@ class Ingestor:
             if item.timestamp:
                 payload["timestamp"] = item.timestamp
             apply_enrichment(self.enrich, item, payload)
+            self.secret_policy.check(payload)
             # tenant_id is set only by the store from the Ingestor's `tenant`
             # (the write-side of the isolation boundary) — never by metadata or
             # an enrich hook. Drop any planted value so it can't be spoofed.

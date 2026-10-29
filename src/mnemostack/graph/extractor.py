@@ -49,15 +49,20 @@ class TripleExtractor:
         llm: LLMProvider,
         max_triples: int = 10,
         max_tokens: int = 1000,
+        secret_policy: str = "off",
     ):
         self.llm = llm
         self.max_triples = max_triples
         self.max_tokens = max_tokens
+        from ..ingest_policy import SecretPolicy
+
+        self.secret_policy = SecretPolicy(secret_policy)
 
     def extract(self, text: str) -> list[Triple]:
         """Extract triples from text. Returns empty list on failure."""
         if not text.strip():
             return []
+        self.secret_policy.check(text)
 
         prompt = _EXTRACT_PROMPT.format(text=text.strip(), max_triples=self.max_triples)
         resp = self.llm.generate(prompt, max_tokens=self.max_tokens, temperature=0.0)
@@ -100,6 +105,8 @@ class TripleExtractor:
         ``tenant`` writes them into that tenant's subgraph (see
         ``GraphStore.add_triple``); None keeps the unscoped form."""
         triples = self.extract(text)
+        for t in triples:
+            self.secret_policy.check((t.subject, t.predicate, t.obj, t.valid_from))
         # Only pass tenant= when set, so a graph without the kwarg still works.
         tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
         for t in triples:

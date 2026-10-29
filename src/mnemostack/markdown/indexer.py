@@ -148,6 +148,7 @@ def collect_markdown(
     index_root: str | None = None,
     root_dir: str | Path | None = None,
     tenant: str | None = None,
+    secret_policy: str = "off",
 ) -> MarkdownCollection:
     """Walk ``root`` for ``*.md`` files and return their chunks + link edges.
 
@@ -209,12 +210,17 @@ def collect_markdown(
         key_to_rel.setdefault(f.stem.lower(), rel)
         key_to_rel[rel_key.lower()] = rel
 
+    from ..ingest_policy import SecretPolicy
+
+    policy = SecretPolicy(secret_policy)
     chunker = MarkdownChunker(chunk_size=chunk_size)
     out = MarkdownCollection()
     for f in files:
         rel = _rel(f, base)
         text = f.read_text(encoding="utf-8", errors="ignore")
+        policy.check((text, str(f)))
         meta, body = parse_frontmatter(text)
+        policy.check(meta)
         # Qdrant payload field names must be strings; a YAML key like ``2026:``
         # parses to an int and would abort the upsert, so coerce keys to str.
         # Structural resolver keys are RESERVED — frontmatter cannot set them.

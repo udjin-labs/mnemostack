@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Add an opt-in ingest secret-format policy (`ingest.secret_policy: "block"`,
+  `MNEMOSTACK_SECRET_POLICY`, or `--secret-policy`). Built-in SDK, file, HTTP,
+  and MCP ingestion reject matching input before embedding or storage.
+  Default remains off; full dummy credentials can also match. See
+  [scope and refusal behavior](docs/ingest-policy.md).
+
 ## [3.1.0] - 2026-10-29
 
 - Add opt-in authenticated Streamable HTTP MCP with per-request service keys,

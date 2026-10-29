@@ -39,6 +39,7 @@ from .embeddings.roles import (
     document_space_fingerprint_via,
     embed_documents_resilient,
 )
+from .ingest_policy import IngestPolicyError, SecretPolicy
 from .llm import get_llm, list_llms
 from .markdown.sync import PAYLOAD_PATCH_BATCH
 from .recall import (
@@ -2600,6 +2601,7 @@ def _utcnow_iso() -> str:
 
 
 def cmd_index(args: argparse.Namespace) -> int:
+    policy = SecretPolicy(getattr(args, "secret_policy", "off"))
     # One instant for the whole run: chunks written together get the same
     # write time, rather than times that differ by the wall-clock cost of
     # embedding — precision this field does not have and does not need.
@@ -2649,11 +2651,6 @@ def cmd_index(args: argparse.Namespace) -> int:
         if reply.strip().lower() not in {"y", "yes"}:
             print("aborted")
             return 1
-    store.ensure_collection(recreate=args.recreate)
-    guard_rc, guard_fp = _guard_document_space(store, provider)
-    if guard_rc is not None:
-        return guard_rc
-
     index_code = bool(getattr(args, "code", False))
     if target.is_file():
         files = [target]
@@ -2727,6 +2724,7 @@ def cmd_index(args: argparse.Namespace) -> int:
     visited_sources: set[str] = set()
     for f in files:
         text = f.read_text(encoding="utf-8", errors="ignore")
+        policy.check((text, str(f)))
         source = str(f.relative_to(target if target.is_dir() else target.parent))
         visited_sources.add(source)
         # Document snapshot for verifiable citations (`mnemostack resolve`):
@@ -2856,7 +2854,13 @@ def cmd_index(args: argparse.Namespace) -> int:
     # After enrichment for the same reason the markers above are: an
     # enricher key collision must not be able to fabricate a write time.
     for *_, chunk_payload in chunks:
+        policy.check(chunk_payload)
         chunk_payload["indexed_at"] = _run_indexed_at
+
+    store.ensure_collection(recreate=args.recreate)
+    guard_rc, guard_fp = _guard_document_space(store, provider)
+    if guard_rc is not None:
+        return guard_rc
 
     # Load existing point IDs once so re-runs skip unchanged chunks without
     # re-embedding (saves API quota / local GPU time). When refreshing
@@ -3240,6 +3244,7 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
         index_root=index_root,
         root_dir=root_dir,
         tenant=tenant,
+        secret_policy=getattr(args, "secret_policy", "off"),
     )
     if col.files == 0:
         print(f"error: no .md files found under {target}", file=sys.stderr)
@@ -3309,6 +3314,7 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
             tenant=tenant,
             before_upsert=_quota_check,
             embedding_batch_size=getattr(args, "embedding_batch_size", None) or 64,
+            secret_policy=getattr(args, "secret_policy", "off"),
         )
     except QuotaExceededError as e:
         # In --watch mode, a startup corpus over quota must NOT kill the daemon:
@@ -3500,6 +3506,7 @@ def _watch_markdown(
         # A resolver (not a fixed value) so `quota set/rm` takes effect mid-watch.
         max_points_resolver=lambda: _resolve_max_points(args, _watch_tenant),
         embedding_batch_size=getattr(args, "embedding_batch_size", None) or 64,
+        secret_policy=getattr(args, "secret_policy", "off"),
     )
 
     def _on_result(res: Any) -> None:
@@ -3526,6 +3533,9 @@ def _watch_markdown(
         )
 
     def _on_error(path: str, kind: str, exc: Exception) -> None:
+        if isinstance(exc, IngestPolicyError):
+            print(f"  error: {exc}", file=sys.stderr)
+            return
         print(f"  error syncing {path} ({kind}): {exc}", file=sys.stderr)
 
     watcher = MarkdownWatcher(
@@ -3605,10 +3615,15 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         graph_user=cfg.graph.user,
         graph_password=cfg.graph.password,
         graph_database=cfg.graph.database,
+        secret_policy=cfg.ingest.secret_policy,
     )
     sub = p.add_subparsers(dest="command", required=True)
 
     common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "--secret-policy", choices=("off", "block"), default=cfg.ingest.secret_policy,
+        help="Ingest secret-format policy (default: config/env, otherwise off)",
+    )
     common.add_argument(
         "--provider",
         default=cfg.embedding.provider,
@@ -4847,6 +4862,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     )
     cfg = ServerConfig(
         provider_name=args.provider,
+        secret_policy=getattr(args, "secret_policy", "off"),
         embedding_model=_embedding_model(args),
         ollama_host=getattr(args, "ollama_host", None),
         embedding_timeout=getattr(args, "embedding_timeout", None),
@@ -5056,6 +5072,7 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
         return 2
     _schema_text, _schema_ts, _schema_fmt = _payload_schema()
     mcp = build_server(
+        secret_policy=getattr(args, "secret_policy", "off"),
         collection=args.collection,
         embedding_provider=args.provider,
         embedding_model=_embedding_model(args),
@@ -5184,7 +5201,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.func(args)
-    except (ProviderProbeError, EmbeddingSpaceError, CrossTenantRecallError) as e:
+    except (ProviderProbeError, EmbeddingSpaceError, CrossTenantRecallError, IngestPolicyError) as e:
         # Typed, operator-actionable refusals (dimension undiscoverable,
         # embedding spaces would mix) follow the CLI's error convention —
         # a clean message and exit 2, never a raw traceback.
