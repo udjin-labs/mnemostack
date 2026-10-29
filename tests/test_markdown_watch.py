@@ -830,3 +830,21 @@ def test_syncer_reports_failed_embeddings_and_keeps_stale(tmp_path):
     # old chunks kept (not pruned) since the re-embed failed
     after = len(list(store.scroll(filters={"index_root": root, "source": "a.md"})))
     assert after == before
+
+
+def test_syncer_secret_refusal_keeps_previous_document(tmp_path):
+    import pytest
+
+    from mnemostack.ingest_policy import IngestPolicyError
+
+    store = _mem_store()
+    syncer = MarkdownSyncer(store, _FakeProvider(), index_root=str(tmp_path),
+                            chunk_size=10000, secret_policy="block")
+    path = tmp_path / "note.md"
+    path.write_text("# Note\nOrdinary content.\n")
+    syncer.index_file(path)
+    before = [(str(h.id), h.payload) for h in store.scroll()]
+    path.write_text("# Note\n" + "gh" + "p_" + "test" + "Ab7cDe9f" * 4)
+    with pytest.raises(IngestPolicyError):
+        syncer.index_file(path)
+    assert [(str(h.id), h.payload) for h in store.scroll()] == before

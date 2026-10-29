@@ -1134,7 +1134,7 @@ class _RememberEmbedding:
         return [self.embed(t) for t in texts]
 
 
-def _remember_mcp(tmp_path, monkeypatch, *, scopes="read,write", tenant="alpha"):
+def _remember_mcp(tmp_path, monkeypatch, *, scopes="read,write", tenant="alpha", secret_policy="off"):
     """MCP server with a REAL in-memory vector store behind the remember tool."""
     from qdrant_client import QdrantClient
 
@@ -1160,6 +1160,7 @@ def _remember_mcp(tmp_path, monkeypatch, *, scopes="read,write", tenant="alpha")
         auth_enabled=True,
         api_key=key,
         keys_file=str(ks),
+        secret_policy=secret_policy,
     )
     return mcp, store, emb
 
@@ -1178,6 +1179,17 @@ def test_mcp_remember_stores_under_the_key_tenant(tmp_path, monkeypatch):
     point = store.client.retrieve(store.collection, ids=[pid], with_payload=True)[0]
     assert point.payload["tenant_id"] == "alpha"  # tenant from the process KEY
     assert point.payload["k"] == "v"
+
+
+@pytest.mark.parametrize("invalid", [False, True])
+def test_mcp_secret_policy_prevents_embedding_and_validation_echo(tmp_path, monkeypatch, caplog, invalid):
+    mcp, store, emb = _remember_mcp(tmp_path, monkeypatch, secret_policy="block")
+    token = "gh" + "p_" + "test" + "Ab7cDe9f" * 4
+    args = {"text": [token] if invalid else token, "source": "fixture"}
+    result = asyncio.run(mcp.call_tool("mnemostack_remember", args)).structured_content
+    assert result == {"ok": False, "error": "ingest blocked by secret policy", "error_kind": "ingest_policy"}
+    assert store.count() == 0 and not emb.embedded
+    assert token not in caplog.text
 
 
 def test_mcp_remember_duplicates_cost_no_embedding(tmp_path, monkeypatch):

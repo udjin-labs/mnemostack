@@ -77,6 +77,7 @@ from mnemostack.ingest import (
     validate_remote_source,
     validate_remote_triple,
 )
+from mnemostack.ingest_policy import IngestPolicyError, SecretPolicy
 from mnemostack.llm import get_llm
 from mnemostack.observability.recorder import (
     InMemoryRecorder,
@@ -836,8 +837,10 @@ class ServerConfig:
     quantization_rescore: bool | None = None
     quantization_oversampling: float | None = None
     hnsw_ef: int | None = None
+    secret_policy: str = "off"
 
     def __post_init__(self) -> None:
+        SecretPolicy(self.secret_policy)
         # A blank tenant is no tenant: "" would stamp writes with an empty
         # tenant_id, match nothing on reads, and slip past the startup gate.
         from mnemostack.config import normalize_tenant
@@ -899,6 +902,7 @@ class ServerConfig:
             timestamp_format=cfg.recall.timestamp_format,
             text_search=cfg.recall.text_search,
             resolve_roots=_resolve_roots_env(),
+            secret_policy=cfg.ingest.secret_policy,
         )
 
 
@@ -1052,6 +1056,7 @@ def _prometheus_dump(rec: InMemoryRecorder) -> str:
 
 def build_app(config: ServerConfig | None = None) -> FastAPI:
     cfg = config or ServerConfig.from_env()
+    ingest_policy = SecretPolicy(cfg.secret_policy)
 
     # Install a process-wide in-memory recorder so /metrics has something
     # to show. Safe to replace an existing one — the old counters are simply
@@ -1416,6 +1421,9 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error_handler(request, exc):  # noqa: ANN001 — FastAPI signature
+        route_path = getattr(request.scope.get("route"), "path", None)
+        if cfg.secret_policy == "block" and route_path in ("/memories", "/triples"):
+            return JSONResponse(status_code=422, content={"detail": "invalid ingest request"})
         # The default 422 renderer echoes the raw offending input into the
         # response body; a lone surrogate in it (valid JSON escape) crashes
         # the UTF-8 response encoder — the client would see a bare 500 for
@@ -1913,6 +1921,11 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         # text/timestamp keys are reserved too — metadata must not shadow
         # what recall actually reads.
         schema_reserved = {cfg.text_key, cfg.timestamp_key} - {"text", "timestamp"}
+        try:
+            for item in req.items:
+                ingest_policy.check((item.text, item.source, item.metadata, item.tags, item.timestamp))
+        except IngestPolicyError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
         for i, item in enumerate(req.items):
             problem = validate_remote_item(
                 item.text,
@@ -1970,7 +1983,10 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 text_key=cfg.text_key,
                 timestamp_key=cfg.timestamp_key,
                 timestamp_format=cfg.timestamp_format,
+                secret_policy=cfg.secret_policy,
             )
+        except IngestPolicyError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
         except QuotaExceededError as exc:
             if tenant is not None:
                 counter("mnemostack.tenant.quota_rejected", labels={"tenant": tenant})
@@ -2022,6 +2038,11 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         # Input validation FIRST (a 400 the caller can fix), availability
         # second (a 503 the operator owns). Contract shared with the MCP
         # graph tool via validate_remote_triple.
+        try:
+            for t in req.triples:
+                ingest_policy.check((t.subject, t.predicate, t.object, t.valid_from, t.valid_until))
+        except IngestPolicyError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
         for i, t in enumerate(req.triples):
             problem = validate_remote_triple(
                 t.subject, t.predicate, t.object, t.valid_from, t.valid_until

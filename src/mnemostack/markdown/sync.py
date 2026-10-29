@@ -174,6 +174,7 @@ def upsert_markdown_chunks(
     tenant: str | None = None,
     before_upsert: Callable[[int, set[str]], None] | None = None,
     embedding_batch_size: int = 64,
+    secret_policy: str = "off",
 ) -> ChunkSyncResult:
     """Embed & upsert new chunks; refresh payloads of already-indexed ones.
 
@@ -230,6 +231,12 @@ def upsert_markdown_chunks(
             "embedding space changed mid-sync (the model tag was repointed "
             "or became unresolvable) — aborting before any mixed-space write"
         )
+
+    from ..ingest_policy import SecretPolicy
+
+    policy = SecretPolicy(secret_policy)
+    for _cid, text, payload in chunks:
+        policy.check((text, payload))
 
     def _embed_group(
         group: list[tuple[str, str, dict]],
@@ -422,6 +429,7 @@ class MarkdownSyncer:
         tenant: str | None = None,
         max_points_resolver: Callable[[], int | None] | None = None,
         embedding_batch_size: int = 64,
+        secret_policy: str = "off",
     ):
         self.store = store
         self.provider = provider
@@ -433,6 +441,9 @@ class MarkdownSyncer:
         # resolver (no limit). Enforced per file in upsert_markdown_chunks.
         self.max_points_resolver = max_points_resolver
         self.embedding_batch_size = embedding_batch_size
+        from ..ingest_policy import SecretPolicy
+
+        self.secret_policy = SecretPolicy(secret_policy)
         # Scopes every store + graph read/write and the chunk-id derivation to one
         # tenant, so a markdown corpus is isolated (and tenant-scoped graph recall
         # can see its :File link nodes). None = unscoped (single-tenant), unchanged.
@@ -488,6 +499,7 @@ class MarkdownSyncer:
             index_root=self.index_root,
             root_dir=self.index_root,
             tenant=self.tenant,
+            secret_policy=self.secret_policy.mode,
         )
         if col.files == 0:
             return FileSyncResult()  # not a .md file / vanished before we read it
@@ -524,6 +536,7 @@ class MarkdownSyncer:
             tenant=self.tenant,
             before_upsert=check,
             embedding_batch_size=self.embedding_batch_size,
+            secret_policy=self.secret_policy.mode,
         )
 
         # Prune chunks this file no longer produces (shrunk / re-chunked). Skip a
@@ -619,6 +632,7 @@ class MarkdownSyncer:
             index_root=self.index_root,
             root_dir=self.index_root,
             tenant=self.tenant,
+            secret_policy=self.secret_policy.mode,
         )
         for src, targets in build_link_map(col, set()).items():
             self.graph.sync_file_links(src, targets, index_root=self.index_root, **self._tkw)

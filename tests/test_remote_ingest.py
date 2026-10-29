@@ -243,6 +243,54 @@ def test_remote_ingest_quota_never_splits_a_multi_flush_request():
 # ------------------------------------------------------------- HTTP surface
 
 
+def test_secret_policy_blocks_whole_request_before_chunking(monkeypatch, tmp_path, caplog):
+    token = "gh" + "p_" + "test" + "Ab7cDe9f" * 4
+    app, store, emb, keys = _ingest_app(monkeypatch, tmp_path, cfg_extra={"secret_policy": "block"})
+    client = TestClient(app)
+    # The token crosses the fixed character boundary; inspecting chunks alone misses it.
+    text = "a" * (REMOTE_CHUNK_SIZE - 10) + " " + token
+    for key in (keys["write"], keys["beta_write"]):
+        response = client.post("/memories", headers={"X-API-Key": key}, json={"items": [
+            {"text": "safe"}, {"text": text, "source": "doc.md", "chunk": True},
+        ]})
+        assert response.status_code == 422
+        assert response.json() == {"detail": "ingest blocked by secret policy"}
+    assert emb.embedded == [] and store.count() == 0
+    assert token not in caplog.text
+
+
+def test_secret_policy_blocks_metadata_and_graph_without_echo(monkeypatch, tmp_path):
+    token = "gh" + "p_" + "test" + "Ab7cDe9f" * 4
+    app, store, emb, keys = _ingest_app(monkeypatch, tmp_path, cfg_extra={"secret_policy": "block"})
+    client = TestClient(app)
+    headers = {"X-API-Key": keys["write"]}
+    r = client.post("/memories", headers=headers, json={"items": [{"text": "safe", "metadata": {"nested": [token]}}]})
+    assert r.status_code == 422 and token not in r.text
+    r = client.post("/triples", headers=headers, json={"triples": [{"subject": token, "predicate": "uses", "object": "service"}]})
+    assert r.status_code == 422 and token not in r.text
+    assert not emb.embedded and store.count() == 0
+
+
+@pytest.mark.parametrize("prefix", ["", "/api"])
+@pytest.mark.parametrize("route", ["/memories", "/triples"])
+def test_secret_policy_does_not_echo_invalid_body(monkeypatch, tmp_path, prefix, route):
+    from fastapi import FastAPI
+
+    token = "gh" + "p_" + "test" + "Ab7cDe9f" * 4
+    app, store, emb, keys = _ingest_app(monkeypatch, tmp_path, cfg_extra={"secret_policy": "block"})
+    if prefix:
+        parent = FastAPI()
+        parent.mount(prefix, app)
+        app = parent
+    body = {"items": [{"text": [token]}]} if route == "/memories" else {
+        "triples": [{"subject": [token], "predicate": "uses", "object": "service"}],
+    }
+    response = TestClient(app).post(prefix + route, headers={"X-API-Key": keys["write"]}, json=body)
+    assert response.status_code == 422
+    assert response.json() == {"detail": "invalid ingest request"}
+    assert token not in response.text and not emb.embedded and store.count() == 0
+
+
 def _ingest_app(monkeypatch, tmp_path, *, auth=True, quotas=None, cfg_extra=None, llm=None):
     """Build the app with real ingest wiring (in-memory store + counting
     embedder) and the recall layers stubbed out."""

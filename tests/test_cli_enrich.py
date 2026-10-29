@@ -82,6 +82,20 @@ def _patch_stack(monkeypatch, store, provider=None):
     return provider
 
 
+def test_secret_policy_blocks_before_enrich_and_recreate(tmp_path, monkeypatch, store):
+    from mnemostack.ingest_policy import IngestPolicyError
+
+    provider = _patch_stack(monkeypatch, store)
+    store.upsert(stable_chunk_id("existing", 0, "safe"), VEC, {"text": "safe"})
+    enriched = []
+    monkeypatch.setattr(cli, "_load_enricher", lambda _: lambda item: enriched.append(item))
+    (tmp_path / "note.md").write_text("gh" + "p_" + "test" + "Ab7cDe9f" * 4)
+    with pytest.raises(IngestPolicyError):
+        cli.cmd_index(_args(tmp_path, secret_policy="block", enrich="fixture:hook", recreate=True, yes=True))
+    assert provider.embed_calls == 0 and not enriched
+    assert store.count() == 1
+
+
 def test_set_payload_merges_without_touching_vector(store):
     pid = stable_chunk_id("a.md", 0, "hello")
     store.upsert(pid, VEC, {"text": "hello", "source": "a.md", "offset": 0})

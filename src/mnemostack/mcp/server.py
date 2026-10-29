@@ -153,6 +153,7 @@ def build_server(
     quantization_oversampling: float | None = None,
     hnsw_ef: int | None = None,
     transport: str = "stdio",
+    secret_policy: str = "off",
 ) -> Any:
     """Build and return a configured FastMCP server.
 
@@ -212,6 +213,9 @@ def build_server(
     # Fail a schema-key misconfiguration at BOOT (HTTP does the same) —
     # a bad text/timestamp key must not 500 every remember call instead.
     ensure_remote_schema_keys(text_key, timestamp_key)
+    from ..ingest_policy import IngestPolicyError, SecretPolicy
+
+    ingest_policy = SecretPolicy(secret_policy)
     if timestamp_format not in ("iso", "epoch", "epoch_ms"):
         # HTTP fails a typo'd format loud at boot (eager TemporalRetriever);
         # MCP builds retrievers lazily, so an unvalidated format could reach
@@ -1067,6 +1071,10 @@ def build_server(
             # The deployment's configured schema keys are reserved too —
             # metadata must not shadow what recall actually reads.
             schema_reserved = {text_key, timestamp_key} - {"text", "timestamp"}
+            try:
+                ingest_policy.check((text, source, timestamp, tags, metadata))
+            except IngestPolicyError as e:
+                return {"ok": False, "error": str(e), "error_kind": "ingest_policy"}
             problem = validate_remote_item(
                 text,
                 source,
@@ -1126,7 +1134,10 @@ def build_server(
                     text_key=text_key,
                     timestamp_key=timestamp_key,
                     timestamp_format=timestamp_format,
+                    secret_policy=secret_policy,
                 )
+            except IngestPolicyError as e:
+                return {"ok": False, "error": str(e), "error_kind": "ingest_policy"}
             except QuotaExceededError as e:
                 return {"ok": False, "error": str(e), "error_kind": "quota_exceeded"}
             except EmbeddingSpaceError as e:
@@ -1323,6 +1334,10 @@ def build_server(
                 )
                 if problem:
                     return {"ok": False, "error": problem, "error_kind": "invalid_argument"}
+                try:
+                    ingest_policy.check((subject, predicate, obj, valid_from, valid_until))
+                except IngestPolicyError as e:
+                    return {"ok": False, "error": str(e), "error_kind": "ingest_policy"}
                 from ..graph.factory import make_graph_store
 
                 gs = make_graph_store(
@@ -1346,6 +1361,30 @@ def build_server(
                 # error_kind on every failure shape, mirroring remember.
                 return {"ok": False, "error": str(e), "error_kind": "error"}
 
+    if secret_policy == "block":
+        from fastmcp.server.middleware import Middleware
+        from fastmcp.tools import ToolResult
+
+        class _SecretIngressMiddleware(Middleware):
+            async def on_call_tool(self, context: Any, call_next: Any) -> Any:
+                if context.message.name in ("mnemostack_remember", "mnemostack_graph_add_triple"):
+                    # Check before FastMCP validates arguments: validation errors
+                    # otherwise echo raw values into framework logs/responses.
+                    try:
+                        _authorize("write")
+                    except _AuthError as exc:
+                        return ToolResult(structured_content={
+                            "ok": False, "error": str(exc), "error_kind": "unauthorized",
+                        })
+                    try:
+                        ingest_policy.check(context.message.arguments)
+                    except IngestPolicyError as exc:
+                        return ToolResult(structured_content={
+                            "ok": False, "error": str(exc), "error_kind": "ingest_policy",
+                        })
+                return await call_next(context)
+
+        mcp.add_middleware(_SecretIngressMiddleware())
     return mcp
 
 
@@ -1404,6 +1443,7 @@ def main() -> None:
         text_key=cfg.recall.text_key,
         timestamp_key=cfg.recall.timestamp_key,
         timestamp_format=cfg.recall.timestamp_format,
+        secret_policy=cfg.ingest.secret_policy,
         text_search=cfg.recall.text_search,
         resolve_roots=[
             p for p in os.environ.get("MNEMOSTACK_RESOLVE_ROOTS", "").split(os.pathsep) if p

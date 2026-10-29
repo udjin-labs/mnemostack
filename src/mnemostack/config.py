@@ -327,12 +327,18 @@ class RecallConfig:
 
 
 @dataclass
+class IngestConfig:
+    secret_policy: str = "off"
+
+
+@dataclass
 class Config:
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     vector: VectorConfig = field(default_factory=VectorConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     graph: GraphConfig = field(default_factory=GraphConfig)
     recall: RecallConfig = field(default_factory=RecallConfig)
+    ingest: IngestConfig = field(default_factory=IngestConfig)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -393,6 +399,9 @@ class Config:
 
         # 2. Env vars (MNEMOSTACK_*)
         cfg = _apply_env_overrides(cfg)
+        from .ingest_policy import SecretPolicy
+
+        SecretPolicy(cfg.ingest.secret_policy)
 
         # A configured budget of 0 or less means "no budget", not a broken
         # deployment: apply_token_budget requires >= 1, so passing a bad
@@ -526,11 +535,14 @@ def _apply_env_overrides(cfg: Config) -> Config:
         MNEMOSTACK_TIMESTAMP_KEY    (payload key holding the timestamp)
         MNEMOSTACK_TIMESTAMP_FORMAT (iso | epoch | epoch_ms)
         MNEMOSTACK_TEXT_SEARCH      (auto | off | bm25 | native_bm25 | sparse)
+        MNEMOSTACK_SECRET_POLICY    (off | block; ingest secret-format checks)
         MNEMOSTACK_QDRANT_HOST  (alias for VECTOR_HOST)
         MNEMOSTACK_COLLECTION   (alias for VECTOR_COLLECTION)
         MNEMOSTACK_MEMGRAPH_URI (alias for GRAPH_URI)
     """
     env = os.environ
+    if "MNEMOSTACK_SECRET_POLICY" in env:
+        cfg.ingest.secret_policy = env["MNEMOSTACK_SECRET_POLICY"]
 
     # Embedding
     embedding_provider = (
@@ -683,6 +695,9 @@ llm:
   model: null             # null = provider default (gemini-2.5-flash)
   host: null              # ollama: null = inherit embedding.ollama_host; openai: required base URL
   timeout: null           # LLM request seconds; null = provider default (not inherited)
+
+ingest:
+  secret_policy: "off"     # opt-in format checks before ingest: off | block
 
 graph:
   uri: null               # e.g. bolt://localhost:7687 to enable graph

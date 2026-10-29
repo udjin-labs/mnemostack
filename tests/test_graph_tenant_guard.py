@@ -384,7 +384,7 @@ def test_extract_and_store_writes_into_the_tenant_subgraph():
         def add_triple(self, **kw):
             calls.append(kw)
 
-    ex = TripleExtractor.__new__(TripleExtractor)
+    ex = TripleExtractor(llm=None)  # extract is stubbed below; no model is called
     ex.extract = lambda _text: [Triple(subject="a", predicate="uses", obj="b")]
     ex.extract_and_store("text", _Graph(), tenant="t1")
     ex.extract_and_store("text", _Graph())
