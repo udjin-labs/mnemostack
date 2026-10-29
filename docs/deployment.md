@@ -8,7 +8,7 @@ The main production rule is simple: durable memory must be actually durable. Do 
 
 Mnemostack can run as either:
 
-- an **MCP stdio server** for local agent integrations such as Claude Desktop, Claude Code, Cursor, or other MCP-capable clients; or
+- an **MCP server** using stdio for local integrations or authenticated Streamable HTTP for shared remote access; or
 - an **HTTP server** for applications and services that call `/recall`, `/answer`, `/memories` (remote write: server-side embedding, tenant-stamped; `DELETE /memories` = hard delete for erasure requests), `/invalidate` (non-destructive retraction), `GET /memories` (reconciliation listing), `/triples` (graph write), `/feedback`, `/health` (plus `/healthz` / `/readyz` / `/status` probes), and `/metrics`.
 
 Both modes use the same backing stores:
@@ -536,13 +536,19 @@ Know what it is and isn't:
 
 ### MCP
 
-The MCP server is stdio-based:
+The MCP server uses stdio by default:
 
 ```bash
 mnemostack mcp-serve --provider gemini --collection production-memory
 ```
 
 It should be launched by the local MCP client. It does not need a listening TCP port. Do not wrap MCP stdio in a network service unless you add a proper transport security and auth model.
+
+For shared remote access, use `mnemostack mcp-serve --transport http --auth`.
+This binds to `127.0.0.1:8001/mcp` by default. Each client supplies its own
+Bearer service key; the server does not bind all clients to one process key.
+See [authenticated HTTP MCP](mcp.md#authenticated-http) for TLS, proxy validation,
+client requirements, and the distinction from OAuth connectors.
 
 For multi-tenant use, `mcp-serve --auth` runs the process as one authenticated tenant: launch it with a service key (`--api-key` / `MNEMOSTACK_API_KEY`) that resolves the tenant + scopes for the whole process (the natural fit for how an MCP client passes secrets in its server config). The key is **re-verified on every tool call**, so revoking it stops the data/graph tools immediately; they are scope-gated (`search`/`answer` need `read`, `invalidate`/`feedback` need `write`) and confined to the key's tenant — including the tenant-scoped graph tools. (`mnemostack_health` is public — a liveness check that still responds after the key is revoked, so it isn't a tenant boundary.)
 
@@ -1100,7 +1106,7 @@ Before going live:
 - [ ] Memgraph is either disabled or stored on a persistent volume.
 - [ ] Memgraph is network-isolated or authenticated according to your deployment model.
 - [ ] Mnemostack HTTP is behind TLS and authentication before any external exposure.
-- [ ] MCP is used over stdio only, not exposed as a network service.
+- [ ] MCP uses local stdio, or authenticated HTTP behind an HTTPS proxy with Host and Origin validation.
 - [ ] `GEMINI_API_KEY` and other provider keys are injected as secrets, not committed.
 - [ ] Embedding provider and model are pinned for each collection.
 - [ ] Indexing and serving use the same collection and embedding model.

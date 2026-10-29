@@ -152,6 +152,7 @@ def build_server(
     quantization_rescore: bool | None = None,
     quantization_oversampling: float | None = None,
     hnsw_ef: int | None = None,
+    transport: str = "stdio",
 ) -> Any:
     """Build and return a configured FastMCP server.
 
@@ -172,6 +173,7 @@ def build_server(
         rerank_mode: LLM reranker mode for service parity
         token_budget: default token budget applied to search/answer recall when
             the tool call does not pass one (None = no budget)
+        transport: stdio binds one process key; http requires each request's Bearer key
         reranker: a ready reranker instance used as-is (any object with
             ``rerank(query, results)``). When provided, the server does NOT
             resolve an answer LLM for reranking purposes, so a scoring
@@ -225,7 +227,12 @@ def build_server(
 
     resolve_text_search_mode(text_search, bm25_paths)
 
-    mcp = FastMCP("mnemostack")
+    if transport not in {"stdio", "http"}:
+        raise ValueError("MCP transport must be stdio or http")
+    if transport == "http" and not auth_enabled:
+        raise ValueError("HTTP MCP requires service-key authentication")
+    if transport == "http" and api_key:
+        raise ValueError("HTTP MCP uses each request's Bearer key, not a process API key")
 
     resolved_state_path = state_path or default_state_path()
     # The tool functions take a per-call `token_budget` parameter that
@@ -237,20 +244,41 @@ def build_server(
     # so (unlike HTTP) there is no per-request credential — the server is launched
     # WITH a service key that resolves the tenant + scopes for the whole process.
     # The key is re-verified on every tool call so a mid-session revocation takes
-    # effect immediately (fail closed). Off by default: byte-identical, unscoped.
+    # effect immediately (fail closed). HTTP instead verifies each request's key.
     key_store = None
+    http_auth = None
     if auth_enabled:
         from ..auth import make_key_store
 
         # Backend selected by MNEMOSTACK_KEYSTORE (file default, openbao optional);
         # a selected-but-misconfigured backend raises here (boot fails loud).
         key_store = make_key_store(keys_file)
-        if not api_key:
+        if transport == "stdio" and not api_key:
             raise ValueError(
                 "auth enabled but no service key provided (set --api-key or MNEMOSTACK_API_KEY)"
             )
-        if key_store.verify(api_key) is None:
+        if transport == "stdio" and api_key and key_store.verify(api_key) is None:
             raise ValueError("auth enabled but the provided service key is invalid or revoked")
+        if transport == "http":
+            import asyncio
+
+            from fastmcp.server.auth import AccessToken, TokenVerifier
+
+            class ServiceKeyVerifier(TokenVerifier):
+                async def verify_token(self, token: str) -> AccessToken | None:
+                    assert key_store is not None
+                    principal = await asyncio.to_thread(key_store.verify, token)
+                    if principal is None:
+                        return None
+                    return AccessToken(
+                        token=token,
+                        client_id=principal.key_id or "service-key",
+                        scopes=sorted(principal.scopes),
+                    )
+
+            http_auth = ServiceKeyVerifier()
+
+    mcp = FastMCP("mnemostack", auth=http_auth) if http_auth is not None else FastMCP("mnemostack")
 
     class _AuthError(Exception):
         """Raised inside a tool on an auth failure; the tool's except maps it to a
@@ -258,11 +286,17 @@ def build_server(
 
     def _authorize(scope: str):
         """Principal for an authenticated call, or None when auth is off. Re-verifies
-        the bound key each call (revocation takes effect at once); raises _AuthError
+        the request key or stdio-bound key each call; raises _AuthError
         on a revoked key or insufficient scope."""
         if not auth_enabled:
             return None
-        principal = key_store.verify(api_key) if (key_store and api_key) else None
+        presented_key = api_key
+        if transport == "http":
+            from fastmcp.server.dependencies import get_access_token
+
+            token = get_access_token()
+            presented_key = token.token if token is not None else None
+        principal = key_store.verify(presented_key) if (key_store and presented_key) else None
         if principal is None:
             raise _AuthError("service key invalid or revoked")
         if not principal.can(scope):
