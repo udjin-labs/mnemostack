@@ -6,6 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Add opt-in authenticated Streamable HTTP MCP with per-request service keys,
+  tenant isolation, scope checks, and stateless JSON responses. Stdio remains the default.
+
 - Add informational collection memory estimates to `doctor`, including
   heap RAM, page cache, disk usage, and JSON component counters. Missing
   telemetry warns without changing the diagnostic exit code.

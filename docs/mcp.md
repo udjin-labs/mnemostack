@@ -4,7 +4,37 @@
 
 Mnemostack exposes durable agent memory through MCP tools. Run the MCP server locally, connect it to an MCP-capable client, and your agent can search indexed memories, synthesize answers, record feedback, and, when Memgraph is configured, query or write temporal graph facts.
 
-The server is stdio-based and uses lazy initialization. It can start even before Qdrant, Memgraph, or provider credentials are reachable; component failures are returned as structured JSON from the tools instead of crashing the MCP process.
+The default transport is stdio. An optional authenticated Streamable HTTP transport supports shared remote access. Both use lazy initialization: component failures are returned as structured JSON from the tools.
+
+## Authenticated HTTP
+
+Use FastMCP 3.4.2 or newer, included in the `mcp` extra:
+
+```bash
+mnemostack mcp-serve --transport http --auth --host 127.0.0.1 --port 8001
+```
+
+The endpoint is `/mcp`. Each client sends its own service key in the
+`Authorization: Bearer <service-key>` header. Issue keys with `mnemostack keys add`.
+The key determines the tenant and tool scopes. Revocation is checked on each request and tool call.
+HTTP requires authentication; `--api-key` is reserved for stdio and is rejected in HTTP mode.
+`MNEMOSTACK_API_KEY` does not provide a shared identity in HTTP mode.
+
+The transport uses stateless HTTP requests and JSON responses, without a persistent MCP session.
+Storage, quotas, and feedback state remain persistent; stateless transport does not disable memory.
+Available protocol versions depend on the installed FastMCP version.
+
+Keep the listener on loopback behind an HTTPS proxy for remote use.
+The proxy must validate Host and Origin headers and prevent direct access to the listener.
+Never send service keys over unencrypted remote HTTP.
+
+Clients must support Streamable HTTP and a configured Bearer header.
+This mode is not an OAuth authorization server and does not provide a browser login flow.
+An OAuth-only connector requires a separate integration.
+Direct browser JavaScript also needs an explicit CORS policy at the proxy;
+browser-hosted services that connect from their backend do not need browser CORS.
+
+Stdio commands and client configurations remain unchanged.
 
 ## Installation
 

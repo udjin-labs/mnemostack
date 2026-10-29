@@ -4460,8 +4460,11 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     p_mcp = sub.add_parser(
         "mcp-serve",
         parents=[common],
-        help="Run MCP server (stdio). Requires: pip install 'mnemostack[mcp]'",
+        help="Run MCP server (stdio or authenticated HTTP). Requires: pip install 'mnemostack[mcp]'",
     )
+    p_mcp.add_argument("--transport", choices=["stdio", "http"], default="stdio")
+    p_mcp.add_argument("--host", default="127.0.0.1", help="HTTP MCP listen address")
+    p_mcp.add_argument("--port", type=int, default=8001, help="HTTP MCP listen port")
     p_mcp.add_argument("--llm", default=cfg.llm.provider, help="LLM provider for answer generation")
     p_mcp.add_argument(
         "--llm-model",
@@ -5041,6 +5044,16 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
         )
         return 2
 
+    transport = getattr(args, "transport", "stdio")
+    auth_enabled = args.auth or os.environ.get("MNEMOSTACK_AUTH_ENABLED", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    if transport == "http" and (not auth_enabled or args.api_key):
+        print("error: HTTP MCP requires --auth and client Bearer keys; do not pass --api-key", file=sys.stderr)
+        return 2
+    if transport == "http" and not 1 <= getattr(args, "port", 8001) <= 65535:
+        print("error: HTTP MCP port must be between 1 and 65535", file=sys.stderr)
+        return 2
     _schema_text, _schema_ts, _schema_fmt = _payload_schema()
     mcp = build_server(
         collection=args.collection,
@@ -5069,10 +5082,9 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
         rerank_mode=args.rerank_mode,
         token_budget=_effective_token_budget(args),
         # Honor the env toggles too (parity with serve / the MCP main()).
-        auth_enabled=args.auth
-        or os.environ.get("MNEMOSTACK_AUTH_ENABLED", "").strip().lower()
-        in {"1", "true", "yes", "on"},
-        api_key=args.api_key or os.environ.get("MNEMOSTACK_API_KEY") or None,
+        auth_enabled=auth_enabled,
+        api_key=(args.api_key or os.environ.get("MNEMOSTACK_API_KEY") or None) if transport == "stdio" else None,
+        transport=transport,
         keys_file=args.keys_file,
         # getattr: programmatic callers construct bare Namespaces without
         # every parser default (the tier tests do exactly that).
@@ -5088,7 +5100,13 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
             p for p in os.environ.get("MNEMOSTACK_RESOLVE_ROOTS", "").split(os.pathsep) if p
         ],
     )
-    mcp.run()
+    if transport == "http":
+        mcp.run(
+            transport="http", host=getattr(args, "host", "127.0.0.1"),
+            port=getattr(args, "port", 8001), stateless_http=True, json_response=True,
+        )
+    else:
+        mcp.run()
     return 0
 
 

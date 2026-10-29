@@ -202,6 +202,35 @@ def test_mcp_serve_passes_vector_floor_to_build_server():
     fake_mcp.run.assert_called_once()
 
 
+def test_mcp_http_uses_request_keys_and_stateless_transport(monkeypatch):
+    from mnemostack.config import Config
+
+    monkeypatch.setattr(Config, "load", classmethod(lambda cls: Config()))
+    monkeypatch.setenv("MNEMOSTACK_API_KEY", "fixture-stdio-key")
+    args = build_parser().parse_args(["mcp-serve", "--transport", "http", "--auth", "--port", "8123"])
+    fake_mcp = MagicMock()
+    with patch("mnemostack.mcp.build_server", return_value=fake_mcp) as factory:
+        assert cmd_mcp_serve(args) == 0
+    assert factory.call_args.kwargs["transport"] == "http"
+    assert factory.call_args.kwargs["api_key"] is None
+    assert factory.call_args.kwargs["auth_enabled"] is True
+    fake_mcp.run.assert_called_once_with(
+        transport="http", host="127.0.0.1", port=8123, stateless_http=True, json_response=True,
+    )
+
+
+@pytest.mark.parametrize("flags", [[], ["--auth", "--api-key", "fixture"], ["--auth", "--port", "0"]])
+def test_mcp_http_rejects_unsafe_startup(monkeypatch, flags):
+    from mnemostack.config import Config
+
+    monkeypatch.setattr(Config, "load", classmethod(lambda cls: Config()))
+    monkeypatch.delenv("MNEMOSTACK_AUTH_ENABLED", raising=False)
+    args = build_parser().parse_args(["mcp-serve", "--transport", "http", *flags])
+    with patch("mnemostack.mcp.build_server") as factory:
+        assert cmd_mcp_serve(args) == 2
+    factory.assert_not_called()
+
+
 def test_tier3_more_results_longer_text():
     """Tier 3: up to 10 results, text up to 200 chars."""
     rc, out = _run_search_capture(tier=3, json_out=True)
