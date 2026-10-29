@@ -150,7 +150,13 @@ def recall_flow(
     if apply_floor is not None:
         results = apply_floor(results, recalled)
     if token_budget is not None:
-        results, _ = apply_token_budget(results, token_budget, token_counter)
+        before_budget = results
+        results, used = apply_token_budget(results, token_budget, token_counter)
+        if trace is not None:
+            trace.record_budget(
+                before_budget, results, token_budget, used,
+                recaller=recaller, tenant=tenant, filters=filters,
+            )
     return results
 
 

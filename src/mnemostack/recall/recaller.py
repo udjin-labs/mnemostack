@@ -946,7 +946,13 @@ class Recaller:
         if tenant is not None and trace is not None:
             trace.restrict_to_ids(r.id for r in results)
         if token_budget is not None:
-            results, _ = apply_token_budget(results, token_budget, token_counter)
+            before_budget = results
+            results, used = apply_token_budget(results, token_budget, token_counter)
+            if trace is not None:
+                trace.record_budget(
+                    before_budget, results, token_budget, used,
+                    recaller=self, tenant=tenant, filters=filters,
+                )
         return results
 
     def _recall_once(
