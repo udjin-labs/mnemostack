@@ -455,6 +455,43 @@ def test_search_and_answer_parsers_accept_rerank_mode():
     assert args.rerank_mode
 
 
+@pytest.mark.parametrize("command", ["search", "answer"])
+def test_cli_parsers_accept_required_reranking(command):
+    assert build_parser().parse_args([command, "q", "--require-rerank"]).require_rerank
+    assert not build_parser().parse_args([command, "q"]).require_rerank
+
+
+@pytest.mark.parametrize("failure", ["llm_init", "reranker_init", "fallback", "exception", "success", "raw"])
+def test_required_reranking_cannot_silently_return_a_found_fact(failure, capsys):
+    from mnemostack.cli import _recall_for_cli
+
+    args = argparse.Namespace(require_rerank=True, raw=failure == "raw", llm="fake", memgraph_uri=None)
+    recaller = MagicMock()
+    recaller.recall.return_value = FAKE_RESULTS[:2]
+    recaller.apply_vector_floor_after_rerank.side_effect = lambda res, recalled: res
+    pipeline = MagicMock()
+    pipeline.apply.side_effect = lambda q, res, **kw: res
+    reranker = MagicMock(fallback_keeps_input_object=True)
+    reranker.rerank.side_effect = (RuntimeError("private provider body") if failure == "exception"
+                                  else lambda q, res: res if failure == "fallback" else list(res))
+    with (
+        patch("mnemostack.cli.build_full_pipeline", return_value=pipeline),
+        patch("mnemostack.cli.get_llm", side_effect=RuntimeError("private provider body") if failure == "llm_init" else None),
+        patch("mnemostack.cli.Reranker", side_effect=RuntimeError("private provider body") if failure == "reranker_init" else None,
+              return_value=reranker),
+    ):
+        if failure == "success":
+            assert _recall_for_cli(args, recaller, "fact", 2) == FAKE_RESULTS[:2]
+        else:
+            with pytest.raises(SystemExit) as caught:
+                _recall_for_cli(args, recaller, "fact", 2)
+            assert caught.value.code == 2
+            captured = capsys.readouterr()
+            assert not captured.out
+            assert "private provider body" not in captured.err
+            assert "require-rerank" in captured.err
+
+
 def test_search_filters_flag_threads_to_recall():
     args = argparse.Namespace(
         provider="fake",

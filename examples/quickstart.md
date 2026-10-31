@@ -149,3 +149,33 @@ integration-specific and is not enabled merely by adding this MCP configuration.
 Next: try the [same archive from two local clients](two-local-clients-demo.md), or read the
 [HTTP API and tenant-auth setup](../README.md#http-server-optional) for a service
 with separate consumers.
+
+## Repeatable verification
+
+From a repository checkout, `verify_quickstart.py` automates the CLI commands
+and MCP arguments in this guide. Install the package with its `mcp` extra first.
+Use existing test Qdrant/Ollama services with both models installed:
+
+```bash
+python examples/verify_quickstart.py --run --check-answer --output quickstart-check.json
+```
+
+`--run` explicitly permits model calls and writing a synthetic test collection.
+The script does not install packages, pull models, start services, or change
+server settings. It creates a unique collection, isolates application config
+and local learning state, checks code/source/message ID, and tests two independent
+stdio MCP clients. It repeats indexing, checks that the record count does not
+grow, and confirms both clients still retrieve the same record.
+The script adds `--require-rerank` to CLI search and answer commands. This opt-in
+flag checks the recall trace and exits 2 if reranking is unavailable or falls back.
+Finding the fact cannot hide disabled reranking. Normal CLI calls stay fail-open.
+It records the CLI/backend versions, selected model digests, and guide
+hash. Agent UI behavior, physical remote PCs, and ranking quality are not tested.
+
+The collection is retained by default. `--cleanup` deletes only this run's
+confirmed new collection; it never deletes an existing archive or server.
+Use `--qdrant` and `--ollama-host` for other test endpoints. Optional
+`--embedding-model` and `--llm-model` overrides are recorded as deviations from
+the documented model pair. Reports contain only synthetic evidence IDs and
+status metadata. Choose a new output filename for each run; existing reports
+are not overwritten.
