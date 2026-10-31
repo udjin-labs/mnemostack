@@ -47,6 +47,84 @@ and the full per-QA log in `benchmarks/results/<timestamp>.log`.
 
 ## Runners
 
+### Compare two configurations on your own facts
+
+`own_corpus.py` is a trusted-operator tool for an existing Qdrant collection or,
+preferably, a separate test copy. It never indexes, deletes, records feedback,
+or updates access/IoR state. A tenant selector is not authorization: use credentials
+that already permit reading the intended data. Graph recall, query expansion,
+foreign payload schemas, and file-backed BM25 are outside this first runner.
+Unsupported settings are rejected rather than silently ignored.
+
+Create a JSON list of manually checked queries. Use real stored chunk IDs,
+not source filenames. Reserve separate questions for final verification; repeatedly
+choosing configurations on these questions does not create an independent test.
+
+```json
+[
+  {"query_id": "q1", "query": "What is the workshop pickup code?", "expected_ids": ["aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa"], "category": "fact"},
+  {"query_id": "q2", "query": "An intentionally unsupported question", "expected_ids": [], "category": "negative"}
+]
+```
+
+Optional per-query fields are `filters`, timezone-aware `as_of`, and
+`include_invalidated`. Config files A/B contain supported recall settings,
+not credentials or arbitrary application configuration. For example, compare
+`{"vector": false, "pipeline": "off", "limit": 10}` with
+`{"vector": false, "pipeline": "full", "limit": 10}`:
+
+```bash
+python benchmarks/own_corpus.py --queries questions.json \
+  --config-a a.json --config-b b.json \
+  --qdrant http://127.0.0.1:6333 --collection archive-test \
+  --tenant demo --output comparison.json
+```
+
+This example uses the existing native BM25 text index without models.
+`vector` defaults to true; vector comparisons require explicit
+`--allow-model-calls`, `--provider` and, where needed, `--embedding-model` and
+`--ollama-host`. Query vectors are prepared once in a batch and shared across A/B.
+Their preparation time is separate from retrieval latency, not hidden as free
+end-to-end acceleration. `rerank` defaults to false. Enable it only deliberately;
+it uses an explicitly configured local Ollama LLM (`--llm-model`), the existing
+reranker, and its unchanged 20-candidate window. There is no answer generator or judge.
+
+Both arms use `recall_flow`. Supported settings are `vector`, `text_search`
+(`native_bm25`/`off`), `pipeline` (`full`/`off`), `rerank`, `rerank_mode`, `limit`,
+`token_budget`, `rrf_k`, `vector_floor`, `hnsw_ef`, `freshness_weight`, and
+`access_bonus_max`. Defaults match the corresponding product constructors.
+Collection/model/provider are shared controls, not varied silently between arms.
+
+The JSON report includes per-query ranks, paired gains/losses, hit rate,
+expected-ID recall, MRR, all-expected coverage, latency with sample counts,
+faults versus routine notes, and existing trace/loss reports. Errors contribute
+zero to positive-query metrics instead of disappearing. Empty expected-ID lists
+form a separate negative category; neither empty results nor score prove absence.
+Unknown or foreign expected IDs stay in metric denominators but their identifiers
+and contents are not exported. Query/result text is omitted unless `--include-text`.
+Provider/exception response bodies and endpoint URLs are not exported.
+`ids` and `returned_count` preserve the complete canonical response, including
+any extra vector-floor results. `metrics` uses the configured top-K;
+`returned_metrics` separately covers the complete returned response.
+
+Each query/arm starts with independent empty in-memory learning state. Ranking
+stage time is frozen for the run; relative-date retrieval and external models
+remain external inputs. `--cache-mode cold` starts fresh client components;
+`warm` runs each arm once before timing it. Both use the same prepared query
+vectors. A failed/degraded warm-up is recorded as a failed sample, not timed
+as successfully warm. It remains in quality/error denominators; `timed_n`
+states the latency sample count. Neither mode flushes Qdrant/OS caches or claims fully cold storage.
+A/B order alternates. Tenant-scoped point content/vector hashes are checked
+before and after: a changed corpus invalidates the comparison, but matching
+hashes do not create a transactional snapshot. Use a stable test copy.
+The scan costs work proportional to this tenant's corpus; it is outside query
+latency. Exit codes: 0 completed without faults, 1 corpus drift/query faults,
+2 setup, input, or report-write failure. Saved artifacts can contain private IDs and must not
+be committed or published without an explicit privacy review. Choose a new
+output file for each run; the runner refuses to overwrite an existing report.
+
+### Existing benchmark runners
+
 - `locomo_single.py` — single-variant end-to-end run (what the README numbers
   come from). One pipeline configuration, one pass through the dataset.
 - `locomo_compare.py` — A/B run comparing raw recall vs full pipeline on the
