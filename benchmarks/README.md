@@ -102,6 +102,19 @@ The first three honour `LOCOMO_DATASET` for the dataset path.
 
 ## Synthetic long-horizon results (representative)
 
+Synthetic reports with `metrics_version: 2` include every probe in `mrr`:
+a missing needle contributes zero. Earlier unversioned reports averaged only
+successful probes; that historical statistic is now named `mrr_found_only`.
+Do not compare old `mrr` values with version 2 without recomputing from ranks.
+Existing saved reports are not rewritten. This correction does not change
+LoCoMo results or retrieval behavior.
+
+`search_k` records the actual search depth. Fixed cutoffs beyond it are `null`,
+not measured recall values. Each synthetic query has one expected needle,
+so its historical `recall_at_*` fields are query hit rates; `hit_rate_at_k`
+names that meaning explicitly. They are not multi-document evidence coverage.
+Empty input reports zero probes and zero metrics at measured cutoffs.
+
 Smoke run with 2000 turns / 10 needles on Gemini embeddings + BM25 + RRF
 (no pipeline, no LLM):
 
