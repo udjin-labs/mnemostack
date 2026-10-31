@@ -48,6 +48,7 @@ from .recall import (
     BM25Retriever,
     MemgraphRetriever,
     Recaller,
+    RecallTrace,
     Reranker,
     Retriever,
     TemporalRetriever,
@@ -2045,6 +2046,10 @@ def _recall_for_cli(args: argparse.Namespace, recaller, query: str, limit: int):
     and returns plain fused recall (the historical CLI behavior); filters
     apply on both paths.
     """
+    require_rerank = bool(getattr(args, "require_rerank", False))
+    if require_rerank and getattr(args, "raw", False):
+        print("error: --require-rerank cannot be combined with --raw", file=sys.stderr)
+        raise SystemExit(2)
     filters = _parse_filters(args)
     token_budget = _effective_token_budget(args)
     include_invalidated = bool(getattr(args, "include_invalidated", False))
@@ -2083,8 +2088,11 @@ def _recall_for_cli(args: argparse.Namespace, recaller, query: str, limit: int):
             rerank_mode=getattr(args, "rerank_mode", None) or "relevant_only",
         )
     except Exception:  # noqa: BLE001 — no LLM key: search still works, unranked by LLM
-        pass
-    return recall_flow(
+        if require_rerank:
+            print("error: --require-rerank: reranker unavailable", file=sys.stderr)
+            raise SystemExit(2) from None
+    trace = RecallTrace() if require_rerank else None
+    results = recall_flow(
         recaller,
         query,
         limit,
@@ -2094,7 +2102,12 @@ def _recall_for_cli(args: argparse.Namespace, recaller, query: str, limit: int):
         token_budget=token_budget,
         include_invalidated=include_invalidated,
         as_of=as_of,
+        trace=trace,
     )
+    if trace is not None and (trace.post_rerank is None or any(tag.startswith("reranker:") for tag in trace.degraded)):
+        print("error: --require-rerank: reranking did not succeed", file=sys.stderr)
+        raise SystemExit(2)
+    return results
 
 
 def cmd_invalidate(args: argparse.Namespace) -> int:
@@ -3955,6 +3968,7 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     p_search.add_argument("query", help="Search query text")
     p_search.add_argument("--limit", type=int, default=cfg.recall.top_k, help="Max results")
     p_search.add_argument("--json", action="store_true", help="JSON output")
+    p_search.add_argument("--require-rerank", action="store_true", help="Exit 2 if reranking is unavailable or falls back")
     p_search.add_argument(
         "--bm25-path",
         action="append",
@@ -4157,6 +4171,7 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         "answer", parents=[common], help="Synthesize concise answer from memories"
     )
     p_answer.add_argument("query", help="Question to answer")
+    p_answer.add_argument("--require-rerank", action="store_true", help="Exit 2 if reranking is unavailable or falls back")
     p_answer.add_argument(
         "--limit", type=int, default=cfg.recall.top_k, help="Max memories to consider"
     )
