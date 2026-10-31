@@ -181,21 +181,33 @@ def probe_needles(
     return results
 
 
-def summarise(results: list[ProbeResult]) -> dict:
-    ranks = [r.found_rank for r in results if r.found_rank is not None]
-    def rate_at(k: int) -> float:
+def summarise(results: list[ProbeResult], *, k: int = 20) -> dict:
+    """Summarise all probes, including misses; null means an unmeasured cutoff."""
+    if isinstance(k, bool) or not isinstance(k, int) or k < 1:
+        raise ValueError("search depth k must be a positive integer")
+    if any(r.found_rank is not None and r.found_rank < 1 for r in results):
+        raise ValueError("found ranks must be positive or None")
+    ranks = [r.found_rank for r in results if r.found_rank is not None and r.found_rank <= k]
+
+    def rate_at(cutoff: int) -> float:
         if not results:
             return 0.0
-        return sum(1 for r in results if r.found_rank is not None and r.found_rank <= k) / len(results)
+        return sum(
+            1 for r in results if r.found_rank is not None and r.found_rank <= cutoff
+        ) / len(results)
 
-    mrr = mean([1.0 / r for r in ranks]) if ranks else 0.0
+    mrr = sum(1.0 / rank for rank in ranks) / len(results) if results else 0.0
     latencies = [r.latency_ms for r in results]
     return {
+        "metrics_version": 2,
+        "search_k": k,
         "probes": len(results),
+        "hit_rate_at_k": round(rate_at(k), 4),
         "recall_at_1": round(rate_at(1), 4),
-        "recall_at_5": round(rate_at(5), 4),
-        "recall_at_20": round(rate_at(20), 4),
+        "recall_at_5": round(rate_at(5), 4) if k >= 5 else None,
+        "recall_at_20": round(rate_at(20), 4) if k >= 20 else None,
         "mrr": round(mrr, 4),
+        "mrr_found_only": round(mean(1.0 / rank for rank in ranks), 4) if ranks else 0.0,
         "latency_ms_mean": round(mean(latencies), 1) if latencies else 0.0,
         "latency_ms_p50": round(median(latencies), 1) if latencies else 0.0,
         "latency_ms_max": round(max(latencies), 1) if latencies else 0.0,
@@ -235,7 +247,7 @@ def run_one_scale(turns: int, needles: int, args) -> dict:
     ])
 
     results = probe_needles(recaller, planted, k=args.k)
-    summary = summarise(results)
+    summary = summarise(results, k=args.k)
     summary["turns"] = turns
     summary["needles"] = needles
     summary["collection"] = collection
@@ -267,6 +279,8 @@ def main():
     ap.add_argument("--output", default=None, help="write summary JSON here")
     ap.add_argument("--cleanup", action="store_true", help="drop the collection after the run")
     args = ap.parse_args()
+    if args.k < 1:
+        ap.error("--k must be a positive integer")
 
     steps = [int(s) for s in args.scale_steps.split(",") if s.strip()] if args.scale_steps else [args.turns]
 
@@ -276,6 +290,7 @@ def main():
         all_summaries.append(s)
 
     final = {
+        "metrics_version": 2,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "provider": args.provider,
         "seed": args.seed,
