@@ -824,6 +824,8 @@ def test_bm25_from_qdrant_forwards_timestamp_format():
 def test_doctor_flags_invalid_timestamp_format(monkeypatch, capsys):
     import mnemostack.cli as cli
 
+    # This checks configuration, not reachability or background client probes.
+    monkeypatch.setattr(cli, "_doctor_qdrant", lambda *a, **kw: None)
     monkeypatch.setenv("MNEMOSTACK_TIMESTAMP_FORMAT", "unixtime")
     rc = cli.cmd_doctor(
         argparse.Namespace(

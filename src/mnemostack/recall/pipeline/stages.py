@@ -466,6 +466,24 @@ def compute_access_boost(
     return 1.0 + safe_max * saturation * recency
 
 
+class CalibrateRelevance(Stage):
+    """Map rank-sum relevance to bounded utility before mixing other signals.
+
+    Rank sums have arbitrary units, not probability units. A signed square
+    root preserves their order with diminishing returns, while the pool
+    maximum removes dependence on the number or weight of retrieval arms.
+    Zero evidence stays zero; negative evidence remains negative.
+    """
+
+    def apply(self, context, results):
+        scale = max((abs(r.score) for r in results if math.isfinite(r.score)), default=0.0)
+        if scale > 0:
+            for r in results:
+                if math.isfinite(r.score):
+                    r.score = math.copysign(math.sqrt(abs(r.score) / scale), r.score)
+        return results
+
+
 class FreshnessBlend(Stage):
     """Blend similarity with recency, then reinforce what has been used.
 
@@ -722,6 +740,10 @@ class InhibitionOfReturn(Stage):
 class CuriosityBoost(Stage):
     """Boost old, rarely-recalled memories to encourage exploration.
 
+    ``bonus`` is a fraction of the incoming maximum score magnitude.
+    Eligible memories receive an age-saturated fraction of that bound,
+    reaching half the bound at ``min_age_days`` and approaching it with age.
+
     Uses IOR log as source of truth for recall counts (both stages typically
     share the same state_store).
     """
@@ -755,7 +777,12 @@ class CuriosityBoost(Stage):
         for entry in log:
             counts[str(entry.get("id", ""))] += 1
         now = datetime.now(timezone.utc)
+        # Invalid scores must not become a shared bonus for healthy entries.
+        scale = max((abs(r.score) for r in results if math.isfinite(r.score)), default=0.0)
+        bonus = self.bonus * scale
         for r in results:
+            if not math.isfinite(r.score):
+                continue
             if counts.get(str(r.id), 0) > self.max_recalls:
                 continue
             created = r.payload.get(self.timestamp_key)
@@ -770,13 +797,14 @@ class CuriosityBoost(Stage):
                 else None
             )
             if ts is not None:
-                age_days = (now - ts).days
+                age_days = (now - ts).total_seconds() / 86400
                 if age_days >= self.min_age_days:
-                    r.score += self.bonus
+                    fraction = age_days / (age_days + max(1, self.min_age_days))
+                    r.score += bonus * fraction
                     r.payload["curiosity_boosted"] = True
             elif created is None or created == "":
                 # No date info — half bonus
-                r.score += self.bonus * 0.5
+                r.score += bonus * 0.5
         results.sort(key=lambda x: -x.score)
         return results
 

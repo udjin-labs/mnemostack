@@ -13,6 +13,7 @@ from .base import Pipeline
 from .resurrection import GraphResurrection
 from .stages import (
     DEFAULT_ACCESS_BONUS_MAX,
+    CalibrateRelevance,
     ClassifyQuery,
     CuriosityBoost,
     ExactTokenProtection,
@@ -51,17 +52,20 @@ def build_full_pipeline(
     timestamp_format: str = "iso",
     access_bonus_max: float = DEFAULT_ACCESS_BONUS_MAX,
 ) -> Pipeline:
-    """Build the full 8-stage reranking pipeline.
+    """Build the full reranking pipeline.
 
     Stage order (applied left-to-right):
         1. ClassifyQuery       — determine query_type for downstream stages
         2. ExactTokenRescue    — boost exact-match sources for infra queries
         3. GravityDampen       — penalize results missing query key terms
         4. HubDampen           — penalize highly-connected graph hubs
-        5. FreshnessBlend      — blend similarity with recency
-        6. InhibitionOfReturn  — penalize recently-recalled memories
+        5. CalibrateRelevance  — put rank scores on a bounded utility scale
+        6. QLearningReranker   — blend historically useful source utility
         7. CuriosityBoost      — surface old, rarely-recalled memories
-        8. QLearningReranker   — boost scores from historically-good sources
+        8. FreshnessBlend      — blend similarity with recency
+        9. InhibitionOfReturn  — penalize recently-recalled memories
+        10. ExactTokenProtection — protect strong exact-token vector hits
+        11. GraphResurrection  — optionally add graph neighbours
 
     Args:
         state_store: persistent state for stateful stages. If None, uses
@@ -76,10 +80,7 @@ def build_full_pipeline(
     enable_ior = enable_stateful_stages and enable_ior
     enable_curiosity = enable_stateful_stages and enable_curiosity
 
-    # Stage order mirrors legacy enhanced-recall.py pipeline:
-    #   Gravity → Hub → Q-learning → Curiosity → Freshness → IOR → Protection → Graph
-    # Q-learning applies BEFORE Freshness so BM25/graph results get the
-    # source-utility boost while scores are still in raw RRF range.
+    # Calibration precedes the unit-scale source, exploration and age signals.
     stages = [
         ClassifyQuery(),
         ExactTokenRescue(boost=rescue_boost),
@@ -88,6 +89,9 @@ def build_full_pipeline(
 
     if hub_degrees:
         stages.append(HubDampen(hub_degrees=hub_degrees))
+
+    # Calibrate rank-score units before mixing source, exploration and age utility.
+    stages.append(CalibrateRelevance())
 
     if enable_q_learning:
         stages.append(QLearningReranker(state_store=store))
@@ -155,6 +159,7 @@ def build_stateless_pipeline(
     ]
     if hub_degrees:
         stages.append(HubDampen(hub_degrees=hub_degrees))
+    stages.append(CalibrateRelevance())
     stages.append(
         FreshnessBlend(
             weight=freshness_weight,
