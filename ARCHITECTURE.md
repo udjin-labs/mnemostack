@@ -2,11 +2,11 @@
 
 ## Overview
 
-**mnemostack** is a memory stack for AI agents — durable, structured, semantically searchable memory with knowledge graph and consolidation lifecycle.
+**mnemostack** is an independent memory and retrieval layer for agents and applications: ingestion, configurable hybrid recall, temporal validity and source evidence, plus service controls for separate consumers. Python SDK, CLI, HTTP, and MCP expose these capabilities at different levels of composition. See the [memory model](docs/memory-model.md) for their roles and boundaries.
 
 Built around proven patterns: hybrid retrieval (BM25 + vector + graph), RRF fusion, reranker, inference layer. Pluggable embedding providers so you can run local or cloud.
 
-## Target architecture
+## Module map
 
 ```
 mnemostack/
@@ -14,9 +14,10 @@ mnemostack/
 ├── vector/           # Qdrant operations (indexing, search)
 ├── graph/            # Memgraph/Neo4j operations (temporal knowledge graph)
 ├── recall/           # Unified recall pipeline (BM25 + vector + RRF + rerank + answer)
-├── consolidation/    # Memory lifecycle (decay, promote, summarize)
+├── consolidation/    # Phase orchestrator; health checks and custom phases
 ├── observability/    # Metrics recorder + Prometheus exposition helpers
 ├── mcp/              # Model Context Protocol server
+├── server.py         # HTTP memory service and tenant controls
 └── cli.py            # `mnemostack` command-line tool
 ```
 
@@ -74,22 +75,22 @@ Chunking depends on the ingest surface. The CLI uses deterministic character win
 
 Memgraph (Cypher-compatible) with temporal validity:
 
-- Nodes: `Person`, `Project`, `Decision`, `Event`, `Fact`
-- Edges: `WORKS_ON`, `DECIDED`, `RELATES_TO`, `CAUSES`, `ENABLES`, `PREVENTS`
+- By default, `Entity` nodes hold structured subject/object facts; `File` nodes support file/tag and markdown-link relationships.
+- Triple predicates become validated relationship types (for example `WORKS_ON`); markdown links use `LINKS_TO`. Authenticated operations scope graph data by tenant.
 - Each edge has `valid_from` and `valid_until`; current facts use the explicit `valid_until="current"` marker, and older `NULL` markers are still read as current for compatibility.
 
 ### Recall pipeline (hybrid)
 
 Retrieval and reranking are fail-open: a broken retriever contributes nothing, a failing LLM reranker leaves the pre-rerank order. Query expansion is the exception — it runs before retrieval, and a misconfigured expansion step (`query_expansion=True` without an `expansion_llm`, or a provider error inside `expand_query`) surfaces as an error rather than degrading. Since v0.4.5 those degradations are observable instead of silent: pass a per-call `RecallTrace` to `Recaller.recall(trace=...)` to capture per-retriever ranked lists (with errors and latency), the fused order, the post-rerank order, and stable tags split by meaning: `notes` is the authoritative list of routine stage-did-not-apply signals (`temporal:no_parse` on any query without a parseable date, `<arm>:no_tokens` when a lexical arm's gate finds no usable tokens), while `degraded` carries components that actually fell back (`retriever:<name>:failed`, `reranker:fallback`, `reranker:unavailable`) plus — deprecated until the next major — a back-compat duplicate of the routine tags; a `degraded` entry absent from `notes` is a real fault. The HTTP and MCP surfaces always expose `degraded` and `notes` in responses and offer the full trace opt-in via `include_trace`; the shared `apply_rerank_safe` helper implements the reranker's fail-open contract for all entry points.
 
-Since v0.5.0 every entry point (CLI, HTTP, MCP) ranks through one canonical chain, `recall_flow()`: recall with a 3x candidate pool → ranking pipeline → fail-open rerank → top-K cut → vector-floor → optional token-budget cut (keep the ranked prefix whose total text tokens fit `token_budget`; a hard cap, never overshot). The pipeline is the default everywhere; `--raw` (CLI) or `full_pipeline=false` (HTTP) opt back out to plain fused recall.
+Since v0.5.0 every entry point (CLI, HTTP, MCP) ranks through one canonical chain, `recall_flow()`: recall with a 3x candidate pool → ranking pipeline → fail-open rerank → top-K cut → vector-floor → optional token-budget cut (keep the ranked prefix whose total text tokens fit `token_budget`; a hard cap, never overshot). The serving paths build the pipeline by default; `--raw` (CLI) or `full_pipeline=false` (HTTP) opt back out to plain fused recall. SDK calls compose these parts explicitly: `Recaller.recall()` does not build the full pipeline, and `recall_flow()` defaults to no pipeline or reranker unless supplied.
 
 Query goes through that staged chain:
 
 1. Optional **query expansion** (`Recaller(expansion_llm=...)`) — reformulate the query into multiple variants before retrieval (v0.4.0). Conversational follow-ups can be resolved into standalone questions first with the `rewrite_followup()` helper (the caller supplies the dialog history).
 2. **Parallel retrieval**: Qdrant vector, Temporal vector, optional BM25, optional Memgraph. Optional payload `filters=` apply *inside every retriever* (exact match and `gte`/`lte` ranges, native in Qdrant, mirrored in-process for BM25/MCA via `payload_matches`) — the retrieval-level isolation contract for multi-tenant memory: a source that cannot attribute its results to the filtered scope contributes nothing rather than leak. (Filters are caller-supplied, so they are an isolation *mechanism*, not an authorization boundary; for a server-enforced tenant boundary run `serve --auth` / `mcp-serve --auth`, which resolves the tenant from a service key.)
 3. **Reciprocal Rank Fusion (RRF)** — equal-weight by default; optionally weighted (`reciprocal_rank_fusion(weights=...)`) or per-query-shape adaptive (`Recaller(adaptive_weights=True)`).
-4. **8-stage ranking pipeline** (default on all surfaces since v0.5.0): ClassifyQuery → ExactTokenRescue → GravityDampen → HubDampen → FreshnessBlend → InhibitionOfReturn → CuriosityBoost → QLearningReranker. The final stage and IoR pull from a `StateStore`; `/feedback` (HTTP, CLI, MCP) drives Q-learning updates.
+4. **8-stage ranking pipeline** (default on CLI search/answer and HTTP/MCP serving paths; explicit SDK composition): ClassifyQuery → ExactTokenRescue → GravityDampen → HubDampen → FreshnessBlend → InhibitionOfReturn → CuriosityBoost → QLearningReranker. The final stage and IoR pull from a `StateStore`; `/feedback` (HTTP, CLI, MCP) drives Q-learning updates.
 5. **Graph spreading activation** — optional `GraphResurrection` stage walks 1 hop in Memgraph from RRF seeds (its unattributable additions are dropped under `filters=`).
 6. **LLM reranker** for top-K (`rerank_mode`: `relevant_only` subset or `full_reorder`).
 7. **Inference layer** (Answer mode) — LLM synthesizes a concise factual answer from top memories, with category-aware prompts, specificity resolver, and `cat_3` inference retry on by default. With `retry_with_expansion=True`, low-confidence answers are retried with an expanded query and a HyDE-style hypothetical before giving up. Localization hooks: `prompt_overrides=`, `question_classifier=`, `abstention_text=`; count/list questions get the two-pass batched extract path (`list_extract_mode`, optional `list_finalize="verbatim"`).
@@ -101,14 +102,21 @@ Output:
 
 ### Consolidation / decay
 
-Nightly lifecycle runtime:
+`consolidation.Runtime` is a phase orchestrator: it executes registered `Phase`
+objects in order, records timing and outcomes, and supports `dry_run` and
+`stop_on_error`. Built-in phases are `EmbeddingHealthPhase`, `VectorHealthPhase`,
+and `GraphHealthPhase`; `CallablePhase` wraps application-provided work.
 
-1. Ingest new files into vector store
-2. Extract facts from recent text → update graph
-3. Detect consolidation candidates (repeated patterns, aging items) → summarize into long-term memory
-4. Decay sweep — reduce activation scores for unused memories
-5. Prune orphan graph nodes
-6. Health check
+A scheduled sequence that ingests files, extracts facts, resolves contradictions,
+summarizes, promotes, or forgets memories requires your own phases and scheduler.
+Those tasks are not implemented as a turnkey nightly workflow. The separate
+experimental synthesis API can build entity profiles; it is not automatically
+run by consolidation.
+
+Memory lifecycle operations already exist outside this orchestrator: idempotent
+ingest, root-scoped chunk pruning, payload refresh, stale-fact invalidation,
+validity views, hard deletion, and tenant export/offboarding. See the
+[memory model](docs/memory-model.md#maintain-facts-and-their-evidence).
 
 ### MCP server
 
@@ -117,9 +125,17 @@ Expose mnemostack tools over Model Context Protocol so LLM clients (Claude Deskt
 - `mnemostack_health()` — config + reachability summary
 - `mnemostack_search(query, limit, include_trace, filters)` — hybrid recall through the full ranking chain
 - `mnemostack_answer(query, limit, filters)` — concise answer with confidence + source citations
+- `mnemostack_remember(text, source, ...)` — explicit ingestion with server-side embedding
+- `mnemostack_invalidate(ids, ...)` — mark memories stale without re-embedding
+- `mnemostack_resolve(chunk_id)` — verify a citation against an allowed local source root
 - `mnemostack_feedback(hit_id, signal, query, ...)` — explicit feedback into the stateful pipeline (Q-learning + inhibition-of-return)
 - `mnemostack_graph_query(subject, predicate, obj, as_of)` — point-in-time graph query *(only registered when `--memgraph-uri` is set)*
 - `mnemostack_graph_add_triple(subject, predicate, obj, valid_from, valid_until)` *(only registered when `--memgraph-uri` is set)*
+
+Tool signatures above are abbreviated; optional arguments and auth requirements
+are defined by the server schema. Graph tools are conditional. MCP is one
+interface to the backend, alongside CLI, HTTP, and Python. See [MCP](docs/mcp.md)
+and [source verification](docs/recipes.md#auditing-answer-citations-against-their-sources).
 
 ## Configuration
 
@@ -176,7 +192,7 @@ services:
 - **Pluggable embeddings.** No vendor lock-in. User picks provider; system validates dimension consistency.
 - **Same provider for write and read.** Indexing and querying must use identical embedding model.
 - **Graceful degradation.** If Memgraph is down, retrieval still works with BM25+vector only.
-- **Confidence over certainty.** Recall returns scores and sources; caller decides what to trust.
+- **Evidence and observable retrieval.** Recall returns source-bearing results and optional traces. Response order is authoritative; scores are not calibrated confidence. Citation resolution checks current source support separately.
 
 ## Status
 
@@ -189,9 +205,9 @@ services:
 - [x] LLM reranker
 - [x] Inference layer (answer mode) with category-aware prompts and inference retry
 - [x] Graph client with temporal validity
-- [x] Consolidation runtime
+- [x] Consolidation phase orchestrator (health phases and application-supplied work)
 - [x] CLI
-- [x] MCP server (6 tools)
+- [x] MCP server (search, answer, remember, invalidate, resolve, feedback, health; graph tools when configured)
 - [x] HTTP server with `/metrics` (Prometheus)
 - [x] Streaming `Ingestor` with lazy iterator
 - [x] Sliding-window message chunking (`window_size`) — v0.4.0

@@ -5,29 +5,42 @@
 [![CI](https://github.com/udjin-labs/mnemostack/actions/workflows/ci.yml/badge.svg)](https://github.com/udjin-labs/mnemostack/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-> Self-hosted memory for your agents and applications.
+> Self-hosted memory and retrieval for agents and applications.
 
-Keep useful context beyond a single session. With mnemostack, several authorized agents can query one personal archive, or each consumer can use a separate tenant on shared infrastructure. Index the context you want to retain, then retrieve facts and their sources when an agent or application needs them.
+mnemostack keeps context beyond a session, retrieves relevant evidence, and gives you controls for maintaining and operating that memory. Ingest notes, messages, documents, or application events; search them with configurable hybrid retrieval; track when facts were valid and whether their sources still support them. Run it inside your application or as a service with a separate tenant for each consumer.
+
+The Python SDK, CLI, HTTP API, and MCP server are interfaces to the same memory and retrieval components. Agent integrations decide when to capture or recall context; mnemostack provides the backend and its controls.
+
+## What you can do with it
+
+| Your task | What mnemostack provides | Start here |
+| --- | --- | --- |
+| Keep context across sessions | File indexing and streaming ingestion, deterministic chunk IDs, structured markdown, and enrichment hooks | [Ingestion](#streaming-ingest-api) |
+| Find evidence that fits the question | Vector, lexical, temporal, and optional graph retrieval; fusion, ranking, reranking, and token budgets | [Retrieval design](#architecture) |
+| Maintain facts as they change | Invalidation, validity intervals and `as_of` reads, source metadata, and citation resolution against current files | [Memory lifecycle](docs/memory-model.md#maintain-facts-and-their-evidence) |
+| Understand a missed result | Per-retriever and per-stage traces, explicit fallback tags, and `RecallTrace.loss_report(expected_ids)` | [Diagnosis and feedback](docs/memory-model.md#inspect-retrieval-before-tuning-it) |
+| Operate memory for different consumers | Service-key scopes, tenant isolation across vector/graph/learning state, quotas, metering, export, and offboarding | [Service operations](docs/deployment.md#security) |
+
+These capabilities have different activation points. The [memory model and boundaries](docs/memory-model.md) distinguish shipped interfaces, optional settings, and SDK components that your application assembles.
 
 ## Start with your own context
 
-A personal messenger archive can be a source that several of your agents query from different PCs. Index the archive once, then let each authorized agent retrieve facts and their sources from the same backend. See the [synthetic archive walkthrough for two local clients](examples/two-local-clients-demo.md) for a concrete example and the connection prerequisites.
+- **OpenClaw memory:** retain existing notes and connect recall through the [companion plugin](#openclaw-auto-recall-companion-plugin) or an [existing recall entry point](#install-for-an-openclaw-style-agent). The companion adds retrieved context to the agent prompt; ingestion remains a separate operation.
+- **One personal archive, several agents:** index a messenger export once and let your authorized agents query the same backend. The [two-local-client walkthrough](examples/two-local-clients-demo.md) rehearses shared reads; access from different PCs needs a protected connection to that backend. It does not configure automatic messenger capture or synchronization.
+- **Local memory for a Hermes agent:** use a local mnemostack backend through the agent's memory integration. The separate `hermes-mnemostack` provider is listed in the [integration roadmap](#roadmap); its installation and capture behavior belong to that integration, not to the core quickstart.
+- **Workplace infrastructure:** serve multiple applications or agents from one deployment, with **a separate tenant for each consumer**. Use [service-key authentication](#http-server-optional) to enforce ownership. Sharing the infrastructure does not imply sharing their context.
 
-Other uses include durable memory for an OpenClaw agent, local memory for a Hermes agent, and workplace infrastructure where each consumer has its own tenant. Sharing an archive and sharing infrastructure are different arrangements: separate workplace tenants keep each consumer's context scoped to that consumer.
+The same interfaces also support document RAG, code search, personal knowledge bases, and time-aware application retrieval.
 
-The same engine also supports RAG over mixed corpora, per-user knowledge stores, and time-aware search backends. Use it as a Python library, an HTTP service, or an MCP server, depending on how your agents and applications connect.
+<a id="quickstart-agent-memory-over-mcp"></a>
 
-**Choose a starting point:**
+## Quickstart: index, retrieve, inspect
 
-- **Individual agent users:** follow the [local quickstart](examples/quickstart.md) to index a synthetic message, retrieve a fact with its source, and connect an MCP client. For OpenClaw, see the [companion plugin](#openclaw-auto-recall-companion-plugin) and [existing-memory setup](#install-for-an-openclaw-style-agent).
-- **Several agents using one personal archive:** use the [two-local-client walkthrough](examples/two-local-clients-demo.md). Using two actual PCs is a separate verification step requiring an existing protected connection to the same backend.
-- **Service operators with separate consumers:** start with the [HTTP API and tenant authentication](#http-server-optional) and [deployment guide](docs/deployment.md). Caller-supplied filters alone are not an access-control boundary.
+Follow the [local quickstart](examples/quickstart.md) to index one synthetic message with Ollama and Qdrant, retrieve its fact and filename, and optionally generate an answer or connect an MCP client. It keeps one collection and embedding model throughout. The explicitly tested `full_reorder` setting is a configuration workaround for the selected LLM, not a change to the default reranker.
 
-**Under the hood:**
+Choose the [interface](#interfaces) your application needs after the first retrieval works. Connecting tools alone does not make an agent capture messages or query memory automatically.
 
-`mnemostack` is a durable retrieval layer over your own Qdrant (and optional Memgraph): semantic, keyword (BM25), temporal, and graph recall, fused with Reciprocal Rank Fusion and refined by an 8-stage ranking pipeline, with payload filters for multi-tenant isolation, optional LLM answer synthesis (confidence + citations), and an ingest path that enriches and projects structured fields. One `recall(query)` call, usable as a Python library, an HTTP service, or an MCP server.
-
-**Status:** Actively developed — public API is stable; new functionality lands additively in minor releases. Breaking changes are rare and called out in [CHANGELOG.md](CHANGELOG.md).
+**Status:** Actively developed. See the [API stability guide](docs/api-stability.md) for stable contracts versus experimental components, and [CHANGELOG.md](CHANGELOG.md) for release changes.
 
 **Upgrading to 3.0:** Qdrant 1.20+ is required. The `lexical` and
 `qdrant_bm25` text-search modes and `recall.text_search_fields` were removed.
@@ -36,93 +49,69 @@ collection configuration, and set `recall.text_search: native_bm25`.
 See [the 3.0.0 changelog](CHANGELOG.md#300---2026-10-28) for Python API removals
 and the new LLM options environment variable.
 
-## Quickstart: agent memory over MCP
-
-Follow the [local quickstart](examples/quickstart.md) for prerequisites and a complete Ollama example using one collection throughout. It covers installation, indexing, search with source evidence, optional answer generation, and an MCP client configuration.
-
-The MCP server provides `mnemostack_search`, `mnemostack_answer`, and `mnemostack_remember`, alongside graph and memory lifecycle tools. Connecting a client makes tools available; when the agent calls them depends on that client's configuration. Index existing files explicitly, or use the remember tool or the [streaming Ingestor API](#streaming-ingest-api) for writes from your application.
-
-Building a service instead? Use the [HTTP API or Python library](#three-ways-to-use-mnemostack) with the same storage and retrieval components.
-
 ## Why hybrid memory?
 
-Vector search answers "what sounds similar?" Real retrieval over a growing corpus needs to answer "what actually matters for this query?" — which takes exact matches, semantic similarity, relationship tracking, recency, user/project scope, and feedback from past recalls. Mnemostack uses hybrid retrieval so recall is reliable instead of embedding roulette. (Agent memory is the most demanding version of this problem, which is why it's the flagship use case.)
+A useful memory query may depend on an exact identifier, a paraphrased decision, a date, or a relationship. Configurable retrieval sources let you combine these signals instead of relying on a single nearest-vector lookup. Traces and source evidence help you check whether the configured path found what your application needed.
 
 ## Use cases
 
-**Agent and chatbot memory (flagship):**
+Use mnemostack when retaining context also requires retrieving, updating, or operating it: agent memory across restarts, a personal archive queried by several clients, grounded answers over documents, or a service with isolated consumers. Choose the corpus, ownership boundary, and ingestion path explicitly. The [memory model](docs/memory-model.md) explains how those choices relate.
 
-- Long-running coding agents that need to survive compaction and session restarts.
-- Chat assistants and conversational bots that remember a user's earlier messages, preferences, and decisions across sessions — scope each user's memory with payload `filters` so one user never sees another's history.
-- Personal assistant memory for preferences, recurring tasks, and long-horizon context.
-- Multi-agent context sharing through one durable memory backend.
-- Session compaction recovery when the useful details no longer fit in the prompt.
+<a id="three-ways-to-use-mnemostack"></a>
 
-**Beyond agents — the same engine as a retrieval backend:**
+## Interfaces
 
-- A searchable knowledge base in memory: ingest your docs/notes/FAQ once, then serve hybrid search or grounded `answer()` (with confidence and source citations) over it from the CLI, HTTP, or library.
-- RAG over mixed corpora (code, docs, transcripts) where exact-token and temporal recall beat pure vector similarity.
-- Multi-tenant or per-user knowledge stores — payload `filters` isolate each tenant's data inside every retriever, or enable **service-key auth** (`serve --auth`) for a hard, key-resolved tenant boundary with optional per-tenant quotas (see the [HTTP API](#http-server-optional)).
-- Time-aware search and knowledge bases — "what changed last week", point-in-time graph facts, freshness-weighted ranking.
-- Team or project knowledge recall across docs, notes, tickets, and chat history.
+| Interface | Use it when | Entry point |
+| --- | --- | --- |
+| Python SDK | Your application owns ingestion and composes retrieval components | [Python API](#python-api), [streaming ingest](#streaming-ingest-api) |
+| CLI | You import, query, inspect, or maintain a corpus from scripts or a terminal | [Local quickstart](examples/quickstart.md), [CLI reference](docs/api-stability.md#cli) |
+| HTTP API | Applications in any language need a running memory service | [HTTP server](#http-server-optional), [deployment](docs/deployment.md) |
+| MCP | An agent client needs memory tools in its existing tool protocol | [MCP guide](docs/mcp.md), [host integrations](integrations/README.md) |
 
-## Three ways to use Mnemostack
-
-1. **MCP server — for agent users.** Start `mnemostack mcp-serve`, connect your agent, and use memory tools from the chat/runtime you already use.
-2. **HTTP API — for app developers.** Run `mnemostack serve` and call `/recall`, `/answer`, `/feedback`, the memory write/lifecycle endpoints (`/memories`, `/invalidate`, `/triples`), `/health`, `/metrics`, or `/docs` from any language.
-3. **Python SDK — for library users.** Compose retrievers, stores, rerankers, graph tools, and the streaming ingest API inside your own Python application.
+SDK composition is explicit: `Recaller.recall()` does not automatically build the serving surfaces' full ranking pipeline. CLI search/answer, HTTP, and MCP use the shared `recall_flow()` chain with their configured components. See [defaults and composition](docs/memory-model.md#choose-the-interface-and-components).
 
 ## Architecture
 
 ### Mental model
 
-Think of it as a storage hierarchy for agent memory:
+Your application or agent keeps its current working context. mnemostack keeps the corpus you explicitly ingest and returns selected evidence when called. Qdrant holds vectors and payloads, optional Memgraph holds temporal relationships, and the ranking state store holds feedback separately from the corpus. An integration decides what to write, when to query, and how to use the results.
 
-- **Context window = RAM.** Fast, limited (typically 100K–200K tokens for many agent models; larger windows exist, but usable working context is often much smaller after tools, instructions, MCP output, and context rot — ~45K usable tokens on a 200K window is a realistic working number in long-running agent sessions. Clears on session restart.
-- **mnemostack corpus = Disk.** Persistent, searchable, grows forever — every fact the agent has ever seen, queryable on demand.
-- **`recall(query)` = page fault handler.** When the agent needs something that isn't in the current context, it pulls the exact fact from storage with a single hybrid query — not a grep, not a reload of the whole corpus.
-
-The practical effect: you stop re-explaining your project to the agent after every `/compact`. You stop losing momentum to the re-orientation tax that shows up in any agent with session compaction. mnemostack solves it at the library level, not tied to any single agent runtime.
+Retention, retrieval, and correction are separate actions: storing a fact does not guarantee it will rank first, and marking it stale does not erase it. That separation lets you inspect recall, preserve historical validity, and choose explicit removal policies.
 
 ### How it works, in one paragraph
 
-On each `recall(query)`: the configured retrievers (Vector and Temporal by default, with BM25 and Memgraph when configured) run in parallel and return ranked lists. Reciprocal Rank Fusion merges them. The optional 8-stage pipeline can reweight results using query classification, exact-token rescue, gravity/hub dampening, freshness, inhibition-of-return, curiosity boosts, Q-learning weights supplied through its state store, and graph resurrection. An optional LLM reranker does a final ordering pass. You get a list of `RecallResult` with source, score, and provenance — ready to hand to a model. The list order is authoritative: `score` has no single scale — many stages and fallback paths write it, and a rerank changes the order without rewriting the numbers — so re-sorting by them undoes it. It is not a similarity, not a confidence, and not comparable across queries; see [what `score` is not](docs/api-stability.md#what-score-is-not).
+Configured retrievers collect candidates from vector, lexical, temporal, and optional graph sources. Reciprocal Rank Fusion combines their ranked lists. The ranking pipeline can adjust the result using exact tokens, freshness, and feedback state; graph resurrection and LLM reranking add further configured steps. The serving chain cuts the final result to the requested limit and optional text-token budget. Answers are an additional LLM synthesis step over retrieved evidence. The response order is authoritative: `score` is not calibrated confidence and need not sort the response. See [the score contract](docs/api-stability.md#what-score-is-not).
 
 ![mnemostack architecture](docs/images/mnemostack-architecture.jpg)
 
 ### Where mnemostack fits
 
-Most memory tools in the agent ecosystem pick one axis and optimize for it: simple vector similarity for RAG, framework-bound memory tied to a specific agent library, platform-level runtimes with audit and compliance features, or CLI wrappers over a single vendor's session store. Each makes sense for its scope.
-
-mnemostack takes a different slice: it is a **recall quality layer**, offered as a plain Python package. Four retrievers (Vector + BM25 + Memgraph + Temporal), RRF fusion, an 8-stage pipeline, and an optional LLM reranker — composed to handle mixed workloads on the same corpus: exact-token lookups, semantic queries, temporal questions, and multi-hop reasoning, without forcing you to choose one mode over another.
-
-We are not a replacement for your agent framework and not a full platform runtime. We are the piece that actually finds the right fact in a growing corpus. Drop mnemostack into your own Python agent or application, or let a higher-level service call `recall()` over a plain function boundary. The retrievers, pipeline, and reranker are individually composable — take only the parts you need.
+mnemostack is an independent memory and retrieval layer. You can embed its components in an application, expose them through a service, or connect an agent integration. Alongside retrieval, it provides explicit memory lifecycle operations and service controls. Your application still owns conversation state, ingestion decisions, domain-specific extraction, and any automatic policy for reconciling conflicting facts.
 
 ### Design
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed design: pipeline stages, Qdrant schema, Memgraph temporal model, consolidation runtime, MCP tools.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for module behavior and the recall chain, [the memory model](docs/memory-model.md) for capabilities and boundaries, and [deployment](docs/deployment.md) for persistence and operations.
 
 ### Storage, index, and retrieval layers
 
-- **Storage/index layer:** Qdrant stores vector points and payloads; BM25 indexes exact-token corpora; Memgraph stores temporal graph facts; the Temporal retriever handles time-aware vector recall.
-- **Fusion layer:** Reciprocal Rank Fusion merges ranked lists from Vector, BM25, Memgraph, and Temporal retrievers, with optional static or adaptive weights.
-- **Recall pipeline:** the 8-stage pipeline can classify the query, rescue exact tokens, dampen gravity/hubs, blend freshness, apply inhibition-of-return, add curiosity boosts, use Q-learning state, and resurrect graph-linked memories.
-- **Feedback loop:** HTTP and MCP recall can apply existing state; explicit `/feedback` or `mnemostack feedback` updates usefulness signals without silently training on every response.
-- **Inference layer:** optional LLM reranking and answer generation sit on top of recall, so retrieval still works when the LLM is unavailable.
+- **Corpus and indexes:** Qdrant stores vectors and payloads; lexical retrieval can use an in-process corpus or configured Qdrant-native text search. Memgraph is optional.
+- **Retrieval and ranking:** configured sources feed fusion and the ranking chain. A token budget bounds returned memory text using the configured counter; it is not a bound on the whole prompt or answer.
+- **Lifecycle and evidence:** idempotent ingest, pruning, invalidation, validity views, and citation resolution give explicit controls over stored information.
+- **Service operations:** authentication and tenant scopes govern consumers; quotas, metering, diagnostics, export, and offboarding support operators.
 
 ### Pipeline state
 
-The 8-stage pipeline can use a small state store between calls (Q-learning weights, inhibition-of-return history, per-document gravity/hub counters). `FileStateStore(path)` persists it to a JSON file. HTTP recall applies existing state and can record inhibition-of-return exposure with `--auto-record-ior`; Q-learning updates only through explicit `/feedback` calls. CLI/MCP recall still apply existing state but do not collect feedback automatically. For deterministic benchmarks, call `build_full_pipeline(enable_stateful_stages=False)` so IoR/Q-learning/curiosity state cannot affect scores. For multi-process servers, implement your own `StateStore` (three methods: `get()`, `set()`, `update()`) backed by Redis or your database.
+Explicit feedback updates Q-learning and exposure state. HTTP exposure/access recording are opt-in; access reinforcement is a bounded bonus, not automatic forgetting. CLI and MCP can use existing state and accept explicit feedback. `FileStateStore` uses `flock` so processes on the same host can share a local POSIX state file. Multi-host deployments, network filesystems, and high-write workloads need a suitable shared store or restricted stateful writes; see [state persistence](docs/deployment.md#state-store).
 
 ### Graceful degradation
 
-Any retriever can fail (Memgraph down, Qdrant unreachable, BM25 corpus empty). `Recaller` logs and continues with the remaining sources. The LLM reranker is wrapped in try/except by convention — if the LLM is rate-limited, the pre-rerank order is returned. This is deliberate: a memory stack that goes dark because one component hiccuped is worse than a slightly degraded one.
+A failed retriever can leave results from other sources, and a failing LLM reranker can leave the pre-rerank order. Inspect `degraded` together with `notes`: entries present only in `degraded` identify actual faults. Request `include_trace` on HTTP/MCP to inspect the stages. A plausible answer alone does not demonstrate that every component worked.
 
-One exception: query expansion runs *before* retrieval, so a misconfigured expansion step (`query_expansion=True` without an `expansion_llm`, or a provider error inside it) surfaces as an error instead of degrading silently — see [ARCHITECTURE.md](ARCHITECTURE.md) for the full fail-open contract. Degradations themselves are visible, not silent: every HTTP/MCP response carries `degraded` tags, and the full per-retriever trace is available opt-in via `include_trace`.
+Query expansion is an exception: misconfiguration or a provider failure before retrieval surfaces as an error. The [architecture guide](ARCHITECTURE.md#recall-pipeline-hybrid) describes the contract.
 
 ## Comparison and benchmarks
 
-On LoCoMo, Mnemostack reaches **82.9% strict accuracy** in our evaluation setup. The table below includes our baseline runs and externally reported numbers for context. Results depend on dataset version, configuration, judge model, scoring rules, and query type. Treat externally reported numbers as directional unless they were run with the same harness and settings.
+On LoCoMo, Mnemostack reaches **82.9% strict accuracy** in the evaluation setup below. These runs measure the specified retrieval-and-answer configuration, not the complete current service: the runtime LLM reranker is excluded, and tenant operations, integrations, and lifecycle policies are not benchmarked by these figures. The table below includes our baseline runs and externally reported numbers for context. Results depend on dataset version, configuration, judge model, scoring rules, and query type. Treat externally reported numbers as directional unless they were run with the same harness and settings.
 
 ### Benchmarks
 
@@ -233,7 +222,7 @@ Not the best fit if you only need a single call to `text-embedding-3-small` + co
 - 🧠 **4-source hybrid retrieval** — Vector (Qdrant) + BM25 (exact tokens) + Memgraph (knowledge graph) + Temporal (time-aware vector), all fused via Reciprocal Rank Fusion. Pluggable `Retriever` abstraction — add your own sources.
 - ⚖️ **Weighted & adaptive RRF fusion** — `reciprocal_rank_fusion(weights=[...])` lets you lift sources you trust more; `Recaller(adaptive_weights=True)` picks a per-query-shape profile (exact-token / person / temporal / general). See the honest write-up below for where this helps and where it doesn't.
 - 🧪 **HyDE retriever (opt-in)** — embeds a hypothetical answer instead of the query. Useful for query↔document vocabulary gaps in documentation-style corpora; does **not** reliably help on dialogue-backed memory and always costs one extra LLM roundtrip per `search()`. Not included in the default `Recaller`.
-- 🪜 **8-stage recall pipeline** — ClassifyQuery → ExactTokenRescue → GravityDampen → HubDampen → FreshnessBlend → InhibitionOfReturn → CuriosityBoost → QLearningReranker. Opt-in; stateful HTTP feedback is explicit via `/feedback`, and recall exposure logging is off unless `--auto-record-ior` is enabled.
+- 🪜 **8-stage recall pipeline** — ClassifyQuery → ExactTokenRescue → GravityDampen → HubDampen → FreshnessBlend → InhibitionOfReturn → CuriosityBoost → QLearningReranker. Used by CLI search/answer and the HTTP/MCP serving paths; SDK users compose it explicitly. Feedback updates are explicit, and HTTP recall exposure logging is off unless `--auto-record-ior` is enabled.
 - 🔁 **Reranking** — Gemini Flash (or any LLM) reorders top-K by relevance, or plug a cross-encoder / hosted rerank service through the score-based `ScoringReranker`. See [docs/recipes.md](docs/recipes.md) for a runnable `bge-reranker-v2-m3` example.
 - 🔤 **Pluggable BM25 analyzer** — the default is lowercase + Unicode word split (great for exact tokens); pass `BM25Retriever(tokenizer=...)` for stemming / lemmatization / language routing. Core stays dependency-free; [docs/recipes.md](docs/recipes.md) has per-language recipes.
 - ⚡ **Async API** — every blocking surface has a signature-stable async mirror: `Recaller.recall_async`, `recall_flow_async`, `Ingestor.ingest_async` / `ingest_one_async`, `AnswerGenerator.generate_async`, `synthesize_async`, plus `AsyncVectorStore` over the native async Qdrant client. Retrievers dispatch in parallel; five concurrent HTTP recalls finish in roughly one single-recall wall-clock.
@@ -250,7 +239,7 @@ Not the best fit if you only need a single call to `text-embedding-3-small` + co
 - 📏 **Progressive Tiers API** — `search --tier {1,2,3}` and `answer --tier {1,2,3}` bound output size (~50 / ~200 / ~500 tokens) so agents can pay only for the detail they actually need. Omit `--tier` for unchanged full output.
 - ✂️ **Chunkers + sliding window** — plain, fixed-size, and `MessagePairChunker` for chat transcripts (keeps user↔assistant pairs together). The new `vector.window_size` config carries adjacent-turn context inside each chunk; `window_size=3` was worth **+5.8pp strict / +4.1pp combined** on LoCoMo (v0.4.0).
 - 🔎 **Query expansion + smart retry** — `Recaller(expansion_llm=...)` widens recall with reformulated queries; `AnswerGenerator(retry_with_expansion=True)` retries low-confidence answers with the expanded query and a HyDE-style hypothetical before giving up. Opt-in via `--query-expansion` on `mnemostack answer`.
-- ⚙ **Consolidation runtime** — phase orchestrator for nightly memory lifecycle
+- ⚙ **Consolidation runtime** — phase orchestrator with built-in health checks and application-supplied phases; scheduling, semantic consolidation, and forgetting policies are supplied by the application ([scope](ARCHITECTURE.md#consolidation--decay))
 - 🔌 **MCP server** — expose memory tools to Claude Desktop, ChatGPT, Cursor, etc.
 - 🛡 **Graceful degradation** — retrieval keeps working if graph or any retriever is down
 - 🔐 **Multi-tenancy — soft filters or a hard auth boundary** — `filters={"tenant": "a"}` applies inside *every* retriever (exact match + ranges) on HTTP/MCP/CLI/library; results never include points outside the scope, verified by adversarial isolation tests. Filters are **caller-supplied**, so for a real trust boundary run the server with **service-key auth** (`serve --auth` / `mcp-serve --auth`): the tenant is resolved from the key (a client can't assert another's), enforced across the vector store, the knowledge graph, and per-tenant learning state. Optional per-tenant **storage quotas** apply at ingest, and **request-rate quotas** on the authenticated **HTTP** surface (`serve --auth`). Off by default. See the HTTP API section.
