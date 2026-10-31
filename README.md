@@ -5,13 +5,27 @@
 [![CI](https://github.com/udjin-labs/mnemostack/actions/workflows/ci.yml/badge.svg)](https://github.com/udjin-labs/mnemostack/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-> Self-hosted hybrid memory & retrieval for AI apps.
+> Self-hosted memory for your agents and applications.
 
-`mnemostack` is a durable retrieval layer over your own Qdrant (and optional Memgraph): semantic, keyword (BM25), temporal, and graph recall, fused with Reciprocal Rank Fusion and refined by an 8-stage ranking pipeline — with payload filters for multi-tenant isolation, optional LLM answer synthesis (confidence + citations), and an ingest path that enriches and projects structured fields. One `recall(query)` call, usable as a Python library, an HTTP service, or an MCP server.
+Keep useful context beyond a single session. With mnemostack, several authorized agents can query one personal archive, or each consumer can use a separate tenant on shared infrastructure. Index the context you want to retain, then retrieve facts and their sources when an agent or application needs them.
 
-**Flagship use case — durable memory for AI agents.** Long-running agents hit the same wall: context gets compacted, sessions restart, useful decisions disappear, and the next run pays the re-orientation tax again. mnemostack gives them a persistent memory layer to query when the context window is not enough — durable, searchable, scoped, and explainable, not just embedded and hoped for.
+## Start with your own context
 
-The same engine backs other retrieval-heavy work: RAG over mixed corpora, multi-tenant or per-user knowledge stores, and time-aware search backends — anywhere pure vector similarity falls short on its own.
+A personal messenger archive can be a source that several of your agents query from different PCs. Index the archive once, then let each authorized agent retrieve facts and their sources from the same backend. See the [synthetic archive walkthrough for two local clients](examples/two-local-clients-demo.md) for a concrete example and the connection prerequisites.
+
+Other uses include durable memory for an OpenClaw agent, local memory for a Hermes agent, and workplace infrastructure where each consumer has its own tenant. Sharing an archive and sharing infrastructure are different arrangements: separate workplace tenants keep each consumer's context scoped to that consumer.
+
+The same engine also supports RAG over mixed corpora, per-user knowledge stores, and time-aware search backends. Use it as a Python library, an HTTP service, or an MCP server, depending on how your agents and applications connect.
+
+**Choose a starting point:**
+
+- **Individual agent users:** follow the [local quickstart](examples/quickstart.md) to index a synthetic message, retrieve a fact with its source, and connect an MCP client. For OpenClaw, see the [companion plugin](#openclaw-auto-recall-companion-plugin) and [existing-memory setup](#install-for-an-openclaw-style-agent).
+- **Several agents using one personal archive:** use the [two-local-client walkthrough](examples/two-local-clients-demo.md). Using two actual PCs is a separate verification step requiring an existing protected connection to the same backend.
+- **Service operators with separate consumers:** start with the [HTTP API and tenant authentication](#http-server-optional) and [deployment guide](docs/deployment.md). Caller-supplied filters alone are not an access-control boundary.
+
+**Under the hood:**
+
+`mnemostack` is a durable retrieval layer over your own Qdrant (and optional Memgraph): semantic, keyword (BM25), temporal, and graph recall, fused with Reciprocal Rank Fusion and refined by an 8-stage ranking pipeline, with payload filters for multi-tenant isolation, optional LLM answer synthesis (confidence + citations), and an ingest path that enriches and projects structured fields. One `recall(query)` call, usable as a Python library, an HTTP service, or an MCP server.
 
 **Status:** Actively developed — public API is stable; new functionality lands additively in minor releases. Breaking changes are rare and called out in [CHANGELOG.md](CHANGELOG.md).
 
@@ -24,74 +38,11 @@ and the new LLM options environment variable.
 
 ## Quickstart: agent memory over MCP
 
-The fastest on-ramp is the MCP server — it gives Claude Desktop, Claude Code, Cursor, ChatGPT, or another MCP-capable agent durable memory in a few commands. Building an app instead of wiring up an agent? Use the [HTTP API or the Python library](#three-ways-to-use-mnemostack) over the same collection.
+Follow the [local quickstart](examples/quickstart.md) for prerequisites and a complete Ollama example using one collection throughout. It covers installation, indexing, search with source evidence, optional answer generation, and an MCP client configuration.
 
-### 1. Install
+The MCP server provides `mnemostack_search`, `mnemostack_answer`, and `mnemostack_remember`, alongside graph and memory lifecycle tools. Connecting a client makes tools available; when the agent calls them depends on that client's configuration. Index existing files explicitly, or use the remember tool or the [streaming Ingestor API](#streaming-ingest-api) for writes from your application.
 
-```bash
-pip install 'mnemostack[mcp]'
-```
-
-Run a local Qdrant for the vector store:
-
-```bash
-# tag rule: match your installed qdrant-client - same major, minor within 1
-docker run -p 6333:6333 qdrant/qdrant:v1.20.0
-```
-
-Optional: run Memgraph for graph-backed memory:
-
-```bash
-docker run -p 7687:7687 memgraph/memgraph:latest
-```
-
-### 2. Start the MCP server
-
-```bash
-export GEMINI_API_KEY=your-key-here
-mnemostack mcp-serve --provider gemini --collection my-memory
-```
-
-Claude Desktop config example:
-
-```json
-{
-  "mcpServers": {
-    "mnemostack": {
-      "command": "mnemostack",
-      "args": ["mcp-serve", "--provider", "gemini", "--collection", "my-memory"],
-      "env": {
-        "GEMINI_API_KEY": "your-key-here"
-      }
-    }
-  }
-}
-```
-
-Claude will then be able to call `mnemostack_search`, `mnemostack_answer`, and graph tools.
-
-### 3. Store memory
-
-Index a folder of notes, docs, transcripts, or project context:
-
-```bash
-mnemostack index ./my-notes/ --provider gemini --collection my-memory --recreate
-```
-
-`--recreate` drops the existing collection, so it asks for confirmation first; pass `--yes` to skip the prompt (required in scripts/CI — non-interactive runs without it exit with code 2).
-
-For a running app or assistant, use the streaming `Ingestor` API shown below to store messages as they arrive.
-
-### 4. Recall memory
-
-From an agent, ask a memory-style question and let the MCP tools retrieve the right facts.
-
-From the shell, test the same collection directly:
-
-```bash
-mnemostack search "what did we decide about auth" --provider gemini --collection my-memory
-mnemostack answer "what did we decide about auth" --provider gemini --collection my-memory
-```
+Building a service instead? Use the [HTTP API or Python library](#three-ways-to-use-mnemostack) with the same storage and retrieval components.
 
 ## Why hybrid memory?
 
