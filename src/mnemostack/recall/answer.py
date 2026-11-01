@@ -543,6 +543,14 @@ class AnswerGenerator:
         budget the caller applied to `memories` up front (see
         `apply_token_budget` for the trimming contract).
 
+        With a finite budget, selected memory text is rendered in full.
+        With `None`, the historical 400-character per-memory preview remains
+        to bound unbudgeted records. A caller that already trimmed memories
+        must still pass its budget here to enable full-text rendering.
+        The default token counter is heuristic. Metadata, query, instructions,
+        and output tokens are not included; callers must reserve provider
+        context space for them. This is not a model-input size guarantee.
+
         `include_invalidated` / `as_of` must match the validity view the
         caller used to fetch `memories`: the expansion/inference retry paths
         run fresh sub-recalls, so without threading these a point-in-time
@@ -592,13 +600,15 @@ class AnswerGenerator:
             )
         elif self.list_extract_mode and category in {"list", "count"}:
             answer = self._generate_list_extract(
-                query, memories, category, token_counter=token_counter
+                query, memories, category, token_counter=token_counter,
+                budgeted_context=token_budget is not None,
             )
         else:
             answer = self._generate_single_prompt(
                 query=query,
                 memories=memories[: self.max_memories],
                 prompt_template=prompt_template,
+                budgeted_context=token_budget is not None,
             )
 
         specificity_memories = memories
@@ -772,6 +782,7 @@ class AnswerGenerator:
             query=query,
             memories=merged_memories[: self.max_memories],
             prompt_template=prompt_template,
+            budgeted_context=token_budget is not None,
         )
         if retry_answer.ok:
             return retry_answer, merged_memories
@@ -849,6 +860,7 @@ class AnswerGenerator:
             query=query,
             memories=merged_memories[: self.max_memories],
             prompt_template=prompt_template,
+            budgeted_context=token_budget is not None,
         )
         if (
             retry_answer.ok
@@ -901,19 +913,27 @@ class AnswerGenerator:
         memories: list[RecallResult],
         category: str = "list",
         token_counter: TokenCounter | None = None,
+        *,
+        budgeted_context: bool = False,
     ) -> Answer:
-        extracted = self._extract_items_over_pool(query, memories)
+        extracted = self._extract_items_over_pool(
+            query, memories, budgeted_context=budgeted_context
+        )
         if extracted is not None and not extracted[0]:
             # The pool is non-empty but extraction found nothing. Extraction
             # is the lossy, non-deterministic step (not retrieval) — give it
             # one more pass before abstaining.
             counter("mnemostack.answer.list_extract_empty_retry", 1)
-            extracted = self._extract_items_over_pool(query, memories)
+            extracted = self._extract_items_over_pool(
+                query, memories, budgeted_context=budgeted_context
+            )
         if extracted is None or not extracted[0]:  # every batch failed / still empty
             # The single-prompt fallback sees only max_memories; leave the
             # context estimate unset so generate() reports that smaller pool,
             # not the full pool extraction failed to use.
-            return self._fallback_list_answer(query, memories)
+            return self._fallback_list_answer(
+                query, memories, budgeted_context=budgeted_context
+            )
         items, contributing = extracted
 
         # Extraction walked the FULL pool in batches — that is the context
@@ -1049,7 +1069,7 @@ class AnswerGenerator:
         return "\n".join(parts).lower()
 
     def _extract_items_over_pool(
-        self, query: str, memories: list[RecallResult]
+        self, query: str, memories: list[RecallResult], *, budgeted_context: bool = False
     ) -> tuple[list[str], list[RecallResult]] | None:
         """Run the extract prompt over the WHOLE pool in batches.
 
@@ -1079,7 +1099,8 @@ class AnswerGenerator:
             prompt = template.format(
                 n_memories=len(batch),
                 context=self._format_context(
-                    batch, self.context_fields, self.timestamp_key, self.timestamp_format
+                    batch, self.context_fields, self.timestamp_key, self.timestamp_format,
+                    budgeted_context=budgeted_context,
                 ),
                 query=query,
             )
@@ -1111,11 +1132,14 @@ class AnswerGenerator:
         self,
         query: str,
         memories: list[RecallResult],
+        *,
+        budgeted_context: bool = False,
     ) -> Answer:
         answer = self._generate_single_prompt(
             query=query,
             memories=memories[: self.max_memories],
             prompt_template=self.prompt_overrides.get("list", self._builtin_prompts["list"]),
+            budgeted_context=budgeted_context,
         )
         if answer.ok:
             answer.confidence = 0.3
@@ -1126,9 +1150,12 @@ class AnswerGenerator:
         query: str,
         memories: list[RecallResult],
         prompt_template: str,
+        *,
+        budgeted_context: bool = False,
     ) -> Answer:
         context = self._format_context(
-            memories, self.context_fields, self.timestamp_key, self.timestamp_format
+            memories, self.context_fields, self.timestamp_key, self.timestamp_format,
+            budgeted_context=budgeted_context,
         )
         prompt = prompt_template.format(
             context=context,
@@ -1174,13 +1201,23 @@ class AnswerGenerator:
         context_fields: Sequence[str] = (),
         timestamp_key: str = "timestamp",
         timestamp_format: str = "iso",
+        *,
+        budgeted_context: bool = False,
     ) -> str:
+        """Render already selected text, preserving the unbudgeted preview.
+
+        Internal callers enable full text only after applying a finite
+        memory-text budget. Direct/custom callers default to the historical
+        preview; this helper itself does not perform budget selection.
+        """
         from .validity import numeric_unit_for
 
         unit = numeric_unit_for(timestamp_format)
         lines = []
         for i, m in enumerate(memories, 1):
-            text = m.text.strip().replace("\n", " ")[:400]
+            text = m.text.strip().replace("\n", " ")
+            if not budgeted_context:
+                text = text[:400]
             source = m.payload.get("source", "")
             ts = m.payload.get(timestamp_key)
             prefix = f"[{i}]"
