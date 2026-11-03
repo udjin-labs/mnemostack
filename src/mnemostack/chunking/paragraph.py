@@ -54,14 +54,14 @@ class ParagraphChunker(Chunker):
 
         for para_offset, para in paragraphs:
             para_len = len(para)
-            if buffer_offset is None:
-                buffer_offset = para_offset
-
             # If single paragraph is already too large, flush current buffer then emit alone
             if para_len >= self.chunk_size:
                 flush()
                 chunks.append(Chunk(text=para, offset=para_offset))
                 continue
+
+            if buffer_offset is None:
+                buffer_offset = para_offset
 
             # If adding would exceed target, flush first
             if buffer_len + para_len + 2 > self.chunk_size and buffer_len >= self.min_chunk:
