@@ -6,11 +6,46 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.2.0] - 2026-11-03
+
+### Added
 - Add an opt-in ingest secret-format policy (`ingest.secret_policy: "block"`,
-  `MNEMOSTACK_SECRET_POLICY`, or `--secret-policy`). Built-in SDK, file, HTTP,
-  and MCP ingestion reject matching input before embedding or storage.
-  Default remains off; full dummy credentials can also match. See
+  `MNEMOSTACK_SECRET_POLICY`, or `--secret-policy`) across SDK, file, HTTP,
+  and MCP ingestion (#220). Matching input is rejected before embedding,
+  enrichment, or storage, and existing file records are preserved on refusal.
+  The default remains off; full dummy credentials can also match. See
   [scope and refusal behavior](docs/ingest-policy.md).
+- Add a read-only, tenant-scoped A/B benchmark runner for retrieval
+  configurations on an existing corpus, with chunk-ID relevance metrics,
+  per-query losses, corpus fingerprints, and isolated learning state (#225).
+  Model calls require explicit opt-in; query and result text are omitted by
+  default. Synthetic benchmark MRR now counts missing probes as zero and
+  reports historical found-only MRR separately (#224).
+- Add an opt-in quickstart smoke runner for CLI and two stdio MCP clients,
+  including source-evidence checks and repeat-indexing checks (#226).
+  CLI search and answer gain `--require-rerank` to fail when reranking is
+  unavailable or falls back; ordinary CLI behavior remains fail-open.
+
+### Changed
+- Calibrate relevance against utility and freshness in full and stateless
+  recall pipelines; bound curiosity bonuses relative to incoming score scale
+  and age (#227). `CuriosityBoost.bonus` now represents a fraction of that
+  scale rather than an absolute score increment. Retrieval defaults and
+  tenant/validity filters are unchanged.
+- Improve onboarding and architecture documentation for SDK, CLI, HTTP, MCP,
+  memory lifecycle, and a shared local archive walkthrough (#222, #223).
+
+### Fixed
+- Record token-budget before/after checkpoints in recall loss traces, while
+  preserving first-pass snapshots across weak retries (#221).
+- Keep all budget-selected memory text in answer-provider prompts instead of
+  cropping each memory again to 400 characters (#228). The legacy preview
+  remains for calls without a finite token budget; the budget still excludes
+  prompt overhead, metadata, and output tokens.
+- Correct source offsets for short paragraph tails after oversized paragraphs
+  without changing chunk text or order (#229). Reprocessing affected sources
+  can change stable chunk IDs; ordinary upserts do not remove legacy points,
+  so old and corrected points may coexist until reconciled.
 
 ## [3.1.0] - 2026-10-29
 
