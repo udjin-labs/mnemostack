@@ -9,8 +9,9 @@ from datetime import datetime, timezone
 from typing import Any, ClassVar, cast
 from uuid import UUID
 
+from httpx import RemoteProtocolError
 from qdrant_client import QdrantClient
-from qdrant_client.http.exceptions import UnexpectedResponse
+from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 from qdrant_client.models import (
     DatetimeRange,
     DeletePayload,
@@ -883,6 +884,30 @@ class VectorStore:
 
     # ---------- write ----------
 
+    def _retrieve_owners(self, ids: list[str | int]) -> list[Any]:
+        """Retry one owner read after a wrapped REST remote protocol error.
+
+        Never retry writes or treat an ownership failure as permission to write.
+        The second failure propagates; this is not a transaction or CAS.
+        """
+        collection = self.collection
+        point_ids = tuple(ids)
+
+        def read() -> list[Any]:
+            return self.client.retrieve(
+                collection_name=collection, ids=list(point_ids), with_payload=[TENANT_ID_KEY]
+            )
+
+        try:
+            return read()
+        except ResponseHandlingException as exc:
+            if (
+                type(exc) is not ResponseHandlingException
+                or type(exc.source) is not RemoteProtocolError
+            ):
+                raise
+            return read()
+
     def _assert_tenant_owned(self, ids: list[str | int], tenant: str) -> None:
         """Refuse to overwrite points already owned by a *different* tenant.
 
@@ -904,9 +929,7 @@ class VectorStore:
         concurrent writes, serialize writes per collection or front the store with a
         compare-and-swap-capable layer.
         """
-        found = self.client.retrieve(
-            collection_name=self.collection, ids=list(ids), with_payload=[TENANT_ID_KEY]
-        )
+        found = self._retrieve_owners(ids)
         conflicts = [
             p.id
             for p in found
@@ -920,9 +943,7 @@ class VectorStore:
 
     def _existing_tenants(self, ids: list[str | int]) -> dict[Any, str]:
         """Map ``id -> tenant_id`` for the given ids that exist and carry an owner."""
-        found = self.client.retrieve(
-            collection_name=self.collection, ids=list(ids), with_payload=[TENANT_ID_KEY]
-        )
+        found = self._retrieve_owners(ids)
         return {p.id: t for p in found if (t := (p.payload or {}).get(TENANT_ID_KEY)) is not None}
 
     def upsert(
