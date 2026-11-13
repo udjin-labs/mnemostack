@@ -132,7 +132,8 @@ class ClassifyQuery(Stage):
 
 _EXACT_PATTERNS = [
     re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b"),  # IP address
-    re.compile(r"\b\d{4,5}\b"),  # port / numeric code
+    # port / numeric code; a bare year is not one, a year inside a date is
+    re.compile(r"\b(?!(?:19|20)\d{2}\b(?![-./]\d))\d{4,5}\b|(?<=\d[-./])(?:19|20)\d{2}\b"),
     re.compile(r"\b\d{4}\.\d+\.\d+\b"),  # version like 2026.4.12
     re.compile(r"\b[a-z]+[-_]?\d+[a-z0-9-]*\b"),  # IDs/codes
 ]

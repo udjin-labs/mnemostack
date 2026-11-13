@@ -456,7 +456,8 @@ class Recaller:
     # like "pipeline" → "ip" or "important" → "port".
     _EXACT_TOKEN_RE = re.compile(
         r"\b\d{1,3}(?:\.\d{1,3}){3}\b|"  # IPv4
-        r"\b\d{4,5}\b|"  # port / numeric code
+        # port / numeric code; a bare year is not one, a year inside a date is
+        r"\b(?!(?:19|20)\d{2}\b(?![-./]\d))\d{4,5}\b|(?<=\d[-./])(?:19|20)\d{2}\b|"
         r"\b\d{4}\.\d+\.\d+\b|"  # version
         r"\b[A-Za-z]+[-_]\d+[A-Za-z0-9-]*\b"  # id/code
     )

@@ -406,3 +406,19 @@ def test_legacy_migration_is_atomic_and_leaves_no_temp(monkeypatch, tmp_path):
     assert not list(target.parent.glob("*.migrate-tmp"))
     # the migration shares FileStateStore's lock file for this path
     assert (target.parent / "server-state.json.lock").exists()
+
+
+def test_bare_year_does_not_enable_exact_token_handling():
+    for year in (1900, 2025, 2049, 2099):
+        query = f"what did we decide in {year}"
+        assert not is_exact_token_query(query)
+        result = _mk_result(1, str(year), score=0.1, source="MEMORY.md", raw_vector_score=0.9)
+        result.sources = ["vector"]
+        context = PipelineContext(query=query)
+        ExactTokenRescue().apply(context, [result])
+        assert result.score == 0.1
+        assert is_exact_token_query(f"port {year}")
+    for token in ("1899", "2100", "12025", "10.0.0.1", "2025.4.12", "abc2025"):
+        assert is_exact_token_query(token)
+    for date in ("2025-11-13", "13.11.2025", "2025/11/13", "1999-2001"):
+        assert is_exact_token_query(f"what happened on {date}")

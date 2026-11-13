@@ -211,3 +211,19 @@ def test_synthesize_validates_inputs():
         synthesize("Alice", format="xml")
     with pytest.raises(ValueError):
         synthesize("Alice", max_results=0)
+
+
+def test_query_recaller_does_not_retry_internal_type_error():
+    from mnemostack.synthesis import _query_recaller
+
+    class BrokenRecaller:
+        def __init__(self):
+            self.calls = 0
+
+        def recall(self, query, limit=10, **kwargs):
+            self.calls += 1
+            raise TypeError("internal recall bug")
+
+    recaller = BrokenRecaller()
+    assert _query_recaller(recaller, "Alice", 10, None) == []
+    assert recaller.calls == 1
