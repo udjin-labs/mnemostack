@@ -99,3 +99,21 @@ def test_healthy_reranker_path_remains_quiet(monkeypatch, tmp_path, capsys):
     assert cli._recall_for_cli(SimpleNamespace(), object(), "query", 3) is rows
     assert calls[0]["reranker"] is not None
     assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("override", [None, "", "selected-state.json"])
+def test_cli_recall_reads_the_same_state_path_as_feedback(monkeypatch, tmp_path, override):
+    calls, rows = _patch_recall(monkeypatch, tmp_path, fail=False)
+    if override is None:
+        monkeypatch.delenv("MNEMOSTACK_STATE_PATH", raising=False)
+    else:
+        monkeypatch.setenv("MNEMOSTACK_STATE_PATH", str(tmp_path / override) if override else "")
+    state_paths = []
+    monkeypatch.setattr(cli, "FileStateStore", lambda path: state_paths.append(str(path)) or object())
+    assert cli._recall_for_cli(SimpleNamespace(), object(), "query", 3) is rows
+    assert len(calls) == 1
+    tree = ast.parse(inspect.getsource(cli.build_parser))
+    call = next(n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name) and n.func.value.id == "p_feedback" and n.func.attr == "add_argument" and n.args and isinstance(n.args[0], ast.Constant) and n.args[0].value == "--state-path")
+    parser = argparse.ArgumentParser(add_help=False)
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[ast.Expr(copy.deepcopy(call))], type_ignores=[])), "actual-feedback-state-flag", "exec"), {"p_feedback": parser, "os": os, "default_state_path": cli.default_state_path})
+    assert state_paths == [str(parser.parse_args([]).state_path)]

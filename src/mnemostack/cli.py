@@ -2065,7 +2065,7 @@ def _recall_for_cli(args: argparse.Namespace, recaller, query: str, limit: int):
         )
     _text_key, _ts_key, _ts_fmt = _payload_schema()
     pipeline = build_full_pipeline(
-        state_store=FileStateStore(default_state_path()),
+        state_store=FileStateStore(os.environ.get("MNEMOSTACK_STATE_PATH") or default_state_path()),
         # `search` and `answer` run the same freshness stage `serve` does, so
         # a deployment that turned the access signal off must get that here
         # too — otherwise the off switch depends on which command you type.
