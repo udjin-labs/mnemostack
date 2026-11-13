@@ -13,12 +13,12 @@ import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from ..embeddings.roles import embed_documents_via, embed_queries_via
 from ..llm.base import LLMProvider, LLMResponse
 from ..observability import counter, histogram
-from .deadline import get_deadline, start_deadline
+from .deadline import Deadline, get_deadline, start_deadline
 from .inference_retry import decompose_query, merge_results, should_retry
 from .recaller import RecallResult
 from .specificity import detect_placeholders, resolve_specificity
@@ -29,7 +29,11 @@ logger = logging.getLogger(__name__)
 
 
 def _expired(trace: RecallTrace | None) -> bool:
-    if trace is not None and get_deadline(trace) is not None and get_deadline(trace).expired():
+    if (
+        trace is not None
+        and get_deadline(trace) is not None
+        and cast(Deadline, get_deadline(trace)).expired()
+    ):
         trace.mark("recall:deadline")
         return True
     return False
@@ -38,7 +42,7 @@ def _expired(trace: RecallTrace | None) -> bool:
 def _generate_llm(llm: LLMProvider, prompt: str, *, trace=None, **kwargs) -> LLMResponse:
     if trace is None or get_deadline(trace) is None:
         return llm.generate(prompt, **kwargs)
-    response = get_deadline(trace).run(
+    response = cast(Deadline, get_deadline(trace)).run(
         lambda: llm.generate(prompt, **kwargs),
         LLMResponse(text="", error="recall deadline exceeded"),
         on_timeout=lambda: trace.mark("recall:deadline"),
@@ -826,7 +830,7 @@ class AnswerGenerator:
 
         try:
             vectors = embed() if deadline is None else deadline.run(
-                embed, [], on_timeout=lambda: trace.mark("recall:deadline")
+                embed, [], on_timeout=lambda: cast(RecallTrace, trace).mark("recall:deadline")
             )
         except Exception as exc:
             logger.warning("Answer retry embedding failed (%s); keeping draft", type(exc).__name__)
@@ -851,7 +855,7 @@ class AnswerGenerator:
             )
 
         merged_memories = search() if deadline is None else deadline.run(
-            search, [], on_timeout=lambda: trace.mark("recall:deadline")
+            search, [], on_timeout=lambda: cast(RecallTrace, trace).mark("recall:deadline")
         )
         # The fresh sub-recall bypassed any budget the caller applied to the
         # primary memories; re-cap before this pool reaches another prompt.
@@ -911,7 +915,7 @@ class AnswerGenerator:
         if self.recaller is None:
             return draft, memories
         if trace is not None and get_deadline(trace) is not None:
-            sub_queries = get_deadline(trace).run(
+            sub_queries: list[str] = cast(Deadline, get_deadline(trace)).run(
                 lambda: decompose_query(query, self.llm), [],
                 on_timeout=lambda: trace.mark("recall:deadline"),
             )
@@ -945,7 +949,7 @@ class AnswerGenerator:
                 sub_results.append([])
             child = tkw.get("trace")
             if child is not None and "recall:deadline" in child.degraded:
-                trace.mark("recall:deadline")
+                cast(RecallTrace, trace).mark("recall:deadline")
 
         merged_memories = merge_results(memories, *sub_results)
         # Decomposed sub-recalls bypassed any caller-applied budget; re-cap

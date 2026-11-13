@@ -7,7 +7,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import Future, TimeoutError
 from threading import Lock, Thread
-from typing import TypeVar
+from typing import TypeVar, cast
 
 T = TypeVar("T")
 
@@ -59,7 +59,7 @@ def submit_deadline_work(call):
     return future
 
 
-def validate_deadline(value: float | None) -> float | None:
+def validate_deadline(value: object) -> float | None:
     """Accept None or a positive finite number of seconds."""
     if value is not None and (
         isinstance(value, bool)
@@ -97,7 +97,7 @@ def start_deadline(recaller, trace, *, deadline: Deadline | None = None):
 
         trace = RecallTrace()
     try:
-        trace.deadline = deadline if deadline is not None else Deadline(seconds)
+        trace.deadline = deadline if deadline is not None else Deadline(cast(float, seconds))
     except (AttributeError, TypeError):
         pass
     return trace

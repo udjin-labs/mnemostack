@@ -38,7 +38,7 @@ Bounded on purpose:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from ..llm.base import LLMProvider
 from ..observability.recorder import counter
@@ -178,7 +178,7 @@ def retry_weak_recall(
             variants = expander.generate_variants(query)[:MAX_VARIANTS]
         else:
             variants = deadline.run(
-                lambda: expander.generate_variants(query), [],
+                lambda: expander.generate_variants(query), cast(list[str], []),
                 on_timeout=paraphrase_timeout,
             )[:MAX_VARIANTS]
     except Exception:  # noqa: BLE001 — a retry must not fail the recall

@@ -2328,7 +2328,7 @@ def cmd_answer(args: argparse.Namespace) -> int:
     recaller = _build_recaller(args, provider, store)
     from .recall.trace import RecallTrace
 
-    trace_kw = {}
+    trace_kw: dict[str, Any] = {}
     if getattr(recaller, "overall_deadline", None) is not None:
         trace_kw["trace"] = RecallTrace()
     results = _recall_for_cli(args, recaller, args.query, args.limit, **trace_kw)

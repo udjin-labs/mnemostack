@@ -7,7 +7,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from ..embeddings.base import EmbeddingProvider
 from ..embeddings.roles import EmbeddingSpaceError, SpaceGuard, embed_query_via
@@ -17,6 +17,7 @@ from ..reranker_cache import RerankerCache
 from ..vector.qdrant import Hit, VectorStore
 from .bm25 import BM25, BM25Doc
 from .deadline import (
+    Deadline,
     abandoned_workers_full,
     get_deadline,
     start_deadline,
@@ -928,7 +929,11 @@ class Recaller:
         # retriever once per variant — state that must span the whole recall
         # (the graph arm's probe budget/circuit breaker: one store failure
         # per recall, not per variant) lives here instead of per-search.
-        if trace is not None and get_deadline(trace) is not None and get_deadline(trace).expired():
+        if (
+            trace is not None
+            and get_deadline(trace) is not None
+            and cast(Deadline, get_deadline(trace)).expired()
+        ):
             trace.mark("recall:deadline")
             return []
         recall_scope: dict[Any, Any] = {}
@@ -1011,7 +1016,8 @@ class Recaller:
                     return True
 
                 if not deadline.run(
-                    check_space, False, on_timeout=lambda: trace.mark("recall:deadline")
+                    check_space, False,
+                    on_timeout=lambda: cast(RecallTrace, trace).mark("recall:deadline")
                 ):
                     return []
         # Retrievers mode: fuse N arbitrary ranked lists
@@ -1056,7 +1062,7 @@ class Recaller:
                     return embed_query_via(self.embedding, query)
 
                 query_vec = embed() if deadline is None else deadline.run(
-                    embed, [], on_timeout=lambda: trace.mark("recall:deadline")
+                    embed, [], on_timeout=lambda: cast(RecallTrace, trace).mark("recall:deadline")
                 )
             if query_vec:
                 with histogram("mnemostack.recall.vector_latency_ms"):
@@ -1070,7 +1076,8 @@ class Recaller:
                         )
 
                     vector_hits = search() if deadline is None else deadline.run(
-                        search, [], on_timeout=lambda: trace.mark("recall:deadline")
+                        search, [],
+                        on_timeout=lambda: cast(RecallTrace, trace).mark("recall:deadline")
                     )
                 # Filter, then trim back to the original window: the over-fetch
                 # only backfills dropped hits, so a clean index keeps exactly
@@ -1209,7 +1216,8 @@ class Recaller:
                         )
 
                     completed = deadline.run(
-                        fallback, None, on_timeout=lambda: trace.mark("recall:deadline")
+                        fallback, None,
+                        on_timeout=lambda: cast(RecallTrace, trace).mark("recall:deadline")
                     )
                     if completed is not None:
                         originals = {memory_key(r.id): r for r in results}
@@ -1358,11 +1366,11 @@ class Recaller:
         else:
             queries = deadline.run(
                 lambda: self._expanded_queries(query), [query],
-                on_timeout=lambda: trace.mark("recall:deadline"),
+                on_timeout=lambda: cast(RecallTrace, trace).mark("recall:deadline"),
             )
         for expanded_query in queries:
             if deadline is not None and deadline.expired():
-                trace.mark("recall:deadline")
+                cast(RecallTrace, trace).mark("recall:deadline")
                 break
             trace_mark = len(trace.retrievers) if trace is not None else 0
             results = self._recall_once(
@@ -1606,7 +1614,7 @@ class Recaller:
                             id_to_result[memory_key(hit.id)] = hit
             deadline = get_deadline(trace)
             if deadline is not None and deadline.expired():
-                trace.mark("recall:deadline")
+                cast(RecallTrace, trace).mark("recall:deadline")
                 retriever_hits = []
             elif deadline is None or abandoned_workers_full():
                 with concurrent.futures.ThreadPoolExecutor(
@@ -1614,7 +1622,7 @@ class Recaller:
                 ) as ex:
                     retriever_hits = list(ex.map(_run, self.retrievers))
             else:
-                futures = []
+                futures: list[Any] = []
                 refused = []
                 for retr in self.retrievers:
                     future = None if deadline.expired() else submit_deadline_work(
@@ -1622,7 +1630,7 @@ class Recaller:
                     )
                     if future is None:
                         if deadline.expired():
-                            trace.mark("recall:deadline")
+                            cast(RecallTrace, trace).mark("recall:deadline")
                         else:
                             refused.append((len(futures), retr))
                             futures.append(None)
@@ -1637,7 +1645,7 @@ class Recaller:
                     retriever_hits = []
                     for future in futures:
                         if future in pending and future.abandon():
-                            trace.mark("recall:deadline")
+                            cast(RecallTrace, trace).mark("recall:deadline")
                         else:
                             retriever_hits.append(future.result())
                 else:
@@ -1758,7 +1766,8 @@ class Recaller:
                         )
 
                     completed = deadline.run(
-                        fallback, None, on_timeout=lambda: trace.mark("recall:deadline")
+                        fallback, None,
+                        on_timeout=lambda: cast(RecallTrace, trace).mark("recall:deadline")
                     )
                     if completed is not None:
                         originals = {memory_key(r.id): r for r in results}
