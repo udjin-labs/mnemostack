@@ -128,7 +128,7 @@ def test_extract_temporal_accepts_2030s_years():
     assert window is not None
     start_iso, end_iso = window
     assert start_iso.startswith("2035-04-01")
-    assert end_iso.startswith("2035-05-01")
+    assert end_iso == "2035-04-30T23:59:59.999999+00:00"
 
 
 def test_temporal_filter_preserves_caller_filters():

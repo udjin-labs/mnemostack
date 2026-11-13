@@ -2117,17 +2117,17 @@ def _intersect_instant_window(
 
 def _month_window(year: int, month: int) -> tuple[str, str]:
     start = datetime(year, month, 1, tzinfo=timezone.utc)
-    end_month = month + 1
-    end_year = year + (1 if end_month > 12 else 0)
-    end_month = end_month if end_month <= 12 else 1
-    end = datetime(end_year, end_month, 1, tzinfo=timezone.utc)
+    # TemporalRetriever emits lte, so the bound belongs to this month.
+    end = datetime.combine(
+        date(year, month, monthrange(year, month)[1]), datetime.max.time(), tzinfo=timezone.utc
+    )
     return start.isoformat(), end.isoformat()
 
 
 def _year_window(year: int) -> tuple[str, str]:
     return (
         datetime(year, 1, 1, tzinfo=timezone.utc).isoformat(),
-        datetime(year + 1, 1, 1, tzinfo=timezone.utc).isoformat(),
+        datetime.combine(date(year, 12, 31), datetime.max.time(), tzinfo=timezone.utc).isoformat(),
     )
 
 
@@ -2193,15 +2193,19 @@ def extract_temporal_query(query: str, now: datetime | None = None) -> TemporalQ
         m = re.search(pattern, q)
         if not m:
             continue
-        delta_days = int(m.group(1)) * abs(days) if days < 0 else days
-        target = today - timedelta(days=delta_days)
-        start, end = _day_window(target, slack=_around_slack(q, m.start()))
+        try:
+            delta_days = int(m.group(1)) * abs(days) if days < 0 else days
+            target = today - timedelta(days=delta_days)
+            start, end = _day_window(target, slack=_around_slack(q, m.start()))
+        except (ValueError, OverflowError):
+            # Best-effort parsing must not crash recall on an unrepresentable date.
+            return None
         return TemporalQuery(
             start, end, target, _date_focused(query, [m.span()], has_target_date=True)
         )
 
     # Absolute day/month: "30 апреля", "April 30", optional year.
-    day_month = re.search(rf"\b([0-3]?\d)\s+({_MONTH_NAME_PATTERN})\w*\s*(20\d{{2}})?\b", q)
+    day_month = re.search(rf"\b([0-3]?\d)\s+({_MONTH_NAME_PATTERN})\w*(?:\s*,?\s*(20\d{{2}}))?\b", q)
     if day_month:
         day = int(day_month.group(1))
         month = _month_from_text(day_month.group(2))
@@ -2218,7 +2222,7 @@ def extract_temporal_query(query: str, now: datetime | None = None) -> TemporalQ
                 )
 
     month_day = re.search(
-        rf"\b({_MONTH_NAME_PATTERN})\w*\s+([0-3]?\d)(?:st|nd|rd|th)?\s*(20\d{{2}})?\b", q
+        rf"\b({_MONTH_NAME_PATTERN})\w*\s+([0-3]?\d)(?:st|nd|rd|th)?(?:\s*,?\s*(20\d{{2}}))?\b", q
     )
     if month_day:
         month = _month_from_text(month_day.group(1))
