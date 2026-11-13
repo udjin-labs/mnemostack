@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import re
+from array import array
 from collections import Counter, defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -68,7 +69,11 @@ class BM25:
         if retokenize is None:
             retokenize = tokenizer is not tokenize
         if not retokenize:
-            self.docs = documents
+            # A snapshot: the term index below refers to documents by position.
+            # A one-shot iterable is refused, as before: callers read the same
+            # corpus again after this call (the tenant probe).
+            len(documents)
+            self.docs = list(documents)
         else:
             # Existing BM25Doc instances may already carry tokens produced by
             # the default analyzer. A custom analyzer must be applied to both
@@ -81,9 +86,12 @@ class BM25:
         self.avgdl = sum(len(d.tokens or []) for d in self.docs) / max(self.doc_count, 1)
         # Document frequency per term
         self.df: dict[str, int] = defaultdict(int)
-        for d in self.docs:
+        # Positions of the documents that contain each term.
+        self._postings: dict[str, array[int]] = {}
+        for index, d in enumerate(self.docs):
             for term in set(d.tokens or []):
                 self.df[term] += 1
+                self._postings.setdefault(term, array("i")).append(index)
         # IDF per term
         self.idf: dict[str, float] = {}
         for term, df in self.df.items():
@@ -119,7 +127,15 @@ class BM25:
         q_tokens = self.tokenizer(query)
         if not q_tokens:
             return []
-        candidates = self.docs if predicate is None else [d for d in self.docs if predicate(d)]
+        matching: set[int] = set()
+        for term in q_tokens:
+            matching.update(self._postings.get(term, ()))
+        if predicate is None:
+            candidates = [self.docs[index] for index in sorted(matching)]
+        else:
+            candidates = [
+                d for index, d in enumerate(self.docs) if predicate(d) and index in matching
+            ]
         scored = [(d, self._score(q_tokens, d)) for d in candidates]
         scored = [x for x in scored if x[1] > 0]
         scored.sort(key=lambda x: -x[1])
