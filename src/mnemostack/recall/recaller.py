@@ -1642,12 +1642,13 @@ class Recaller:
                             futures[index] = ex.submit(_run, retr)
                 if futures:
                     _, pending = concurrent.futures.wait(futures, timeout=deadline.remaining())
-                    retriever_hits = []
-                    for future in futures:
-                        if future in pending and future.abandon():
-                            cast(RecallTrace, trace).mark("recall:deadline")
-                        else:
-                            retriever_hits.append(future.result())
+                    # Abandon every pending arm before reading results: a
+                    # finished arm can raise, and the arms behind it must
+                    # still be counted.
+                    abandoned = {f for f in futures if f in pending and f.abandon()}
+                    if abandoned:
+                        cast(RecallTrace, trace).mark("recall:deadline")
+                    retriever_hits = [f.result() for f in futures if f not in abandoned]
                 else:
                     retriever_hits = []
             for retr, hits, err, elapsed_ms in retriever_hits:

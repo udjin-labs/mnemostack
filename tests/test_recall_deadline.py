@@ -679,6 +679,36 @@ def test_abandoned_cap_preserves_healthy_arm_and_drains(monkeypatch):
     assert module._abandoned_workers == 0
 
 
+def test_arm_error_still_counts_pending_arms():
+    from threading import Event
+
+    import mnemostack.recall.deadline as module
+    from mnemostack.embeddings.roles import EmbeddingSpaceError
+
+    release = Event()
+
+    class _Incompatible(_Arm):
+        def search(self, query, limit=10, filters=None):
+            raise EmbeddingSpaceError("incompatible")
+
+    class _Blocked(_Arm):
+        def search(self, query, limit=10, filters=None):
+            release.wait(2)
+            return []
+
+    time.sleep(0.2)
+    before = module._abandoned_workers
+    recaller = Recaller(retrievers=[_Incompatible(), _Blocked("slow")], overall_deadline=0.05)
+    try:
+        with pytest.raises(EmbeddingSpaceError):
+            recaller.recall("q")
+        assert module._abandoned_workers == before + 1
+    finally:
+        release.set()
+    time.sleep(0.1)
+    assert module._abandoned_workers == before
+
+
 @pytest.mark.parametrize("error", [RuntimeError, BaseException])
 def test_abandoned_raising_worker_drains(monkeypatch, error):
     import threading
