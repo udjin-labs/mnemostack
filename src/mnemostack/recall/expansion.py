@@ -16,6 +16,7 @@ Design:
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
@@ -24,6 +25,8 @@ from ..observability import counter, histogram
 from .fusion import reciprocal_rank_fusion
 from .recaller import Recaller, RecallResult
 from .trace import RecallTrace
+
+logger = logging.getLogger(__name__)
 
 _EXPANSION_PROMPT = """Given a user question, produce {n} short paraphrases that
 are likely to match different wordings in a memory store. Keep them diverse.
@@ -185,8 +188,12 @@ class QueryExpander:
             )
 
         queries = [query] if self.include_original else []
-        queries += self.generate_variants(query)
-        if len(queries) <= 1:
+        try:
+            queries += self.generate_variants(query)
+        except Exception as exc:
+            counter("mnemostack.query_expansion.errors", 1)
+            logger.warning("Query expansion failed (%s); using plain recall", type(exc).__name__)
+        if not queries or queries == [query]:
             return self.recaller.recall(
                 query,
                 limit=limit,

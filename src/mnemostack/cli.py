@@ -2065,7 +2065,7 @@ def _recall_for_cli(args: argparse.Namespace, recaller, query: str, limit: int):
         )
     _text_key, _ts_key, _ts_fmt = _payload_schema()
     pipeline = build_full_pipeline(
-        state_store=FileStateStore(default_state_path()),
+        state_store=FileStateStore(os.environ.get("MNEMOSTACK_STATE_PATH") or default_state_path()),
         # `search` and `answer` run the same freshness stage `serve` does, so
         # a deployment that turned the access signal off must get that here
         # too — otherwise the off switch depends on which command you type.
@@ -2091,6 +2091,7 @@ def _recall_for_cli(args: argparse.Namespace, recaller, query: str, limit: int):
         if require_rerank:
             print("error: --require-rerank: reranker unavailable", file=sys.stderr)
             raise SystemExit(2) from None
+        print("warning: reranker unavailable; continuing without LLM reranking", file=sys.stderr)
     trace = RecallTrace() if require_rerank else None
     results = recall_flow(
         recaller,
@@ -4483,7 +4484,7 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     )
     p_feedback.add_argument(
         "--state-path",
-        default=default_state_path(),
+        default=os.environ.get("MNEMOSTACK_STATE_PATH") or default_state_path(),
         help="Pipeline state file path",
     )
     p_feedback.add_argument(
@@ -4530,7 +4531,7 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     )
     p_mcp.add_argument(
         "--state-path",
-        default=default_state_path(),
+        default=os.environ.get("MNEMOSTACK_STATE_PATH") or default_state_path(),
         help="Pipeline state file path for feedback",
     )
     p_mcp.add_argument(
@@ -4668,7 +4669,7 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     )
     p_serve.add_argument(
         "--state-path",
-        default=default_state_path(),
+        default=os.environ.get("MNEMOSTACK_STATE_PATH") or default_state_path(),
         help="Pipeline state file path",
     )
     p_serve.add_argument(
@@ -4913,7 +4914,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
         rerank_mode=args.rerank_mode,
         token_budget=_effective_token_budget(args),
         state_path=args.state_path,
-        auto_record_ior=args.auto_record_ior,
+        auto_record_ior=(
+            getattr(args, "auto_record_ior", False) or _env_bool("MNEMOSTACK_AUTO_RECORD_IOR")
+        ),
         # getattr, like quotas_file above: cmd_serve is called with
         # hand-built namespaces (tests, embedders) that predate each new flag.
         record_access=(

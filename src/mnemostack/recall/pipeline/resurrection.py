@@ -14,6 +14,7 @@ the stage is a no-op. This matches legacy behaviour.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any
 
@@ -33,6 +34,12 @@ from .base import PipelineContext, Stage
 from .stages import STOPWORDS
 
 logger = logging.getLogger(__name__)
+
+# Match the item-source policy:these scripts need containment in running text.
+_NONSPACED_SCRIPT_RE = re.compile(
+    "[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff"
+    "\uf900-\ufaff\uac00-\ud7af\u0e00-\u0e7f]"
+)
 
 try:
     from neo4j import GraphDatabase
@@ -311,7 +318,9 @@ class GraphResurrection(Stage):
         for key, info in seed_match.items():
             nb = info["data"]
             name = nb.get("name") or ""
-            if key in existing:
+            if re.search(rf"(?<!\w){re.escape(key)}(?!\w)", existing) or (
+                _NONSPACED_SCRIPT_RE.search(key) and key in existing
+            ):
                 continue
             overlap = len(info["seeds"]) / max(len(seeds), 1)
             score = min(0.10 + 0.15 * overlap, 0.30)

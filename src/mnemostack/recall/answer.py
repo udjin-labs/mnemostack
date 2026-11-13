@@ -8,6 +8,7 @@ uncertainty: low confidence → caller should fall back to raw evidence.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -21,6 +22,17 @@ from .inference_retry import decompose_query, merge_results, should_retry
 from .recaller import RecallResult
 from .specificity import detect_placeholders, resolve_specificity
 from .tokens import TokenCounter, apply_token_budget, sum_tokens
+
+logger = logging.getLogger(__name__)
+
+
+class _IncompleteListExtraction(RuntimeError):
+    """Retain extracted items without treating a partial pool as complete."""
+
+    def __init__(self, items: list[str], contributing: list[RecallResult]):
+        super().__init__("list extraction incomplete")
+        self.items = items
+        self.contributing = contributing
 
 
 def _display_ts(ts: Any, numeric_unit: str = "auto") -> str:
@@ -599,10 +611,21 @@ class AnswerGenerator:
                 raw="",
             )
         elif self.list_extract_mode and category in {"list", "count"}:
-            answer = self._generate_list_extract(
-                query, memories, category, token_counter=token_counter,
-                budgeted_context=token_budget is not None,
-            )
+            try:
+                answer = self._generate_list_extract(
+                    query, memories, category, token_counter=token_counter,
+                    budgeted_context=token_budget is not None,
+                )
+            except _IncompleteListExtraction as exc:
+                counter("mnemostack.answer.list_extract_incomplete", 1)
+                return Answer(
+                    text=", ".join(exc.items) if category == "list" else "",
+                    confidence=0.0,
+                    sources=self._sources_for_items(exc.items, exc.contributing),
+                    error="list extraction incomplete",
+                    context_tokens_estimate=sum_tokens(memories, token_counter),
+                    context_memories=list(memories),
+                )
         else:
             answer = self._generate_single_prompt(
                 query=query,
@@ -754,7 +777,8 @@ class AnswerGenerator:
             # Batch-of-one on purpose: this path has always been batch-only,
             # so a provider implementing just embed_batch keeps working.
             vectors.extend(embed_documents_via(self.recaller.embedding, [expanded_texts[2]]))
-        except Exception:
+        except Exception as exc:
+            logger.warning("Answer retry embedding failed (%s); keeping draft", type(exc).__name__)
             return draft, memories
         vectors = [v for v in vectors if v]
         if not vectors:
@@ -846,7 +870,8 @@ class AnswerGenerator:
                         **tkw,
                     )
                 )
-            except Exception:
+            except Exception as exc:
+                logger.warning("Inference sub-recall failed (%s); keeping available evidence", type(exc).__name__)
                 sub_results.append([])
 
         merged_memories = merge_results(memories, *sub_results)
@@ -1080,7 +1105,8 @@ class AnswerGenerator:
         pool no longer decides whether a memory is seen.
 
         Returns None when every batch failed (LLM error or unparseable
-        output); otherwise (items, contributing_memories) where items are
+        output). Raises _IncompleteListExtraction when only some failed.
+        Otherwise returns (items, contributing_memories) where items are
         merged across batches preserving first-seen order and the memories
         come from the batches that actually produced items — source
         attribution must point at the supporting batches, not the pool
@@ -1094,6 +1120,7 @@ class AnswerGenerator:
         seen: set[str] = set()
         contributing: list[RecallResult] = []
         any_batch_ok = False
+        failed_batches = 0
         for start in range(0, len(memories), self.list_extract_batch_size):
             batch = memories[start : start + self.list_extract_batch_size]
             prompt = template.format(
@@ -1107,10 +1134,12 @@ class AnswerGenerator:
             with histogram("mnemostack.answer.llm_latency_ms"):
                 resp = self.llm.generate(prompt, max_tokens=self.max_tokens)
             if not resp.ok:
-                continue  # fail-open per batch: other batches still count
+                failed_batches += 1
+                continue
             try:
                 items = self._parse_extracted_items(resp.text)
             except (TypeError, ValueError, json.JSONDecodeError):
+                failed_batches += 1
                 continue
             any_batch_ok = True
             if items:
@@ -1126,6 +1155,8 @@ class AnswerGenerator:
                     merged.append(item)
         if not any_batch_ok:
             return None
+        if failed_batches:
+            raise _IncompleteListExtraction(merged, contributing)
         return merged, contributing
 
     def _fallback_list_answer(
