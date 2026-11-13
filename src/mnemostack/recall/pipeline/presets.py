@@ -83,15 +83,14 @@ def build_full_pipeline(
     # Calibration precedes the unit-scale source, exploration and age signals.
     stages = [
         ClassifyQuery(),
+        CalibrateRelevance(),
         ExactTokenRescue(boost=rescue_boost),
-        GravityDampen(penalty=gravity_penalty),
     ]
 
     if hub_degrees:
         stages.append(HubDampen(hub_degrees=hub_degrees))
 
     # Calibrate rank-score units before mixing source, exploration and age utility.
-    stages.append(CalibrateRelevance())
 
     if enable_q_learning:
         stages.append(QLearningReranker(state_store=store))
@@ -113,6 +112,10 @@ def build_full_pipeline(
             access_bonus_max=access_bonus_max,
         )
     )
+
+    # Apply the lexical penalty to the blended utility, not only its relevance
+    # component. Otherwise a uniform penalty changes the recency weight.
+    stages.append(GravityDampen(penalty=gravity_penalty))
 
     if enable_ior:
         stages.append(InhibitionOfReturn(state_store=store))
@@ -154,12 +157,11 @@ def build_stateless_pipeline(
     """
     stages = [
         ClassifyQuery(),
+        CalibrateRelevance(),
         ExactTokenRescue(boost=rescue_boost),
-        GravityDampen(penalty=gravity_penalty),
     ]
     if hub_degrees:
         stages.append(HubDampen(hub_degrees=hub_degrees))
-    stages.append(CalibrateRelevance())
     stages.append(
         FreshnessBlend(
             weight=freshness_weight,
@@ -168,5 +170,6 @@ def build_stateless_pipeline(
             access_bonus_max=access_bonus_max,
         )
     )
+    stages.append(GravityDampen(penalty=gravity_penalty))
     stages.append(ExactTokenProtection())
     return Pipeline(stages)

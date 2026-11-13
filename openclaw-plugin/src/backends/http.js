@@ -77,7 +77,12 @@ export function mapJsonToResult(json, mapping = {}) {
   const answer = getPath(json, mapping.answerPath || "answer");
   const confidence = getPath(json, mapping.confidencePath || "confidence");
   const rawStatus = getPath(json, mapping.statusPath || "status");
-  const degraded = Boolean(getPath(json, mapping.degradedPath || "degraded"));
+  const degradedValue = getPath(json, mapping.degradedPath || "degraded");
+  const noteValue = getPath(json, mapping.notesPath || "notes");
+  // The stock API duplicates routine notes in degraded for compatibility.
+  // Only tags absent from its authoritative notes list describe failures.
+  const notes = new Set(Array.isArray(noteValue) ? noteValue.filter((tag) => typeof tag === "string") : []);
+  const degraded = Array.isArray(degradedValue) ? degradedValue.some((tag) => !notes.has(tag)) : Boolean(degradedValue);
   const sourceValue = getPath(json, mapping.sourcesPath || "sources");
   const status = rawStatus || (degraded ? "degraded" : (answer ? "ok" : "not_found"));
   return {

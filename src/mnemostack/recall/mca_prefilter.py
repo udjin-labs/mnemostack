@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
 from .bm25 import BM25, BM25Doc
@@ -111,7 +112,7 @@ def mca_prefilter(
             id=doc.id,
             text=doc.text,
             score=score,
-            payload=doc.payload or {},
+            payload=deepcopy(doc.payload or {}),
             sources=["mca"],
         )
         for doc, score in hits

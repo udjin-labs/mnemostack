@@ -181,6 +181,10 @@ class Reranker:
                     return ordinal_map[bare]
                 if bare in id_map:
                     return id_map[bare]
+            # Bare numbers are not the R-prefixed labels sent to the model.
+            # Only an exact numeric raw ID may resolve to a candidate.
+            if bare.isdecimal():
+                return None
             # Fuzzy fallback: longest full-id that starts with the candidate,
             # or that the candidate starts with. This catches composite ids
             # (paths / namespaced keys) when the LLM emits a shorter form.

@@ -177,7 +177,9 @@ class ExactTokenRescue(Stage):
                 continue
             if answer_re.search(r.text):
                 r.score += self.boost
-                r.payload.setdefault("flags", []).append("exact_rescue")
+                flags = r.payload.setdefault("flags", [])
+                if isinstance(flags, list):
+                    flags.append("exact_rescue")
         results.sort(key=lambda x: -x.score)
         return results
 
@@ -590,7 +592,7 @@ class FreshnessBlend(Stage):
             if any(name in src for name in self.always_current_files):
                 if freshness < self.always_current_freshness:
                     freshness = self.always_current_freshness
-            if age_minutes is not None and age_minutes < self.echo_window_minutes:
+            if age_minutes is not None and 0 <= age_minutes < self.echo_window_minutes:
                 freshness *= self.echo_penalty
                 r.payload["echo_penalty"] = True
             r.score = (1 - self.weight) * r.score + self.weight * freshness
@@ -775,7 +777,8 @@ class CuriosityBoost(Stage):
         log = self.store.get(tenant_state_key(self.IOR_KEY, tenant)) or []
         counts: dict[str, int] = defaultdict(int)
         for entry in log:
-            counts[str(entry.get("id", ""))] += 1
+            if isinstance(entry, dict):
+                counts[str(entry.get("id", ""))] += 1
         now = datetime.now(timezone.utc)
         # Invalid scores must not become a shared bonus for healthy entries.
         scale = max((abs(r.score) for r in results if math.isfinite(r.score)), default=0.0)

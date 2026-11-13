@@ -2145,12 +2145,13 @@ class Ingestor:
         # (and the existing single-tenant path) is unaffected.
         tkw: dict[str, Any] = {"tenant": self.tenant} if self.tenant is not None else {}
         with histogram("mnemostack.ingest.upsert_batch_ms"):
-            try:
-                self.store.upsert_batch(
+            upsert_batch = getattr(self.store, "upsert_batch", None)
+            if upsert_batch is not None:
+                upsert_batch(
                     [(pid, vec, payload) for pid, vec, payload, _item in points],
                     **tkw,
                 )
-            except AttributeError:
+            else:
                 for pid, vec, payload, _item in points:
                     self.store.upsert(pid, vec, payload, **tkw)
         stats.upserted += len(points)

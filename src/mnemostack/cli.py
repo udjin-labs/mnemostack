@@ -2112,6 +2112,9 @@ def _recall_for_cli(args: argparse.Namespace, recaller, query: str, limit: int):
 
 def cmd_invalidate(args: argparse.Namespace) -> int:
     """Mark memories stale by id (non-destructive; no re-embedding)."""
+    from .ingest import coerce_point_ids
+
+    ids = coerce_point_ids(args.ids)
     # Invalidation is a payload write — no embeddings needed, so skip provider
     # construction (which for some providers loads a model). The dimension is
     # unused by set_payload/retrieve.
@@ -2122,10 +2125,6 @@ def cmd_invalidate(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    # argparse hands every id in as a string, but Qdrant integer point ids are
-    # distinct from string ids — coerce digit-only args so numeric-id
-    # collections can be invalidated (UUIDs contain hyphens, so stay strings).
-    ids = [int(x) if x.isdigit() else x for x in args.ids]
     updated = store.invalidate(
         ids,
         invalidated_at=args.invalidated_at,
@@ -2614,6 +2613,11 @@ def _utcnow_iso() -> str:
 
 
 def cmd_index(args: argparse.Namespace) -> int:
+    if args.chunk_size <= 0:
+        # Reject before any reads or writes: an empty chunk set must not turn
+        # an invalid indexing request into a destructive --prune operation.
+        print("error: --chunk-size must be greater than zero", file=sys.stderr)
+        return 2
     policy = SecretPolicy(getattr(args, "secret_policy", "off"))
     # One instant for the whole run: chunks written together get the same
     # write time, rather than times that differ by the wall-clock cost of
@@ -4931,8 +4935,13 @@ def cmd_serve(args: argparse.Namespace) -> int:
     app = build_app(cfg)
 
     if args.host == "0.0.0.0":
+        auth_state = (
+            "protected routes require service keys; public probes remain open"
+            if cfg.auth_enabled
+            else "the API is unauthenticated"
+        )
         print(
-            "warning: binding to 0.0.0.0 exposes the unauthenticated API on all interfaces",
+            f"warning: binding to 0.0.0.0 exposes all interfaces ({auth_state})",
             file=sys.stderr,
         )
 
@@ -4995,7 +5004,10 @@ def cmd_config_show(args: argparse.Namespace) -> int:
     except (ValueError, TypeError) as e:
         print(f"error: invalid configuration: {e}", file=sys.stderr)
         return 2
-    print(yaml.safe_dump(cfg.to_dict(), default_flow_style=False, sort_keys=False))
+    data = cfg.to_dict()
+    if data.get("graph", {}).get("password"):
+        data["graph"]["password"] = "[redacted]"
+    print(yaml.safe_dump(data, default_flow_style=False, sort_keys=False))
     return 0
 
 

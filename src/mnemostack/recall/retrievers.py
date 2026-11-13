@@ -23,6 +23,7 @@ from abc import ABC, abstractmethod
 from calendar import monthrange
 from collections import defaultdict
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, cast
@@ -882,7 +883,7 @@ class BM25Retriever(Retriever):
                 id=d.id,
                 text=d.text,
                 score=s,
-                payload=d.payload or {},
+                payload=deepcopy(d.payload or {}),
                 sources=[self.name],
             )
             for d, s in hits
@@ -1529,8 +1530,10 @@ class MemgraphRetriever(Retriever):
         # minute while every substantive recall is told to skip.
         words: list[str] = []
         seen_words: set[str] = set()
-        for raw_word in query.split():
-            token = raw_word.lower()
+        # Separate sentence punctuation, but retain entity syntax such as
+        # .NET, C++, @handles, file names and hyphenated project names.
+        for raw_word in re.split(r'[\s,!?;()\[\]{}"«»“”]+', query):
+            token = raw_word.strip("'").rstrip(":.").lower()
             if len(token) < self.min_word or token in seen_words:
                 continue
             seen_words.add(token)

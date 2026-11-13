@@ -131,8 +131,8 @@ class GraphStore:
         MERGE key and stamped on both nodes and the edge, so two tenants writing
         the same ``(subject, predicate, obj)`` get distinct, isolated nodes — a
         scoped read (``tenant=`` on the query side) can never reach another
-        tenant's node. With ``tenant=None`` the Cypher is byte-for-byte the
-        legacy single-tenant form, so existing graphs are untouched.
+        tenant's node. With ``tenant=None`` the legacy single-tenant ownership
+        rules are preserved.
         """
         props = {
             "valid_from": _to_iso(valid_from),
@@ -146,7 +146,13 @@ class GraphStore:
         o_label = self._safe_label(obj_label)
         rel = self._safe_rel(predicate)
         tk = self._tenant_key_frag(tenant)  # ", tenant: $tenant" when scoped
-        params: dict[str, Any] = {"subject": subject, "obj": obj, "props": props}
+        params: dict[str, Any] = {
+            "subject": subject,
+            "obj": obj,
+            "subject_lower": subject.lower(),
+            "obj_lower": obj.lower(),
+            "props": props,
+        }
         if tenant is not None:
             props[TENANT_KEY] = tenant  # stamp the edge too
             params["tenant"] = tenant
@@ -173,7 +179,8 @@ class GraphStore:
             f"MERGE (s:{s_label} {{name: $subject{tk}}}) "
             f"MERGE (o:{o_label} {{name: $obj{tk}}}) "
             f"SET s.valid_until = coalesce(s.valid_until, 'current'), "
-            f"    o.valid_until = coalesce(o.valid_until, 'current'){set_tenant} "
+            f"    o.valid_until = coalesce(o.valid_until, 'current'){set_tenant}, "
+            f"    s.name_lower = $subject_lower, o.name_lower = $obj_lower "
             f"{edge_merge}"
             f"{edge_set}"
         )

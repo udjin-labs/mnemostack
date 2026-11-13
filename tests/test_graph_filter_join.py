@@ -857,7 +857,7 @@ def test_recall_cypher_calls_bounded_under_expansion():
     variants = [
         " ".join(f"tok{v}x{i:02d}" for i in range(16)) for v in range(4)
     ]
-    recaller._query_expansion_cache[variants[0]] = variants[1:]
+    recaller._query_expansion_cache.put(variants[0], ["3"], variants[1:])
 
     recaller.recall(variants[0], include_invalidated=True)
 
@@ -903,7 +903,7 @@ def test_expansion_variants_share_the_probe_result_cache():
     recaller = Recaller(
         retrievers=[retr], query_expansion=True, expansion_llm=object()
     )
-    recaller._query_expansion_cache["note.md"] = ["note.md doc"]
+    recaller._query_expansion_cache.put("note.md", ["3"], ["note.md doc"])
 
     out = recaller.recall("note.md", include_invalidated=True)
 
@@ -961,7 +961,7 @@ def test_query_expansion_shares_the_probe_breaker_across_variants():
     )
     # Pre-seed the expansion cache so no LLM call happens: the public query
     # plus two variants — three serial runs of the graph arm.
-    recaller._query_expansion_cache["note.md"] = ["note.md doc", "note.md file"]
+    recaller._query_expansion_cache.put("note.md", ["3"], ["note.md doc", "note.md file"])
 
     out = recaller.recall(
         "note.md", filters={"project": "x"}, include_invalidated=True

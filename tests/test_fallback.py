@@ -108,7 +108,7 @@ def test_fallback_only_results_rank_below_pipeline_results():
 
     assert store.calls == 2
     assert [result.id for result in results] == ["bm25", "fallback"]
-    assert results[1].score == pytest.approx(results[0].score - 0.01)
+    assert results[1].score == pytest.approx(results[0].score * 0.5)
 
 
 def test_fallback_dedupes_and_keeps_higher_score():

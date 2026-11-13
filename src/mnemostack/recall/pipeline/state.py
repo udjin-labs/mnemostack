@@ -154,13 +154,20 @@ class FileStateStore(StateStore):
             finally:
                 fcntl.flock(fh, fcntl.LOCK_UN)
 
-    def _read_all(self) -> dict:
-        if not self.path.exists():
-            return {}
+    def _read_all(self, *, strict: bool = False) -> dict:
         try:
-            return json.loads(self.path.read_text())
-        except (json.JSONDecodeError, OSError):
+            data = json.loads(self.path.read_text())
+        except FileNotFoundError:
             return {}
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+            if strict:
+                raise
+            return {}
+        if not isinstance(data, dict):
+            if strict:
+                raise ValueError("state file root must be a JSON object")
+            return {}
+        return data
 
     def _write_all(self, data: dict) -> None:
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
@@ -174,13 +181,13 @@ class FileStateStore(StateStore):
 
     def set(self, key, value):
         with self._lock, self._file_lock():
-            data = self._read_all()
+            data = self._read_all(strict=True)
             data[key] = value
             self._write_all(data)
 
     def update(self, key, updater):
         with self._lock, self._file_lock():
-            data = self._read_all()
+            data = self._read_all(strict=True)
             new_value = updater(data.get(key))
             data[key] = new_value
             self._write_all(data)
@@ -196,9 +203,7 @@ class FileStateStore(StateStore):
         an offboarding must never report a cleanup it couldn't inspect.
         """
         with self._lock, self._file_lock():
-            if not self.path.exists():
-                return False
-            data = json.loads(self.path.read_text())  # raises on corrupt/unreadable
+            data = self._read_all(strict=True)
             if key not in data:
                 return False
             del data[key]

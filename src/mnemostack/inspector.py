@@ -996,6 +996,9 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
         from mnemostack.quotas import QuotaStoreError
 
         assert quota_store is not None  # guaranteed by _admin (auth on)
+        tenant = tenant.strip()
+        if not tenant:
+            raise HTTPException(status_code=400, detail="tenant is required")
         try:
             removed = quota_store.remove(tenant)
         except QuotaStoreError as e:

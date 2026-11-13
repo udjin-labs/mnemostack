@@ -64,10 +64,24 @@ from ..recall import (
     resolve_access_bonus_max,
     sum_tokens,
 )
+from ..recall.filters import validate_filters
 from ..recall.pipeline import FileStateStore, default_state_path
 from ..vector import VectorStore
 
 log = logging.getLogger(__name__)
+
+
+class _AuthError(Exception):
+    """A fixed, client-safe authorization error raised inside a tool."""
+
+
+def _error_text(error: object, transport: str) -> str | None:
+    """Keep backend details local; preserve operator diagnostics over stdio."""
+    if error is None:
+        return None
+    if transport == "http" and not isinstance(error, _AuthError):
+        return "operation failed"
+    return str(error)
 
 
 def _public_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -283,10 +297,6 @@ def build_server(
             http_auth = ServiceKeyVerifier()
 
     mcp = FastMCP("mnemostack", auth=http_auth) if http_auth is not None else FastMCP("mnemostack")
-
-    class _AuthError(Exception):
-        """Raised inside a tool on an auth failure; the tool's except maps it to a
-        structured {"ok": False, "error": ...} (tools return errors, not raise)."""
 
     def _authorize(scope: str):
         """Principal for an authenticated call, or None when auth is off. Re-verifies
@@ -532,6 +542,7 @@ def build_server(
         as_of: str | None = None,
         tenant: str | None = None,
     ) -> tuple[list[Any], RecallTrace]:
+        validate_filters(filters)
         trace = RecallTrace()
         recaller = _get_recaller()
         try:
@@ -582,12 +593,17 @@ def build_server(
     def mnemostack_health() -> dict:
         """Check health of all mnemostack components.
 
-        Read-only, no side effects, no authentication required. Returns a JSON
+        Read-only. Requires the read scope when authentication is enabled.
+        Returns a JSON
         object with ok (bool) and per-component status for the embedding
         provider, Qdrant vector store, and optional Memgraph graph database.
         Use this to verify the memory backend is reachable before issuing recall
         queries.
         """
+        try:
+            tenant = _tenant_of(_authorize("read"))
+        except Exception as e:
+            return {"ok": False, "error": _error_text(e, transport)}
         result: dict[str, Any] = {"ok": True, "components": {}}
         try:
             emb = _get_embedding()
@@ -596,18 +612,18 @@ def build_server(
                 "ok": ok,
                 "provider": emb.name,
                 "dimension": emb.dimension,
-                "message": msg,
+                "message": ("ok" if ok else "component unavailable") if transport == "http" else msg,
             }
             if not ok:
                 result["ok"] = False
         except Exception as e:  # noqa: BLE001
-            result["components"]["embedding"] = {"ok": False, "error": str(e)}
+            result["components"]["embedding"] = {"ok": False, "error": _error_text(e, transport)}
             result["ok"] = False
 
         try:
             vec = _get_vector()
             exists = vec.collection_exists()
-            count = vec.count() if exists else 0
+            count = (vec.count(tenant=tenant) if tenant is not None else vec.count()) if exists else 0
             result["components"]["vector"] = {
                 "ok": True,
                 "collection": vec.collection,
@@ -615,10 +631,11 @@ def build_server(
                 "points": count,
             }
         except Exception as e:  # noqa: BLE001
-            result["components"]["vector"] = {"ok": False, "error": str(e)}
+            result["components"]["vector"] = {"ok": False, "error": _error_text(e, transport)}
             result["ok"] = False
 
         if memgraph_uri:
+            gs = None
             try:
                 from ..graph.factory import make_graph_store
 
@@ -632,16 +649,24 @@ def build_server(
                 ok, msg = gs.health_check()
                 result["components"]["graph"] = {
                     "ok": ok,
-                    "nodes": gs.count_nodes() if ok else 0,
-                    "edges": gs.count_edges() if ok else 0,
-                    "message": msg,
+                    # Graph counts have no tenant-scoped API. Never return
+                    # global totals to a scoped caller.
+                    "nodes": gs.count_nodes() if ok and tenant is None else None,
+                    "edges": gs.count_edges() if ok and tenant is None else None,
+                    "message": ("ok" if ok else "component unavailable") if transport == "http" else msg,
                 }
-                gs.close()
                 if not ok:
                     result["ok"] = False
             except Exception as e:  # noqa: BLE001
-                result["components"]["graph"] = {"ok": False, "error": str(e)}
+                result["components"]["graph"] = {"ok": False, "error": _error_text(e, transport)}
                 result["ok"] = False
+            finally:
+                if gs is not None:
+                    try:
+                        gs.close()
+                    except Exception as e:
+                        result["components"]["graph"] = {"ok": False, "error": _error_text(e, transport)}
+                        result["ok"] = False
 
         return result
 
@@ -653,7 +678,7 @@ def build_server(
         ],
         limit: Annotated[
             int,
-            Field(description="Maximum number of results to return (default 10)"),
+            Field(description="Maximum number of results to return (default 10)", ge=1),
         ] = 10,
         include_trace: Annotated[
             bool,
@@ -702,7 +727,7 @@ def build_server(
     ) -> dict:
         """Search indexed memories with hybrid recall.
 
-        Read-only, no side effects, no authentication required. Use this when
+        Read-only. Requires the read scope when authentication is enabled. Use this when
         you need raw memory matches rather than a synthesized answer. Returns a
         JSON object with ok, query, count, results, tokens_estimate (estimated
         total text tokens of the results), notes (the AUTHORITATIVE list of
@@ -744,7 +769,7 @@ def build_server(
                 response["trace"] = trace.to_dict()
             return response
         except Exception as e:  # noqa: BLE001
-            return {"ok": False, "error": str(e), "query": query}
+            return {"ok": False, "error": _error_text(e, transport), "query": query}
 
     @mcp.tool()
     def mnemostack_answer(
@@ -754,7 +779,7 @@ def build_server(
         ],
         limit: Annotated[
             int,
-            Field(description="Maximum number of results to return (default 10)"),
+            Field(description="Maximum number of results to return (default 10)", ge=1),
         ] = 10,
         filters: Annotated[
             dict[str, Any] | None,
@@ -792,7 +817,7 @@ def build_server(
     ) -> dict:
         """Answer a question using retrieved memories.
 
-        Read-only, no side effects, no authentication required. Use this when
+        Read-only. Requires the read scope when authentication is enabled. Use this when
         you want a concise factual answer synthesized from memory search results
         instead of the raw matches returned by mnemostack_search. Returns a JSON
         object with ok, query, answer text, confidence (0.0-1.0), sources,
@@ -843,10 +868,10 @@ def build_server(
                 "fallback_recommended": gen.should_fallback(answer),
                 "tokens_estimate": tokens_estimate,
                 "tokens_used": getattr(answer, "tokens_used", None),
-                "error": answer.error,
+                "error": _error_text(answer.error, transport),
             }
         except Exception as e:  # noqa: BLE001
-            return {"ok": False, "error": str(e), "query": query}
+            return {"ok": False, "error": _error_text(e, transport), "query": query}
 
     @mcp.tool()
     def mnemostack_resolve(
@@ -883,7 +908,7 @@ def build_server(
             )
             return {"ok": True, **res.to_dict()}
         except Exception as e:  # noqa: BLE001
-            return {"ok": False, "error": str(e), "chunk_id": chunk_id}
+            return {"ok": False, "error": _error_text(e, transport), "chunk_id": chunk_id}
 
     @mcp.tool()
     def mnemostack_invalidate(
@@ -936,7 +961,7 @@ def build_server(
             except _AuthError as e:
                 return {
                     "ok": False,
-                    "error": str(e),
+                    "error": _error_text(e, transport),
                     "error_kind": "unauthorized",
                     "requested": len(ids),
                 }
@@ -981,7 +1006,7 @@ def build_server(
             # error_kind on every failure shape, mirroring mnemostack_remember.
             return {
                 "ok": False,
-                "error": str(e),
+                "error": _error_text(e, transport),
                 "error_kind": "error",
                 "requested": len(ids),
             }
@@ -1067,14 +1092,14 @@ def build_server(
             try:
                 tenant = _tenant_of(_authorize("write"))
             except _AuthError as e:
-                return {"ok": False, "error": str(e), "error_kind": "unauthorized"}
+                return {"ok": False, "error": _error_text(e, transport), "error_kind": "unauthorized"}
             # The deployment's configured schema keys are reserved too —
             # metadata must not shadow what recall actually reads.
             schema_reserved = {text_key, timestamp_key} - {"text", "timestamp"}
             try:
                 ingest_policy.check((text, source, timestamp, tags, metadata))
             except IngestPolicyError as e:
-                return {"ok": False, "error": str(e), "error_kind": "ingest_policy"}
+                return {"ok": False, "error": _error_text(e, transport), "error_kind": "ingest_policy"}
             problem = validate_remote_item(
                 text,
                 source,
@@ -1103,7 +1128,7 @@ def build_server(
             except RemoteRequestTooLarge as e:
                 # Same condition HTTP maps to 400: the caller must split the
                 # document — an agent retrying a generic error would spin.
-                return {"ok": False, "error": str(e), "error_kind": "invalid_argument"}
+                return {"ok": False, "error": _error_text(e, transport), "error_kind": "invalid_argument"}
             max_points = None
             if tenant is not None:
                 try:
@@ -1137,11 +1162,11 @@ def build_server(
                     secret_policy=secret_policy,
                 )
             except IngestPolicyError as e:
-                return {"ok": False, "error": str(e), "error_kind": "ingest_policy"}
+                return {"ok": False, "error": _error_text(e, transport), "error_kind": "ingest_policy"}
             except QuotaExceededError as e:
-                return {"ok": False, "error": str(e), "error_kind": "quota_exceeded"}
+                return {"ok": False, "error": _error_text(e, transport), "error_kind": "quota_exceeded"}
             except EmbeddingSpaceError as e:
-                return {"ok": False, "error": str(e), "error_kind": "embedding_space"}
+                return {"ok": False, "error": _error_text(e, transport), "error_kind": "embedding_space"}
             failed_n = sum(r.status == "failed" for r in results)
             if results and failed_n == len(results):
                 # Same honesty rule as the HTTP 502: when EVERY item failed
@@ -1164,7 +1189,7 @@ def build_server(
         except Exception as e:  # noqa: BLE001
             # error_kind is present on EVERY failure shape of this tool;
             # "error" is the generic backend bucket (do not retry blindly).
-            return {"ok": False, "error": str(e), "error_kind": "error"}
+            return {"ok": False, "error": _error_text(e, transport), "error_kind": "error"}
 
     @mcp.tool()
     def mnemostack_feedback(
@@ -1210,7 +1235,7 @@ def build_server(
             )
             return outcome.to_dict()
         except Exception as e:  # noqa: BLE001
-            return {"ok": False, "error": str(e), "hit_id": hit_id}
+            return {"ok": False, "error": _error_text(e, transport), "hit_id": hit_id}
 
     # ---------- graph tools (optional) ----------
 
@@ -1239,7 +1264,7 @@ def build_server(
             as_of: str | None = None,
             limit: Annotated[
                 int,
-                Field(description="Maximum number of graph triples to return (default 50)"),
+                Field(description="Maximum number of graph triples to return (default 50)", ge=1),
             ] = 50,
         ) -> dict:
             """Query knowledge graph with optional SPO filters and point-in-time.
@@ -1302,7 +1327,7 @@ def build_server(
                     ],
                 }
             except Exception as e:  # noqa: BLE001
-                return {"ok": False, "error": str(e)}
+                return {"ok": False, "error": _error_text(e, transport)}
 
         @mcp.tool()
         def mnemostack_graph_add_triple(
@@ -1325,7 +1350,7 @@ def build_server(
                 try:
                     tenant = _tenant_of(_authorize("write"))
                 except _AuthError as e:
-                    return {"ok": False, "error": str(e), "error_kind": "unauthorized"}
+                    return {"ok": False, "error": _error_text(e, transport), "error_kind": "unauthorized"}
                 # Same contract as POST /triples (shared validator): predicate
                 # shape (punctuation variants would silently collapse into one
                 # relationship type), UTF-8 entities, ordered validity bounds.
@@ -1337,7 +1362,7 @@ def build_server(
                 try:
                     ingest_policy.check((subject, predicate, obj, valid_from, valid_until))
                 except IngestPolicyError as e:
-                    return {"ok": False, "error": str(e), "error_kind": "ingest_policy"}
+                    return {"ok": False, "error": _error_text(e, transport), "error_kind": "ingest_policy"}
                 from ..graph.factory import make_graph_store
 
                 gs = make_graph_store(
@@ -1347,19 +1372,21 @@ def build_server(
                     password=graph_password,
                     database=graph_database,
                 )
-                gs.add_triple(
-                    subject=subject,
-                    predicate=predicate,
-                    obj=obj,
-                    valid_from=valid_from,
-                    valid_until=valid_until,
-                    tenant=tenant,
-                )
-                gs.close()
+                try:
+                    gs.add_triple(
+                        subject=subject,
+                        predicate=predicate,
+                        obj=obj,
+                        valid_from=valid_from,
+                        valid_until=valid_until,
+                        tenant=tenant,
+                    )
+                finally:
+                    gs.close()
                 return {"ok": True, "subject": subject, "predicate": predicate, "obj": obj}
             except Exception as e:  # noqa: BLE001
                 # error_kind on every failure shape, mirroring remember.
-                return {"ok": False, "error": str(e), "error_kind": "error"}
+                return {"ok": False, "error": _error_text(e, transport), "error_kind": "error"}
 
     if secret_policy == "block":
         from fastmcp.server.middleware import Middleware
