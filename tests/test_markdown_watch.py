@@ -848,3 +848,63 @@ def test_syncer_secret_refusal_keeps_previous_document(tmp_path):
     with pytest.raises(IngestPolicyError):
         syncer.index_file(path)
     assert [(str(h.id), h.payload) for h in store.scroll()] == before
+
+
+def test_reconcile_projects_only_compared_fields(tmp_path, monkeypatch):
+    store = _mem_store()
+    syncer = MarkdownSyncer(store, _FakeProvider(), index_root=str(tmp_path), chunk_size=10000)
+    path = tmp_path / "here.md"
+    path.write_text("# Here\n")
+    syncer.index_file(path)
+    calls = []
+    scroll = store.client.scroll
+
+    def tracked(**kwargs):
+        calls.append(kwargs)
+        return scroll(**kwargs)
+
+    monkeypatch.setattr(store.client, "scroll", tracked)
+    assert syncer.reconcile_deletions() == []
+    assert calls
+    assert all(c["with_payload"] == ["source", "_md_keys"] for c in calls)
+    assert all(c["with_vectors"] is False for c in calls)
+
+
+def test_reconcile_lifecycle_matches_legacy_scroll(tmp_path, monkeypatch):
+    results = []
+    for projected in (False, True):
+        root = tmp_path / "docs"
+        root.mkdir(exist_ok=True)
+        path = root / "here.md"
+        path.write_text("# Original\n")
+        store = _mem_store()
+        syncer = MarkdownSyncer(store, _FakeProvider(), index_root=str(root), chunk_size=10000)
+        if not projected:
+            scroll = store.scroll
+
+            def legacy_scroll(filters=None, *, tenant=None, _scroll=scroll):
+                return _scroll(filters=filters, tenant=tenant)
+
+            monkeypatch.setattr(store, "scroll", legacy_scroll)
+        syncer.index_file(path)
+        steps = []
+
+        def reconcile(syncer=syncer, store=store, steps=steps):
+            removed = syncer.reconcile_deletions()
+            rows = sorted((str(hit.id), hit.payload["text"]) for hit in store.scroll())
+            steps.append((removed, rows))
+
+        reconcile()
+        path.write_text("# Changed\n")
+        syncer.index_file(path)
+        reconcile()
+        path.write_text("# Changed while stopped\n")
+        restarted = MarkdownSyncer(store, _FakeProvider(), index_root=str(root), chunk_size=10000)
+        restarted.index_file(path)
+        reconcile()
+        path.unlink()
+        reconcile()
+        assert [removed for removed, _ in steps] == [[], [], [], ["here.md"]]
+        assert [len(rows) for _, rows in steps] == [1, 1, 1, 0]
+        results.append(steps)
+    assert results[0] == results[1]

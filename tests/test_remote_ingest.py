@@ -1695,3 +1695,22 @@ def test_ingest_failure_leaves_retracted_memories_retracted(monkeypatch):
         )
     point = store.client.retrieve(store.collection, ids=[first.id], with_payload=True)[0]
     assert point.payload.get("invalidated_at")  # still retracted — no side effect
+
+
+def test_reactivation_reads_only_lifecycle_marker(monkeypatch):
+    emb, store = _CountingEmbedding(), _mem_store()
+    item = IngestItem(text="remember this", source="chat")
+    (first,) = ingest_remote_items(emb, store, [item], tenant="a")
+    store.invalidate([first.id], tenant="a")
+    calls = []
+    retrieve = store.client.retrieve
+
+    def tracked(*args, **kwargs):
+        calls.append(kwargs)
+        return retrieve(*args, **kwargs)
+
+    monkeypatch.setattr(store.client, "retrieve", tracked)
+    (again,) = ingest_remote_items(emb, store, [item], tenant="a")
+    assert again.status == "stored"
+    assert any(c.get("with_payload") == ["invalidated_at"] and c.get("with_vectors") is False for c in calls)
+    assert all(c.get("with_payload") is not True for c in calls)

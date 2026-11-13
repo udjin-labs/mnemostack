@@ -356,7 +356,18 @@ def check_document_space(
     sampled = 0
     unstamped = 0
     found: str | None = None
-    for hit in islice(scroll(), sample_size):
+    from ..ingest import _scroll_keywords
+
+    supported = _scroll_keywords(scroll)
+    options: dict[str, Any] = {}
+    for key, value in {
+        "batch_size": sample_size,
+        "payload_keys": [EMBEDDING_SPACE_KEY],
+        "with_vectors": False,
+    }.items():
+        if supported is None or key in supported:
+            options[key] = value
+    for hit in islice(scroll(**options), sample_size):
         sampled += 1
         fp = (getattr(hit, "payload", None) or {}).get(EMBEDDING_SPACE_KEY)
         if fp is None:

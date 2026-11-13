@@ -1317,7 +1317,10 @@ def _ingest_remote_items_locked(
         collection = getattr(store, "collection", None)
         stale_ids: list[str] = []
         if callable(retrieve_fn) and collection is not None:
-            points = retrieve_fn(collection, ids=list(existing), with_payload=True)
+            points = retrieve_fn(
+                collection, ids=list(existing),
+                with_payload=["invalidated_at"], with_vectors=False,
+            )
             stale_ids = [
                 str(pt.id)
                 for pt in points
@@ -1557,6 +1560,11 @@ def prune_stale_chunks_from_snapshot(
             stale.clear()
 
     has_scroll = hasattr(vector_store, "scroll")
+    scroll_kwargs = dict(tkw)
+    if has_scroll:
+        supported = _scroll_keywords(vector_store.scroll)
+        if supported is None or "payload_keys" in supported:
+            scroll_kwargs["payload_keys"] = ["source", "index_root"]
     if (
         existing is None
         and has_scroll
@@ -1571,7 +1579,7 @@ def prune_stale_chunks_from_snapshot(
             filters: dict[str, Any] = {"source": source}
             if index_root is not None:
                 filters["index_root"] = index_root
-            for hit in vector_store.scroll(filters=filters, **tkw):
+            for hit in vector_store.scroll(filters=filters, **scroll_kwargs):
                 scanned += 1
                 payload = hit.payload or {}
                 if payload.get("source") != source:
@@ -1607,7 +1615,7 @@ def prune_stale_chunks_from_snapshot(
             )
             existing = (
                 (hit.id, hit.payload or {})
-                for hit in vector_store.scroll(filters=root_filter, **tkw)
+                for hit in vector_store.scroll(filters=root_filter, **scroll_kwargs)
             )
         for point_id, payload in existing:
             scanned += 1

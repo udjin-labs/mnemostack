@@ -255,3 +255,137 @@ def test_refresh_payload_writes_are_tenant_scoped(indexer, tmp_path):
     assert cli.cmd_index(args) == 0
     assert seen, "no payload patch was issued"
     assert all(kw.get("tenant") == "acme" for kw in seen), seen
+
+
+@pytest.mark.parametrize("tenant", [None, "a"])
+def test_index_candidate_lifecycle(indexer, monkeypatch, tmp_path, capsys, tenant):
+    from hashlib import sha256
+
+    run, store, _emb = indexer
+    timestamps = {}
+    root = tmp_path / "docs"
+    root.mkdir()
+    a = root / "a.txt"
+    b = root / "b.txt"
+    a.write_text("first document")
+    b.write_text("second document")
+    opts = {} if tenant is None else {"tenant": True, "_tenant_value": tenant}
+    first = stable_chunk_id("a.txt", 0, "first document", tenant=tenant)
+    second = stable_chunk_id("b.txt", 0, "second document", tenant=tenant)
+    changed = stable_chunk_id("a.txt", 0, "changed document", tenant=tenant)
+    embedded = []
+    upsert = store.upsert_batch
+
+    def tracked(points, **kwargs):
+        points = list(points)
+        embedded.extend(str(p[0]) for p in points)
+        return upsert(points, **kwargs)
+
+    monkeypatch.setattr(store, "upsert_batch", tracked)
+
+    def step(expected_embedded, expected_texts, skipped, pruned=None, refresh=False):
+        embedded.clear()
+        capsys.readouterr()
+        run(root, **opts, prune=pruned is not None, refresh_payloads=refresh)
+        output = capsys.readouterr().out
+        assert set(embedded) == set(expected_embedded)
+        assert f"inserted/updated {len(expected_embedded)}, skipped {skipped}," in output
+        if pruned is not None:
+            assert f"pruned {pruned} stale" in output
+        if refresh:
+            assert "1 compared / 0 unchanged / 1 patched" in output
+        rows = {str(h.id): h.payload for h in store.scroll()}
+        assert {pid: p["text"] for pid, p in rows.items()} == expected_texts
+        for pid, payload in rows.items():
+            times = {key: payload[key] for key in ("source_captured_at", "indexed_at")}
+            assert all(isinstance(value, str) and value for value in times.values())
+            assert timestamps.setdefault(pid, times) == times
+            text = expected_texts[pid]
+            expected = {
+                "text": text,
+                "source": "b.txt" if pid == second else "a.txt",
+                "offset": 0,
+                "index_root": str(root.resolve()),
+                "_id_scheme": "stable_chunk_id",
+                "source_content_hash": sha256(text.encode()).hexdigest(),
+                **times,
+            }
+            if tenant is not None:
+                expected["tenant_id"] = tenant
+            assert payload == expected
+        return rows
+
+    step([first, second], {first: "first document", second: "second document"}, 0)
+    step([], {first: "first document", second: "second document"}, 2)
+    a.write_text("changed document")
+    step([changed], {first: "first document", second: "second document", changed: "changed document"}, 1)
+    b.unlink()
+    step([], {second: "second document", changed: "changed document"}, 1, pruned=1)
+    store.client.set_payload(store.collection, {"_enrich_keys": ["ghost"], "ghost": "stale"}, [changed])
+    rows = step([], {second: "second document", changed: "changed document"}, 1, refresh=True)
+    assert "ghost" not in rows[changed]
+
+
+@pytest.mark.parametrize("key", ["meta.author", "tags[]", "tags[0]", "trailing]", '"author"', "display name", ""])
+def test_refresh_flat_path_keys_is_unchanged(indexer, tmp_path, monkeypatch, capsys, key):
+    run, _store, emb = indexer
+    monkeypatch.setattr(cli, "_load_enricher", lambda _path: lambda _item: {key: "value"})
+    doc = _doc(tmp_path, "flat.txt", "flat payload key")
+    run(doc, enrich="example:fields")
+    embedded = emb.embedded
+    for _ in range(2):
+        capsys.readouterr()
+        run(doc, enrich="example:fields", refresh_payloads=True)
+        assert "1 compared / 1 unchanged / 0 patched" in capsys.readouterr().out
+    assert emb.embedded == embedded
+
+
+@pytest.mark.parametrize("refresh", [False, True])
+def test_candidate_lookup_uses_id_page_size(indexer, tmp_path, monkeypatch, refresh):
+    run, store, _emb = indexer
+    root = tmp_path / "corpus"
+    root.mkdir()
+    for i in range(1025):
+        (root / f"{i}.txt").write_text(f"document {i}")
+    run(root)
+    method = "retrieve_payload_fields" if refresh else "retrieve_existing_ids"
+    lookup = getattr(store, method)
+    calls = []
+
+    def tracked(ids, *args, **kwargs):
+        calls.append(len(ids))
+        return lookup(ids, *args, **kwargs)
+
+    monkeypatch.setattr(store, method, tracked)
+    run(root, refresh_payloads=refresh)
+    assert calls == [1024, 1]
+
+
+@pytest.mark.parametrize("tenant", [None, "a"])
+def test_refresh_repoint_with_only_new_chunks(indexer, tmp_path, monkeypatch, capsys, tenant):
+    run, store, _emb = indexer
+    old = _doc(tmp_path, "old.txt", "stored content")
+    opts = {} if tenant is None else {"tenant": True, "_tenant_value": tenant}
+    run(old, **opts)
+    new = _doc(tmp_path, "new.txt", "new content")
+    fingerprint = "original"
+    calls = []
+    iter_ids = store.iter_ids
+
+    def tracked(**kwargs):
+        calls.append(kwargs)
+        return iter_ids(**kwargs)
+
+    monkeypatch.setattr(store, "iter_ids", tracked)
+
+    def guard(_store, _provider):
+        nonlocal fingerprint
+        if store.count() > 1:
+            fingerprint = "repointed"
+        return None, "original"
+
+    monkeypatch.setattr(cli, "_guard_document_space", guard)
+    monkeypatch.setattr(cli, "document_space_fingerprint_via", lambda _provider: fingerprint)
+    assert cli.cmd_index(_index_args(new, refresh_payloads=True, **opts)) == 1
+    assert "EMBEDDING SPACE CHANGED mid-run" in capsys.readouterr().err
+    assert calls == [{"batch_size": 1, **({} if tenant is None else {"tenant": tenant})}]

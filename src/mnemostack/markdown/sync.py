@@ -668,7 +668,14 @@ class MarkdownSyncer:
         # record) are eligible, so a markdown watcher never prunes chunks the
         # generic `index` command wrote under the same collection/root.
         sources: set[str] = set()
-        for hit in self.store.scroll(filters={"index_root": self.index_root}, **self._tkw):
+        from ..ingest import _scroll_keywords
+
+        options = dict(self._tkw)
+        supported = _scroll_keywords(self.store.scroll)
+        for key, value in {"payload_keys": ["source", "_md_keys"], "with_vectors": False}.items():
+            if supported is None or key in supported:
+                options[key] = value
+        for hit in self.store.scroll(filters={"index_root": self.index_root}, **options):
             payload = hit.payload or {}
             source = payload.get("source")
             if source and payload.get("_md_keys"):
