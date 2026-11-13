@@ -14,6 +14,7 @@ the stage is a no-op. This matches legacy behaviour.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any
 
@@ -311,7 +312,7 @@ class GraphResurrection(Stage):
         for key, info in seed_match.items():
             nb = info["data"]
             name = nb.get("name") or ""
-            if key in existing:
+            if re.search(rf"(?<!\w){re.escape(key)}(?!\w)", existing):
                 continue
             overlap = len(info["seeds"]) / max(len(seeds), 1)
             score = min(0.10 + 0.15 * overlap, 0.30)

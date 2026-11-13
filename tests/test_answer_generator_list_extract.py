@@ -413,7 +413,10 @@ def test_partial_batch_failure_keeps_other_batches(memories):
     answer = gen.generate("What are Melanie's pets?", memories)
 
     assert answer.text == "Luna"
-    assert answer.confidence == 0.8
+    assert answer.confidence == 0.0
+    assert answer.error == "list extraction incomplete"
+    assert answer.ok is False
+    assert len(llm.prompts) == 2
 
 
 def test_invalid_list_finalize_rejected():

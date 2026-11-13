@@ -7,11 +7,14 @@ already-generated answer using exact names present in the retrieved memories.
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Iterable
 
 from ..llm.base import LLMProvider
 from .recaller import RecallResult
+
+logger = logging.getLogger(__name__)
 
 _GENERIC_NOUNS = (
     "country",
@@ -159,9 +162,11 @@ def resolve_specificity(
     )
     try:
         resp = llm.generate(prompt, max_tokens=200)
-    except Exception:  # noqa: BLE001 - resolver must never break answer generation
+    except Exception as exc:  # noqa: BLE001 - resolver must never break answer generation
+        logger.warning("Specificity rewrite failed (%s); keeping draft", type(exc).__name__)
         return draft_answer
     if not resp.ok:
+        logger.warning("Specificity rewrite returned an error; keeping draft")
         return draft_answer
     rewritten = resp.text.strip()
     # LLMs occasionally echo the prompt's final label back; strip it so the
