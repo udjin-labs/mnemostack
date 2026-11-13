@@ -41,6 +41,7 @@ except ImportError:  # pragma: no cover - qdrant-client is a runtime dependency
     DatetimeRange = FieldCondition = Filter = Range = None  # type: ignore[assignment,misc]
 from .bm25 import BM25, BM25Doc, Tokenizer, tokenize
 from .filters import ATTRIBUTED_FILTERS_KEY, payload_matches
+from .pipeline.stages import STOPWORDS
 from .recaller import RecallResult
 from .validity import (
     graph_as_of_predicate,
@@ -1529,6 +1530,9 @@ class MemgraphRetriever(Retriever):
         # re-arm the window without probing and keep the arm dark for another
         # minute while every substantive recall is told to skip.
         words: list[str] = []
+        # The first tokens of any kind: the historical probes, used only when
+        # every usable token is a stopword.
+        leading: list[str] = []
         seen_words: set[str] = set()
         # Separate sentence punctuation, but retain entity syntax such as
         # .NET, C++, @handles, file names and hyphenated project names.
@@ -1537,9 +1541,13 @@ class MemgraphRetriever(Retriever):
             if len(token) < self.min_word or token in seen_words:
                 continue
             seen_words.add(token)
-            words.append(token)
-            if len(words) >= _MAX_QUERY_TOKENS:
-                break
+            if len(leading) < _MAX_QUERY_TOKENS:
+                leading.append(token)
+            if token not in STOPWORDS:
+                words.append(token)
+                if len(words) >= _MAX_QUERY_TOKENS:
+                    break
+        words = words or leading
         if not words:
             return []
         driver = self._get_driver()

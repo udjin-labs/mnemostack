@@ -26,6 +26,7 @@ import os
 import threading
 import time
 import weakref
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Annotated, Any, Literal
@@ -1114,30 +1115,72 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     # recall store's client, whose timeout is sized for recall.
     probe_client = _make_probe_client(cfg.qdrant_url, cfg.qdrant_health_timeout)
 
+    # One driver serves all graph probes. `users` counts the probes running on
+    # it: a driver is closed only after it was retired and its last probe ended,
+    # so one failed probe never closes a driver under a concurrent one.
+    graph_probe: dict[str, Any] = {"driver": None, "users": 0}
+    graph_probe_lock = threading.Lock()
+
+    def _close_driver(d: Any) -> None:
+        try:
+            d.close()
+        except Exception:
+            log.debug("graph probe close failed", exc_info=True)
+
+    def _release_graph_probe(slot: dict[str, Any], *, retire: bool) -> None:
+        nonlocal graph_probe
+        with graph_probe_lock:
+            slot["users"] -= 1
+            if retire:
+                slot["retired"] = True
+                if graph_probe is slot:
+                    graph_probe = {"driver": None, "users": 0}
+            close = bool(slot.get("retired")) and slot["users"] == 0
+        if close and slot["driver"] is not None:
+            _close_driver(slot["driver"])
+
     def _graph_ok() -> bool:
         if not cfg.graph_uri:
             return False
-        d = None
         try:
-            from neo4j import GraphDatabase
+            with graph_probe_lock:
+                slot = graph_probe
+                if slot["driver"] is None:
+                    from neo4j import GraphDatabase
 
-            d = GraphDatabase.driver(
-                cfg.graph_uri,
-                auth=(cfg.graph_user, cfg.graph_password) if cfg.graph_user else None,
-                connection_timeout=cfg.graph_health_timeout,
-                connection_acquisition_timeout=cfg.graph_health_timeout,
-            )
-            with d.session(database=cfg.graph_database) as s:
-                s.run("RETURN 1").single()
-            return True
+                    slot["driver"] = GraphDatabase.driver(
+                        cfg.graph_uri,
+                        auth=(cfg.graph_user, cfg.graph_password) if cfg.graph_user else None,
+                        connection_timeout=cfg.graph_health_timeout,
+                        connection_acquisition_timeout=cfg.graph_health_timeout,
+                    )
+                slot["users"] += 1
         except Exception:
             return False
+        ok = False
+        try:
+            # The probe runs outside the lock: a slow probe must not queue the others.
+            with slot["driver"].session(database=cfg.graph_database) as s:
+                s.run("RETURN 1").single()
+            ok = True
+        except Exception:
+            ok = False
         finally:
-            if d is not None:
-                try:
-                    d.close()
-                except Exception:
-                    log.debug("graph probe close failed", exc_info=True)
+            _release_graph_probe(slot, retire=not ok)
+        return ok
+
+    @asynccontextmanager
+    async def lifespan(app):
+        nonlocal graph_probe
+        try:
+            yield
+        finally:
+            with graph_probe_lock:
+                slot, graph_probe = graph_probe, {"driver": None, "users": 0}
+                slot["retired"] = True
+                close = slot["users"] == 0
+            if close and slot["driver"] is not None:
+                _close_driver(slot["driver"])
 
     def _qdrant_ok() -> bool:
         # Ping-level reachability: only that the client can reach Qdrant, not
@@ -1362,6 +1405,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         reranker = None
 
     app = FastAPI(
+        lifespan=lifespan,
         title="mnemostack",
         version=__version__,
         description="Hybrid memory stack for AI agents. See https://github.com/udjin-labs/mnemostack.",

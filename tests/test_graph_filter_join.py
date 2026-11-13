@@ -969,3 +969,34 @@ def test_query_expansion_shares_the_probe_breaker_across_variants():
 
     assert out == []
     assert len(calls) == 1  # one failed probe for the whole recall
+
+
+def test_graph_stopwords_do_not_consume_content_token_budget():
+    driver = _CountingDriver(FILES)
+    retr = MemgraphRetriever(uri="bolt://x", driver=driver, min_word=1)
+    retr.search("what the is и в что note.md NOTE.MD", include_invalidated=True)
+    assert driver.probed == ["note.md"]
+
+
+def test_graph_stopwords_only_preserve_probes():
+    driver = _CountingDriver(FILES)
+    retr = MemgraphRetriever(uri="bolt://x", driver=driver, min_word=1)
+    retr.search("what the is и в что", include_invalidated=True)
+    assert list(dict.fromkeys(driver.probed)) == ["what", "the", "is", "и", "в", "что"]
+
+
+def test_graph_content_tokens_preserve_order_and_deduplication():
+    driver = _CountingDriver(FILES)
+    retr = MemgraphRetriever(uri="bolt://x", driver=driver)
+    retr.search("note.md report.md NOTE.MD", include_invalidated=True)
+    assert list(dict.fromkeys(driver.probed)) == ["note.md", "report.md"]
+
+
+def test_graph_token_scan_stops_at_the_content_token_cap():
+    from mnemostack.recall import retrievers as module
+
+    driver = _CountingDriver(FILES)
+    retr = MemgraphRetriever(uri="bolt://x", driver=driver)
+    words = [f"word{i}" for i in range(module._MAX_QUERY_TOKENS * 4)]
+    retr.search(" ".join(words), include_invalidated=True)
+    assert list(dict.fromkeys(driver.probed)) == words[: module._MAX_QUERY_TOKENS]
