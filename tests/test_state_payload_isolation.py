@@ -12,7 +12,7 @@ from mnemostack.recall.pipeline.state import FileStateStore
 from mnemostack.recall.retrievers import BM25Retriever
 
 
-@pytest.mark.parametrize('operation', ['set', 'update', 'delete'])
+@pytest.mark.parametrize('operation', ['set', 'update', 'delete', 'batch'])
 @pytest.mark.parametrize('content', [b'{"alpha":', b'\xff', b'[]', b'null', b'42'])
 def test_invalid_state_blocks_mutations_without_overwrite(tmp_path, operation, content):
     path = tmp_path/'state.json'
@@ -22,18 +22,20 @@ def test_invalid_state_blocks_mutations_without_overwrite(tmp_path, operation, c
     def updater(old):
         invoked.append(old)
         return {'new': True}
-    with pytest.raises((ValueError, OSError, TypeError, AttributeError)):
+    with pytest.raises((ValueError, OSError, TypeError)):
         if operation == 'set':
             store.set('third-tenant', {'new': True})
         elif operation == 'update':
             store.update('third-tenant', updater)
+        elif operation == 'batch':
+            store.update_many([('third', lambda old: {}), ('alpha', lambda old: {})])
         else:
             store.delete('alpha')
     assert path.read_bytes() == content
     assert invoked == []
 
 
-@pytest.mark.parametrize('operation', ['set', 'update', 'delete'])
+@pytest.mark.parametrize('operation', ['set', 'update', 'delete', 'batch'])
 def test_unreadable_state_blocks_mutations(tmp_path, monkeypatch, operation):
     path = tmp_path/'state.json'
     original = b'{"alpha": {"value": 1}, "beta": {"value": 2}}'
@@ -50,6 +52,8 @@ def test_unreadable_state_blocks_mutations(tmp_path, monkeypatch, operation):
             store.set('third', {})
         elif operation == 'update':
             store.update('alpha', lambda old: {})
+        elif operation == 'batch':
+            store.update_many([('third', lambda old: {}), ('alpha', lambda old: {})])
         else:
             store.delete('alpha')
     assert path.read_bytes() == original

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -92,6 +93,16 @@ def record_recall_events(pipeline, results, tenant: str | None = None) -> bool:
     for stage in pipeline:
         record_recall = getattr(stage, "record_recall", None)
         if record_recall is None:
+            continue
+        batch = getattr(stage, "record_recalls", None)
+        # Only a real method counts: a mock or another duck-typed attribute
+        # keeps getting one call per result. The stage decides itself whether
+        # its per-result hook was overridden.
+        if inspect.ismethod(batch) and batch.__self__ is stage:
+            ids = [str(result.id) for result in results]
+            if ids:
+                batch(ids, **tkw)
+                recorded = True
             continue
         for result in results:
             record_recall(str(result.id), **tkw)
