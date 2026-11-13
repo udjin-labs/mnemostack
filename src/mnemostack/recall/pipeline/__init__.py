@@ -3,7 +3,7 @@ Staged recall pipeline — composable list of Stage objects.
 
 Each Stage transforms a list of RecallResult objects. Stages can be:
 - Stateless (gravity_dampen, freshness_blend, classify_query)
-- Stateful (QLearning, InhibitionOfReturn, MoodCongruent) — take a StateStore
+- Stateful (QLearningReranker, InhibitionOfReturn, CuriosityBoost) — take a StateStore
 
 Usage:
     from mnemostack.recall.pipeline import Pipeline, Stage

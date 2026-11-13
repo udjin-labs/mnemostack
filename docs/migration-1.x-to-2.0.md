@@ -13,7 +13,7 @@ major release. Read the table, find your setup, apply the one relevant step.
 | --- | --- | --- |
 | Gemini, or any model with no built-in profile (e.g. `nomic-embed-text`, MiniLM) | Identity profile — vectors byte-identical to 1.x | None |
 | Ollama + `qwen3-embedding:*` | Queries now get the family's instruction prefix; documents unchanged | None — existing collections keep working (query-only transforms never require reindexing) |
-| E5 (`e5-*`, `multilingual-e5-*`) via HuggingFace or Ollama | Documents now embed as `passage: …`, queries as `query: …` — a DIFFERENT document space than raw-text 1.x vectors | Reindex into a new collection **or** pin the old behavior (below) |
+| Plain E5 (`e5-*`, `multilingual-e5-*`, excluding instruct variants with unprefixed documents) via HuggingFace or Ollama | Documents now embed as `passage: …`, queries as `query: …` — a DIFFERENT document space than raw-text 1.x vectors | Reindex into a new collection **or** pin the old behavior (below) |
 | HuggingFace + decoder embedding family (`qwen3-embedding`, `e5-mistral`) | Pooling default changed `mean` → `last` (the family's correct mode) | Reindex, or pass `pooling="mean"` explicitly to keep 1.x vectors |
 | HuggingFace + explicit `pooling="cls"` (lowercase) | Unchanged | None |
 | HuggingFace + `pooling="CLS"` (uppercase) | 1.x silently mean-pooled it; 2.0 normalizes to real CLS pooling — different vectors | Reindex, or pass `pooling="mean"` to keep what 1.x actually did |

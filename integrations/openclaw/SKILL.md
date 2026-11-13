@@ -2,7 +2,7 @@
 
 Wire mnemostack into OpenClaw as an MCP server, alongside the native OpenClaw
 memory tools (`memory_search` / `memory_get`). The two coexist — mnemostack
-handles the hybrid pipeline (Vector + BM25 + Memgraph + Temporal + 8-stage
+handles the hybrid pipeline (Vector + BM25 + Memgraph + Temporal + configurable
 rerank), while the native tools do fast file-scoped retrieval.
 
 ## Install
@@ -51,9 +51,9 @@ After gateway restart, in any OpenClaw session:
 
 Expected: `mnemostack` among the available servers. Then:
 
-> Call mnemostack's search tool with query "VPN failover" and tier 1.
+> Call mnemostack's search tool with query "VPN failover" with limit 1.
 
-You should get id+score+source list, no text. The existing
+You should get at most one result with id, score, text, and sources. The existing
 `scripts/recall-selfeval.sh` and the `auto-recall-mnemostack` plugin are
 **unaffected** — they call mnemostack via its Python API directly, not via
 MCP. The MCP route is for cases where an outer agent host wants tool-style

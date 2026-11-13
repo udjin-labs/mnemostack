@@ -38,7 +38,7 @@ reads the same MCP config) as an MCP server.
    }
    ```
 
-   Swap `--provider gemini` for `ollama` or `openai` if that's what `health`
+   Swap `--provider gemini` for `ollama` or `huggingface` if that's what `health`
    validated. For graph tools, add `--memgraph-uri bolt://localhost:7687`.
 
 4. Restart Claude Desktop (fully quit, not just close the window).
@@ -49,12 +49,12 @@ In a new chat, ask Claude:
 
 > List the MCP tools you have available from mnemostack.
 
-You should see `health`, `search`, `answer`, and `feedback` (plus `graph_query`
+You should see `health`, `search`, `answer`, `feedback`, `resolve`, `invalidate`, and `remember` (plus `graph_query`
 and `graph_add_triple` if a Memgraph URI was passed). Then:
 
-> Use mnemostack to search for "VPN failover" with tier 1.
+> Use mnemostack to search for "VPN failover" with limit 1.
 
-The reply should cite sources and not leak any snippets (tier 1 = list only).
+The reply should include at most one result with its text and sources.
 
 ## Uninstall
 

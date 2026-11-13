@@ -83,7 +83,7 @@ environment. Treat retrieved memory text as untrusted prompt input.
 
 ## Dependencies
 
-mnemostack pins upper bounds on its direct dependencies in `pyproject.toml`.
+mnemostack pins upper bounds on its core dependencies; optional `transformers`, `torch`, and `fastmcp` have no upper bounds in `pyproject.toml`.
 We rely on GitHub's Dependabot and Python's advisory database; if you spot a
 transitive vulnerability we missed, please report it through the same private
 channel.

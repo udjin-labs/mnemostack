@@ -143,7 +143,7 @@ Notes:
 
 - Judge model matters: `gemini-3-flash-preview` is more accurate than the previous Gemini Flash judge on synonyms, partial matches, and empty ground truth.
 - `cat_5` questions have empty ground truth in this new run and are auto-scored as correct by the benchmark harness. That makes the new `cat_5` strict score (446 / 446, 100.0%) useful for aggregate harness accounting, but not directly comparable to the historical `cat_5` strict score (89.7%) from the older adversarial-question evaluation.
-- Pipeline: Vector retrieval with Gemini embeddings + BM25 + RRF + 8-stage reranking pipeline. The LLM reranker is not part of the benchmark loop (it is a runtime/server feature), so `rerank_mode` does not affect these numbers.
+- Pipeline: Vector retrieval with Gemini embeddings + BM25 + RRF + configurable reranking pipeline. The LLM reranker is not part of the benchmark loop (it is a runtime/server feature), so `rerank_mode` does not affect these numbers.
 - The v0.4.5 run additionally ingests the photo captions (`blip_caption`) that LoCoMo attaches to image-sharing turns — 697 of the 1540 signal questions cite image turns as evidence, and earlier runs silently dropped that content. Answer prompts also show the time of day of each memory since v0.4.5.
 
 ### Historical LoCoMo results (`gemini-2.5-flash` judge)
@@ -222,7 +222,7 @@ Not the best fit if you only need a single call to `text-embedding-3-small` + co
 - 🧠 **4-source hybrid retrieval** — Vector (Qdrant) + BM25 (exact tokens) + Memgraph (knowledge graph) + Temporal (time-aware vector), all fused via Reciprocal Rank Fusion. Pluggable `Retriever` abstraction — add your own sources.
 - ⚖️ **Weighted & adaptive RRF fusion** — `reciprocal_rank_fusion(weights=[...])` lets you lift sources you trust more; `Recaller(adaptive_weights=True)` picks a per-query-shape profile (exact-token / person / temporal / general). See the honest write-up below for where this helps and where it doesn't.
 - 🧪 **HyDE retriever (opt-in)** — embeds a hypothetical answer instead of the query. Useful for query↔document vocabulary gaps in documentation-style corpora; does **not** reliably help on dialogue-backed memory and always costs one extra LLM roundtrip per `search()`. Not included in the default `Recaller`.
-- 🪜 **8-stage recall pipeline** — ClassifyQuery → ExactTokenRescue → GravityDampen → HubDampen → FreshnessBlend → InhibitionOfReturn → CuriosityBoost → QLearningReranker. Used by CLI search/answer and the HTTP/MCP serving paths; SDK users compose it explicitly. Feedback updates are explicit, and HTTP recall exposure logging is off unless `--auto-record-ior` is enabled.
+- 🪜 **Configurable recall pipeline** — ClassifyQuery, CalibrateRelevance, ExactTokenRescue, HubDampen (when hub degrees are supplied), QLearningReranker (when enabled), CuriosityBoost (when enabled), FreshnessBlend, GravityDampen, InhibitionOfReturn (when enabled), ExactTokenProtection, and GraphResurrection (when a graph URI is supplied). Used by CLI search/answer and the HTTP/MCP serving paths; SDK users compose it explicitly. Feedback updates are explicit, and HTTP recall exposure logging is off unless `--auto-record-ior` is enabled.
 - 🔁 **Reranking** — Gemini Flash (or any LLM) reorders top-K by relevance, or plug a cross-encoder / hosted rerank service through the score-based `ScoringReranker`. See [docs/recipes.md](docs/recipes.md) for a runnable `bge-reranker-v2-m3` example.
 - 🔤 **Pluggable BM25 analyzer** — the default is lowercase + Unicode word split (great for exact tokens); pass `BM25Retriever(tokenizer=...)` for stemming / lemmatization / language routing. Core stays dependency-free; [docs/recipes.md](docs/recipes.md) has per-language recipes.
 - ⚡ **Async API** — every blocking surface has a signature-stable async mirror: `Recaller.recall_async`, `recall_flow_async`, `Ingestor.ingest_async` / `ingest_one_async`, `AnswerGenerator.generate_async`, `synthesize_async`, plus `AsyncVectorStore` over the native async Qdrant client. Retrievers dispatch in parallel; five concurrent HTTP recalls finish in roughly one single-recall wall-clock.
@@ -238,7 +238,7 @@ Not the best fit if you only need a single call to `text-embedding-3-small` + co
 - 📋 **Knowledge synthesis** — `synthesize(entity)` rolls up everything memory knows about a person, project, or topic into a structured profile (`SynthesisFact` / `SynthesisResult`, markdown or JSON). CLI: `mnemostack synthesize <entity>`. Optional related-entities expansion via graph and LLM summarization pass.
 - 📏 **Progressive Tiers API** — `search --tier {1,2,3}` and `answer --tier {1,2,3}` bound output size (~50 / ~200 / ~500 tokens) so agents can pay only for the detail they actually need. Omit `--tier` for unchanged full output.
 - ✂️ **Chunkers + sliding window** — plain, fixed-size, and `MessagePairChunker` for chat transcripts (keeps user↔assistant pairs together). The new `vector.window_size` config carries adjacent-turn context inside each chunk; `window_size=3` was worth **+5.8pp strict / +4.1pp combined** on LoCoMo (v0.4.0).
-- 🔎 **Query expansion + smart retry** — `Recaller(expansion_llm=...)` widens recall with reformulated queries; `AnswerGenerator(retry_with_expansion=True)` retries low-confidence answers with the expanded query and a HyDE-style hypothetical before giving up. Opt-in via `--query-expansion` on `mnemostack answer`.
+- 🔎 **Query expansion + smart retry** — `Recaller(query_expansion=True, expansion_llm=...)` widens recall with reformulated queries; `AnswerGenerator(retry_with_expansion=True)` retries low-confidence answers with the expanded query and a HyDE-style hypothetical before giving up. Opt-in via `--query-expansion` on `mnemostack answer`.
 - ⚙ **Consolidation runtime** — phase orchestrator with built-in health checks and application-supplied phases; scheduling, semantic consolidation, and forgetting policies are supplied by the application ([scope](ARCHITECTURE.md#consolidation--decay))
 - 🔌 **MCP server** — expose memory tools to Claude Desktop, ChatGPT, Cursor, etc.
 - 🛡 **Graceful degradation** — retrieval keeps working if graph or any retriever is down
@@ -409,7 +409,7 @@ agent loop where full recall output would burn context unnecessarily.
 
 ```bash
 # Tier 1 (~50 tokens) — just "is there anything in memory about this?"
-# Returns id, score, source labels; no text.
+# Returns position, score, source labels; no text.
 mnemostack search "VPN failover" --tier 1 --provider gemini
 
 # Tier 2 (~200 tokens) — triage with short snippets (~40 chars each)
@@ -497,7 +497,7 @@ store.ensure_collection()
 recaller = Recaller(embedding_provider=emb, vector_store=store)
 results = recaller.recall("what did we decide", limit=10)
 
-# Each result: .id .text .score .source ("vector" | "bm25" | "memgraph" | "temporal") .metadata
+# Each result: .id .text .score .sources (retriever labels) .payload
 # The list order is authoritative — .score need not follow it, and is not a
 # confidence; re-sorting by it undoes reranking. docs/api-stability.md#what-score-is-not
 
@@ -560,9 +560,9 @@ answer = gen.generate(query, pool, category="count")
 
 Override names: the seven category prompts (`general`, `list`, `count`, `temporal`, `multihop`, `inference`, `adversarial`) plus `list_extract` / `list_finalize`. Required placeholders are validated at construction. mnemostack ships no translations by design — prompt quality is corpus- and domain-specific, so you own the templates.
 
-#### Full stack: 4-source retrieval + 8-stage pipeline + reranker
+#### Full stack: 4-source retrieval + configurable pipeline + reranker
 
-This is the full runtime configuration. The LoCoMo numbers above are produced by a subset of it: the benchmark loop runs Vector + BM25 retrieval, the 8-stage pipeline, `window_size=3`, query expansion, and top-K 25 — the LLM reranker and the graph retriever are runtime-only features and are not part of the benchmark methodology (see `benchmarks/run_locomo.sh` for the exact reproduction path).
+This is the full runtime configuration. The LoCoMo numbers above are produced by a subset of it: the benchmark loop runs Vector + BM25 retrieval, the configurable pipeline, `window_size=3`, query expansion, and top-K 25 — the LLM reranker and the graph retriever are runtime-only features and are not part of the benchmark methodology (see `benchmarks/run_locomo.sh` for the exact reproduction path).
 
 ```python
 from mnemostack.embeddings import get_provider
@@ -695,7 +695,7 @@ Endpoints:
 | `GET`  | `/healthz` | Liveness probe — `200` whenever the process is up (no backend checks) |
 | `GET`  | `/readyz`  | Readiness probe — `503` when Qdrant is unreachable (graph is fail-soft, never gates) |
 | `GET`  | `/status`  | Operator snapshot — config, live dependency reachability, headline counters |
-| `POST` | `/recall`  | Hybrid recall with optional 8-stage pipeline |
+| `POST` | `/recall`  | Hybrid recall with optional configurable pipeline |
 | `POST` | `/answer`  | Recall + LLM answer synthesis with citations |
 | `GET`  | `/resolve/{chunk_id}` | Verify a citation — resolve a chunk id back to its source document — `read` |
 | `POST` | `/feedback` | Explicit click/usefulness feedback for stateful learning |
@@ -721,7 +721,7 @@ Response shape (abridged):
   "results": [
     { "id": "...", "text": "...", "score": 0.72, "source": "notes/...md", "metadata": {} }
   ],
-  "degraded": [],  // components that ACTUALLY fell back, e.g. "retriever:bm25:failed", "reranker:fallback"; empty when healthy
+  "degraded": [],  // fallback signals plus routine tags duplicated from notes; entries absent from notes indicate faults
   "notes": [],     // routine signals for stages that did not apply, e.g. "temporal:no_parse" on a date-less query; never a fault
   "tokens_estimate": 512   // estimated text tokens of the returned results
 }
@@ -735,7 +735,7 @@ Pass `"token_budget": 2000` to cap how much prompt space the results may occupy:
 
 Pass `"filters": {...}` to scope recall by payload fields — exact match (`{"tenant": "a"}`) or inclusive ranges (`{"timestamp": {"gte": "2026-01-01"}}`). Filters apply inside **every** retriever, not as a post-filter on the output: the candidate pool itself is restricted, so top-K stays full and results never include points outside the scope — this is the isolation contract for multi-tenant and per-user memory. Sources that cannot attribute their results to the scope contribute nothing rather than leak. The knowledge-graph retriever attributes its hits where it can: a filter key the hit's own node metadata carries (e.g. `index_root`) is checked in place, the rest is proven through the hit's vector chunks — a graph file hit (with a recorded root, pinning the probe to its exact document) passes the filter exactly when at least one of its chunks does; entity nodes and anything else without pinnable chunks are still excluded, never leaked. The same `filters` parameter is available on `/answer` (the answer is generated only from in-scope memories, including retry sub-recalls), on MCP `mnemostack_search` / `mnemostack_answer`, on the CLI as `--filters '{"tenant": "a"}'`, and in the library as `recaller.recall(query, filters=...)` / `recall_flow(..., filters=...)`.
 
-The `/answer` endpoint adds `{ answer, confidence, sources }` alongside the memories and carries the same `degraded` / `notes` / opt-in `trace` fields, plus `tokens_used` — the LLM provider's reported token usage for the generation call that produced the answer (provider-specific semantics; `null` when the provider reports nothing). If the LLM isn't configured, `/answer` returns `503` and `/recall` still works — graceful degradation applies at the HTTP layer too.
+The `/answer` endpoint adds `{ answer, confidence, sources }` alongside the memories and carries the same `degraded` / `notes` / opt-in `trace` fields, plus `tokens_used` — the LLM provider's reported token usage for answer generation plus a specificity rewrite when it changes the answer (provider-specific semantics; `null` when the provider reports nothing). If the LLM isn't configured, `/answer` returns `503` and `/recall` still works — graceful degradation applies at the HTTP layer too.
 
 Start the server with `--retry-on-weak` if you want a recall that comes back nearly empty to be paraphrased by the answer LLM and asked again, fusing the rounds by reciprocal rank — so a memory that two phrasings both find outranks one that only a single phrasing did, and a later paraphrase can beat an earlier one. What counts as "weak" is a COUNT (`--retry-weak-below`, default 1 — only a recall that returned nothing), not a score: fused scores are RRF values encoding rank, not confidence, so a threshold on them would measure nothing. One extra round, at most two paraphrases, and every retry carries the caller's tenant, filters, validity view and budget unchanged. Budget for it accordingly: each variant repeats your recall in full, reranker included, so a weak recall costs up to three LLM calls (one paraphrase plus one rerank per variant) and two extra retrieval rounds — not the single call the name suggests. Two consequences worth knowing before you switch it on: a retried response fuses over several rounds where an unretried one fuses over a single one, so the rank basis behind `score` differs and the two are never comparable — threshold on rank, not on the number, and see [what `score` is not](docs/api-stability.md#what-score-is-not) for what the number holds on each path; and a retry never returns fewer memories than it was given — if the fused list plus your token budget would hand back less than the recall already had, the original results come back untouched. That is a guarantee about the size of the response, not its membership: at a fixed `limit` a hit that a paraphrase ranks first will take the slot of one your original phrasing ranked last, which is what asking again is for. Off by default, and a request can only opt *out* of it — the server pays for the LLM call, so enabling it is the operator's call.
 
@@ -943,7 +943,7 @@ The plugin defaults to `http://127.0.0.1:18793/answer`, supports English/Russian
 - [x] MCP server (Model Context Protocol)
 - [x] Text → graph triple extractor helpers (`mnemostack.graph.TripleExtractor`)
 - [x] Config file support YAML/JSON (`mnemostack.config`, `mnemostack init`/`config` CLI)
-- [x] Async variants for high-throughput servers (`mnemostack.vector.AsyncQdrantStore`)
+- [x] Async variants for high-throughput servers (`mnemostack.vector.AsyncVectorStore`)
 - [x] Docker compose examples (`examples/docker-compose.yml`)
 - [x] Reproducible LoCoMo benchmark harness in-tree (`benchmarks/run_locomo.sh`)
 - [x] First-class FastAPI/Starlette service wrapper (`pip install 'mnemostack[server]'`, `mnemostack serve`)

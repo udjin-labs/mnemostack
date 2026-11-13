@@ -43,15 +43,15 @@ Open the Cursor chat and ask:
 
 > What MCP tools do you have from mnemostack?
 
-Expected: `health`, `search`, `answer`, `feedback` (and `graph_query` plus
+Expected: `health`, `search`, `answer`, `feedback`, `resolve`, `invalidate`, `remember` (and `graph_query` plus
 `graph_add_triple` if a Memgraph URI was set).
 
 Quick smoke test:
 
-> Search mnemostack for "VPN failover", tier 2.
+> Search mnemostack for "VPN failover" with limit 2.
 
-The model should invoke the tool and return short (~40 char) snippets with
-source ids.
+The model should invoke the tool and return at most two results with text and
+retriever labels.
 
 ## Uninstall
 

@@ -60,7 +60,7 @@ docstring for the identity contract that keeps this thread-safe).
 
 Wire it into the shared flow like any other reranker — but feed it a **wider
 pool than you return**, or the reranker only reorders the handful you asked for.
-`recall_flow` widens its internal pool (to `3 × limit`) only when a `pipeline=`
+`recall_flow` widens its internal pool (to `max(3 × limit, 30)`) only when a `pipeline=`
 is passed; with no pipeline it recalls exactly `limit`. So either recall the
 wide pool yourself and slice after reranking:
 

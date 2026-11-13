@@ -17,7 +17,7 @@ where the host's MCP config lives and how it discovers servers.
 
 ```bash
 pip install 'mnemostack[mcp]'
-mnemostack health --provider gemini  # or ollama, openai
+mnemostack health --provider gemini  # or ollama, huggingface
 ```
 
 If `health` passes and you have indexed content (`mnemostack index ./notes/`),
@@ -31,8 +31,11 @@ Tools are prefixed with `mnemostack_` in the wire protocol:
 - `search` — hybrid recall over indexed content
 - `answer` — LLM-synthesized answer with confidence + source citations
 - `feedback` — record explicit click/usefulness feedback into the stateful pipeline
+- `resolve`: verify a citation against its source
+- `invalidate`: retract stored memories
+- `remember`: store a memory
 - `graph_query` *(only when `--memgraph-uri` is set)* — point-in-time Cypher over the graph
 - `graph_add_triple` *(only when `--memgraph-uri` is set)* — add a temporal fact
 
-`search` and `answer` accept the same `--tier {1,2,3}` semantics as the CLI, so
-agents can bound output size per call.
+`search` and `answer` accept `limit` and `token_budget` to bound output size;
+`search` returns full result text and neither tool accepts `tier`.

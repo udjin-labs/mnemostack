@@ -1,12 +1,12 @@
 """
 Consolidation runtime — memory lifecycle (ingest, decay, graph-sync, health).
 
-The Runtime orchestrator runs phases in order; each phase can be enabled/disabled
-via config. Failures in one phase are logged but do not block subsequent phases.
+The Runtime orchestrator runs the supplied phases in order. Failures are recorded
+and do not block subsequent phases unless stop_on_error=True.
 
 Usage:
-    from mnemostack.consolidation import Runtime, Phase
-    runtime = Runtime(phases=[MyIngestPhase(), DecayPhase(), HealthPhase()])
+    from mnemostack.consolidation import Runtime, CallablePhase
+    runtime = Runtime(phases=[CallablePhase("ingest", lambda: (True, "ingested"))])
     state = runtime.run()
     print(state.to_dict())
 """

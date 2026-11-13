@@ -121,7 +121,7 @@ MATCH (f:File)-[:LINKS_TO]-() WHERE f.index_root IS NULL DETACH DELETE f;
 > ⚠️ Only **clear/rebuild the whole graph** if it holds nothing but markdown link
 > data. `index-markdown` regenerates the link graph, but **not** manually added
 > temporal facts (`mnemostack_graph_add_triple` / `GraphStore.add_triple`) or
-> ingest tag/file nodes (`Ingestor(graph=...)`, written by `mnemostack index`) —
+> ingest tag/file nodes (`Ingestor(graph=...)`; `mnemostack index` writes vector points only) —
 > clearing drops those for good. Back them up first, or stick to the scoped delete
 > above. And never blanket-delete every `index_root`-less `:File` node: that hits
 > the live `:File {path}`/triple nodes too.

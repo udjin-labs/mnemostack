@@ -155,7 +155,7 @@ class RecallRequest(BaseModel):
     limit: int = Field(10, ge=1, le=100, description="Top-K memories to return.")
     full_pipeline: bool = Field(
         True,
-        description="Apply the 8-stage recall pipeline. Set to False for raw RRF output.",
+        description="Apply the recall ranking pipeline. Set to False for raw RRF output.",
     )
     retry_on_weak: bool | None = Field(
         None,

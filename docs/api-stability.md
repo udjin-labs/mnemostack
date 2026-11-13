@@ -188,7 +188,9 @@ through or removed; either way it won't silently change a working deployment.
 🟢 **CLI-only defaults**: `recall.top_k` and `recall.confidence_threshold` are
 stable as defaults for the `search` / `answer` CLI (`--limit` / `--min-confidence`),
 but the HTTP and MCP surfaces don't read them — `/recall` and the MCP tools take a
-per-request `limit` (default 10) and apply no server-side confidence threshold. Set
+per-request `limit` (default 10) and apply no server-side confidence threshold to
+results; MCP `mnemostack_answer` only reports `fallback_recommended` against a fixed
+0.5 threshold. Set
 the result count per request there.
 
 `graph.timeout` bounds graph connections for `serve`, `mcp-serve`,
@@ -212,8 +214,8 @@ Env aliases (e.g. `MNEMOSTACK_QDRANT_URL` for `vector.host`,
 `MNEMOSTACK_MEMGRAPH_URI` for `graph.uri`) are 🟢 stable **where they exist** — not
 every stable key has one. `vector.chunk_size` and `vector.window_size`, for
 example, are set via the YAML file or CLI flags only (no `MNEMOSTACK_*` override),
-and they tune the generic `index` command — `index-markdown` uses a fixed chunk
-size (1200) and no windowing, so it ignores both.
+and they tune the generic `index` command — `index-markdown` uses its own `--chunk-size`
+(default 1200) and no windowing, so it ignores both.
 Defaults won't change
 without a major bump. `graph.uri = null` (disabled) is the documented off state for
 the **library** recall path — but the **HTTP server defaults it on**: both
@@ -234,7 +236,7 @@ so an unreachable store's first burst may cost one attempt per in-flight
 request, once, before the breaker exists to consult. The breaker is deliberately
 per component, not per URI (each carries its own credentials and can point at
 its own store), so a dead store costs at most one attempt per component per
-window rather than one per request. The `/health`, `/readyz` and `/status`
+window rather than one per request. The `/health` and `/status`
 graph probes stay LIVE by design: their job is to notice recovery immediately,
 they are bounded by `graph_health_timeout`, and they log nothing. `token_budget <= 0` normalizing to "no budget"
 is a 🟢 documented behavior.

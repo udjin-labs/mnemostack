@@ -217,7 +217,7 @@ Add a stdio MCP server in Cursor settings. The exact UI changes between Cursor v
 }
 ```
 
-After saving, reload Cursor and check that `mnemostack_health`, `mnemostack_search`, `mnemostack_answer`, and `mnemostack_feedback` appear in the MCP tools list.
+After saving, reload Cursor and check that `mnemostack_health`, `mnemostack_search`, `mnemostack_answer`, `mnemostack_feedback`, `mnemostack_resolve`, `mnemostack_invalidate`, and `mnemostack_remember` appear in the MCP tools list.
 
 ### Other MCP clients
 
@@ -237,7 +237,7 @@ For clients that do not support per-server `env`, export variables before starti
 
 ## Available tools
 
-Four base tools are always registered (`health`, `search`, `answer`, `feedback`); two graph tools (`graph_query`, `graph_add_triple`) appear only when a Memgraph URI is configured.
+Seven base tools are always registered (`health`, `search`, `answer`, `feedback`, `resolve`, `invalidate`, `remember`); two graph tools (`graph_query`, `graph_add_triple`) appear only when a Memgraph URI is configured.
 
 ### `mnemostack_health`
 
@@ -275,13 +275,13 @@ Four base tools are always registered (`health`, `search`, `answer`, `feedback`)
 
 `components.graph` is present only when `MNEMOSTACK_MEMGRAPH_URI`, `MNEMOSTACK_GRAPH_URI`, or `--memgraph-uri` is configured.
 
-On failure, a component contains `{"ok": false, "error": "..."}` and top-level `ok` becomes `false`.
+On a failed check, a component contains `{"ok": false, "message": "..."}`; on an exception it contains `{"ok": false, "error": "..."}`. Top-level `ok` becomes `false`.
 
 **Example usage scenario:** At the start of an agent session, call `mnemostack_health` to verify that the configured collection exists and that provider credentials are valid.
 
 ### `mnemostack_search`
 
-**Purpose:** Hybrid recall over indexed memories. Returns top-K results ranked by reciprocal rank fusion across vector recall, temporal recall, optional BM25, and optional Memgraph, refined by the same 8-stage ranking pipeline and fail-open LLM reranker the HTTP server uses (since 0.5.0 all entry points rank identically).
+**Purpose:** Hybrid recall over indexed memories. Returns top-K results ranked by reciprocal rank fusion across vector recall, temporal recall, optional BM25, and optional Memgraph, refined by the same configurable ranking pipeline and fail-open LLM reranker the HTTP server uses (since 0.5.0 all entry points rank identically).
 
 **Input parameters:**
 
@@ -373,7 +373,7 @@ On failure:
 }
 ```
 
-`degraded` has the same semantics as in `mnemostack_search`. `tokens_estimate` is the estimated text tokens of the context memories; `tokens_used` is the LLM provider's reported usage for the generation call that produced the answer (provider-specific semantics; `null` when the provider reports nothing). The answer tool does not take `include_trace` (use the HTTP `/answer` endpoint when you need the full trace).
+`degraded` has the same semantics as in `mnemostack_search`. `tokens_estimate` is the estimated text tokens of the context memories; `tokens_used` is the LLM provider's reported usage for answer generation plus a specificity rewrite when it changes the answer (provider-specific semantics; `null` when the provider reports nothing). The answer tool does not take `include_trace` (use the HTTP `/answer` endpoint when you need the full trace).
 
 If the answer generator cannot produce a reliable answer, `ok` may be `false`, `confidence` may be low, and `fallback_recommended` may be `true`. On exceptions, the tool returns:
 
@@ -389,7 +389,7 @@ If the answer generator cannot produce a reliable answer, `ok` may be `false`, `
 
 ### `mnemostack_feedback`
 
-**Purpose:** Record explicit feedback into the configured state store for Q-learning weights and inhibition-of-return tracking. Since 0.5.0 `mnemostack_search` runs the full 8-stage pipeline against the same state store, so recorded feedback influences subsequent search ranking in the same deployment (Q-learning weights, inhibition-of-return).
+**Purpose:** Record explicit feedback into the configured state store for Q-learning weights and inhibition-of-return tracking. Since 0.5.0 `mnemostack_search` runs the full configurable pipeline against the same state store, so recorded feedback influences subsequent search ranking in the same deployment (Q-learning weights, inhibition-of-return).
 
 **Input parameters:**
 
@@ -469,8 +469,8 @@ Validation failures return structured errors:
 | `source` | `string` | `""` | Logical origin (e.g. `chat/2026-08-19`); part of the deterministic id. Required when `chunk` is true. |
 | `offset` | `integer` | `0` | Position within `source` for multi-part documents. |
 | `timestamp` | `string` | `null` | Event time of the content (ISO-8601); drives temporal recall. |
-| `tags` | `array<string>` | `[]` | Optional tags stored in the payload. |
-| `metadata` | `object` | `{}` | Free payload fields, filterable at recall. Server-reserved keys (underscore-prefixed, structural ones like `tenant_id`/`source`, `tags`/`timestamp` — use their dedicated parameters — and the lifecycle marker `invalidated_at`, settable only through `mnemostack_invalidate`) are rejected. `valid_from`/`valid_until` are allowed but must be ISO-8601 (`current` allowed for `valid_until`); numbers must fit signed 64-bit integers and be finite; nesting depth is capped. |
+| `tags` | nullable `array<string>` | `null` | Optional tags stored in the payload. |
+| `metadata` | nullable `object` | `null` | Free payload fields, filterable at recall. Server-reserved keys (underscore-prefixed, structural ones like `tenant_id`/`source`, `tags`/`timestamp` — use their dedicated parameters — and the lifecycle marker `invalidated_at`, settable only through `mnemostack_invalidate`) are rejected. `valid_from`/`valid_until` are allowed but must be ISO-8601 (`current` allowed for `valid_until`); numbers must fit signed 64-bit integers and be finite; nesting depth is capped. |
 | `chunk` | `boolean` | `false` | Split a long document server-side into the fixed windows `mnemostack index` uses at its default `--chunk-size` (identical chunk ids under default settings in unscoped deployments; tenant-scoped ids are tenant-prefixed, so match them with `mnemostack index --tenant <id>`, and a custom chunk size or the markdown indexer differ); the expansion is capped per call. |
 
 **Return shape:**
@@ -485,7 +485,7 @@ Validation failures return structured errors:
 }
 ```
 
-Each result's `status` is `stored`, `duplicate` (content already present — nothing embedded), or `failed` (embedding failure for that item). Re-remembering a memory that was retracted via invalidate REACTIVATES it (the `invalidated_at` marker is cleared, no re-embedding) and reports `stored` — the fact is recallable again in default recall. A `valid_until` on the point is PRESERVED (it may be legitimate ingest-declared expiry, indistinguishable from one set by the invalidate call) — if the retraction set it, clear or re-state it via `mnemostack_invalidate`; until then `as_of` queries past that instant still exclude the point. Reactivation does not merge the new call's metadata. Every failure the tool BODY reports returns `{"ok": false, "error": …, "error_kind": …}`; `error_kind` is one of `invalid_argument` (fix the input — includes a document expanding past the per-call chunk budget: split it), `unauthorized` (missing/revoked key or missing `write` scope), `quota_exceeded` (the tenant's storage cap; back off or raise the quota), `embedding_space` (deployment misconfiguration — an operator issue), `embedding_failed` (the provider failed for every item in the call — retriable once the provider recovers), or `error` (any other backend failure — do not retry blindly). One caveat: arguments that violate the tool's declared JSON schema (empty text, negative offset, text beyond the document cap) are rejected by the MCP protocol layer BEFORE the tool runs and surface as protocol-level validation errors without an `error_kind` — schema errors are also input errors, fix and re-send.
+Each result's `status` is `stored`, `duplicate` (content already present — nothing embedded), or `failed` (embedding failure for that item). Re-remembering a memory that was retracted via invalidate REACTIVATES it (the `invalidated_at` marker is cleared, no re-embedding) and reports `stored` — the fact is recallable again in default recall. A `valid_until` on the point is PRESERVED (it may be legitimate ingest-declared expiry, indistinguishable from one set by the invalidate call) — if the retraction set it, clear or re-state it via `mnemostack_invalidate`; until then `as_of` queries past that instant still exclude the point. Reactivation does not merge the new call's metadata. Every failure the tool BODY reports returns `{"ok": false, "error": …, "error_kind": …}`; `error_kind` is one of `invalid_argument` (fix the input — includes a document expanding past the per-call chunk budget: split it), `unauthorized` (missing/revoked key or missing `write` scope), `quota_exceeded` (the tenant's storage cap; back off or raise the quota), `embedding_space` (deployment misconfiguration — an operator issue), `embedding_failed` (the provider failed for every item in the call — retriable once the provider recovers), `ingest_policy` (content rejected by the ingest policy), or `error` (any other backend failure — do not retry blindly). One caveat: arguments that violate the tool's declared JSON schema (empty text, negative offset, text beyond the document cap) are rejected by the MCP protocol layer BEFORE the tool runs and surface as protocol-level validation errors without an `error_kind` — schema errors are also input errors, fix and re-send.
 
 The tenant's storage quota is enforced before any write — the tool reads the quota store configured via `mcp-serve --quotas-file` / `MNEMOSTACK_QUOTAS_FILE` / `build_server(quotas_file=…)`. **Point it at the same file `serve --quotas-file` uses**: a deployment with quotas at a non-default path that starts `mcp-serve` without this setting gets HTTP writes capped but MCP writes unbounded.
 
@@ -575,7 +575,7 @@ On failure:
 }
 ```
 
-Every failure carries `error_kind` (`invalid_argument` for contract violations — including the predicate shape and inverted validity intervals — `unauthorized` for key/scope failures, `error` otherwise), matching `mnemostack_remember`.
+Every failure carries `error_kind` (`invalid_argument` for contract violations — including the predicate shape and inverted validity intervals — `unauthorized` for key/scope failures, `ingest_policy` for content rejected by the ingest policy, `error` otherwise), matching `mnemostack_remember`.
 
 **Example usage scenario:** When a project handoff happens, write `subject: "alice", predicate: "owns", obj: "billing-api", valid_from: "2026-05-11"` so future temporal graph queries can recover ownership.
 

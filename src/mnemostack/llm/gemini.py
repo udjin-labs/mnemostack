@@ -18,7 +18,7 @@ __all__ = ["DEFAULT_IMAGE_PROMPT", "GeminiLLM"]
 class GeminiLLM(LLMProvider):
     """Gemini text generation via Google Generative Language API.
 
-    Default model is `gemini-2.5-flash` with thinking disabled
+    Default model is `gemini-3-flash-preview` with thinking disabled
     (thinkingBudget=0) — fast, cheap, good for factual answers.
 
     For higher quality use `gemini-2.5-pro` (note: Pro does NOT support

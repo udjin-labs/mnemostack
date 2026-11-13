@@ -36,7 +36,7 @@ class MarkdownChunker(Chunker):
     semantically the chunk knows where it sits in the document tree. This
     dramatically improves retrieval for queries about specific sections.
 
-    Code blocks (``` fences) are kept intact — we don't split inside them.
+    Code blocks (``` fences) stay intact unless their section exceeds chunk_size.
 
     Args:
         chunk_size: target char count per chunk (sections larger than this
