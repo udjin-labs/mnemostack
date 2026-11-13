@@ -83,5 +83,16 @@ class MessagePairChunker(Chunker):
 
     def chunk(self, text: str) -> list[Chunk]:
         """Fallback: treat each non-empty line as one message."""
-        messages = [line for line in text.split("\n") if line.strip()]
-        return self.chunk_messages(messages)
+        messages: list[str] = []
+        offsets: dict[int, int] = {}
+        source_offset = compact_offset = 0
+        for line in text.split("\n"):
+            if line.strip():
+                messages.append(line)
+                offsets[compact_offset] = source_offset
+                compact_offset += len(line) + 1
+            source_offset += len(line) + 1
+        return [
+            Chunk(text=chunk.text, offset=offsets[chunk.offset], metadata=chunk.metadata)
+            for chunk in self.chunk_messages(messages)
+        ]
