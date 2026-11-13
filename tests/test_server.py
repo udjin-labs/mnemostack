@@ -1126,3 +1126,108 @@ def test_auth_works_with_external_verify_only_keystore(monkeypatch, tmp_path):
     r = client.post("/recall", json={"query": "x"}, headers={"X-API-Key": "msk_ok"})
     assert r.status_code == 200
     assert recaller.last_tenant == "alpha"  # tenant resolved via the external store
+
+
+def test_graph_probe_driver_lifecycle(monkeypatch):
+    import asyncio
+    import sys
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    drivers = [MagicMock(), MagicMock()]
+    factory = MagicMock(side_effect=drivers)
+    monkeypatch.setitem(sys.modules, "neo4j", SimpleNamespace(
+        GraphDatabase=SimpleNamespace(driver=factory),
+    ))
+    app, _ = _patched_app(monkeypatch, config=ServerConfig(graph_uri="bolt://probe"))
+    health = next(r.endpoint for r in app.routes if r.path == "/health")
+    status = next(r.endpoint for r in app.routes if r.path == "/status")
+    assert factory.call_count == 0
+    assert health().memgraph
+    assert status().memgraph
+    assert factory.call_count == 1
+    drivers[0].close.assert_not_called()
+    drivers[0].session.side_effect = RuntimeError("down")
+    assert not health().memgraph
+    drivers[0].close.assert_called_once()
+    assert health().memgraph
+    assert factory.call_count == 2
+
+    async def shutdown():
+        async with app.router.lifespan_context(app):
+            pass
+
+    asyncio.run(shutdown())
+    drivers[1].close.assert_called_once()
+
+
+def test_graph_probe_concurrent_first_calls_share_driver(monkeypatch):
+    import sys
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    driver = MagicMock()
+    factory = MagicMock(return_value=driver)
+    monkeypatch.setitem(sys.modules, "neo4j", SimpleNamespace(
+        GraphDatabase=SimpleNamespace(driver=factory),
+    ))
+    app, _ = _patched_app(monkeypatch, config=ServerConfig(graph_uri="bolt://probe"))
+    health = next(r.endpoint for r in app.routes if r.path == "/health")
+    barrier = threading.Barrier(8)
+
+    def probe(_):
+        barrier.wait(timeout=5)
+        return health().memgraph
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        assert all(pool.map(probe, range(8)))
+    assert factory.call_count == 1
+    assert driver.session.call_count == 8
+    driver.close.assert_not_called()
+
+
+def test_graph_probe_failure_does_not_close_driver_under_running_probe(monkeypatch):
+    import sys
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    inside, release = threading.Event(), threading.Event()
+    closed_while_running = []
+    driver = MagicMock()
+    calls = []
+
+    @contextmanager
+    def session(database=None):
+        calls.append(1)
+        if len(calls) == 1:
+            inside.set()
+            release.wait(5)
+            closed_while_running.append(driver.close.called)
+            yield MagicMock()
+        else:
+            raise RuntimeError("down")
+
+    driver.session = session
+    factory = MagicMock(side_effect=[driver, MagicMock()])
+    monkeypatch.setitem(sys.modules, "neo4j", SimpleNamespace(
+        GraphDatabase=SimpleNamespace(driver=factory),
+    ))
+    app, _ = _patched_app(monkeypatch, config=ServerConfig(graph_uri="bolt://probe"))
+    health = next(r.endpoint for r in app.routes if r.path == "/health")
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        slow = pool.submit(lambda: health().memgraph)
+        assert inside.wait(5)
+        assert not health().memgraph
+        driver.close.assert_not_called()
+        release.set()
+        assert slow.result(timeout=5)
+    assert closed_while_running == [False]
+    driver.close.assert_called_once()
+    assert health().memgraph
+    assert factory.call_count == 2
