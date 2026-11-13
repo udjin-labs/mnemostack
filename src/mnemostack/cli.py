@@ -1471,6 +1471,13 @@ def cmd_keys_add(args: argparse.Namespace) -> int:
     print(f"scopes:  {','.join(scopes_list)}")
     print("\nkey (shown once — store it now, it is not recoverable):")
     print(f"  {key}")
+    if "admin" in scopes_list:
+        print(
+            "warning: this admin key has access to all tenants: key and quota management, "
+            "record browsing in the admin console, and per-tenant metrics. "
+            "Do not give it to a tenant.",
+            file=sys.stderr,
+        )
     return 0
 
 
@@ -3966,7 +3973,11 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
     pk_add = ksub.add_parser("add", help="Issue a key for a tenant")
     pk_add.add_argument("--tenant", required=True, help="tenant_id the key is scoped to")
     pk_add.add_argument(
-        "--scopes", default="read", help="Comma-separated scopes: read,write,admin (default read)"
+        "--scopes",
+        default="read",
+        help="Comma-separated scopes: read,write,admin (default read); "
+        "admin grants access to all tenants for key and quota management, "
+        "admin console record browsing, and per-tenant metrics",
     )
     pk_add.add_argument("--label", default="", help="Human label (e.g. app name)")
     pk_add.add_argument("--keys-file", default=None, help=_keys_file_help)
