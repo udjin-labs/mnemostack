@@ -124,6 +124,7 @@ class GraphStore:
         properties: dict[str, Any] | None = None,
         *,
         tenant: str | None = None,
+        _session: Any = None,
     ) -> None:
         """Add a temporal fact. Nodes are created on demand.
 
@@ -184,8 +185,54 @@ class GraphStore:
             f"{edge_merge}"
             f"{edge_set}"
         )
+        # consume() waits for the write to finish. Without it an error raised
+        # at execution or commit time is swallowed when the session closes,
+        # and the caller reports a triple that was not stored.
+        if _session is not None:
+            _session.run(query, **params).consume()
+        else:
+            with self.driver.session(database=self.database) as session:
+                result = session.run(query, **params)
+                # A stand-in driver without result objects has nothing to wait for.
+                consume = getattr(result, "consume", None)
+                if consume is not None:
+                    consume()
+
+    def add_triples(self, triples: list[dict[str, Any]]) -> list[Exception | None]:
+        """Write independently committed facts through one request session."""
+        results: list[Exception | None] = []
+        try:
+            with self.driver.session(database=self.database) as session:
+                for triple in triples:
+                    try:
+                        self.add_triple(**triple, _session=session)
+                        results.append(None)
+                    except Exception as exc:
+                        results.append(exc)
+        except Exception as exc:
+            results.extend([exc] * (len(triples) - len(results)))
+        return results
+
+    #: Label-property indexes used by the MERGE of triples and file links.
+    NAME_INDEXES = (("Entity", "name"), ("File", "name"), ("File", "name_lower"))
+
+    def create_name_indexes(self) -> list[tuple[str, str]]:
+        """Create the name indexes during explicit maintenance.
+
+        Uses Memgraph syntax. Each statement runs on its own; one that the
+        backend rejects (an existing index on some versions, or a backend with
+        another index syntax) is returned as ``(statement, error class)`` and
+        does not stop the others.
+        """
+        failed: list[tuple[str, str]] = []
         with self.driver.session(database=self.database) as session:
-            session.run(query, **params)
+            for label, prop in self.NAME_INDEXES:
+                statement = f"CREATE INDEX ON :{label}({prop})"
+                try:
+                    session.run(statement).consume()
+                except Exception as exc:  # noqa: BLE001 - reported to the operator
+                    failed.append((statement, type(exc).__name__))
+        return failed
 
     def sync_file_links(
         self,

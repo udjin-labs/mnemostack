@@ -1171,14 +1171,36 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             _release_graph_probe(slot, retire=not ok)
         return ok
 
+    triples_store: dict[str, Any] = {"driver": None, "users": 0}
+    triples_store_lock = threading.Lock()
+
+    def _release_triples_store(slot: dict[str, Any], *, retire: bool) -> None:
+        nonlocal triples_store
+        with triples_store_lock:
+            slot["users"] -= 1
+            if retire:
+                slot["retired"] = True
+                if triples_store is slot:
+                    triples_store = {"driver": None, "users": 0}
+            close = bool(slot.get("retired")) and slot["users"] == 0
+        if close and slot["driver"] is not None:
+            _close_driver(slot["driver"])
+
     @asynccontextmanager
     async def lifespan(app):
-        nonlocal graph_probe
+        nonlocal graph_probe, triples_store
         try:
             yield
         finally:
             with graph_probe_lock:
                 slot, graph_probe = graph_probe, {"driver": None, "users": 0}
+                slot["retired"] = True
+                close = slot["users"] == 0
+            if close and slot["driver"] is not None:
+                _close_driver(slot["driver"])
+
+            with triples_store_lock:
+                slot, triples_store = triples_store, {"driver": None, "users": 0}
                 slot["retired"] = True
                 close = slot["users"] == 0
             if close and slot["driver"] is not None:
@@ -2179,21 +2201,27 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         from mnemostack.graph.factory import make_graph_store
 
         try:
-            gs = make_graph_store(
-                cfg.graph_uri,
-                timeout=cfg.graph_timeout,
-                user=cfg.graph_user,
-                password=cfg.graph_password,
-                database=cfg.graph_database,
-            )
+            with triples_store_lock:
+                slot = triples_store
+                if slot["driver"] is None:
+                    slot["driver"] = make_graph_store(
+                        cfg.graph_uri,
+                        timeout=cfg.graph_timeout,
+                        user=cfg.graph_user,
+                        password=cfg.graph_password,
+                        database=cfg.graph_database,
+                    )
+                slot["users"] += 1
+                gs = slot["driver"]
         except Exception as exc:
             log.exception("triples endpoint: graph store unavailable")
             raise HTTPException(status_code=503, detail="graph unavailable") from exc
         results: list[TripleResultOut] = []
+        retire = True
         try:
-            for t in req.triples:
-                try:
-                    gs.add_triple(
+            errors = gs.add_triples(
+                [
+                    dict(
                         subject=t.subject,
                         predicate=t.predicate,
                         obj=t.object,
@@ -2201,17 +2229,18 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                         valid_until=t.valid_until,
                         tenant=tenant,
                     )
+                    for t in req.triples
+                ]
+            )
+            retire = any(exc is not None for exc in errors)
+            for error in errors:
+                if error is None:
                     results.append(TripleResultOut(status="added"))
-                except Exception as exc:  # noqa: BLE001 — per-triple isolation
-                    log.warning("triples endpoint: add_triple failed: %s", exc)
-                    results.append(
-                        TripleResultOut(status="failed", error=type(exc).__name__)
-                    )
+                else:
+                    log.warning("triples endpoint: add_triple failed: %s", error)
+                    results.append(TripleResultOut(status="failed", error=type(error).__name__))
         finally:
-            try:
-                gs.close()
-            except Exception:  # noqa: BLE001
-                pass
+            _release_triples_store(slot, retire=retire)
         counter("mnemostack.server.triples", len(req.triples))
         added = sum(r.status == "added" for r in results)
         failed = sum(r.status == "failed" for r in results)

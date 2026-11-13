@@ -81,6 +81,11 @@ mnemostack graph-migrate-current --memgraph-uri bolt://localhost:7687 --dry-run
 mnemostack graph-migrate-current --memgraph-uri bolt://localhost:7687
 ```
 
+The apply command also creates the Memgraph indexes that the writes of triples and
+file links use: `Entity(name)`, `File(name)` and `File(name_lower)`. A statement the
+backend rejects is reported as a warning and does not stop the command. Dry runs do
+not create indexes.
+
 > ⚠️ This normalizes markers on **every** node and relationship in the target
 > database, unscoped. Point it at a **dedicated** mnemostack Memgraph database (or
 > back up first) — on a graph shared with non-mnemostack data it will set
