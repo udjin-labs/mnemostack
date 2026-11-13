@@ -525,7 +525,7 @@ The export is the tenant's vector points (vectors + payloads, JSONL) — the por
 
 ### Audit log (control-plane operations)
 
-Set `MNEMOSTACK_AUDIT_FILE=/var/log/mnemostack/audit.jsonl` (one env var, all surfaces) to record every control-plane operation that touches a tenant's resources as one JSON line — who (`operator:cli`, or the admin key's public id at the `inspect --auth` console), what (`keys.issue`/`keys.revoke`, `quota.set`/`quota.remove`, `tenant.rm`/`tenant.export`/`tenant.migrate`, `auth.denied`), which tenant, and the outcome (`success` / `error` / `partial` / `aborted` / `denied`). Unset (the default) nothing is written. The admin console shows the trail in an **Audit** tab.
+Set `MNEMOSTACK_AUDIT_FILE=/var/log/mnemostack/audit.jsonl` (one env var, all surfaces) to record tenant administration and the collection index commands as one JSON line: who (`operator:cli`, or the admin key's public id at the `inspect --auth` console), what (`keys.issue`/`keys.revoke`, `quota.set`/`quota.remove`, `tenant.rm`/`tenant.export`/`tenant.migrate`, `auth.denied`, `collection.text_index`/`collection.payload_index`/`collection.sparse_backfill`), which tenant or collection, and the outcome (`success` / `error` / `partial` / `aborted` / `denied`). Unset (the default) nothing is written. The admin console shows the trail in an **Audit** tab.
 
 Know what it is and isn't:
 
