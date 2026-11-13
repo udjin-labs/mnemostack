@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import re
 import threading
@@ -153,6 +154,21 @@ def _fetch_limit(base: int, include_invalidated: bool, as_of: str | None) -> int
 # rule lives in a leaf module because `recaller` imports `fusion`, so a rule
 # in either would make the other a cycle. Every existing
 # `from .recaller import memory_key` keeps working.
+
+
+def _takes_recall_scope(retriever: Any) -> bool:
+    """True when ``retriever.search`` can receive ``recall_scope``.
+
+    The class marker alone is not enough: a subclass written before the
+    marker existed inherits it, and its own ``search`` has the old signature.
+    """
+    if not getattr(retriever, "accepts_recall_scope", False):
+        return False
+    try:
+        parameters = inspect.signature(retriever.search).parameters.values()
+    except (TypeError, ValueError):
+        return True
+    return any(p.name == "recall_scope" or p.kind is p.VAR_KEYWORD for p in parameters)
 
 
 def is_floor_extra(result: Any) -> bool:
@@ -963,7 +979,11 @@ class Recaller:
         ):
             trace.mark("recall:deadline")
             return []
-        recall_scope: dict[Any, Any] = {}
+        from .query_vectors import QueryVectors
+
+        recall_scope: dict[Any, Any] = {
+            QueryVectors: QueryVectors(wait_for_pending=get_deadline(trace) is None),
+        }
         if self.query_expansion:
             results = self._recall_with_query_expansion(
                 query=query,
@@ -1086,7 +1106,9 @@ class Recaller:
                 deadline = get_deadline(trace)
 
                 def embed():
-                    return embed_query_via(self.embedding, query)
+                    from .query_vectors import query_vector
+
+                    return query_vector(self.embedding, query, recall_scope, embed_query_via)
 
                 query_vec = embed() if deadline is None else deadline.run(
                     embed, [], on_timeout=lambda: cast(RecallTrace, trace).mark("recall:deadline")
@@ -1226,6 +1248,7 @@ class Recaller:
                         include_invalidated=include_invalidated,
                         as_of=as_of,
                         tenant=tenant,
+                        recall_scope=recall_scope,
                     )
                 else:
                     to_copy = results
@@ -1243,6 +1266,7 @@ class Recaller:
                             include_invalidated=include_invalidated,
                             as_of=as_of,
                             tenant=tenant,
+                            recall_scope=recall_scope,
                         )
 
                     completed = deadline.run(
@@ -1560,7 +1584,7 @@ class Recaller:
                     search_kwargs["include_invalidated"] = include_invalidated
                 if tenant is not None and getattr(retr, "accepts_tenant", False):
                     search_kwargs["tenant"] = tenant
-                if recall_scope is not None and getattr(retr, "accepts_recall_scope", False):
+                if recall_scope is not None and _takes_recall_scope(retr):
                     # Per-recall shared state (e.g. the graph arm's probe
                     # budget must span expanded-query variants, not reset
                     # per variant).
@@ -1780,6 +1804,7 @@ class Recaller:
                         include_invalidated=include_invalidated,
                         as_of=as_of,
                         tenant=tenant,
+                        recall_scope=recall_scope,
                     )
                 else:
                     to_copy = results
@@ -1797,6 +1822,7 @@ class Recaller:
                             include_invalidated=include_invalidated,
                             as_of=as_of,
                             tenant=tenant,
+                            recall_scope=recall_scope,
                         )
 
                     completed = deadline.run(
@@ -2005,6 +2031,7 @@ class Recaller:
         filters: dict[str, Any] | None,
         hide_invalidated: bool = False,
         tenant: str | None = None,
+        recall_scope: dict[Any, Any] | None = None,
     ) -> list[RecallResult]:
         # Scope the fallback to the tenant at the source too (not just via the
         # post-fusion backstop) so a zero-direct-hit tenant doesn't fetch the
@@ -2018,7 +2045,9 @@ class Recaller:
             # the fail-open except below.
             self._ensure_space_compat()
             try:
-                query_vec = embed_query_via(self.embedding, query)
+                from .query_vectors import query_vector
+
+                query_vec = query_vector(self.embedding, query, recall_scope, embed_query_via)
             except Exception:
                 return []
             if not query_vec:
@@ -2051,7 +2080,10 @@ class Recaller:
         for retriever in self.retrievers:
             if getattr(retriever, "name", None) == "vector":
                 try:
-                    return retriever.search(query, limit=limit, filters=filters, **tkw)
+                    scope_kw = {}
+                    if _takes_recall_scope(retriever):
+                        scope_kw["recall_scope"] = recall_scope
+                    return retriever.search(query, limit=limit, filters=filters, **tkw, **scope_kw)
                 except Exception:
                     return []
         return []
@@ -2067,6 +2099,7 @@ class Recaller:
         include_invalidated: bool = False,
         as_of: str | None = None,
         tenant: str | None = None,
+        recall_scope: dict[Any, Any] | None = None,
     ) -> list[RecallResult]:
         # Over-fetch + filter under the caller's validity view before the
         # merge/truncate below, so stale/out-of-window fallback hits can't
@@ -2078,6 +2111,7 @@ class Recaller:
             filters=filters,
             hide_invalidated=_push_hide_invalidated(include_invalidated, as_of),
             tenant=tenant,
+            **({"recall_scope": recall_scope} if recall_scope is not None else {}),
         )
         fallback_hits = [
             h

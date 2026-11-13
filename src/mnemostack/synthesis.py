@@ -679,7 +679,12 @@ def _similar(a: str, b: str, threshold: float = 0.92) -> bool:
         return False
     if a in b or b in a:
         return min(len(a), len(b)) / max(len(a), len(b)) > 0.75
-    return SequenceMatcher(None, a, b).ratio() >= threshold
+    matcher = SequenceMatcher(None, a, b)
+    if matcher.real_quick_ratio() < threshold:
+        return False
+    if matcher.quick_ratio() < threshold:
+        return False
+    return matcher.ratio() >= threshold
 
 
 def _assign_subtopics(facts: list[SynthesisFact], entity: str) -> None:

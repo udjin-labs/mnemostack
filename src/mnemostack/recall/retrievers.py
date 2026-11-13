@@ -285,11 +285,16 @@ class VectorRetriever(Retriever):
     #: Can enforce a tenant filter server-side (see VectorStore.search(tenant=)).
     accepts_tenant = True
 
+    accepts_recall_scope = True
+
     def search(
-        self, query, limit=20, filters=None, as_of=None, include_invalidated=False, tenant=None
+        self, query, limit=20, filters=None, as_of=None, include_invalidated=False, tenant=None,
+        recall_scope=None,
     ):
         self._space_guard.ensure()
-        vec = embed_query_via(self.embedding, query)
+        from .query_vectors import query_vector
+
+        vec = query_vector(self.embedding, query, recall_scope, embed_query_via)
         if not vec:
             return []
         hide_invalidated = as_of is None and not include_invalidated
@@ -2366,7 +2371,9 @@ class TemporalRetriever(Retriever):
         """
         return "temporal:no_parse" if not self.extractor(query) else None
 
-    def search(self, query, limit=10, filters=None, tenant=None):
+    accepts_recall_scope = True
+
+    def search(self, query, limit=10, filters=None, tenant=None, recall_scope=None):
         # Pass tenant only when set (a custom store may lack the parameter).
         tkw = {"tenant": tenant} if tenant is not None else {}
         parsed_or_window = self.extractor(query)
@@ -2475,7 +2482,9 @@ class TemporalRetriever(Retriever):
                 )
 
         self._space_guard.ensure()
-        vec = embed_query_via(self.embedding, query)
+        from .query_vectors import query_vector
+
+        vec = query_vector(self.embedding, query, recall_scope, embed_query_via)
         if not vec:
             return []
         try:
