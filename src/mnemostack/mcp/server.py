@@ -71,11 +71,17 @@ from ..vector import VectorStore
 log = logging.getLogger(__name__)
 
 
+class _AuthError(Exception):
+    """A fixed, client-safe authorization error raised inside a tool."""
+
+
 def _error_text(error: object, transport: str) -> str | None:
     """Keep backend details local; preserve operator diagnostics over stdio."""
     if error is None:
         return None
-    return "operation failed" if transport == "http" else str(error)
+    if transport == "http" and not isinstance(error, _AuthError):
+        return "operation failed"
+    return str(error)
 
 
 def _public_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -291,10 +297,6 @@ def build_server(
             http_auth = ServiceKeyVerifier()
 
     mcp = FastMCP("mnemostack", auth=http_auth) if http_auth is not None else FastMCP("mnemostack")
-
-    class _AuthError(Exception):
-        """Raised inside a tool on an auth failure; the tool's except maps it to a
-        structured {"ok": False, "error": ...} (tools return errors, not raise)."""
 
     def _authorize(scope: str):
         """Principal for an authenticated call, or None when auth is off. Re-verifies

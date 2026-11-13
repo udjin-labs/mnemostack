@@ -768,6 +768,7 @@ def test_fallback_filters_validity_before_truncate():
     from mnemostack.recall.recaller import Recaller
 
     recaller = Recaller.__new__(Recaller)
+    recaller.rrf_k = 60
     recaller.embedding = None
     recaller.vector = None
 

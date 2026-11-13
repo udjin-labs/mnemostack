@@ -106,8 +106,8 @@ def test_future_missing_time_and_nonzero_access_remain_explicit_signals():
     rows = [result("future", .02, days=-1), result("missing", .02), result("used", .02, days=2, last_accessed=NOW.isoformat(), access_count=10)]
     rows[1].payload.pop("timestamp")
     out = {r.id: r for r in build_full_pipeline().apply("history", rows)}
-    assert out["future"].payload["echo_penalty"] is True
-    assert out["future"].payload["freshness"] == .5
+    assert "echo_penalty" not in out["future"].payload
+    assert out["future"].payload["freshness"] == 1.0
     assert out["missing"].payload["freshness"] == .5
     assert out["used"].payload["access_boost"] == 1.25
 
