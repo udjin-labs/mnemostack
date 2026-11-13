@@ -741,7 +741,7 @@ def build_server(
         entry absent from notes is a real fault).
         Results are ranked by reciprocal rank fusion of BM25, semantic, graph,
         and temporal retrievers when configured; each result includes id, text,
-        score, sources, and payload. Stale facts (invalidated_at set) are
+        score, sources, payload, and annotations. Stale facts (invalidated_at set) are
         hidden by default; use include_invalidated or as_of to see them.
         """
         try:
@@ -764,6 +764,7 @@ def build_server(
                         "score": round(r.score, 4),
                         "sources": r.sources,
                         "payload": _public_payload(r.payload),
+                        "annotations": getattr(r, "annotations", {}),
                     }
                     for r in results
                 ],

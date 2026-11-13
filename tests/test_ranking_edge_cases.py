@@ -71,9 +71,8 @@ def test_rescue_does_not_crash_on_foreign_flags(flags):
     result = hit("source", {"source": "MEMORY.md", "flags": flags}, "Port 5432")
     ExactTokenRescue().apply(PipelineContext("port 5432"), [result])
     assert result.score == 1.0
-    assert result.payload["flags"] == (
-        ["existing", "exact_rescue"] if isinstance(flags, list) else flags
-    )
+    assert result.payload["flags"] == flags
+    assert result.annotations["flags"] == ["exact_rescue"]
 
 
 @pytest.mark.parametrize("entry", [None, "bad", 3, [], {"id": "other"}])

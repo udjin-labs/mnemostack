@@ -731,13 +731,15 @@ Response shape (abridged):
 {
   "query": "what did we decide about auth",
   "results": [
-    { "id": "...", "text": "...", "score": 0.72, "source": "notes/...md", "metadata": {} }
+    { "id": "...", "text": "...", "score": 0.72, "source": "notes/...md", "metadata": {}, "annotations": {} }
   ],
   "degraded": [],  // fallback signals plus routine tags duplicated from notes; entries absent from notes indicate faults
   "notes": [],     // routine signals for stages that did not apply, e.g. "temporal:no_parse" on a date-less query; never a fault
   "tokens_estimate": 512   // estimated text tokens of the returned results
 }
 ```
+
+Ranking `annotations` contains `flags`, `dampened`, `echo_penalty`, `access_boost`, `freshness`, `ior_penalty`, `curiosity_boosted`, and `q_value` when the corresponding stages act on that result. A payload copy of an annotation is written only when stored metadata has no key of that name; payload copies are deprecated in favour of `annotations`. For stored metadata using any of these eight names, the payload keeps the client value, and client-stored `flags` is no longer appended to.
 
 The order of `results` is authoritative — do not re-sort by `score`: many stages and fallback paths write that number on different scales, and a rerank changes the order without rewriting it. See [what `score` is not](docs/api-stability.md#what-score-is-not).
 

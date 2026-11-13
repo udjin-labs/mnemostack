@@ -38,6 +38,7 @@ Bounded on purpose:
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any, cast
 
 from ..llm.base import LLMProvider
@@ -236,7 +237,14 @@ def retry_weak_recall(
     # was on them, or "we kept your results" quietly means "we kept your
     # results with someone else's numbers and arms on them".
     original_state = [
-        (r, r.score, list(r.sources), dict(r.payload or {}), getattr(r, "floor_score", None))
+        (
+            r,
+            r.score,
+            list(r.sources),
+            dict(r.payload or {}),
+            getattr(r, "floor_score", None),
+            _annotation_state(r),
+        )
         for r in results
     ]
     by_id: dict[str, Any] = {}
@@ -380,10 +388,11 @@ def retry_weak_recall(
         # and then drops one of the newcomers on an arbitrary tie-break
         # instead. What the caller is protected from is ending up with less
         # than they had, not from a re-ranking they opted into.
-        for result, score, sources, payload, floor in original_state:
+        for result, score, sources, payload, floor, annotation_state in original_state:
             result.score = score
             result.sources = sources
             result.payload = payload
+            _restore_annotation_state(result, annotation_state)
             # Every field the merge can touch, including the one round 6
             # added: a restore that covers all but the newest channel is
             # how "we kept your results" starts quietly meaning something
@@ -594,9 +603,63 @@ def _canonical(by_id: dict[str, Any], result: Any) -> Any:
         for source in getattr(result, "sources", []) or []:
             if source not in incumbent.sources:
                 incumbent.sources.append(source)
+        added_payload = set(getattr(result, "payload", None) or {}) - incumbent.payload.keys()
         for field, value in (getattr(result, "payload", None) or {}).items():
             incumbent.payload.setdefault(field, value)
+        _merge_annotations(incumbent, result, added_payload)
     return incumbent
+
+
+def _owned_keys(result: Any) -> tuple[str, ...]:
+    owned = getattr(result, "_annotation_payload_keys", ())
+    return owned if isinstance(owned, tuple) else ()
+
+
+def _merge_annotations(incumbent: Any, result: Any, added_payload: set[str]) -> None:
+    """Carry a later pass's ranking annotations onto the incumbent.
+
+    The incumbent's own values win, as they do for the payload. An incumbent
+    that cannot hold annotations (a custom result type) is left as it is.
+    """
+    annotations = getattr(result, "annotations", None)
+    if not isinstance(annotations, dict) or not annotations:
+        return
+    target = getattr(incumbent, "annotations", None)
+    try:
+        if not isinstance(target, dict):
+            target = incumbent.annotations = {}
+        later_owned = _owned_keys(result)
+        for field, value in annotations.items():
+            if field in target:
+                continue
+            target[field] = deepcopy(value)
+            if field in added_payload and field in later_owned:
+                try:
+                    incumbent._annotation_payload_keys = (*_owned_keys(incumbent), field)
+                except (AttributeError, TypeError, ValueError):
+                    # Ownership cannot be recorded; keep copying the rest.
+                    pass
+    except (AttributeError, TypeError, ValueError):
+        return
+
+
+def _annotation_state(result: Any) -> tuple[Any, tuple[str, ...]] | None:
+    annotations = getattr(result, "annotations", None)
+    if not isinstance(annotations, dict):
+        return None
+    return deepcopy(annotations), _owned_keys(result)
+
+
+def _restore_annotation_state(result: Any, state: tuple[Any, tuple[str, ...]] | None) -> None:
+    try:
+        if state is None:
+            if isinstance(getattr(result, "annotations", None), dict):
+                result.annotations = {}
+                result._annotation_payload_keys = ()
+            return
+        result.annotations, result._annotation_payload_keys = state
+    except (AttributeError, TypeError, ValueError):
+        return
 
 
 class _WatchedLLM(LLMProvider):

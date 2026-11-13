@@ -170,6 +170,7 @@ def test_search_json_strips_internal_vector_floor_payload():
     assert rc == 0
     payload = json.loads(out)
     assert payload[0]["payload"] == {"public": "ok"}
+    assert payload[0]["annotations"] == {}
 
 
 def test_mcp_serve_passes_vector_floor_to_build_server():
@@ -750,3 +751,15 @@ def test_cmd_invalidate_coerces_digit_ids(monkeypatch):
     assert cli.cmd_invalidate(args) == 0
     # digit-only -> int; anything with non-digits stays a string
     assert store.ids == [1, "abc", "a1b2"]
+
+
+def test_search_json_includes_ranking_annotations():
+    from mnemostack.recall import RecallResult
+
+    result = RecallResult("a", "text", .9, {"freshness": "client"}, ["vector"],
+                          annotations={"freshness": .5})
+    rc, output = _run_search_capture(tier=None, json_out=True, results=[result])
+    assert rc == 0
+    entry = json.loads(output)[0]
+    assert entry["annotations"] == {"freshness": .5}
+    assert entry["payload"] == {"freshness": "client"}

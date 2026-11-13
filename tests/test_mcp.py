@@ -71,6 +71,7 @@ def test_mcp_search_strips_internal_vector_floor_payload(monkeypatch):
                     text="text",
                     score=0.9,
                     sources=["vector"],
+                    annotations={"freshness": .5},
                     payload={
                         "public": "ok",
                         "_vector_floor_candidates": [{"id": "hidden"}],
@@ -94,6 +95,7 @@ def test_mcp_search_strips_internal_vector_floor_payload(monkeypatch):
     # pipeline stages may annotate the payload (freshness, q_value, ...);
     # the contract is: public keys present, internal floor metadata stripped
     assert result_payload["public"] == "ok"
+    assert payload["results"][0]["annotations"]["freshness"] == 0.5
     assert "_vector_floor_candidates" not in result_payload
 
 

@@ -162,6 +162,8 @@ def _pool_sources(keeper: Any, dropped: Any) -> Any:
             if isinstance(merged.get("payload"), dict):
                 merged["payload"] = dict(merged["payload"])
             return merged
+        if hasattr(merged, "annotations"):
+            merged.annotations = copy.deepcopy(merged.annotations)
         merged.sources = [*keeper_sources, *added]
         payload = getattr(merged, "payload", None)
         if isinstance(payload, dict):
