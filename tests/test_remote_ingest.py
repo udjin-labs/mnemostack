@@ -476,13 +476,25 @@ def test_triples_503_without_a_graph(monkeypatch, tmp_path):
     assert r.status_code == 503
 
 
+class _BatchGraph:
+    def add_triples(self, triples):
+        errors = []
+        for triple in triples:
+            try:
+                self.add_triple(**triple)
+                errors.append(None)
+            except Exception as exc:
+                errors.append(exc)
+        return errors
+
+
 def test_triples_all_failed_is_a_502_not_a_quiet_200(monkeypatch, tmp_path):
     """Review pin: per-triple isolation is for PARTIAL failure — a batch
     where EVERY write failed means the graph path is broken, and a caller
     checking only the status code must see it."""
     import mnemostack.graph.factory as graph_factory
 
-    class _DeadGraph:
+    class _DeadGraph(_BatchGraph):
         def add_triple(self, **kw):
             raise RuntimeError("schema regression")
 
@@ -522,7 +534,7 @@ def test_triples_stamps_the_key_tenant_and_isolates_failures(monkeypatch, tmp_pa
 
     calls: list[dict] = []
 
-    class _FakeGraph:
+    class _FakeGraph(_BatchGraph):
         def add_triple(self, **kw):
             if kw["subject"] == "boom":
                 raise RuntimeError("backend hiccup")
@@ -1025,7 +1037,7 @@ def test_triples_validity_bounds_must_parse(monkeypatch, tmp_path):
 
     added: list[dict] = []
 
-    class _G:
+    class _G(_BatchGraph):
         def add_triple(self, **kw):
             added.append(kw)
 
@@ -1426,7 +1438,7 @@ def _triples_app(monkeypatch, tmp_path):
 
     calls: list[dict] = []
 
-    class _G:
+    class _G(_BatchGraph):
         def add_triple(self, **kw):
             calls.append(kw)
 

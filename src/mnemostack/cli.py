@@ -5046,13 +5046,18 @@ def cmd_graph_migrate_current(args: argparse.Namespace) -> int:
     from .graph.factory import make_graph_store
 
     store = make_graph_store(args.memgraph_uri, timeout=args.timeout, **_graph_auth(args))
+    index_failures: list[tuple[str, str]] = []
     try:
         counts = store.backfill_current_markers(dry_run=args.dry_run)
+        if not args.dry_run:
+            index_failures = store.create_name_indexes()
     finally:
         store.close()
 
     action = "Would update" if args.dry_run else "Updated"
     print(f"{action} {counts['nodes']} node(s) and {counts['relationships']} relationship(s).")
+    for statement, error in index_failures:
+        print(f"warning: index not created ({error}): {statement}", file=sys.stderr)
     return 0
 
 

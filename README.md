@@ -796,6 +796,11 @@ created graph data with an older release, run
 `mnemostack graph-migrate-current --dry-run` first, then
 `mnemostack graph-migrate-current` to backfill legacy `NULL` markers.
 
+The apply command also creates the Memgraph indexes that the writes of triples and
+file links use: `Entity(name)`, `File(name)` and `File(name_lower)`. A statement the
+backend rejects is reported as a warning and does not stop the command. Dry runs do
+not create indexes.
+
 ### MCP server for Claude Desktop
 
 Add the entry below to your Claude Desktop config file:
