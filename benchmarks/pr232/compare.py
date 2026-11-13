@@ -18,7 +18,13 @@ def report(a, b, csv_path="per_query.csv", config_pairs=None):
     for key in ("corpus_sha256", "model", "self_test", "limit"):
         if a[key] != b[key]:
             raise ValueError(f"incomparable runs: {key}")
-    pairs = config_pairs or [(c, c) for c in a["metrics"] if c in b["metrics"]]
+    if config_pairs is None:
+        # A configuration whose queries all failed has rows but no metrics.
+        seen = [set(run["metrics"]) | {r["configuration"] for r in run["rows"]} for run in (a, b)]
+        missing = sorted(c for c in seen[0] | seen[1] if c not in a["metrics"] or c not in b["metrics"])
+        if missing or not seen[0]:
+            raise ValueError(f"incomparable runs: configurations without results in one run: {missing}")
+    pairs = config_pairs or [(c, c) for c in a["metrics"]]
     print(
         f"# {a['label']} versus {b['label']}\n\nDifferences are second minus first. Missing rank is worse than any observed rank. MRR uses the evaluated candidate pool; recall_flow ranks are censored at its output limit.\n"
     )
