@@ -7,6 +7,7 @@ returns a structured result that can be rendered as Markdown or JSON.
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
 from collections import Counter, defaultdict
@@ -481,6 +482,36 @@ def _query_recaller(
     from .recall.recaller import CrossTenantRecallError
 
     tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
+    try:
+        # The wrapper is what gets called, so its own signature decides.
+        parameters = inspect.signature(recaller.recall, follow_wrapped=False).parameters
+    except Exception:
+        pass
+    else:
+        accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values())
+        kwargs = {
+            "limit": max_results,
+            "vector_limit": max_results,
+            "bm25_limit": max_results,
+            "filters": filters,
+            **tkw,
+        }
+        if not accepts_kwargs:
+            kwargs = {
+                key: value
+                for key, value in kwargs.items()
+                if key in parameters
+                and parameters[key].kind
+                in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+            }
+        if tkw and "tenant" not in kwargs:
+            return []
+        try:
+            return list(recaller.recall(entity, **kwargs))
+        except CrossTenantRecallError:
+            raise
+        except Exception:
+            return []
     try:
         return list(
             recaller.recall(

@@ -155,8 +155,12 @@ export function getRecallTrigger(text, snapshot = defaultTriggerSnapshot()) {
 
   for (const [patternId, re] of [["memory_keyword", snapshot.memoryKeywordRe], ["past_reference", snapshot.pastReferenceRe], ["named_entity", snapshot.namedEntityRe]]) {
     if (!re) continue;
-    const matched = value.match(re);
-    if (matched) return { match: true, patternId, matchedText: matched[2] || matched[0] };
+    for (const matched of value.matchAll(new RegExp(re.source, `${re.flags}g`))) {
+      const matchedText = matched[2] || matched[0];
+      const whitelisted = snapshot.whitelistRe?.exec(matchedText);
+      if (patternId === "named_entity" && whitelisted?.[2].toLowerCase() === matchedText.toLowerCase()) continue;
+      return { match: true, patternId, matchedText };
+    }
   }
 
   const words = tokenize(value);

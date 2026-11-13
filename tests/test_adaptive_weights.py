@@ -10,6 +10,9 @@ from mnemostack.recall.recaller import Recaller
 def test_detect_exact_token_shape_by_regex():
     assert Recaller._detect_query_shape("what is the IP 185.31.164.237") == "exact_token"
     assert Recaller._detect_query_shape("open port 7687") == "exact_token"
+    assert Recaller._detect_query_shape("open port 2049") == "exact_token"
+    assert Recaller._detect_query_shape("what happened on 2025-11-13") == "exact_token"
+    assert Recaller._detect_query_shape("what did we decide in 2025") != "exact_token"
     assert Recaller._detect_query_shape("version 2026.4.12 is out") == "exact_token"
     assert Recaller._detect_query_shape("Ticker LKOH-123") == "exact_token"
 

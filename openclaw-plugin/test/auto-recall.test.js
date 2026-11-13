@@ -560,3 +560,14 @@ test("plugin entry registers and helpers work", () => {
   assert.equal(hasActiveMemoryMarker("<mnemostack_memory>x</mnemostack_memory>", "mnemostack_memory"), true);
   assert.match(buildInjection({ answer: "abc", confidence: 0.5, sources: ["s"] }), /abc/);
 });
+
+
+test("whitelisted named entities do not suppress other recall triggers", () => {
+  const snapshot = compileTriggers({ named_entities: ["API", "Ada Lovelace", "API gateway"] });
+  assert.deepEqual(getRecallTrigger("status API", snapshot), { match: false, reason: "whitelisted_term" });
+  assert.equal(getRecallTrigger("API and Ada Lovelace", snapshot).matchedText, "Ada Lovelace");
+  assert.equal(getRecallTrigger("API gateway", snapshot).matchedText, "API gateway");
+  for (const [text, patternId] of [["remember API", "memory_keyword"], ["earlier API", "past_reference"], ["who built API", "past_tense_question"]]) {
+    assert.equal(getRecallTrigger(text, snapshot).patternId, patternId);
+  }
+});
