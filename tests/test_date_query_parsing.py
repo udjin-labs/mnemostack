@@ -358,7 +358,7 @@ def test_part_of_month_wins_over_month_only():
 def test_plain_month_window_unchanged():
     start, end = _window("what did we do in April?")
     assert start.startswith("2026-04-01")
-    assert end.startswith("2026-05-01")  # exclusive month-wide window
+    assert end == "2026-04-30T23:59:59.999999+00:00"  # inclusive lte bound
 
 
 # ---------- "around <date>" slack widening ----------
