@@ -6,6 +6,8 @@ import math
 import time
 from collections.abc import Callable
 from concurrent.futures import Future, TimeoutError
+from copy import deepcopy
+from dataclasses import replace
 from threading import Lock, Thread
 from typing import TypeVar, cast
 
@@ -57,6 +59,101 @@ def submit_deadline_work(call):
 
     Thread(target=work, daemon=True).start()
     return future
+
+
+_MISSING = object()
+
+
+class _TrialMemo(dict):
+    """A ``deepcopy`` memo that reads through to ``base`` and keeps its own writes.
+
+    A copy that fails leaves ``base`` untouched; a copy that succeeds is
+    merged into it. The ``copy`` module reads its memo through ``get`` and
+    ``[]`` only.
+    """
+
+    def __init__(self, base: dict):
+        super().__init__()
+        self.base = base
+
+    def get(self, key, default=None):
+        value = dict.get(self, key, _MISSING)
+        return self.base.get(key, default) if value is _MISSING else value
+
+    def __missing__(self, key):
+        return self.base[key]
+
+    def setdefault(self, key, default=None):
+        if key not in self:
+            self[key] = default
+        return self[key]
+
+    def __contains__(self, key):
+        return dict.__contains__(self, key) or key in self.base
+
+
+def _copy_plain_containers(value, memo: dict):
+    """Copy plain dicts and lists without recursion; keep every other object.
+
+    The reduced copy for a payload that ``deepcopy`` cannot handle: it holds
+    an object that cannot be copied (a lock, a client handle) or it is nested
+    too deep for the stack.
+    """
+    pending: list[tuple[object, object]] = []
+    keep = memo.setdefault(id(memo), [])
+
+    def copy(item):
+        kind = type(item)
+        if kind is not dict and kind is not list:
+            return memo.get(id(item), item)
+        key = id(item)
+        if key not in memo:
+            memo[key] = kind()
+            keep.append(item)
+            pending.append((item, memo[key]))
+        return memo[key]
+
+    result = copy(value)
+    while pending:
+        source, target = pending.pop()
+        if type(source) is dict:
+            for name, member in source.items():
+                cast(dict, target)[name] = copy(member)
+        else:
+            cast(list, target).extend(copy(member) for member in cast(list, source))
+    return result
+
+
+def isolate_results(results, memo: dict | None = None):
+    """Copies of the results for work that may be abandoned.
+
+    Each payload is deep-copied, so nothing mutable in it stays shared with
+    the originals. Objects shared between the results stay shared between
+    the copies, as they are without a deadline. Pass one ``memo`` to several
+    calls to keep that sharing across them: a result that was copied before
+    maps to the same copy.
+
+    A payload that ``deepcopy`` cannot handle never fails the recall. Its
+    plain dicts and lists are copied and its other objects stay shared.
+    """
+    if memo is None:
+        memo = {}
+    keep = memo.setdefault(id(memo), [])
+    copies = []
+    for result in results:
+        key = ("result", id(result))
+        if key not in memo:
+            trial = _TrialMemo(memo)
+            try:
+                payload = deepcopy(result.payload, trial)
+            except Exception:
+                payload = _copy_plain_containers(result.payload, memo)
+            else:
+                keep.extend(trial.pop(id(trial), ()))
+                memo.update(trial)
+            memo[key] = (replace(result, sources=list(result.sources), payload=payload), result)
+        copies.append(memo[key][0])
+    return copies
 
 
 def validate_deadline(value: object) -> float | None:

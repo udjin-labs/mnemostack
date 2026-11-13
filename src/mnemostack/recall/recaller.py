@@ -21,6 +21,7 @@ from .deadline import (
     Deadline,
     abandoned_workers_full,
     get_deadline,
+    isolate_results,
     start_deadline,
     submit_deadline_work,
     validate_deadline,
@@ -939,7 +940,17 @@ class Recaller:
         # tenant itself; an explicit per-call tenant always wins.
         tenant = self._effective_tenant(tenant)
         if tenant is None:
-            self._guard_tenantless_recall()
+            deadline = get_deadline(trace)
+            if deadline is None:
+                self._guard_tenantless_recall()
+            else:
+                def guard():
+                    self._guard_tenantless_recall()
+                    return True
+
+                if not deadline.run(guard, False):
+                    cast(RecallTrace, trace).mark("recall:deadline")
+                    return []
         # Mutable state scoped to THIS public recall, handed to retrievers
         # advertising `accepts_recall_scope`. Query expansion re-runs every
         # retriever once per variant — state that must span the whole recall
@@ -1217,9 +1228,12 @@ class Recaller:
                         tenant=tenant,
                     )
                 else:
-                    candidates = [replace(r, sources=list(r.sources), payload=dict(r.payload)) for r in results]
+                    to_copy = results
+                    candidates: list[RecallResult] = []
 
                     def fallback():
+                        # The copy is part of the bounded work.
+                        candidates.extend(isolate_results(to_copy))
                         return self._maybe_apply_fallback(
                             query,
                             candidates,
@@ -1768,9 +1782,12 @@ class Recaller:
                         tenant=tenant,
                     )
                 else:
-                    candidates = [replace(r, sources=list(r.sources), payload=dict(r.payload)) for r in results]
+                    to_copy = results
+                    candidates: list[RecallResult] = []
 
                     def fallback():
+                        # The copy is part of the bounded work.
+                        candidates.extend(isolate_results(to_copy))
                         return self._maybe_apply_fallback(
                             query,
                             candidates,

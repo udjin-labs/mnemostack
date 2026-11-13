@@ -193,7 +193,7 @@ def test_expired_request_runs_guard_before_returning_empty(monkeypatch):
     guards = []
     monkeypatch.setattr(recaller, "_guard_tenantless_recall", lambda: guards.append(True))
     assert recaller.recall("q", trace=trace) == []
-    assert guards and not recaller.retrievers[0].calls
+    assert not guards and not recaller.retrievers[0].calls
     assert trace.degraded == ["recall:deadline"]
 
 
@@ -855,7 +855,7 @@ def test_expired_legacy_recall_skips_remote_guards(monkeypatch):
     monkeypatch.setattr(recaller, "_guard_tenantless_recall", lambda: guards.append(True))
     monkeypatch.setattr(recaller, "_ensure_space_compat", unexpected)
     assert recaller.recall("q", trace=trace) == []
-    assert guards == [True]
+    assert guards == []
     assert trace.degraded == ["recall:deadline"]
 
 
@@ -1044,3 +1044,391 @@ def test_flow_checks_deadline_before_pipeline(traced, expired):
     assert results == original
     assert bool(calls) is not expired
     assert traces[0].degraded == (["recall:deadline"] if expired else [])
+
+
+@pytest.mark.parametrize("refuse", [False, True])
+def test_tenant_probe_timeout_and_concurrent_refresh(monkeypatch, refuse):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from mnemostack.recall.recaller import CrossTenantRecallError
+
+    entered, release, finished = Event(), Event(), Event()
+    calls = []
+
+    def sample():
+        calls.append(True)
+        entered.set()
+        assert release.wait(2)
+        return {"one", "two"} if refuse else set()
+
+    arm = _Arm()
+    arm.tenant_probe_store = SimpleNamespace(tenant_sample=sample)
+    recaller = Recaller(retrievers=[arm], overall_deadline=0.05)
+    guard = recaller._guard_tenantless_recall
+
+    def checked():
+        try:
+            guard()
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(recaller, "_guard_tenantless_recall", checked)
+    traces = [RecallTrace(), RecallTrace()]
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            start = time.monotonic()
+            first = executor.submit(recaller.recall, "q", trace=traces[0])
+            assert entered.wait(1)
+            second = executor.submit(recaller.recall, "q", trace=traces[1])
+            returned = [first.result(timeout=1), second.result(timeout=1)]
+            assert time.monotonic() - start < 0.4
+            assert returned == [[], []]
+            assert arm.calls == []
+            assert all(t.degraded == ["recall:deadline"] for t in traces)
+    finally:
+        release.set()
+    assert finished.wait(1)
+    assert returned == [[], []]
+    if refuse:
+        with pytest.raises(CrossTenantRecallError):
+            recaller.recall("q")
+    else:
+        assert recaller.recall("q")
+    assert calls == [True]
+
+
+@pytest.mark.parametrize("refuse", [False, True])
+def test_timely_tenant_probe_matches_disabled(refuse):
+    from threading import get_ident
+
+    from mnemostack.recall.recaller import CrossTenantRecallError
+
+    outcomes = []
+    for seconds in (None, 5):
+        threads = []
+
+        def sample(threads=threads):
+            threads.append(get_ident())
+            return {"one", "two"} if refuse else set()
+
+        arm = _Arm()
+        arm.tenant_probe_store = SimpleNamespace(tenant_sample=sample)
+        recaller = Recaller(retrievers=[arm], overall_deadline=seconds)
+        if refuse:
+            with pytest.raises(CrossTenantRecallError) as exc:
+                recaller.recall("q")
+            outcomes.append(str(exc.value))
+        else:
+            outcomes.append(recaller.recall("q"))
+        if seconds is None:
+            assert threads == [get_ident()]
+    assert outcomes[0] == outcomes[1]
+
+
+@pytest.mark.parametrize("boundary", ["reranker", "fallback", "legacy_fallback"])
+@pytest.mark.parametrize("seconds", [None, 5, 0.05])
+def test_nested_payload_worker_isolation(monkeypatch, boundary, seconds):
+    from threading import Event
+
+    from mnemostack.recall.bm25 import BM25Doc
+
+    entered, release, finished = Event(), Event(), Event()
+    original = RecallResult(id="m1", text="Paris", score=0.9,
+                            payload={"nested": {"value": "original", "items": []}})
+    arm = SimpleNamespace(name="bm25", search=lambda *a, **kw: [original])
+    recaller = Recaller(retrievers=[arm], overall_deadline=seconds)
+    if boundary == "legacy_fallback":
+        recaller = Recaller(
+            embedding_provider=SimpleNamespace(), vector_store=SimpleNamespace(search=lambda *a, **kw: []),
+            bm25_docs=[BM25Doc(id="m1", text="Paris", payload=original.payload)], overall_deadline=seconds,
+        )
+        monkeypatch.setattr(recaller, "_ensure_space_compat", lambda **kw: None)
+        monkeypatch.setattr("mnemostack.recall.recaller.embed_query_via", lambda *a: [1.0])
+    abandoned = seconds == 0.05
+
+    def change(query, results, **kwargs):
+        if seconds is None and boundary != "legacy_fallback":
+            assert results[0] is original
+        entered.set()
+        try:
+            if abandoned:
+                assert release.wait(2)
+            results[0].payload["nested"]["value"] = "changed"
+            results[0].payload["nested"]["items"].append("changed")
+            return results
+        finally:
+            finished.set()
+
+    if boundary != "reranker":
+        monkeypatch.setattr(recaller, "_maybe_apply_fallback", change)
+    trace = RecallTrace()
+    try:
+        if boundary == "reranker":
+            results = recall_flow(recaller, "Paris", reranker=SimpleNamespace(rerank=change), trace=trace)
+        else:
+            results = recaller.recall("Paris", trace=trace)
+        assert entered.is_set()
+        assert results[0].payload["nested"]["value"] == ("original" if abandoned else "changed")
+    finally:
+        release.set()
+    assert finished.wait(1)
+    assert results[0].payload["nested"] == (
+        {"value": "original", "items": []} if abandoned
+        else {"value": "changed", "items": ["changed"]}
+    )
+    assert trace.degraded == (["recall:deadline"] if abandoned else [])
+
+
+def test_tenant_probe_at_worker_cap_runs_inline(monkeypatch):
+    from threading import get_ident
+
+    import mnemostack.recall.deadline as module
+
+    threads = []
+
+    def sample():
+        threads.append(get_ident())
+        return set()
+
+    arm = _Arm()
+    arm.tenant_probe_store = SimpleNamespace(tenant_sample=sample)
+    monkeypatch.setattr(module, "MAX_ABANDONED_WORKERS", 0)
+    assert Recaller(retrievers=[arm], overall_deadline=5).recall("q")
+    assert threads == [get_ident()]
+
+
+def test_isolate_results_keeps_uncopyable_values_and_sharing():
+    import threading
+
+    from mnemostack.recall.deadline import isolate_results
+    from mnemostack.recall.recaller import RecallResult
+
+    lock = threading.Lock()
+    shared = {"value": "original"}
+    cyclic: dict = {"items": [1]}
+    cyclic["self"] = cyclic
+    first = RecallResult(id="a", text="a", score=1.0, payload={"lock": lock, "shared": shared, "cyclic": cyclic})
+    second = RecallResult(id="b", text="b", score=0.5, payload={"shared": shared, "pair": (shared, [1])})
+
+    copies = isolate_results([first, second])
+
+    assert copies[0].payload["lock"] is lock
+    assert copies[0].payload["shared"] is not shared
+    assert copies[0].payload["shared"] is copies[1].payload["shared"]
+    assert copies[1].payload["pair"][0] is copies[0].payload["shared"]
+    assert copies[0].payload["cyclic"]["self"] is copies[0].payload["cyclic"]
+    copies[0].payload["shared"]["value"] = "changed"
+    copies[0].payload["cyclic"]["items"].append(2)
+    copies[1].payload["pair"][1].append(2)
+    assert shared == {"value": "original"}
+    assert cyclic["items"] == [1]
+    assert second.payload["pair"][1] == [1]
+
+
+def test_timely_reranker_matches_no_deadline_path_with_vector_floor(monkeypatch):
+    """Floor extras see the reranker's nested changes with and without a deadline."""
+    import json
+    import random
+    from types import SimpleNamespace
+
+    import mnemostack.recall.recaller as recaller_module
+    from mnemostack.recall import Recaller, RecallTrace
+    from mnemostack.recall.bm25 import BM25Doc
+    from mnemostack.recall.flow import recall_flow
+    from mnemostack.vector.qdrant import Hit
+
+    monkeypatch.setattr(recaller_module, "embed_query_via", lambda *a, **k: [1.0])
+    words = "alice bob paris london cat dog river mountain blue red green".split()
+
+    class Store:
+        def __init__(self, rng, docs):
+            self.rng, self.docs = rng, docs
+
+        def search(self, vec, limit=10, filters=None, **kw):
+            picks = self.rng.sample(self.docs, min(limit, len(self.docs), self.rng.randint(1, 8)))
+            return [
+                Hit(id=d.id, score=round(self.rng.random(), 4), payload={"text": d.text, "nested": {"k": d.id}})
+                for d in picks
+            ]
+
+    def run(seed, overall_deadline):
+        rng = random.Random(seed)
+        docs = [
+            BM25Doc(id=f"d{i}", text=" ".join(rng.choices(words, k=6)), payload={"nested": {"i": i}})
+            for i in range(rng.randint(3, 25))
+        ]
+        recaller = Recaller(
+            embedding_provider=SimpleNamespace(), vector_store=Store(rng, docs), bm25_docs=docs,
+            vector_floor=rng.choice([2, 5]), overall_deadline=overall_deadline,
+        )
+        recaller._ensure_space_compat = lambda **kw: None
+
+        def rerank(query, results, **kw):
+            ranked = list(results)
+            for item in ranked:
+                item.payload.setdefault("nested", {})["reranked"] = True
+            random.Random(seed).shuffle(ranked)
+            return ranked
+
+        results = recall_flow(
+            recaller, " ".join(rng.choices(words, k=2)), limit=rng.randint(1, 10),
+            reranker=SimpleNamespace(rerank=rerank), trace=RecallTrace(),
+        )
+        return [
+            [str(r.id), round(r.score, 9), json.dumps(r.payload, sort_keys=True, default=str), list(r.sources),
+             r.floor_score]
+            for r in results
+        ]
+
+    for seed in range(80):
+        assert run(seed, 30) == run(seed, None), seed
+
+
+def test_isolate_results_keeps_aliases_through_custom_objects_and_result_identity():
+    from mnemostack.recall.deadline import isolate_results
+    from mnemostack.recall.recaller import RecallResult
+
+    class Box:
+        def __init__(self, shared):
+            self.shared = shared
+
+    class Number(int):
+        pass
+
+    shared = {"value": "original"}
+    number = Number(7)
+    number.tags = ["original"]
+    box = Box(None)
+    cycle = (box,)
+    box.shared = cycle
+    first = RecallResult(id="a", text="a", score=1.0, payload={"box": Box(shared), "shared": shared, "n": number})
+    second = RecallResult(id="b", text="b", score=0.5, payload={"shared": shared, "box": Box(shared), "cycle": cycle})
+
+    memo: dict = {}
+    copies = isolate_results([first, second], memo)
+
+    copied_shared = copies[0].payload["shared"]
+    assert copied_shared is not shared
+    assert copies[0].payload["box"].shared is copied_shared
+    assert copies[1].payload["box"].shared is copied_shared
+    assert copies[1].payload["shared"] is copied_shared
+    copied_cycle = copies[1].payload["cycle"]
+    assert copied_cycle is not cycle and copied_cycle[0].shared is copied_cycle
+    assert copies[0].payload["n"] is not number and copies[0].payload["n"].tags == ["original"]
+    # A second call with the same memo returns the same result objects.
+    again = isolate_results([second, first], memo)
+    assert again[0] is copies[1] and again[1] is copies[0]
+    copies[0].payload["box"].shared["value"] = "changed"
+    copies[0].payload["n"].tags.append("changed")
+    assert shared == {"value": "original"}
+    assert number.tags == ["original"]
+
+
+def test_isolate_results_copies_a_payload_too_deep_for_the_stack():
+    from mnemostack.recall.deadline import isolate_results
+    from mnemostack.recall.recaller import RecallResult
+
+    deep: list = []
+    tip = deep
+    for _ in range(5000):
+        tip.append([])
+        tip = tip[0]
+    tip.append("leaf")
+    shared = {"value": "original"}
+    before = RecallResult(id="a", text="a", score=1.0, payload={"shared": shared})
+    result = RecallResult(id="b", text="b", score=0.9, payload={"deep": deep, "shared": shared})
+    after = RecallResult(id="c", text="c", score=0.8, payload={"shared": shared})
+
+    copies = isolate_results([before, result, after])
+
+    tip = copies[1].payload["deep"]
+    for _ in range(5000):
+        tip = tip[0]
+    assert tip == ["leaf"]
+    tip.append("changed")
+    assert deep[0] is not copies[1].payload["deep"][0]
+    probe = deep
+    for _ in range(5000):
+        probe = probe[0]
+    assert probe == ["leaf"]
+    # The failed deep copy does not break the sharing between the results.
+    assert copies[0].payload["shared"] is copies[1].payload["shared"] is copies[2].payload["shared"]
+    assert copies[0].payload["shared"] is not shared
+
+
+def test_deeply_nested_payload_does_not_fail_a_deadline_recall(monkeypatch):
+    from types import SimpleNamespace
+
+    import mnemostack.recall.recaller as recaller_module
+    from mnemostack.recall import Recaller, RecallTrace
+    from mnemostack.recall.flow import recall_flow
+    from mnemostack.vector.qdrant import Hit
+
+    monkeypatch.setattr(recaller_module, "embed_query_via", lambda *a, **k: [1.0])
+    deep: list = ["leaf"]
+    for _ in range(900):
+        deep = [deep]
+    store = SimpleNamespace(
+        search=lambda vec, limit=10, filters=None, **kw: [Hit(id="d", score=0.9, payload={"text": "t", "deep": deep})]
+    )
+
+    def run(overall_deadline):
+        recaller = Recaller(
+            embedding_provider=SimpleNamespace(), vector_store=store, bm25_docs=[], overall_deadline=overall_deadline,
+        )
+        recaller._ensure_space_compat = lambda **kw: None
+        received = []
+
+        def rerank(query, results, **kw):
+            received.extend(results)
+            return list(results)
+
+        reranker = SimpleNamespace(rerank=rerank)
+        ids = [r.id for r in recall_flow(recaller, "alpha", limit=3, reranker=reranker, trace=RecallTrace())]
+        return ids, received[0].payload["deep"]
+
+    assert run(None) == (["d"], deep)
+    ids, copied = run(30)
+    assert ids == ["d"]
+    assert copied is not deep and copied[0] is not deep[0]
+
+
+def test_copies_for_the_reranker_and_the_floor_pool_are_bounded_by_the_deadline():
+    import threading
+    from types import SimpleNamespace
+
+    from mnemostack.recall import RecallResult, RecallTrace
+    from mnemostack.recall.deadline import Deadline
+    from mnemostack.recall.flow import recall_flow
+
+    release = threading.Event()
+
+    class Slow:
+        def __deepcopy__(self, memo):
+            release.wait(5)
+            return Slow()
+
+    # Only the results that the pipeline drops hold the slow object, so the
+    # reranker candidates copy at once and the floor pool does not.
+    recalled = [RecallResult(id="keep", text="keep", score=1.0, payload={"n": {"v": "original"}})]
+    recalled += [RecallResult(id=f"drop{i}", text="drop", score=0.5, payload={"slow": Slow()}) for i in range(3)]
+    recaller = SimpleNamespace(recall=lambda *a, **k: list(recalled), overall_deadline=None)
+    pipeline = SimpleNamespace(apply=lambda query, results, **kw: results[:1])
+
+    def rerank(query, results, **kw):
+        results[0].payload["n"]["v"] = "changed"
+        return list(results)
+
+    trace = RecallTrace()
+    trace.deadline = Deadline(0.05)
+    try:
+        results = recall_flow(
+            recaller, "q", limit=5, pipeline=pipeline, reranker=SimpleNamespace(rerank=rerank), trace=trace,
+        )
+        assert not release.is_set()
+        assert "recall:deadline" in trace.degraded
+        assert results[0] is recalled[0]
+        assert results[0].payload == {"n": {"v": "original"}}
+    finally:
+        release.set()
