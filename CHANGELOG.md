@@ -6,6 +6,83 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.3.0] - 2026-11-13
+
+### Added
+- Add an optional shared recall deadline across retrieval, query expansion,
+  fallback, reranking, answer generation and retries (#240, #249). It is
+  disabled by default. Expiry returns available results with `recall:deadline`;
+  a timed-out ownership guard returns no results and never authorizes a read.
+  Running synchronous work is not interrupted. Ranking checks between stages,
+  GraphResurrection retains its own timeout, and bounded waits are suspended
+  when the process-wide cap of 64 abandoned workers is reached.
+- Add a separate `annotations` field for ranking-stage diagnostics, exposed
+  through HTTP recall/answer results, MCP search and CLI JSON search (#243).
+  Compatible payload copies remain deprecated and no longer overwrite stored
+  client metadata or append to client-owned flags.
+- Audit text-index, payload-index and sparse-backfill administration through
+  the existing opt-in audit log, including partial backfill counts (#238).
+- Add a reproducible, retrieval-only comparison and stage-order ablation for
+  #232, with synthetic fixtures and per-query evidence (#250). These results
+  measure that corpus, not general answer accuracy.
+
+### Changed
+- Run relevance calibration before exact-token rescue and gravity dampening
+  after freshness blending; keep fallback scores in rank-sum units (#232).
+  Result ordering can change. Gravity also recognizes five-letter prefixes
+  for plain query words of at least six letters (#242).
+- Aggregate anonymous metrics across tenants and omit the tenant label (#239).
+  With authentication enabled, per-tenant metrics require an admin-scoped key;
+  invalid keys receive 401 and valid non-admin keys receive 403.
+- Reduce storage payload reads and index-time ID discovery (#246), share
+  ranking-state reads and batch exposure writes (#247), and reuse query
+  embeddings within a recall while indexing BM25 term postings (#248).
+  BM25 uses additional memory and snapshots the input document list; failed
+  embedding sharing can lengthen the no-deadline failure path.
+- Reuse graph-probe and HTTP triple-write drivers and skip graph stopwords
+  when substantive query terms are available (#241, #244). Triple writes now
+  consume their results so execution/commit failures are reported.
+- Read audit tails backwards instead of scanning the whole file (#245).
+  `skipped` describes the portion read; the new `complete` field indicates
+  whether the read reached the beginning of the file.
+- Create validity and explicitly configured timestamp payload indexes only
+  for new collections, in synchronous and asynchronous stores (#251).
+  `doctor` warns about missing or wrongly typed indexes without changing its
+  exit status. Add explicit graph name-index creation to maintenance (#244).
+- Align documentation and docstrings with the supported APIs and behavior
+  (#236, #239, #242).
+
+### Fixed
+- Retry wrapped owner-read protocol errors once without retrying writes
+  (#231); prevent duplicate writes after internal batch errors, protect
+  state mutations and isolate lexical result payloads (#232).
+- Harden filter validation, tenant-scoped health checks, resource cleanup,
+  HTTP/MCP error handling, write admission/cancellation and plugin response
+  mapping (#232). Reject nonpositive indexing chunk sizes before pruning.
+- Retry failed Markdown indexing without requiring another file edit and
+  preserve tenant scope and native point ID types during pruning (#233,
+  #246).
+- Correct inclusive temporal boundaries, explicit-year parsing, relative-date
+  overflow handling and original message offsets (#234).
+- Mark partial list extraction as incomplete rather than returning confident
+  partial counts; preserve query-expansion fallbacks, literal graph-name
+  matching and CLI state/recording environment settings (#235).
+- Stop treating bare years as exact numeric codes and avoid recall retries
+  after internal TypeError; honor whitelisted named-entity triggers (#237).
+  Unmarked four-digit codes in 1900–2099 also lose exact-token treatment.
+- Bound tenantless ownership-probe waits and isolate nested result payloads
+  passed to deadline workers (#249). Non-copyable custom objects retain the
+  documented reduced-copy behavior.
+
+### Upgrade notes
+- Use `mnemostack-auto-recall` wherever the OpenClaw plugin runtime ID is
+  referenced (#239).
+- Configure admin authentication for Prometheus scrapes that need tenant
+  labels; an admin key is a deployment-wide credential (#239).
+- Existing collections are not automatically migrated to the new payload
+  indexes. Run `mnemostack doctor` and apply its explicit `payload-index`
+  commands to obtain the filtering optimization (#251).
+
 ## [3.2.0] - 2026-11-03
 
 ### Added
