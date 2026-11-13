@@ -926,7 +926,8 @@ def build_server(
             Field(
                 description=(
                     "World-time the fact stopped being true (ISO-8601); "
-                    "optional, separate from the system-time invalidation stamp."
+                    "optional, separate from the system-time invalidation stamp. "
+                    "Null preserves the stored value; clearing it is unsupported."
                 )
             ),
         ] = None,

@@ -210,3 +210,35 @@ def test_snapshot_survives_concurrent_writes():
             future.result(timeout=5)
         finally:
             barrier.abort()
+
+
+@pytest.mark.parametrize("max_samples", [None, 2])
+def test_public_metrics_aggregate_tenants_without_changing_accounting(max_samples):
+    from mnemostack.server import _prometheus_dump
+
+    rec = InMemoryRecorder(max_histogram_samples=max_samples)
+    for tenant, values in (("private-alpha", [1, 2, 3]), ("private-beta", [4, 5, 6])):
+        labels = {"tenant": tenant, "endpoint": "POST /memories"}
+        rec.record_counter("requests", sum(values), labels)
+        for value in values:
+            rec.record_histogram("latency", value, labels)
+    rec.record_counter("requests", 7, {"endpoint": "GET /recall"})
+    body = _prometheus_dump(rec)
+    assert "tenant" not in body
+    assert "private-alpha" not in body
+    assert "private-beta" not in body
+    assert 'requests_total{endpoint="POST /memories"} 21.0' in body
+    assert 'requests_total{endpoint="GET /recall"} 7.0' in body
+    assert 'latency_count{endpoint="POST /memories"} 6' in body
+    assert 'latency_sum{endpoint="POST /memories"} 21.0' in body
+    median = 5.0 if max_samples else 3.0
+    assert f'latency{{endpoint="POST /memories",quantile="0.5"}} {median}' in body
+    series = [line.rsplit(" ", 1)[0] for line in body.splitlines() if not line.startswith("#")]
+    assert len(series) == len(set(series))
+    for tenant, total, values in (
+        ("private-alpha", 6, [1, 2, 3]), ("private-beta", 15, [4, 5, 6])
+    ):
+        labels = {"tenant": tenant, "endpoint": "POST /memories"}
+        assert rec.counter_value("requests", labels) == total
+        expected = values[-max_samples:] if max_samples else values
+        assert rec.histogram_values("latency", labels) == expected
