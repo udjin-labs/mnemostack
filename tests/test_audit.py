@@ -591,3 +591,78 @@ def test_verify_carries_the_key_id(tmp_path):
     key_id, key = ks.issue("acme", ["read"])
     p = ks.verify(key)
     assert p is not None and p.key_id == key_id
+
+
+@pytest.mark.parametrize("count", [0, 2, 3, 10000])
+def test_tail_block_results_match_forward_reader(tmp_path, count):
+    p = tmp_path / "audit.jsonl"
+    data = b"".join(json.dumps({"i": i}).encode() + b"\n" for i in range(count))
+    p.write_bytes(data)
+    p.chmod(0o600)
+    events, skipped, complete = FileAuditLog(p).tail_with_status(3)
+    assert events == [{"i": i} for i in range(max(0, count - 3), count)]
+    assert skipped == 0
+    assert complete is (len(data) <= 8192)
+
+
+@pytest.mark.parametrize("ending", [b'{"i": 9}', b'{"i":'])
+def test_tail_unterminated_last_line(tmp_path, ending):
+    p = tmp_path / "audit.jsonl"
+    p.write_bytes(b'{"i": 1}\n' + ending)
+    p.chmod(0o600)
+    events, skipped, complete = FileAuditLog(p).tail_with_status()
+    assert events == ([{"i": 1}, {"i": 9}] if ending.endswith(b'}') else [{"i": 1}])
+    assert skipped == (0 if ending.endswith(b'}') else 1)
+    assert complete is True
+
+
+def test_tail_reads_past_corruption_and_partial_block_lines(tmp_path):
+    p = tmp_path / "audit.jsonl"
+    # The last block contains no valid events; the long event spans blocks.
+    long_event = {"text": "é" * 10000}
+    prefix = b'not json\n' * 2000
+    p.write_bytes(prefix + json.dumps(long_event, ensure_ascii=False).encode()
+                  + b'\n{"text":"\xff"}\n' + b'bad\n' * 3000)
+    p.chmod(0o600)
+    events, skipped, complete = FileAuditLog(p).tail_with_status(2)
+    assert events == [long_event, {"text": "\ufffd"}]
+    assert skipped == 3082  # includes complete prefix lines in the final block
+    assert complete is False
+
+
+def test_tail_missing_status_and_redaction(tmp_path):
+    log = FileAuditLog(tmp_path / "audit.jsonl")
+    assert log.tail_with_status() == ([], 0, True)
+    log.record("keys.issue", details={"key": "msk_secret"})
+    events, skipped, complete = log.tail_with_status()
+    assert events[0]["details"] == {"key": "[redacted:key-shaped]"}
+    assert (skipped, complete) == (0, True)
+
+
+def test_tail_reads_a_very_long_line_once(tmp_path, monkeypatch):
+    import re
+
+    import mnemostack.audit as audit
+
+    path = tmp_path / "audit.jsonl"
+    log = FileAuditLog(path)
+    log.record("keys.issue", tenant="acme")
+    block = 8192
+    with open(path, "ab") as f:
+        f.write(b"x" * (block * 200) + b"\n")
+    log.record("keys.revoke", tenant="acme")
+
+    scanned = 0
+    real_split = re.split
+
+    def counting_split(pattern, data, *args, **kwargs):
+        nonlocal scanned
+        scanned += len(data)
+        return real_split(pattern, data, *args, **kwargs)
+
+    monkeypatch.setattr(audit.re, "split", counting_split)
+    events, skipped, complete = log.tail_with_status(200)
+    assert [e["action"] for e in events] == ["keys.issue", "keys.revoke"]
+    assert (skipped, complete) == (1, True)
+    # Each block is searched once: the bytes scanned stay near the file size.
+    assert scanned <= os.path.getsize(path) + block

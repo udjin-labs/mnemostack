@@ -152,6 +152,7 @@ def test_inspector_audit_endpoint(monkeypatch, tmp_path, audit_file):
     c.put("/api/quotas/acme", json={"max_points": 9}, headers=_hdr(admin_key))
     d = c.get("/api/audit", headers=_hdr(admin_key)).json()
     assert d["enabled"] is True and d["skipped"] == 0
+    assert d["complete"] is True
     assert any(e["action"] == "quota.set" for e in d["events"])
     # admin-gated like every management endpoint
     assert c.get("/api/audit").status_code == 401
@@ -161,7 +162,7 @@ def test_inspector_audit_endpoint_reports_disabled(monkeypatch, tmp_path):
     monkeypatch.delenv("MNEMOSTACK_AUDIT_FILE", raising=False)
     c, admin_key, *_ = _admin_client(monkeypatch, tmp_path)
     d = c.get("/api/audit", headers=_hdr(admin_key)).json()
-    assert d == {"enabled": False, "events": [], "skipped": 0}
+    assert d == {"enabled": False, "events": [], "skipped": 0, "complete": True}
 
 
 def test_inspector_audit_endpoint_forbidden_without_auth(monkeypatch):
@@ -172,3 +173,15 @@ def test_inspector_audit_endpoint_forbidden_without_auth(monkeypatch):
         ServerConfig(provider_name="fake", collection="mt", graph_uri=None)
     )
     assert TestClient(app).get("/api/audit").status_code == 403
+
+
+def test_inspector_audit_tail_scope(monkeypatch, tmp_path, audit_file):
+    from mnemostack.audit import FileAuditLog
+
+    c, admin_key, *_ = _admin_client(monkeypatch, tmp_path)
+    for i in range(100):
+        FileAuditLog(audit_file).record("quota.set", tenant=str(i))
+    d = c.get("/api/audit?limit=2", headers=_hdr(admin_key)).json()
+    assert d["complete"] is False
+    assert [e["tenant"] for e in d["events"]] == ["98", "99"]
+    assert "earlier lines not checked" in insp.INSPECTOR_HTML
