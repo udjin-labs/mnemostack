@@ -183,7 +183,10 @@ class MarkdownWatcher:
                 res = self.syncer.remove_file(path)
             else:
                 res = self.syncer.index_file(path)
-            self._failed.discard(path)
+            if getattr(res, "failed", 0) or getattr(res, "error", None):
+                self._failed.add(path)
+            else:
+                self._failed.discard(path)
             self._quota_warned.discard(path)  # it fit — reset so a future reject re-warns
             self._quota_retry_at.pop(path, None)
             if self._on_result is not None:
