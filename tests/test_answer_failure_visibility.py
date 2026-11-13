@@ -3,9 +3,9 @@ from types import SimpleNamespace
 
 import pytest
 
+import mnemostack.recall.answer as answer_module
 from mnemostack.llm.base import LLMResponse
 from mnemostack.recall import AnswerGenerator, RecallResult
-import mnemostack.recall.answer as answer_module
 from mnemostack.recall.specificity import resolve_specificity
 
 

@@ -120,13 +120,8 @@ class QueryExpander:
     def generate_variants(self, query: str) -> list[str]:
         """Return paraphrases (excluding the original)."""
         prompt = _EXPANSION_PROMPT.format(n=self.n_variants, query=query)
-        try:
-            with histogram("mnemostack.query_expansion.llm_latency_ms"):
-                resp = self.llm.generate(prompt, max_tokens=self.max_tokens)
-        except Exception as exc:
-            counter("mnemostack.query_expansion.errors", 1)
-            logger.warning("Query expansion failed (%s); using plain recall", type(exc).__name__)
-            return []
+        with histogram("mnemostack.query_expansion.llm_latency_ms"):
+            resp = self.llm.generate(prompt, max_tokens=self.max_tokens)
         if not resp.ok:
             counter("mnemostack.query_expansion.errors", 1)
             return []
@@ -193,7 +188,11 @@ class QueryExpander:
             )
 
         queries = [query] if self.include_original else []
-        queries += self.generate_variants(query)
+        try:
+            queries += self.generate_variants(query)
+        except Exception as exc:
+            counter("mnemostack.query_expansion.errors", 1)
+            logger.warning("Query expansion failed (%s); using plain recall", type(exc).__name__)
         if not queries or queries == [query]:
             return self.recaller.recall(
                 query,
