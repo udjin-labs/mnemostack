@@ -1615,16 +1615,20 @@ def cmd_text_index(args: argparse.Namespace) -> int:
     collection). It enables native BM25 scoring on the configured text field.
     """
     gate_fields = _lexical_gate_fields()
-    store = VectorStore(collection=args.collection, dimension=1, host=args.qdrant)
+    details = {"collection": args.collection, "fields": gate_fields, "schema": "text"}
     try:
+        store = VectorStore(collection=args.collection, dimension=1, host=args.qdrant)
         if not store.collection_exists():
+            _audit("collection.text_index", outcome="error", reason="collection_absent", **details)
             print(f"error: collection '{args.collection}' does not exist", file=sys.stderr)
             return 1
         for gate_field in gate_fields:
             store.ensure_text_index(gate_field, scoring=True)
     except Exception as e:  # noqa: BLE001
+        _audit("collection.text_index", outcome="error", error=type(e).__name__, **details)
         print(f"error: cannot create text index: {e}", file=sys.stderr)
         return 1
+    _audit("collection.text_index", **details)
     listed = ", ".join(f"'{f}'" for f in gate_fields)
     print(
         f"full-text index with BM25 scoring ensured on payload field(s) {listed} of "
@@ -1662,12 +1666,15 @@ def cmd_payload_index(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
+    details = {"collection": args.collection, "field": args.field, "schema": args.schema}
     try:
         # Construction inside the boundary too: an invalid --qdrant URL
         # raises from the client constructor and must be a CLI error, not a
         # traceback.
         store = VectorStore(collection=args.collection, dimension=1, host=args.qdrant)
         if not store.collection_exists():
+            if args.field is not None:
+                _audit("collection.payload_index", outcome="error", reason="collection_absent", **details)
             print(f"error: collection '{args.collection}' does not exist", file=sys.stderr)
             return 1
         if args.field is None:
@@ -1688,11 +1695,18 @@ def cmd_payload_index(args: argparse.Namespace) -> int:
         # other ValueError here can be a genuine server error (auth,
         # reachability) and must exit 1 like text-index's, or an ops script
         # would misroute an outage as "fix your flags".
+        if args.field is not None:
+            _audit(
+                "collection.payload_index", outcome="error", error=type(e).__name__, **details
+            )
         print(f"error: {e}", file=sys.stderr)
         return 2
     except Exception as e:  # noqa: BLE001
+        if args.field is not None:
+            _audit("collection.payload_index", outcome="error", error=type(e).__name__, **details)
         print(f"error: cannot create payload index: {e}", file=sys.stderr)
         return 1
+    _audit("collection.payload_index", **details)
     print(
         f"payload index ensured on '{args.field}' ({result}) of "
         f"'{args.collection}' — filters on this field now use the index on a "
@@ -1761,15 +1775,17 @@ def cmd_sparse_backfill(args: argparse.Namespace) -> int:
     sparse vector is updated, batch by batch.
     """
     text_key = _payload_schema()[0]
-    store = VectorStore(
-        collection=args.collection,
-        dimension=1,
-        host=args.qdrant,
-        sparse_text=True,
-        text_key=text_key,
-    )
+    details = {"collection": args.collection}
     try:
+        store = VectorStore(
+            collection=args.collection,
+            dimension=1,
+            host=args.qdrant,
+            sparse_text=True,
+            text_key=text_key,
+        )
         if not store.collection_exists():
+            _audit("collection.sparse_backfill", outcome="error", reason="collection_absent", **details)
             print(f"error: collection '{args.collection}' does not exist", file=sys.stderr)
             return 1
         # Sparse-only ensure: this command runs with a placeholder dense
@@ -1777,13 +1793,38 @@ def cmd_sparse_backfill(args: argparse.Namespace) -> int:
         # The backfill-needed refusal is exactly what we're here to resolve.
         store.ensure_sparse_space(require_backfilled=False)
     except Exception as e:  # noqa: BLE001
+        _audit(
+            "collection.sparse_backfill",
+            outcome="error",
+            error=type(e).__name__,
+            stage="preflight",
+            **details,
+        )
         print(f"error: {e}", file=sys.stderr)
         return 1
+    written = 0
+
+    def _count_batch(n: int) -> None:
+        nonlocal written
+        written += n
+
     try:
-        updated = store.backfill_sparse_text()
+        updated = store.backfill_sparse_text(on_batch=_count_batch)
     except Exception as e:  # noqa: BLE001
+        # The backfill writes batch by batch, so a failure can follow real
+        # updates: record the points known to be written. The stage tells a
+        # reader that the preflight, which can add the sparse space, had run.
+        _audit(
+            "collection.sparse_backfill",
+            outcome="partial" if written else "error",
+            error=type(e).__name__,
+            stage="backfill",
+            points=written,
+            **details,
+        )
         print(f"error: sparse backfill failed: {e}", file=sys.stderr)
         return 1
+    _audit("collection.sparse_backfill", points=updated, **details)
     print(
         f"sparse text encodings written onto {updated} point(s) of "
         f"'{args.collection}' — `recall.text_search: sparse` is ready"

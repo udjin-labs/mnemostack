@@ -192,6 +192,9 @@ KNOWN_ACTIONS = frozenset(
         "tenant.export",
         "tenant.migrate",
         "auth.denied",
+        "collection.text_index",
+        "collection.payload_index",
+        "collection.sparse_backfill",
     }
 )
 

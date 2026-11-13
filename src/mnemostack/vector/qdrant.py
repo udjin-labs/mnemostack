@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, ClassVar, cast
@@ -412,14 +412,17 @@ class VectorStore:
         total = self.client.count(collection_name=self.collection, exact=True).count
         return max(0, total - covered)
 
-    def backfill_sparse_text(self, batch_size: int = 256) -> int:
+    def backfill_sparse_text(
+        self, batch_size: int = 256, on_batch: Callable[[int], None] | None = None
+    ) -> int:
         """Write the sparse text encoding onto EVERY existing point.
 
         Scrolls the whole collection and updates only the named sparse vector
         (``update_vectors`` — payloads and dense vectors untouched, nothing is
         re-embedded). Idempotent; returns the number of points updated. This
         is the migration path for enabling ``text_search: sparse`` on an
-        already-populated collection."""
+        already-populated collection. ``on_batch`` receives the size of each
+        written batch, so a caller can report progress after a failure."""
         if not self.sparse_text or self._sparse_encoder is None:
             raise RuntimeError("backfill_sparse_text requires VectorStore(sparse_text=True)")
         from qdrant_client.models import PointVectors
@@ -450,6 +453,8 @@ class VectorStore:
                 )
             self.client.update_vectors(collection_name=self.collection, points=updates)
             total += len(updates)
+            if on_batch is not None:
+                on_batch(len(updates))
             if offset is None:
                 break
         return total
