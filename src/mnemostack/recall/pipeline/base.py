@@ -70,6 +70,7 @@ class Pipeline:
         trace_scope: Any = None,
     ) -> list[RecallResult]:
         context = PipelineContext(query=query)
+        context.extras["_pipeline_state"] = {}
         # Validity + tenant context for stages that reach back to the graph
         # (GraphResurrection) so they match the recall's view and scope.
         if as_of is not None:
@@ -118,10 +119,16 @@ class Pipeline:
         results: list[RecallResult],
     ) -> list[RecallResult]:
         """Run pipeline with pre-built context (for integration tests)."""
-        for stage in self.stages:
-            if self.stop_on_empty and not results:
-                break
-            results = stage.apply(context, results)
+        # State reads are shared within one run only; a reused context must
+        # not carry them into the next run.
+        context.extras["_pipeline_state"] = {}
+        try:
+            for stage in self.stages:
+                if self.stop_on_empty and not results:
+                    break
+                results = stage.apply(context, results)
+        finally:
+            context.extras.pop("_pipeline_state", None)
         return results
 
     def __iter__(self):

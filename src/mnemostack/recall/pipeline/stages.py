@@ -15,7 +15,7 @@ from typing import Any
 from ..mca_prefilter import extract_exact_tokens
 from .annotations import annotate, get_annotation
 from .base import Stage
-from .state import StateStore, tenant_state_key
+from .state import StateStore, has_stock_batch_update, pipeline_state, tenant_state_key
 
 # ---------- defaults / stopwords ----------
 
@@ -719,7 +719,7 @@ class InhibitionOfReturn(Stage):
         # Read the tenant's own IoR log (partitioned key), so another tenant's
         # recalls never penalize this tenant's results. Unscoped keeps "ior_log".
         tenant = context.extras.get("tenant")
-        log = self.store.get(tenant_state_key(self.STATE_KEY, tenant)) or []
+        log = pipeline_state(context, self.store, tenant_state_key(self.STATE_KEY, tenant)) or []
         now = datetime.now(timezone.utc)
         window = timedelta(hours=self.window_hours)
         counts: dict[str, int] = defaultdict(int)
@@ -746,6 +746,31 @@ class InhibitionOfReturn(Stage):
         key), so the ``keep_last`` cap is per-tenant and a high-volume tenant can't
         evict another's IoR entries.
         """
+        self.store.update(tenant_state_key(self.STATE_KEY, tenant), self._recall_update(memory_id))
+
+    def record_recalls(self, memory_ids, tenant: str | None = None) -> None:
+        """Record a batch, retaining per-entry timestamps and trimming."""
+        # One locked write is used only for the stock hook on the stock file
+        # store. Any replacement of this stage's per-result hook or of the
+        # store's `update` (subclass, instance attribute, patch) keeps getting
+        # one call per entry, as before the batch existed.
+        hook = self.record_recall
+        direct = (
+            getattr(hook, "__func__", None) is _IOR_RECORD_RECALL
+            and getattr(hook, "__self__", None) is self
+            and has_stock_batch_update(self.store)
+        )
+        if not direct:
+            tkw = {"tenant": tenant} if tenant is not None else {}
+            for memory_id in memory_ids:
+                self.record_recall(memory_id, **tkw)
+            return
+        key = tenant_state_key(self.STATE_KEY, tenant)
+        updates = [(key, self._recall_update(memory_id)) for memory_id in memory_ids]
+        if updates:
+            self.store.update_many(updates)  # type: ignore[attr-defined]
+
+    def _recall_update(self, memory_id):
         ts = datetime.now(timezone.utc).isoformat()
 
         def _update(current):
@@ -753,7 +778,10 @@ class InhibitionOfReturn(Stage):
             log.append({"id": memory_id, "timestamp": ts})
             return log[-self.keep_last :]
 
-        self.store.update(tenant_state_key(self.STATE_KEY, tenant), _update)
+        return _update
+
+
+_IOR_RECORD_RECALL = InhibitionOfReturn.record_recall
 
 
 class CuriosityBoost(Stage):
@@ -791,7 +819,7 @@ class CuriosityBoost(Stage):
         from ..validity import numeric_unit_for, parse_payload_instant
 
         tenant = context.extras.get("tenant")
-        log = self.store.get(tenant_state_key(self.IOR_KEY, tenant)) or []
+        log = pipeline_state(context, self.store, tenant_state_key(self.IOR_KEY, tenant)) or []
         counts: dict[str, int] = defaultdict(int)
         for entry in log:
             if isinstance(entry, dict):
@@ -901,7 +929,7 @@ class QLearningReranker(Stage):
         # (source, query_type) — labels shared across tenants — so WITHOUT this a
         # tenant reranks off every other tenant's feedback. Unscoped keeps "q_table".
         tenant = context.extras.get("tenant")
-        q_table = self.store.get(tenant_state_key(self.STATE_KEY, tenant)) or {}
+        q_table = pipeline_state(context, self.store, tenant_state_key(self.STATE_KEY, tenant)) or {}
         for r in results:
             # Q can mix multiple sources (Vector + BM25 etc.) for one item.
             source_qs = []

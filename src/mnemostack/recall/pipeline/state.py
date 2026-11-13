@@ -48,6 +48,21 @@ class StateStore(ABC):
         return dict(value) if isinstance(value, dict) else {}
 
 
+def pipeline_state(context, store: StateStore, key: str) -> Any:
+    """Read a store key once within one pipeline run.
+
+    The pipeline opens the shared cache at the start of a run. A stage that
+    is applied directly, outside a pipeline, reads the store every time.
+    """
+    cache = context.extras.get("_pipeline_state")
+    if cache is None:
+        return store.get(key)
+    cache_key = (id(store), key)
+    if cache_key not in cache:
+        cache[cache_key] = store.get(key)
+    return cache[cache_key]
+
+
 class InMemoryStateStore(StateStore):
     """Thread-safe in-memory state. Lost on restart."""
 
@@ -193,6 +208,14 @@ class FileStateStore(StateStore):
             self._write_all(data)
             return new_value
 
+    def update_many(self, updates) -> None:
+        """Apply ordered key updaters with one locked read and atomic write."""
+        with self._lock, self._file_lock():
+            data = self._read_all(strict=True)
+            for key, updater in updates:
+                data[key] = updater(data.get(key))
+            self._write_all(data)
+
     def delete(self, key) -> bool:
         """Drop a state key entirely (e.g. a tenant's partition on offboarding).
         Returns True if it existed; see ``InMemoryStateStore.delete``.
@@ -209,3 +232,23 @@ class FileStateStore(StateStore):
             del data[key]
             self._write_all(data)
             return True
+
+
+_FILE_UPDATE = FileStateStore.update
+_FILE_UPDATE_MANY = FileStateStore.update_many
+
+
+def has_stock_batch_update(store: Any) -> bool:
+    """True when ``store.update_many`` is safe to use in place of ``update`` calls.
+
+    Only the unmodified ``FileStateStore`` methods qualify. A subclass
+    override, an instance attribute or a patch of either method does not.
+    """
+    update = getattr(store, "update", None)
+    update_many = getattr(store, "update_many", None)
+    return (
+        getattr(update, "__func__", None) is _FILE_UPDATE
+        and getattr(update, "__self__", None) is store
+        and getattr(update_many, "__func__", None) is _FILE_UPDATE_MANY
+        and getattr(update_many, "__self__", None) is store
+    )
