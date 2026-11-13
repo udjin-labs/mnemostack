@@ -298,6 +298,7 @@ Built-in profiles cover OpenClaw webchat and Telegram envelopes; pass `profiles=
 | `MNEMOSTACK_EMBEDDING_MODEL` / `MNEMOSTACK_LLM_MODEL` | Override the embedding / LLM model name | CLI / HTTP / MCP |
 | `MNEMOSTACK_VECTOR_HOST` / `MNEMOSTACK_VECTOR_COLLECTION` | Aliases for the Qdrant URL / collection | CLI / HTTP / MCP |
 | `MNEMOSTACK_VECTOR_FLOOR` | Keep top-N raw vector hits in results even when fusion/rerank would drop them (0 = off) | Recall tuning |
+| `MNEMOSTACK_RECALL_OVERALL_DEADLINE` | Optional shared recall deadline in seconds, positive and finite; unset disables it | Recall tuning |
 | `MNEMOSTACK_RERANK_MODE` | LLM reranker mode: `relevant_only` (default) or `full_reorder` | HTTP / MCP runtime reranker |
 | `MNEMOSTACK_TOKEN_BUDGET` | Default recall token budget — cut results to the ranked prefix that fits (unset = off) | CLI / HTTP / MCP recall surfaces |
 | `MNEMOSTACK_GRAPH_TIMEOUT` / `MNEMOSTACK_GRAPH_HEALTH_TIMEOUT` | Memgraph query / health-check timeouts in seconds | Graph retriever |
@@ -339,6 +340,17 @@ mnemostack index-markdown memory/ \
     --embedding-timeout 180 \
     --embedding-batch-size 64
 ```
+
+`recall.overall_deadline` (environment: `MNEMOSTACK_RECALL_OVERALL_DEADLINE`) defaults to
+`null`, which disables the overall deadline. A positive finite number sets one shared budget
+in seconds across retrieval, expansion, ranking, answer generation, and retries. It bounds
+waits for parallel retriever arms, query-expansion LLM calls, vector fallback, LLM reranking,
+and answer LLM calls including specificity rewrites. Ranking stages check the budget between
+stages; skipped work or a timed-out wait returns the best results collected so far and records `recall:deadline`.
+Synchronous work already running is not interrupted and may finish in the background.
+At most 64 abandoned workers can remain live process-wide; beyond that, calls run without a bounded wait until workers finish.
+GraphResurrection retains its own `graph_timeout`.
+A guard still running inside an abandoned worker cannot fail the request; other arms' results return with `recall:deadline`.
 
 Embedding uses the batch `POST /api/embed` endpoint (one request per batch; servers too old for it are detected once and served per-item with a loud warning). The embedding timeout (`--embedding-timeout` / `MNEMOSTACK_EMBEDDING_TIMEOUT`, default 180s) is independent of the short Qdrant liveness timeout — cold loads of larger local models are legitimately slow. Vector dimensions come from the model tables (quantization-suffix aware) or, for unknown models, a one-shot probe of the live model — there is no blind fallback dimension, so a wrong-size collection can't be created.
 

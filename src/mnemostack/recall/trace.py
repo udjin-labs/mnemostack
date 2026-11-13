@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 from ..observability import counter
 
 if TYPE_CHECKING:
+    from .deadline import Deadline
     from .recaller import RecallResult
     from .reranker import Reranker
 
@@ -152,6 +153,7 @@ class RecallTrace:
     first_pass_fused: list[tuple[str, float]] | None = None
     budget: BudgetTrace | None = None
     retry_budget: BudgetTrace | None = None
+    deadline: Deadline | None = field(default=None, repr=False)
 
     def record_budget(
         self,
@@ -372,3 +374,9 @@ def apply_rerank_safe(
     if trace is not None:
         trace.post_rerank = [(str(r.id), r.score) for r in out]
     return out
+
+
+class ChildTrace(RecallTrace):
+    def mark(self, tag):
+        if tag not in self.degraded:
+            self.degraded.append(tag)

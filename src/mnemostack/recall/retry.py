@@ -38,10 +38,11 @@ Bounded on purpose:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from ..llm.base import LLMProvider
 from ..observability.recorder import counter
+from .deadline import get_deadline, start_deadline
 from .flow import recall_flow
 from .recaller import is_floor_extra, memory_key
 
@@ -118,6 +119,12 @@ def retry_weak_recall(
     Never raises: a failed retry is a recall that did not improve, not a
     failed request.
     """
+    from ..synthesis import _innermost_recaller
+
+    trace = start_deadline(_innermost_recaller(recaller), flow_kwargs.get("trace"))
+    if trace is not None:
+        flow_kwargs["trace"] = trace
+    deadline = get_deadline(trace)
     budget = flow_kwargs.get("token_budget")
     counter_fn = flow_kwargs.get("token_counter")
     if not is_weak(results, below) or not has_room(results, limit, budget, counter_fn):
@@ -130,6 +137,10 @@ def retry_weak_recall(
         # not even a reranker warning to hint at it. No `mark()`: the
         # counter above is already in `/status`'s allowlist.
         _note(flow_kwargs.get("trace"), "weak_retry:unavailable")
+        return results, False
+
+    if deadline is not None and deadline.expired():
+        trace.mark("recall:deadline")
         return results, False
 
     # Labelled with the tenant, because this is the ATTEMPT — the point
@@ -152,14 +163,29 @@ def retry_weak_recall(
     # filing outages as routine, then filing healthy shrugs as faults.
     # Reading the response is the only answer that is true in both cases.
     watched = _WatchedLLM(llm)
+    paraphrase_timed_out = False
+
+    def paraphrase_timeout():
+        nonlocal paraphrase_timed_out
+        paraphrase_timed_out = True
+        trace.mark("recall:deadline")
+
     try:
         from .expansion import QueryExpander
 
         expander = QueryExpander(recaller, watched, n_variants=MAX_VARIANTS)
-        variants = expander.generate_variants(query)[:MAX_VARIANTS]
+        if deadline is None:
+            variants = expander.generate_variants(query)[:MAX_VARIANTS]
+        else:
+            variants = deadline.run(
+                lambda: expander.generate_variants(query), cast(list[str], []),
+                on_timeout=paraphrase_timeout,
+            )[:MAX_VARIANTS]
     except Exception:  # noqa: BLE001 — a retry must not fail the recall
         counter("mnemostack.recall.weak_retry_failed", 1)
         _note(flow_kwargs.get("trace"), "weak_retry:paraphrase_failed")
+        return results, False
+    if paraphrase_timed_out:
         return results, False
     if not variants:
         # Counted either way, and visible in /metrics — but only a provider
@@ -173,6 +199,10 @@ def retry_weak_recall(
             _note(trace, "weak_retry:paraphrase_failed")
         elif trace is not None:
             trace.mark("weak_retry:no_variants")
+        return results, False
+
+    if deadline is not None and deadline.expired():
+        trace.mark("recall:deadline")
         return results, False
 
     # Each variant recalls into its OWN trace. Sharing the caller's would
@@ -233,6 +263,9 @@ def retry_weak_recall(
     #: floor is owed is the union of what the retry SAW.
     floor_pool = _pass_pool(results)
     for variant in variants:
+        if deadline is not None and deadline.expired():
+            caller_trace.mark("recall:deadline")
+            break
         variant_trace = _fresh_trace(caller_trace)
         if variant_trace is not None:
             flow_kwargs["trace"] = variant_trace
@@ -636,7 +669,8 @@ def _fresh_trace(caller_trace: Any) -> Any:
     """A trace of the same type as the caller's, or None when it wants none."""
     if caller_trace is None:
         return None
-    return type(caller_trace)()
+    child = type(caller_trace)()
+    return start_deadline(None, child, deadline=get_deadline(caller_trace))
 
 
 def _absorb(caller_trace: Any, variant_trace: Any, variant: str) -> None:

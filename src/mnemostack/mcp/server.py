@@ -64,6 +64,7 @@ from ..recall import (
     resolve_access_bonus_max,
     sum_tokens,
 )
+from ..recall.deadline import get_deadline
 from ..recall.filters import validate_filters
 from ..recall.pipeline import FileStateStore, default_state_path
 from ..vector import VectorStore
@@ -168,6 +169,7 @@ def build_server(
     hnsw_ef: int | None = None,
     transport: str = "stdio",
     secret_policy: str = "off",
+    overall_deadline: float | None = None,
 ) -> Any:
     """Build and return a configured FastMCP server.
 
@@ -458,6 +460,7 @@ def build_server(
         return Recaller(
             retrievers=[r for r in retrievers if r is not None],
             vector_floor=max(0, int(vector_floor)),
+            overall_deadline=overall_deadline,
             text_key=text_key,
             timestamp_key=timestamp_key,
             timestamp_format=timestamp_format,
@@ -850,6 +853,7 @@ def build_server(
                 include_invalidated=include_invalidated,
                 as_of=as_of,
                 tenant=tenant,
+                **({"trace": trace} if get_deadline(trace) is not None else {}),
             )
             # Prefer the generator's own estimate: its retry paths can swap
             # in a freshly recalled context pool. getattr: custom/duck-typed
@@ -1467,6 +1471,7 @@ def main() -> None:
         bm25_paths=list(cfg.recall.bm25_paths) or None,
         state_path=os.environ.get("MNEMOSTACK_STATE_PATH"),
         vector_floor=max(0, int(cfg.recall.vector_floor)),
+        overall_deadline=cfg.recall.overall_deadline,
         rerank_mode=cfg.recall.rerank_mode,
         text_key=cfg.recall.text_key,
         timestamp_key=cfg.recall.timestamp_key,

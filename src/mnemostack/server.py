@@ -114,6 +114,7 @@ from mnemostack.recall import (
     resolve_access_bonus_max,
     sum_tokens,
 )
+from mnemostack.recall.deadline import get_deadline
 from mnemostack.recall.pipeline import FileStateStore, default_state_path
 from mnemostack.recall.retry import retry_weak_recall
 from mnemostack.vector import VectorStore
@@ -843,6 +844,7 @@ class ServerConfig:
     quantization_oversampling: float | None = None
     hnsw_ef: int | None = None
     secret_policy: str = "off"
+    overall_deadline: float | None = None
 
     def __post_init__(self) -> None:
         SecretPolicy(self.secret_policy)
@@ -887,6 +889,7 @@ class ServerConfig:
             graph_timeout=cfg.graph.timeout,
             bm25_paths=list(cfg.recall.bm25_paths) or None,
             vector_floor=max(0, int(cfg.recall.vector_floor)),
+            overall_deadline=cfg.recall.overall_deadline,
             rerank_mode=cfg.recall.rerank_mode,
             token_budget=cfg.recall.token_budget,
             auto_record_ior=_env_bool("MNEMOSTACK_AUTO_RECORD_IOR"),
@@ -1256,6 +1259,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     recaller = Recaller(
         retrievers=retrievers,
         vector_floor=cfg.vector_floor,
+        overall_deadline=cfg.overall_deadline,
         text_key=cfg.text_key,
         timestamp_key=cfg.timestamp_key,
         timestamp_format=cfg.timestamp_format,
@@ -1875,6 +1879,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                     include_invalidated=req.include_invalidated,
                     as_of=req.as_of,
                     tenant=tenant,
+                    **({"trace": trace} if get_deadline(trace) is not None else {}),
                 )
             )
         except CrossTenantRecallError as exc:

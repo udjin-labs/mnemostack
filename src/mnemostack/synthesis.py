@@ -401,6 +401,7 @@ def _filter_recaller(recaller: Any, source_filter: set[str] | None) -> Any:
     ]
     clone = Recaller(
         retrievers=filtered,
+        overall_deadline=getattr(recaller, "overall_deadline", None),
         rrf_k=getattr(recaller, "rrf_k", 60),
         retriever_weights=getattr(recaller, "retriever_weights", None),
         adaptive_weights=getattr(recaller, "adaptive_weights", False),

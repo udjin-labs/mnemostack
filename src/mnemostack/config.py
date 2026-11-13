@@ -324,6 +324,7 @@ class RecallConfig:
     #: that holds several tenants an unscoped recall FAILS instead of
     #: searching all of them (CrossTenantRecallError).
     tenant: str | None = None
+    overall_deadline: float | None = None
 
 
 @dataclass
@@ -411,6 +412,9 @@ class Config:
         if budget is not None and int(budget) <= 0:
             cfg.recall.token_budget = None
 
+        from .recall.deadline import validate_deadline
+
+        validate_deadline(cfg.recall.overall_deadline)
         cfg.recall.tenant = normalize_tenant(cfg.recall.tenant)
 
         # Same startup-rejection contract for every source (file AND env): a
@@ -652,6 +656,14 @@ def _apply_env_overrides(cfg: Config) -> Config:
         cfg.graph.health_timeout = float(v)
 
     # Recall
+    if "MNEMOSTACK_RECALL_OVERALL_DEADLINE" in env:
+        from .recall.deadline import validate_deadline
+
+        value = env["MNEMOSTACK_RECALL_OVERALL_DEADLINE"]
+        try:
+            cfg.recall.overall_deadline = float(value)
+        except ValueError:
+            validate_deadline(value)
     if v := env.get("MNEMOSTACK_BM25_PATHS"):
         cfg.recall.bm25_paths = [p for p in v.split(os.pathsep) if p]
     # PRESENCE decides, not truthiness: MNEMOSTACK_TENANT="" must be able to
@@ -726,6 +738,12 @@ recall:
   top_k: 10
   confidence_threshold: 0.5
   bm25_paths: []
+  # Shared across retrievers, expansion, fallback, reranking, answer LLM calls and retries.
+  # Already running synchronous work is not interrupted and may finish in the background.
+  # At most 64 abandoned workers remain live; beyond that, calls wait without a bound until workers finish.
+  # GraphResurrection retains graph_timeout.
+  # Guards in abandoned workers cannot fail the request; other arms return with recall:deadline.
+  overall_deadline: null       # positive finite seconds; null disables the deadline
   vector_floor: 0
   tenant: null            # scope every recall to this tenant (MNEMOSTACK_TENANT)
   rerank_mode: relevant_only  # relevant_only | full_reorder

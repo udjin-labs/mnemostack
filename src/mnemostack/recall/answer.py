@@ -13,17 +13,41 @@ import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from ..embeddings.roles import embed_documents_via, embed_queries_via
-from ..llm.base import LLMProvider
+from ..llm.base import LLMProvider, LLMResponse
 from ..observability import counter, histogram
+from .deadline import Deadline, get_deadline, start_deadline
 from .inference_retry import decompose_query, merge_results, should_retry
 from .recaller import RecallResult
 from .specificity import detect_placeholders, resolve_specificity
 from .tokens import TokenCounter, apply_token_budget, sum_tokens
+from .trace import ChildTrace, RecallTrace
 
 logger = logging.getLogger(__name__)
+
+
+def _expired(trace: RecallTrace | None) -> bool:
+    if (
+        trace is not None
+        and get_deadline(trace) is not None
+        and cast(Deadline, get_deadline(trace)).expired()
+    ):
+        trace.mark("recall:deadline")
+        return True
+    return False
+
+
+def _generate_llm(llm: LLMProvider, prompt: str, *, trace=None, **kwargs) -> LLMResponse:
+    if trace is None or get_deadline(trace) is None:
+        return llm.generate(prompt, **kwargs)
+    response = cast(Deadline, get_deadline(trace)).run(
+        lambda: llm.generate(prompt, **kwargs),
+        LLMResponse(text="", error="recall deadline exceeded"),
+        on_timeout=lambda: trace.mark("recall:deadline"),
+    )
+    return response
 
 
 class _IncompleteListExtraction(RuntimeError):
@@ -396,12 +420,16 @@ class _UsageTrackingLLM(LLMProvider):
     instance state (same race the reranker fallback signal had).
     """
 
-    def __init__(self, llm: LLMProvider):
+    def __init__(self, llm: LLMProvider, trace: RecallTrace | None = None):
         self._llm = llm
+        self._trace = trace
         self.tokens_used: int | None = None
 
     def generate(self, prompt, max_tokens=200, temperature=0.0):
-        resp = self._llm.generate(prompt, max_tokens=max_tokens, temperature=temperature)
+        resp = _generate_llm(
+            self._llm, prompt, trace=self._trace,
+            max_tokens=max_tokens, temperature=temperature,
+        )
         used = getattr(resp, "tokens_used", None)
         if used is not None:
             self.tokens_used = (self.tokens_used or 0) + used
@@ -539,8 +567,12 @@ class AnswerGenerator:
         include_invalidated: bool = False,
         as_of: str | None = None,
         tenant: str | None = None,
+        trace: RecallTrace | None = None,
     ) -> Answer:
         """Synthesize answer from retrieved memories.
+
+        `trace` shares a recall deadline with retrieval and answer retries.
+        When absent, a recaller with `overall_deadline` starts a new budget.
 
         `category` overrides the classifier for this call — pass it when
         the caller routes question classes itself. For a persistent custom
@@ -574,6 +606,10 @@ class AnswerGenerator:
         **caller** must have already scoped those to the tenant (e.g. via
         `recall_flow(..., tenant=...)`); `tenant` here does not re-filter them.
         """
+        from ..synthesis import _innermost_recaller
+
+        trace = start_deadline(_innermost_recaller(self.recaller), trace)
+        trace_kw = {"trace": trace} if get_deadline(trace) is not None else {}
         counter("mnemostack.answer.calls", 1)
         memories = self._cap_memories(memories, token_budget, token_counter)
 
@@ -615,6 +651,7 @@ class AnswerGenerator:
                 answer = self._generate_list_extract(
                     query, memories, category, token_counter=token_counter,
                     budgeted_context=token_budget is not None,
+                    **trace_kw,
                 )
             except _IncompleteListExtraction as exc:
                 counter("mnemostack.answer.list_extract_incomplete", 1)
@@ -632,6 +669,7 @@ class AnswerGenerator:
                 memories=memories[: self.max_memories],
                 prompt_template=prompt_template,
                 budgeted_context=token_budget is not None,
+                **trace_kw,
             )
 
         specificity_memories = memories
@@ -644,6 +682,7 @@ class AnswerGenerator:
                 low_confidence_threshold=0.5,
                 abstention_text=self.abstention_text,
             )
+            and not _expired(trace)
         ):
             answer, specificity_memories = self._retry_with_expansion_answer(
                 query=query,
@@ -656,6 +695,7 @@ class AnswerGenerator:
                 include_invalidated=include_invalidated,
                 as_of=as_of,
                 tenant=tenant,
+                **trace_kw,
             )
         elif (
             self.category_aware_prompts
@@ -663,6 +703,7 @@ class AnswerGenerator:
             and category == "inference"
             and self.recaller is not None
             and should_retry(answer.text, answer.confidence, abstention_text=self.abstention_text)
+            and not _expired(trace)
         ):
             answer, specificity_memories = self._retry_inference_answer(
                 query=query,
@@ -675,8 +716,12 @@ class AnswerGenerator:
                 include_invalidated=include_invalidated,
                 as_of=as_of,
                 tenant=tenant,
+                **trace_kw,
             )
-        answer = self._apply_specificity_resolver(query, answer, specificity_memories, category)
+        answer = self._apply_specificity_resolver(
+            query, answer, specificity_memories, category,
+            **trace_kw,
+        )
         # Report the context that actually produced the answer: after an
         # accepted retry that is the merged retry pool, not the caller's
         # memories. Successful list/count extraction walks the full pool and
@@ -709,6 +754,7 @@ class AnswerGenerator:
         include_invalidated: bool = False,
         as_of: str | None = None,
         tenant: str | None = None,
+        trace: RecallTrace | None = None,
     ) -> Answer:
         """Async wrapper around `generate`.
 
@@ -716,6 +762,7 @@ class AnswerGenerator:
         thread so asyncio services are not blocked. Safe for concurrent calls
         on one generator: generation keeps no per-call state on the instance.
         """
+        trace_kw = {"trace": trace} if trace is not None else {}
         import asyncio
 
         return await asyncio.to_thread(
@@ -730,6 +777,7 @@ class AnswerGenerator:
                 include_invalidated=include_invalidated,
                 as_of=as_of,
                 tenant=tenant,
+                **trace_kw,
             )
         )
 
@@ -745,6 +793,7 @@ class AnswerGenerator:
         include_invalidated: bool = False,
         as_of: str | None = None,
         tenant: str | None = None,
+        trace: RecallTrace | None = None,
     ) -> tuple[Answer, list[RecallResult]]:
         """Retry low-confidence answers with expansion + HyDE vector RRF.
 
@@ -753,12 +802,13 @@ class AnswerGenerator:
         let this path pull unfiltered hits from outside the scope.
         *include_invalidated* / *as_of* keep it inside the same validity view.
         """
+        trace_kw = {"trace": trace} if get_deadline(trace) is not None else {}
         if self.expansion_llm is None or self.recaller is None or self.recaller.embedding is None:
             return draft, memories
 
         prompt = f"Rephrase this question 2 ways + give a hypothetical answer:\n{query}"
         with histogram("mnemostack.answer.llm_latency_ms"):
-            resp = self.expansion_llm.generate(prompt, max_tokens=200)
+            resp = _generate_llm(self.expansion_llm, prompt, trace=trace, max_tokens=200)
         if not resp.ok:
             return draft, memories
 
@@ -770,31 +820,42 @@ class AnswerGenerator:
         # (prompt order): the rephrases are QUERIES, but the hypothetical is a
         # HyDE-style synthetic DOCUMENT — it must be embedded in the document
         # space or an asymmetric profile would put it on the wrong side.
+        deadline = get_deadline(trace)
+
+        def embed():
+            vectors = embed_queries_via(self.recaller.embedding, [query, *expanded_texts[:2]])
+            if deadline is None or not deadline.expired():
+                vectors.extend(embed_documents_via(self.recaller.embedding, [expanded_texts[2]]))
+            return vectors
+
         try:
-            vectors = embed_queries_via(
-                self.recaller.embedding, [query, *expanded_texts[:2]]
+            vectors = embed() if deadline is None else deadline.run(
+                embed, [], on_timeout=lambda: cast(RecallTrace, trace).mark("recall:deadline")
             )
-            # Batch-of-one on purpose: this path has always been batch-only,
-            # so a provider implementing just embed_batch keeps working.
-            vectors.extend(embed_documents_via(self.recaller.embedding, [expanded_texts[2]]))
         except Exception as exc:
             logger.warning("Answer retry embedding failed (%s); keeping draft", type(exc).__name__)
             return draft, memories
         vectors = [v for v in vectors if v]
-        if not vectors:
+        if not vectors or _expired(trace):
             return draft, memories
 
         # search_many filters each vector's list for validity and trims before
         # RRF, so a stale hit recurring across expanded vectors can't be boosted
         # into the merged context ahead of a valid single-vector hit.
         tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
-        merged_memories = self.recaller.search_many(
-            vectors,
-            limit=self.max_memories,
-            filters=dict(recall_filters) if recall_filters is not None else None,
-            include_invalidated=include_invalidated,
-            as_of=as_of,
-            **tkw,
+
+        def search():
+            return self.recaller.search_many(
+                vectors,
+                limit=self.max_memories,
+                filters=dict(recall_filters) if recall_filters is not None else None,
+                include_invalidated=include_invalidated,
+                as_of=as_of,
+                **tkw,
+            )
+
+        merged_memories = search() if deadline is None else deadline.run(
+            search, [], on_timeout=lambda: cast(RecallTrace, trace).mark("recall:deadline")
         )
         # The fresh sub-recall bypassed any budget the caller applied to the
         # primary memories; re-cap before this pool reaches another prompt.
@@ -807,6 +868,7 @@ class AnswerGenerator:
             memories=merged_memories[: self.max_memories],
             prompt_template=prompt_template,
             budgeted_context=token_budget is not None,
+            **trace_kw,
         )
         if retry_answer.ok:
             return retry_answer, merged_memories
@@ -846,17 +908,29 @@ class AnswerGenerator:
         include_invalidated: bool = False,
         as_of: str | None = None,
         tenant: str | None = None,
+        trace: RecallTrace | None = None,
     ) -> tuple[Answer, list[RecallResult]]:
         """Retry low-confidence inference answers with decomposed evidence queries."""
+        trace_kw = {"trace": trace} if get_deadline(trace) is not None else {}
         if self.recaller is None:
             return draft, memories
-        sub_queries = decompose_query(query, self.llm)
+        if trace is not None and get_deadline(trace) is not None:
+            sub_queries: list[str] = cast(Deadline, get_deadline(trace)).run(
+                lambda: decompose_query(query, self.llm), [],
+                on_timeout=lambda: trace.mark("recall:deadline"),
+            )
+        else:
+            sub_queries = decompose_query(query, self.llm)
         if not sub_queries:
             return draft, memories
 
         sub_results: list[list[RecallResult]] = []
         tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
         for sub_query in sub_queries:
+            if _expired(trace):
+                break
+            if get_deadline(trace) is not None:
+                tkw["trace"] = ChildTrace(deadline=get_deadline(trace))
             try:
                 # Keep sub-recalls inside the same filtered scope AND validity
                 # view the caller used, so an as_of retry stays point-in-time.
@@ -873,6 +947,9 @@ class AnswerGenerator:
             except Exception as exc:
                 logger.warning("Inference sub-recall failed (%s); keeping available evidence", type(exc).__name__)
                 sub_results.append([])
+            child = tkw.get("trace")
+            if child is not None and "recall:deadline" in child.degraded:
+                cast(RecallTrace, trace).mark("recall:deadline")
 
         merged_memories = merge_results(memories, *sub_results)
         # Decomposed sub-recalls bypassed any caller-applied budget; re-cap
@@ -886,6 +963,7 @@ class AnswerGenerator:
             memories=merged_memories[: self.max_memories],
             prompt_template=prompt_template,
             budgeted_context=token_budget is not None,
+            **trace_kw,
         )
         if (
             retry_answer.ok
@@ -902,7 +980,9 @@ class AnswerGenerator:
         answer: Answer,
         memories: list[RecallResult],
         category: str,
+        trace: RecallTrace | None = None,
     ) -> Answer:
+        trace_kw = {"trace": trace} if get_deadline(trace) is not None else {}
         if (
             not self.specificity_resolver
             or not self.category_aware_prompts
@@ -910,13 +990,15 @@ class AnswerGenerator:
             or not answer.ok
         ):
             return answer
-        if not detect_placeholders(answer.text):
+        if not detect_placeholders(answer.text) or _expired(trace):
             return answer
 
         # Track the resolver's own LLM usage: when it rewrites the text, the
         # returned answer was produced by draft + resolver calls together, so
         # reporting only the draft's tokens would underreport.
-        tracking_llm = _UsageTrackingLLM(self.llm)
+        tracking_llm = _UsageTrackingLLM(
+            self.llm, **trace_kw
+        )
         rewritten = resolve_specificity(
             query=query,
             draft_answer=answer.text,
@@ -940,24 +1022,29 @@ class AnswerGenerator:
         token_counter: TokenCounter | None = None,
         *,
         budgeted_context: bool = False,
+        trace: RecallTrace | None = None,
     ) -> Answer:
+        trace_kw = {"trace": trace} if get_deadline(trace) is not None else {}
         extracted = self._extract_items_over_pool(
-            query, memories, budgeted_context=budgeted_context
+            query, memories, budgeted_context=budgeted_context,
+            **trace_kw,
         )
-        if extracted is not None and not extracted[0]:
+        if extracted is not None and not extracted[0] and not _expired(trace):
             # The pool is non-empty but extraction found nothing. Extraction
             # is the lossy, non-deterministic step (not retrieval) — give it
             # one more pass before abstaining.
             counter("mnemostack.answer.list_extract_empty_retry", 1)
             extracted = self._extract_items_over_pool(
-                query, memories, budgeted_context=budgeted_context
+                query, memories, budgeted_context=budgeted_context,
+                **trace_kw,
             )
         if extracted is None or not extracted[0]:  # every batch failed / still empty
             # The single-prompt fallback sees only max_memories; leave the
             # context estimate unset so generate() reports that smaller pool,
             # not the full pool extraction failed to use.
             return self._fallback_list_answer(
-                query, memories, budgeted_context=budgeted_context
+                query, memories, budgeted_context=budgeted_context,
+                **trace_kw,
             )
         items, contributing = extracted
 
@@ -985,7 +1072,9 @@ class AnswerGenerator:
         )
         finalize_prompt = finalize_template.format(query=query, items=json.dumps(items))
         with histogram("mnemostack.answer.llm_latency_ms"):
-            final_resp = self.llm.generate(finalize_prompt, max_tokens=self.max_tokens)
+            final_resp = _generate_llm(
+                self.llm, finalize_prompt, trace=trace, max_tokens=self.max_tokens
+            )
         if not final_resp.ok or not final_resp.text.strip():
             # The extract pass already produced verified items — losing them
             # to a re-generation fallback discards correct data and, with
@@ -1094,7 +1183,8 @@ class AnswerGenerator:
         return "\n".join(parts).lower()
 
     def _extract_items_over_pool(
-        self, query: str, memories: list[RecallResult], *, budgeted_context: bool = False
+        self, query: str, memories: list[RecallResult], *, budgeted_context: bool = False,
+        trace: RecallTrace | None = None,
     ) -> tuple[list[str], list[RecallResult]] | None:
         """Run the extract prompt over the WHOLE pool in batches.
 
@@ -1122,6 +1212,10 @@ class AnswerGenerator:
         any_batch_ok = False
         failed_batches = 0
         for start in range(0, len(memories), self.list_extract_batch_size):
+            if _expired(trace):
+                if any_batch_ok:
+                    raise _IncompleteListExtraction(merged, contributing)
+                return None
             batch = memories[start : start + self.list_extract_batch_size]
             prompt = template.format(
                 n_memories=len(batch),
@@ -1132,7 +1226,7 @@ class AnswerGenerator:
                 query=query,
             )
             with histogram("mnemostack.answer.llm_latency_ms"):
-                resp = self.llm.generate(prompt, max_tokens=self.max_tokens)
+                resp = _generate_llm(self.llm, prompt, trace=trace, max_tokens=self.max_tokens)
             if not resp.ok:
                 failed_batches += 1
                 continue
@@ -1165,12 +1259,15 @@ class AnswerGenerator:
         memories: list[RecallResult],
         *,
         budgeted_context: bool = False,
+        trace: RecallTrace | None = None,
     ) -> Answer:
+        trace_kw = {"trace": trace} if get_deadline(trace) is not None else {}
         answer = self._generate_single_prompt(
             query=query,
             memories=memories[: self.max_memories],
             prompt_template=self.prompt_overrides.get("list", self._builtin_prompts["list"]),
             budgeted_context=budgeted_context,
+            **trace_kw,
         )
         if answer.ok:
             answer.confidence = 0.3
@@ -1183,6 +1280,7 @@ class AnswerGenerator:
         prompt_template: str,
         *,
         budgeted_context: bool = False,
+        trace: RecallTrace | None = None,
     ) -> Answer:
         context = self._format_context(
             memories, self.context_fields, self.timestamp_key, self.timestamp_format,
@@ -1195,7 +1293,7 @@ class AnswerGenerator:
         )
 
         with histogram("mnemostack.answer.llm_latency_ms"):
-            resp = self.llm.generate(prompt, max_tokens=self.max_tokens)
+            resp = _generate_llm(self.llm, prompt, trace=trace, max_tokens=self.max_tokens)
         if not resp.ok:
             counter("mnemostack.answer.errors", 1)
             return Answer(

@@ -747,6 +747,7 @@ These are the MCP-relevant environment variables read by `mnemostack mcp-serve` 
 | `MNEMOSTACK_LLM_TIMEOUT` | provider default | LLM request timeout in seconds. Not inherited from the embedding timeout — generation is a different workload. |
 | `MNEMOSTACK_GRAPH_TIMEOUT` | `5.0` | Memgraph operation timeout in seconds. |
 | `MNEMOSTACK_BM25_PATHS` | unset | File or directory paths for BM25 exact-token retrieval, separated by `os.pathsep` (`:` on Unix, `;` on Windows). |
+| `MNEMOSTACK_RECALL_OVERALL_DEADLINE` | unset | Optional positive finite shared recall budget in seconds (`recall.overall_deadline: null` disables it). Bounds retriever, expansion, vector fallback, reranker and answer LLM waits across retries. Synchronous work already running may finish in the background. |
 | `MNEMOSTACK_RERANK_MODE` | `relevant_only` | LLM reranker contract: `relevant_only` returns a relevant subset, `full_reorder` ranks the whole candidate list. |
 | `MNEMOSTACK_TOKEN_BUDGET` | unset | Server-wide default token budget for `mnemostack_search` / `mnemostack_answer`; per-call `token_budget` overrides it. |
 | `MNEMOSTACK_STATE_PATH` | `$XDG_STATE_HOME/mnemostack/server-state.json` (falling back to `~/.local/state/mnemostack/server-state.json`; a legacy `/tmp` state file is migrated once) | JSON state file for feedback and stateful recall stages. **Note:** only read by the module entrypoint (`python -m mnemostack.mcp.server`); the CLI `mnemostack mcp-serve` uses `--state-path` instead (same default). |

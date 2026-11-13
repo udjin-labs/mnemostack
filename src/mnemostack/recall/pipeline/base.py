@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
+from ..deadline import Deadline, get_deadline
 from ..recaller import RecallResult
 
 
@@ -83,6 +84,13 @@ class Pipeline:
         if recaller is not None:
             context.extras["recaller"] = recaller
         for stage in self.stages:
+            if (
+                trace is not None
+                and get_deadline(trace) is not None
+                and cast(Deadline, get_deadline(trace)).expired()
+            ):
+                trace.mark("recall:deadline")
+                break
             if self.stop_on_empty and not results:
                 break
             results = stage.apply(context, results)

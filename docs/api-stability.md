@@ -127,7 +127,7 @@ this is purely additive. See [Multi-tenancy & authentication](#multi-tenancy--au
 `vector.{host,collection,chunk_size,window_size,health_timeout}`,
 `llm.{provider,model}`,
 `graph.{uri,user,password,database,timeout}`,
-`recall.{bm25_paths,vector_floor,rerank_mode,token_budget}`,
+`recall.{bm25_paths,vector_floor,rerank_mode,token_budget,overall_deadline}`,
 `recall.{text_key,timestamp_key,timestamp_format}` (payload schema of the
 collection recall reads — mounts a pre-existing collection with its own field
 names / numeric epoch timestamps; `timestamp_format` ∈ `iso|epoch|epoch_ms`),

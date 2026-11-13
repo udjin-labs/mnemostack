@@ -22,6 +22,7 @@ from typing import Any
 
 from ..llm.base import LLMProvider
 from ..observability import counter, histogram
+from .deadline import get_deadline, start_deadline
 from .fusion import reciprocal_rank_fusion
 from .recaller import Recaller, RecallResult
 from .trace import RecallTrace
@@ -41,7 +42,8 @@ def _fresh_trace(caller_trace: RecallTrace | None) -> RecallTrace | None:
     """A trace of the caller's own type, or None when it asked for none."""
     if caller_trace is None:
         return None
-    return type(caller_trace)()
+    child = type(caller_trace)()
+    return start_deadline(None, child, deadline=get_deadline(caller_trace))
 
 
 def _absorb_expansion(
@@ -172,6 +174,8 @@ class QueryExpander:
         trace across passes would leave `fused` describing whichever pass
         ran last while the caller holds a merge of all of them.
         """
+        trace = start_deadline(self.recaller, trace)
+        deadline = get_deadline(trace)
         counter("mnemostack.query_expansion.calls", 1)
         if not self.apply_to(query):
             counter("mnemostack.query_expansion.skipped", 1)
@@ -189,7 +193,13 @@ class QueryExpander:
 
         queries = [query] if self.include_original else []
         try:
-            queries += self.generate_variants(query)
+            if deadline is None:
+                queries += self.generate_variants(query)
+            else:
+                queries += deadline.run(
+                    lambda: self.generate_variants(query), [],
+                    on_timeout=lambda: trace.mark("recall:deadline"),
+                )
         except Exception as exc:
             counter("mnemostack.query_expansion.errors", 1)
             logger.warning("Query expansion failed (%s); using plain recall", type(exc).__name__)
@@ -209,6 +219,9 @@ class QueryExpander:
         # Recall for each query, merge via RRF across queries
         ranked_lists: list[list[tuple[RecallResult, float]]] = []
         for q in queries:
+            if deadline is not None and deadline.expired():
+                trace.mark("recall:deadline")
+                break
             pass_trace = trace if q == query else _fresh_trace(trace)
             res = self.recaller.recall(
                 q,

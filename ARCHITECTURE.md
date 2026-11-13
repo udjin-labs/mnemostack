@@ -161,6 +161,7 @@ recall:
   top_k: 10
   confidence_threshold: 0.5
   bm25_paths: []
+  overall_deadline: null      # shared recall budget in seconds; null disables it
   vector_floor: 0             # append missing top-N raw-vector candidates after fusion/rerank
   rerank_mode: relevant_only  # or full_reorder
 
