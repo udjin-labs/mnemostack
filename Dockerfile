@@ -12,7 +12,7 @@
 #       health --provider gemini
 #
 # Run (interactive, with notes mounted):
-#   docker run -it --rm --network host -v $(pwd)/notes:/data mnemostack:local \
+#   docker run -it --rm --network host -e GEMINI_API_KEY -v $(pwd)/notes:/data mnemostack:local \
 #       index /data --provider gemini --collection demo
 
 FROM python:3.12-slim

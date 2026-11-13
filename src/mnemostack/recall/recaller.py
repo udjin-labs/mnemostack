@@ -898,7 +898,8 @@ class Recaller:
         filter runs before `token_budget`, so the budget applies to the facts
         that actually survive. Because it drops hits after the fused top-K cut,
         heavy invalidation can shrink the result below `limit`; `recall_flow`'s
-        3x candidate pool absorbs this in practice.
+        candidate pool of max(3 * limit, 30), when a pipeline is supplied,
+        absorbs this in practice.
         """
         counter("mnemostack.recall.calls", 1)
         # Construction-time scope applies whenever the call does not name a

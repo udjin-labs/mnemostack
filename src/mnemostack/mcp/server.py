@@ -1416,7 +1416,7 @@ def build_server(
 
 
 def main() -> None:
-    """Entry point for `python -m mnemostack.mcp.server` or `mnemostack-mcp`.
+    """Entry point for `python -m mnemostack.mcp.server`.
 
     Reads config from env vars:
         MNEMOSTACK_COLLECTION       (default: mnemostack)

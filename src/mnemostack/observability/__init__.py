@@ -9,9 +9,9 @@ Usage:
 
     # In your code
     counter("mnemostack.recall.calls", 1, labels={"provider": "gemini"})
-    with histogram("mnemostack.recall.latency_ms", labels={"op": "search"}) as h:
+    with histogram("mnemostack.recall.latency_ms", labels={"op": "search"}):
         results = recaller.recall(query)
-        # h.value set automatically by context manager
+        # Elapsed milliseconds recorded automatically by context manager
 
     # Plug in Prometheus
     from prometheus_client import Counter, Histogram

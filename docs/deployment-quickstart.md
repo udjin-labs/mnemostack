@@ -70,8 +70,8 @@ the [HTTP server section of the README](../README.md#http-server-optional) for r
 > library `Ingestor(tenant=...)`).
 
 > `--memgraph-uri ""` keeps graph recall **off** in this minimal setup. Without
-> it, `serve` falls back to the default `bolt://localhost:7687` and every recall
-> pays a Bolt connection timeout until Memgraph is running — enable it
+> it, `serve` falls back to the default `bolt://localhost:7687` and failed graph connections
+> trigger a 60-second cooldown before another attempt — enable it
 > deliberately in step 3.
 
 ## 3. Add Memgraph (optional — graph recall)

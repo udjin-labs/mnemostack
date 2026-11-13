@@ -19,6 +19,9 @@ Tools exposed:
     - mnemostack_search — hybrid recall (BM25 + vector + RRF)
     - mnemostack_answer — inference answer with confidence
     - mnemostack_feedback — explicit feedback for stateful learning
+    - mnemostack_resolve: verify a citation against its source
+    - mnemostack_invalidate: retract stored memories
+    - mnemostack_remember: store a memory
     - mnemostack_graph_query — query knowledge graph (optional, requires Memgraph)
     - mnemostack_graph_add_triple — add a fact to the graph
 """

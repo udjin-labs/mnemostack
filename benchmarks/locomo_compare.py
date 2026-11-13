@@ -4,7 +4,7 @@
 Reproduces the methodology used in workspace/scripts for LoCoMo, but through
 mnemostack API. Compares two configurations:
     A) Recaller raw (BM25 + vector + RRF only)
-    B) Recaller + build_full_pipeline (8-stage rerank)
+    B) Recaller + build_full_pipeline (configurable rerank)
 
 Expects LoCoMo dataset at the path below. Prints combined + correct rates
 per variant and saves detailed results to results_*.json.

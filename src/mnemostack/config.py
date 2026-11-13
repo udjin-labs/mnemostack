@@ -704,7 +704,7 @@ vector:
 
 llm:
   provider: gemini
-  model: null             # null = provider default (gemini-2.5-flash)
+  model: null             # null = provider default (gemini-3-flash-preview)
   host: null              # ollama: null = inherit embedding.ollama_host; openai: required base URL
   timeout: null           # LLM request seconds; null = provider default (not inherited)
 

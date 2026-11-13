@@ -55,17 +55,17 @@ def build_full_pipeline(
     """Build the full reranking pipeline.
 
     Stage order (applied left-to-right):
-        1. ClassifyQuery       — determine query_type for downstream stages
-        2. ExactTokenRescue    — boost exact-match sources for infra queries
-        3. GravityDampen       — penalize results missing query key terms
-        4. HubDampen           — penalize highly-connected graph hubs
-        5. CalibrateRelevance  — put rank scores on a bounded utility scale
-        6. QLearningReranker   — blend historically useful source utility
-        7. CuriosityBoost      — surface old, rarely-recalled memories
-        8. FreshnessBlend      — blend similarity with recency
-        9. InhibitionOfReturn  — penalize recently-recalled memories
-        10. ExactTokenProtection — protect strong exact-token vector hits
-        11. GraphResurrection  — optionally add graph neighbours
+        1. ClassifyQuery: determine query_type for downstream stages
+        2. CalibrateRelevance: put rank scores on a bounded utility scale
+        3. ExactTokenRescue: boost exact-match sources for infra queries
+        4. HubDampen: conditional on nonempty hub_degrees
+        5. QLearningReranker: conditional on stateful and Q-learning toggles
+        6. CuriosityBoost: conditional on stateful and curiosity toggles
+        7. FreshnessBlend: blend similarity with recency
+        8. GravityDampen: penalize results missing query key terms
+        9. InhibitionOfReturn: conditional on stateful and IoR toggles
+        10. ExactTokenProtection: protect strong exact-token vector hits
+        11. GraphResurrection: conditional on graph_uri
 
     Args:
         state_store: persistent state for stateful stages. If None, uses

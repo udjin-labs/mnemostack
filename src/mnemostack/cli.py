@@ -2041,7 +2041,7 @@ def _add_validity_recall_flags(parser: argparse.ArgumentParser) -> None:
 def _recall_for_cli(args: argparse.Namespace, recaller, query: str, limit: int):
     """Run the same recall flow as the HTTP and MCP servers.
 
-    Applies the 8-stage pipeline and the fail-open LLM reranker so the CLI
+    Applies the configurable pipeline and the fail-open LLM reranker so the CLI
     ranks results identically to the serving surfaces. `--raw` skips both
     and returns plain fused recall (the historical CLI behavior); filters
     apply on both paths.

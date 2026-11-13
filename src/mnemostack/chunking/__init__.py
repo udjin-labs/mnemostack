@@ -10,7 +10,7 @@ Chunkers take text and return a list of Chunk objects with text + metadata
 
 Usage:
     from mnemostack.chunking import MarkdownChunker
-    chunker = MarkdownChunker(chunk_size=800, overlap=100)
+    chunker = MarkdownChunker(chunk_size=800)
     for chunk in chunker.chunk(text):
         print(chunk.text, chunk.metadata)
 """

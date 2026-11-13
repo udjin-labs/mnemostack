@@ -4,7 +4,7 @@ Knowledge graph (Memgraph / Neo4j) with temporal validity.
 Facts have valid_from and valid_until timestamps — you can query
 point-in-time state:
 
-    graph.query_at("X works_on Y", as_of="2024-06-01")
+    graph.query_triples(subject="X", predicate="works_on", obj="Y", as_of="2024-06-01")
 
 Invalidating a fact means setting valid_until, not deleting it:
 

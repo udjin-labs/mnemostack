@@ -7,7 +7,8 @@ Recommended: Gemini Flash (fast, cheap, strong) or Ollama (local).
 Usage:
     from mnemostack.llm import get_llm
     llm = get_llm('gemini-flash', api_key='...')
-    text = llm.generate('What is the capital of France?')
+    response = llm.generate('What is the capital of France?')
+    text = response.text
 """
 
 from .base import LLMProvider, LLMResponse
