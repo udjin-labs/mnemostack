@@ -1478,11 +1478,11 @@ def prune_stale_chunks(
             filters["index_root"] = index_root
         stale = [
             pid
-            for pid in (str(p) for p in vector_store.iter_ids(filters=filters, **tkw))
-            if pid not in fresh_ids
+            for pid in vector_store.iter_ids(filters=filters, **tkw)
+            if str(pid) not in fresh_ids
         ]
         if stale:
-            removed += vector_store.delete_points(list(stale))
+            removed += vector_store.delete_points(list(stale), **tkw)
     counter("mnemostack.ingest.pruned", removed)
     return removed
 

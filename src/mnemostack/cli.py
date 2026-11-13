@@ -3470,6 +3470,7 @@ def cmd_index_markdown(args: argparse.Namespace) -> int:
             graph_uri,
             watch_baseline,
             retry_all=initial_skipped,
+            failed_sources=failed_sources,
         )
     return 0
 
@@ -3484,6 +3485,7 @@ def _watch_markdown(
     baseline: dict[str, float] | None = None,
     *,
     retry_all: bool = False,
+    failed_sources: set[str] | None = None,
 ) -> int:
     """Run the incremental file-watch loop after the initial index (blocking).
 
@@ -3494,9 +3496,10 @@ def _watch_markdown(
     ``retry_all`` seeds every current file for retry — set when the initial index
     was skipped wholesale (over quota), so the watcher re-indexes the existing
     corpus under the live quota instead of leaving it unindexed until touched.
+    ``failed_sources`` queues initial per-source failures relative to index_root.
     """
     from .markdown.sync import MarkdownSyncer
-    from .markdown.watch import _WATCHDOG, MarkdownWatcher
+    from .markdown.watch import _WATCHDOG, UPSERT, MarkdownWatcher
 
     # A single graph connection kept open for the whole watch (each event's link
     # sync reuses it). Fail-open: no graph just means links aren't synced.
@@ -3537,7 +3540,7 @@ def _watch_markdown(
         if res.failed:
             print(
                 f"  warning: {res.source} — {res.failed} chunk(s) failed to embed; "
-                "stale content kept, re-save after the provider recovers",
+                "stale content kept, will retry on a later scan",
                 file=sys.stderr,
             )
             return
@@ -3568,6 +3571,9 @@ def _watch_markdown(
         # a later `quota set` re-indexes it without waiting for each file's mtime
         # to change (poll_once only re-emits changed or already-failed paths).
         watcher.queue_all_for_retry()
+    else:
+        for source in failed_sources or ():
+            watcher.handle_event(str(Path(index_root) / source), UPSERT)
     backend = "watchdog" if _WATCHDOG else f"polling every {args.watch_poll_interval}s"
     print(f"Watching {watch_root} for changes ({backend}) — Ctrl+C to stop.")
     try:
