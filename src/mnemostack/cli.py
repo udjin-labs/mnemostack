@@ -75,7 +75,11 @@ from .vector.patch import (
     carry_write_time,
     diff_payload,
 )
-from .vector.qdrant import PayloadIndexConflictError, payload_index_type_name
+from .vector.qdrant import (
+    ID_BATCH_SIZE,
+    PayloadIndexConflictError,
+    payload_index_type_name,
+)
 
 # -- Progressive tiers --------------------------------------------------------
 # Tiered output budgets let agents pay only for the detail they need.
@@ -2943,22 +2947,61 @@ def cmd_index(args: argparse.Namespace) -> int:
     if guard_rc is not None:
         return guard_rc
 
-    # Load existing point IDs once so re-runs skip unchanged chunks without
-    # re-embedding (saves API quota / local GPU time). When refreshing
-    # payloads we also need each point's recorded root: a chunk id carries no
-    # root, so an identical (source, offset, text) indexed from another root
-    # shares the id — rewriting its index_root would hijack the point and
-    # break prune isolation for the original root.
+    # Probe only this run's chunk ids. Refresh comparisons need the new
+    # payload keys plus the stored ownership and lifecycle records.
     existing_ids: set[str] = set()
     existing_payloads: dict[str, dict] = {}
+    prune_snapshot: list[tuple[str | int, dict]] | None = (
+        [] if args.refresh_payloads else None
+    )
+    scope_has_points = False
     if not args.recreate and store.collection_exists():
+        refresh_keys = {
+            "index_root", EMBEDDING_SPACE_KEY, "_enrich_keys", "_code_keys",
+            "source_content_hash", "source_captured_at", "indexed_at",
+        }
         if args.refresh_payloads:
-            for hit in store.scroll(**tkw):
-                pid = str(hit.id)
-                existing_ids.add(pid)
-                existing_payloads[pid] = hit.payload or {}
+            refresh_keys.update(key for _, _, payload in chunks for key in payload)
+        lookup = getattr(
+            store,
+            "retrieve_payload_fields" if args.refresh_payloads else "retrieve_existing_ids",
+            None,
+        )
+        if not callable(lookup):
+            if args.refresh_payloads:
+                for hit in store.scroll(**tkw):
+                    pid = str(hit.id)
+                    existing_ids.add(pid)
+                    existing_payloads[pid] = hit.payload or {}
+                prune_snapshot = list(existing_payloads.items())
+            else:
+                existing_ids = {str(pid) for pid in store.iter_ids(**tkw)}
         else:
-            existing_ids = {str(pid) for pid in store.iter_ids(**tkw)}
+            chunk_ids = list(dict.fromkeys(cid for cid, _, _ in chunks))
+            for start in range(0, len(chunk_ids), ID_BATCH_SIZE):
+                batch_ids = chunk_ids[start : start + ID_BATCH_SIZE]
+                if args.refresh_payloads:
+                    found = store.retrieve_payload_fields(batch_ids, sorted(refresh_keys), **tkw)
+                    existing_payloads.update(found)
+                    existing_ids.update(found)
+                else:
+                    existing_ids.update(store.retrieve_existing_ids(list(batch_ids), **tkw))
+
+        if args.refresh_payloads and args.prune and callable(lookup):
+            from .ingest import _scroll_keywords
+
+            snapshot_kwargs = dict(tkw)
+            supported = _scroll_keywords(store.scroll)
+            if supported is None or "payload_keys" in supported:
+                snapshot_kwargs["payload_keys"] = ["source", "index_root"]
+            prune_snapshot = [
+                (hit.id, hit.payload or {}) for hit in store.scroll(**snapshot_kwargs)
+            ]
+
+        if args.refresh_payloads:
+            scope_has_points = bool(existing_ids) or bool(prune_snapshot)
+            if not scope_has_points and callable(lookup):
+                scope_has_points = next(store.iter_ids(batch_size=1, **tkw), None) is not None
 
     to_embed = [c for c in chunks if c[0] not in existing_ids]
     skipped = len(chunks) - len(to_embed)
@@ -3082,7 +3125,7 @@ def cmd_index(args: argparse.Namespace) -> int:
     unchanged = 0
     foreign_skipped = 0
     foreign_space_skipped = 0
-    if args.refresh_payloads and existing_ids and not _fingerprint_still(doc_fp):
+    if args.refresh_payloads and scope_has_points and not _fingerprint_still(doc_fp):
         # A refresh stamps doc_fp onto points WITHOUT re-embedding — if the
         # tag repointed since the run started, that label no longer names
         # the space those vectors are in.
@@ -3208,11 +3251,8 @@ def cmd_index(args: argparse.Namespace) -> int:
                 "with failed embeddings; re-run after the provider recovers",
                 file=sys.stderr,
             )
-        # Discovery from the --refresh-payloads snapshot when it exists (zero
-        # extra reads — points inserted this run are exactly the fresh ids);
-        # otherwise the adaptive fallback inside: narrow per-source scans for
-        # a small walk, one root-scoped scroll for a bulk one.
-        prune_snapshot = existing_payloads.items() if args.refresh_payloads else None
+        # Refresh pruning uses only pre-write candidates; other runs keep
+        # the adaptive live scan.
         pruned = prune_stale_chunks_from_snapshot(
             store, fresh_by_source, prune_snapshot, index_root=index_root, **tkw
         )

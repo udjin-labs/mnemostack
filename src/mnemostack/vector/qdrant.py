@@ -53,6 +53,15 @@ _INVALIDATED_AT_KEY = "invalidated_at"
 #: can never write into another tenant's namespace.
 TENANT_ID_KEY = "tenant_id"
 
+ID_BATCH_SIZE = 1024
+
+
+def _payload_selector(keys: Sequence[str]) -> bool | list[str]:
+    """Fetch full payloads when flat keys could be parsed as JSON paths."""
+    if all(key and all(c.isalnum() or c in "_-" for c in key) for key in keys):
+        return list(keys)
+    return True
+
 
 def _tenant_condition(tenant: str) -> FieldCondition:
     """Qdrant predicate restricting a query to one tenant's points."""
@@ -691,7 +700,8 @@ class VectorStore:
         round-trip.
 
         For a caller that must read a stored value before writing it back and
-        cannot afford a request per point. Only the named keys are fetched.
+        cannot afford a request per point. Path-like keys require fetching the
+        full payload.
         ``tenant`` scopes it exactly like every other read: a point owned by
         another tenant is simply absent from the result, indistinguishable
         from one that does not exist.
@@ -706,7 +716,7 @@ class VectorStore:
         found = self.client.retrieve(
             collection_name=self.collection,
             ids=list(ids),
-            with_payload=fetch,
+            with_payload=_payload_selector(fetch),
             with_vectors=False,
         )
         out: dict[str, dict[str, Any]] = {}
@@ -762,8 +772,12 @@ class VectorStore:
         hide_invalidated: bool = False,
         start_after: Any = None,
         index_root_guard: str | None = None,
+        payload_keys: Sequence[str] | None = None,
     ):
         """Iterate over points in the collection lazily.
+
+        ``payload_keys`` selects plain payload fields; None or path-like keys
+        return full payloads.
 
         Memory-efficient: never loads the whole collection at once. Good for:
         - Re-indexing after schema changes
@@ -818,7 +832,7 @@ class VectorStore:
                 collection_name=self.collection,
                 limit=batch_size,
                 offset=next_offset,
-                with_payload=True,
+                with_payload=_payload_selector(payload_keys) if payload_keys is not None else True,
                 with_vectors=with_vectors,
                 scroll_filter=qfilter,
             )
@@ -860,7 +874,7 @@ class VectorStore:
 
     def iter_ids(
         self,
-        batch_size: int = 1024,
+        batch_size: int = ID_BATCH_SIZE,
         filters: dict[str, Any] | None = None,
         *,
         tenant: str | None = None,
@@ -1041,7 +1055,8 @@ class VectorStore:
         """
         if tenant is not None:
             found = self.client.retrieve(
-                collection_name=self.collection, ids=[id], with_payload=True
+                collection_name=self.collection, ids=[id],
+                with_payload=[TENANT_ID_KEY], with_vectors=False
             )
             if not found or (found[0].payload or {}).get(TENANT_ID_KEY) != tenant:
                 return  # point missing or owned by another tenant — never touch it
@@ -1324,7 +1339,8 @@ class VectorStore:
         existing = {
             str(pt.id): (pt.payload or {})
             for pt in self.client.retrieve(
-                collection_name=self.collection, ids=ids, with_payload=True
+                collection_name=self.collection, ids=ids,
+                with_payload=["index_root", TENANT_ID_KEY], with_vectors=False
             )
         }
         target: list[Any] = []

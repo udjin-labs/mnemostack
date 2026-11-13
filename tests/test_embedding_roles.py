@@ -1159,3 +1159,17 @@ def test_hyde_embeds_hypothetical_as_document():
     retriever = HyDERetriever(embedding=emb, vector_store=_Vec(), llm=_LLM())
     retriever.search("what happened?")
     assert emb.seen == ["passage: a plausible stored memory"]
+
+
+def test_guard_projects_marker_and_bounds_backend_sample():
+    provider = _AsymmetricProvider()
+    fp = provider.document_space_fingerprint()
+    calls = []
+
+    class Store:
+        def scroll(self, batch_size=256, payload_keys=None, with_vectors=True):
+            calls.append((batch_size, payload_keys, with_vectors))
+            yield SimpleNamespace(payload={EMBEDDING_SPACE_KEY: fp})
+
+    assert check_document_space(Store(), provider)[0] == "match"
+    assert calls == [(16, [EMBEDDING_SPACE_KEY], False)]

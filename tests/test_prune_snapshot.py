@@ -554,14 +554,55 @@ def test_cmd_index_refresh_prune_reuses_snapshot(monkeypatch, tmp_path, store, c
     reads = _instrument(monkeypatch, store)
     _patch_stack(monkeypatch, store)
 
+    import mnemostack.ingest as ingest
+
+    real_scroll = store.client.scroll
+    projections = []
+
+    def projected_scroll(*args, **kwargs):
+        projections.append((kwargs["with_payload"], kwargs["with_vectors"]))
+        return real_scroll(*args, **kwargs)
+
+    monkeypatch.setattr(store.client, "scroll", projected_scroll)
+
+    def prune_without_reads(store, *args, **kwargs):
+        scroll, iter_ids = store.scroll, store.iter_ids
+        try:
+            return _prune_with_reads_forbidden(store, *args, **kwargs)
+        finally:
+            store.scroll, store.iter_ids = scroll, iter_ids
+
+    monkeypatch.setattr(ingest, "prune_stale_chunks_from_snapshot", prune_without_reads)
     rc = cli.cmd_index(_index_args(tmp_path, refresh_payloads=True))
 
     assert rc == 0
+    assert projections == [(["source", "index_root"], False)]
     assert stale not in _remaining(store)
     assert "pruned 1 stale" in capsys.readouterr().out
-    # The --refresh-payloads snapshot doubles as the prune snapshot: no
-    # filtered read of any kind happens after it.
+    # One pre-write snapshot; pruning performs no stored-point reads.
     assert all(f is None for _m, f in reads)
+
+
+def test_cmd_index_refresh_prune_preserves_concurrent_chunk(
+    monkeypatch, tmp_path, store
+):
+    (tmp_path / "note.md").write_text("hello world", encoding="utf-8")
+    root = str(tmp_path.resolve())
+    stale = _put(store, "note.md", 800, "old tail", index_root=root)
+    _patch_stack(monkeypatch, store)
+    real_upsert = store.upsert_batch
+    concurrent = stable_chunk_id("note.md", 1600, "concurrent tail")
+
+    def upsert_with_concurrent_writer(*args, **kwargs):
+        result = real_upsert(*args, **kwargs)
+        store.upsert(concurrent, VEC, {"source": "note.md", "index_root": root})
+        return result
+
+    monkeypatch.setattr(store, "upsert_batch", upsert_with_concurrent_writer)
+
+    assert cli.cmd_index(_index_args(tmp_path, refresh_payloads=True)) == 0
+    assert concurrent in _remaining(store)
+    assert stale not in _remaining(store)
 
 
 def test_cmd_index_markdown_full_root_walk_scans_root_exactly_once(

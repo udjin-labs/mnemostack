@@ -187,3 +187,58 @@ def test_scroll_resumes_when_the_first_batch_is_only_the_cursor(store):
     assert ids == [2, 3, 4, 5]
     # And a cursor that IS the last point still terminates.
     assert [hit.id for hit in store.scroll(batch_size=1, start_after=5)] == []
+
+
+def test_lifecycle_reads_project_guards(store, monkeypatch):
+    store.ensure_collection()
+    payloads = [{}, {"tenant_id": "a"}, {"tenant_id": "b", "index_root": "other"}]
+    for pid, payload in enumerate(payloads, 1):
+        store.upsert(pid, [1.0, 0.0, 0.0, 0.0], {**payload, "text": "large" * 1000}, tenant=payload.get("tenant_id"))
+    calls = []
+    retrieve = store.client.retrieve
+
+    def tracked(*args, **kwargs):
+        calls.append(kwargs)
+        return retrieve(*args, **kwargs)
+
+    monkeypatch.setattr(store.client, "retrieve", tracked)
+    for pid in (1, 2, 3, 4):
+        store.set_payload(pid, {"changed": True}, tenant="a")
+    assert all(c["with_payload"] == ["tenant_id"] and c["with_vectors"] is False for c in calls)
+    calls.clear()
+    assert store.invalidate([1, 2, 3, 4], tenant="a", index_root="root") == 1
+    assert calls[0]["with_payload"] == ["index_root", "tenant_id"]
+    assert calls[0]["with_vectors"] is False
+    rows = {p.id: p.payload for p in retrieve(store.collection, ids=[1, 2, 3], with_payload=True)}
+    assert "changed" not in rows[1] and "invalidated_at" not in rows[1]
+    assert rows[2]["changed"] and rows[2]["invalidated_at"]
+    assert "changed" not in rows[3] and "invalidated_at" not in rows[3]
+
+
+def test_scroll_payload_projection_keeps_missing_keys_and_order(store):
+    store.ensure_collection()
+    store.upsert(1, [1.0, 0.0, 0.0, 0.0], {"text": "large"})
+    store.upsert(2, [1.0, 0.0, 0.0, 0.0], {"source": "note", "text": "large"})
+    full = list(store.scroll())
+    narrow = list(store.scroll(payload_keys=["source", "index_root"]))
+    assert [h.id for h in narrow] == [h.id for h in full]
+    assert [h.payload for h in narrow] == [{}, {"source": "note"}]
+    assert all(h.vector is None for h in narrow)
+
+
+@pytest.mark.parametrize("key", ["meta.author", "tags[]", "tags[0]", "trailing]", '"author"', "display name", ""])
+def test_projection_preserves_flat_path_keys(store, monkeypatch, key):
+    store.ensure_collection()
+    store.upsert(1, [1.0, 0.0, 0.0, 0.0], {key: "value", "text": "body"}, tenant="a")
+    calls = []
+    retrieve = store.client.retrieve
+
+    def tracked(*args, **kwargs):
+        calls.append(kwargs["with_payload"])
+        return retrieve(*args, **kwargs)
+
+    monkeypatch.setattr(store.client, "retrieve", tracked)
+    assert store.retrieve_payload_fields([1], [key], tenant="a") == {"1": {key: "value"}}
+    assert store.retrieve_payload_fields([1], [key], tenant="b") == {}
+    assert calls == [True, True]
+    assert list(store.scroll(payload_keys=[key], tenant="a"))[0].payload[key] == "value"
