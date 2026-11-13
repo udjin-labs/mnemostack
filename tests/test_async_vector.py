@@ -3,7 +3,7 @@
 import pytest
 import pytest_asyncio
 from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import DatetimeRange, Distance, Range
+from qdrant_client.models import DatetimeRange, Distance, PayloadSchemaType, Range
 
 from mnemostack.vector import AsyncVectorStore, Hit
 
@@ -99,3 +99,39 @@ async def test_async_context_manager():
         # Just ensure we can call async methods
         # Skip actual Qdrant call if no real server — in-memory works
         pass
+
+
+@pytest.mark.asyncio
+async def test_async_new_collection_indexes_invalidated_at_and_existing_one_is_untouched(store):
+    calls = []
+    original = store.client.create_payload_index
+
+    async def record(**kwargs):
+        calls.append((kwargs["field_name"], kwargs["field_schema"]))
+        return await original(**kwargs)
+
+    store.client.create_payload_index = record
+    assert await store.ensure_collection(recreate=True) is True
+    assert ("invalidated_at", PayloadSchemaType.DATETIME) in calls
+    calls.clear()
+    assert await store.ensure_collection() is False
+    assert calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "configured, expected",
+    [(("ts", "iso"), PayloadSchemaType.DATETIME), (("ts", "epoch_ms"), PayloadSchemaType.FLOAT), (None, None)],
+)
+async def test_async_new_collection_indexes_a_configured_timestamp(store, configured, expected):
+    calls = {}
+    original = store.client.create_payload_index
+
+    async def record(**kwargs):
+        calls[kwargs["field_name"]] = kwargs["field_schema"]
+        return await original(**kwargs)
+
+    store.client.create_payload_index = record
+    store.timestamp_index = configured
+    assert await store.ensure_collection(recreate=True) is True
+    assert calls.get("ts") == expected

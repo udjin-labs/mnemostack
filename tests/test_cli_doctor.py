@@ -450,3 +450,31 @@ def test_doctor_checks_native_bm25_scoring(patched, capsys, scoring, expected_rc
     assert rc == expected_rc
     assert "BM25" in out
     cli._payload_schema.cache_clear()
+
+
+@pytest.mark.parametrize("indexes,expected", [
+    ({"invalidated_at": "datetime", "captured": "float"}, None),
+    ({"captured": "float"}, "invalidated_at --schema datetime"),
+    ({"invalidated_at": "datetime"}, "captured --schema float"),
+    ({"invalidated_at": "datetime", "captured": "datetime"}, "captured --schema float"),
+    ({"invalidated_at": "keyword", "captured": "float"}, "invalidated_at --schema datetime"),
+])
+def test_doctor_filter_index_hints(patched, capsys, indexes, expected):
+    from types import SimpleNamespace
+
+    cfg = Config()
+    cfg.timestamp_index = ("captured", "epoch_ms")
+    patched(
+        cfg=cfg, provider=_FakeProvider(dim=8), llm=_FakeLLM(),
+        qdrant_cls=_fake_qdrant_cls(payload_schema={
+            key: SimpleNamespace(data_type=value) for key, value in indexes.items()
+        }),
+    )
+    assert cli.cmd_doctor(_args()) == 0
+    out = capsys.readouterr().out
+    if expected is None:
+        assert "qdrant.payload_index " not in out
+        assert "mnemostack payload-index" not in out
+    else:
+        assert "mnemostack payload-index " + expected in out
+        assert "--collection" in out and "--qdrant" in out

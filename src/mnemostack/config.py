@@ -341,8 +341,13 @@ class Config:
     recall: RecallConfig = field(default_factory=RecallConfig)
     ingest: IngestConfig = field(default_factory=IngestConfig)
 
+    #: Explicit payload schema provenance, excluded from saved configuration.
+    timestamp_index: tuple[str, str] | None = field(default=None, init=False, repr=False, compare=False)
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        data.pop("timestamp_index")
+        return data
 
     def embedding_provider_kwargs(self) -> dict[str, Any]:
         """Keyword arguments for the configured embedding provider.
@@ -382,6 +387,7 @@ class Config:
         """Load config from file + env vars. If path=None, search default locations."""
         cfg = cls()
 
+        data: dict[str, Any] = {}
         # 1. File
         file_path = _resolve_config_path(path)
         if file_path and file_path.exists():
@@ -400,6 +406,13 @@ class Config:
 
         # 2. Env vars (MNEMOSTACK_*)
         cfg = _apply_env_overrides(cfg)
+        explicit = data.get("recall")
+        explicit = explicit if isinstance(explicit, dict) else {}
+        if all(
+            key in explicit or os.environ.get("MNEMOSTACK_" + key.upper())
+            for key in ("timestamp_key", "timestamp_format")
+        ):
+            cfg.timestamp_index = (cfg.recall.timestamp_key, cfg.recall.timestamp_format)
         from .ingest_policy import SecretPolicy
 
         SecretPolicy(cfg.ingest.secret_policy)

@@ -242,6 +242,23 @@ class Hit:
     vector: list[float] | None = None
 
 
+def timestamp_index_schema(config: tuple[str, str] | None) -> PayloadSchemaType | None:
+    """Index type for an explicitly configured timestamp payload.
+
+    No index for a key that is not a non-empty string, and none for a key
+    that already has its own index type: a second index would replace it.
+    """
+    if config is None or not isinstance(config[0], str) or not config[0]:
+        return None
+    if config[0] in (TENANT_ID_KEY, "source", "invalidated_at"):
+        return None
+    if config[1] == "iso":
+        return PayloadSchemaType.DATETIME
+    if config[1] in ("epoch", "epoch_ms"):
+        return PayloadSchemaType.FLOAT
+    return None
+
+
 class VectorStore:
     """Thin wrapper around QdrantClient with typed search results.
 
@@ -256,6 +273,7 @@ class VectorStore:
     text_key = "text"
     _sparse_encoder: SparseTextEncoder | None = None
     search_params: Any = None
+    timestamp_index: tuple[str, str] | None = None
 
     def __init__(
         self,
@@ -270,7 +288,9 @@ class VectorStore:
         quantization_rescore: bool | None = None,
         quantization_oversampling: float | None = None,
         hnsw_ef: int | None = None,
+        timestamp_index: tuple[str, str] | None = None,
     ):
+        self.timestamp_index = timestamp_index
         self.collection = collection
         self.dimension = dimension
         self.distance = distance
@@ -351,6 +371,10 @@ class VectorStore:
             # is a collection scan per call — the "one request that runs
             # for minutes" those endpoints exist to avoid.
             self.index_payload_field("source", PayloadSchemaType.KEYWORD)
+            self.index_payload_field("invalidated_at", PayloadSchemaType.DATETIME)
+            schema = timestamp_index_schema(self.timestamp_index)
+            if schema is not None and self.timestamp_index is not None:
+                self.index_payload_field(self.timestamp_index[0], schema)
             return True
         self._validate_dimension()
         if sparse_cfg is not None:
