@@ -242,6 +242,8 @@ graph probes stay LIVE by design: their job is to notice recovery immediately,
 they are bounded by `graph_health_timeout`, and they log nothing. `token_budget <= 0` normalizing to "no budget"
 is a 🟢 documented behavior.
 
+🟢 **Stable response field**: `annotations` accompanies HTTP `metadata` and MCP or CLI search `payload`. Ranking `annotations` contains `flags`, `dampened`, `echo_penalty`, `access_boost`, `freshness`, `ior_penalty`, `curiosity_boosted`, and `q_value` when the corresponding stages act on that result. A payload copy of an annotation is written only when stored metadata has no key of that name; payload copies are deprecated in favour of `annotations`. For stored metadata using any of these eight names, the payload keeps the client value, and client-stored `flags` is no longer appended to.
+
 ## MCP tools (`mnemostack mcp-serve`)
 
 🟢 **Stable**: `mnemostack_search`, `mnemostack_answer`, `mnemostack_health`,

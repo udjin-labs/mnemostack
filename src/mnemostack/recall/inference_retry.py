@@ -95,4 +95,7 @@ def merge_results(
         for results in (original_results, *result_lists)
     ]
     fused = reciprocal_rank_fusion(ranked_lists)
-    return [replace(result, score=score) for result, score in fused]
+    return [
+        replace(result, score=score, payload=dict(result.payload), sources=list(result.sources))
+        for result, score in fused
+    ]

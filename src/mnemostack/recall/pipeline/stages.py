@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ..mca_prefilter import extract_exact_tokens
+from .annotations import annotate, get_annotation
 from .base import Stage
 from .state import StateStore, tenant_state_key
 
@@ -178,9 +179,8 @@ class ExactTokenRescue(Stage):
                 continue
             if answer_re.search(r.text):
                 r.score += self.boost
-                flags = r.payload.setdefault("flags", [])
-                if isinstance(flags, list):
-                    flags.append("exact_rescue")
+                flags = [*get_annotation(r, "flags", []), "exact_rescue"]
+                annotate(r, "flags", flags)
         results.sort(key=lambda x: -x.score)
         return results
 
@@ -250,7 +250,7 @@ class GravityDampen(Stage):
                 prefixes and any(w.startswith(prefixes) for w in re.findall(r"\w+", text_lower))
             ):
                 r.score *= self.penalty
-                r.payload["dampened"] = "gravity"
+                annotate(r, "dampened", "gravity")
         results.sort(key=lambda x: -x.score)
         return results
 
@@ -282,7 +282,7 @@ class HubDampen(Stage):
                 ratio = (deg - p90) / (max_deg - p90)
                 penalty = 1.0 - (1.0 - self.p90_floor) * ratio
                 r.score *= max(self.p90_floor, penalty)
-                r.payload["dampened"] = "hub"
+                annotate(r, "dampened", "hub")
         results.sort(key=lambda x: -x.score)
         return results
 
@@ -611,7 +611,7 @@ class FreshnessBlend(Stage):
                     freshness = self.always_current_freshness
             if age_minutes is not None and 0 <= age_minutes < self.echo_window_minutes:
                 freshness *= self.echo_penalty
-                r.payload["echo_penalty"] = True
+                annotate(r, "echo_penalty", True)
             r.score = (1 - self.weight) * r.score + self.weight * freshness
             # The raw payload value goes straight through: coercing it here
             # as well meant two places decided what a bad counter means, and
@@ -627,8 +627,8 @@ class FreshnessBlend(Stage):
                 max_bonus=self.access_bonus_max,
             )
             r.score *= access_boost
-            r.payload["access_boost"] = round(access_boost, 3)
-            r.payload["freshness"] = round(freshness, 3)
+            annotate(r, "access_boost", round(access_boost, 3))
+            annotate(r, "freshness", round(freshness, 3))
         results.sort(key=lambda x: -x.score)
         return results
 
@@ -735,7 +735,7 @@ class InhibitionOfReturn(Stage):
             if n > 0:
                 penalty = min(self.max_penalty, self.penalty_per_recall * n)
                 r.score *= 1 - penalty
-                r.payload["ior_penalty"] = round(penalty, 3)
+                annotate(r, "ior_penalty", round(penalty, 3))
         results.sort(key=lambda x: -x.score)
         return results
 
@@ -821,7 +821,7 @@ class CuriosityBoost(Stage):
                 if age_days >= self.min_age_days:
                     fraction = age_days / (age_days + max(1, self.min_age_days))
                     r.score += bonus * fraction
-                    r.payload["curiosity_boosted"] = True
+                    annotate(r, "curiosity_boosted", True)
             elif created is None or created == "":
                 # No date info — half bonus
                 r.score += bonus * 0.5
@@ -915,7 +915,7 @@ class QLearningReranker(Stage):
                 r.score = (1 - self.blend_weight) * r.score + self.blend_weight * avg_q
             else:
                 r.score += self.boost_weight * (avg_q - self.default_q)
-            r.payload["q_value"] = round(avg_q, 3)
+            annotate(r, "q_value", round(avg_q, 3))
         results.sort(key=lambda x: -x.score)
         return results
 

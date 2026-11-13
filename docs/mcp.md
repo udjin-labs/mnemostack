@@ -310,6 +310,7 @@ On a failed check, a component contains `{"ok": false, "message": "..."}`; on an
       "text": "We decided to keep OAuth behind the API gateway...",
       "score": 0.0328,
       "sources": ["vector", "bm25"],
+      "annotations": {},
       "payload": {
         "source": "notes/auth.md",
         "offset": 120,
@@ -319,6 +320,8 @@ On a failed check, a component contains `{"ok": false, "message": "..."}`; on an
   ]
 }
 ```
+
+Ranking `annotations` contains `flags`, `dampened`, `echo_penalty`, `access_boost`, `freshness`, `ior_penalty`, `curiosity_boosted`, and `q_value` when the corresponding stages act on that result. A payload copy of an annotation is written only when stored metadata has no key of that name; payload copies are deprecated in favour of `annotations`. For stored metadata using any of these eight names, the payload keeps the client value, and client-stored `flags` is no longer appended to.
 
 **The order of `results` is authoritative — do not re-sort by `score`.** Many
 stages and fallback paths write that number, on different scales; a rerank then

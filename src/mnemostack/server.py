@@ -526,6 +526,7 @@ class Memory(BaseModel):
         description="Which retrievers produced this hit (vector/bm25/memgraph/temporal).",
     )
     metadata: dict[str, Any] = Field(default_factory=dict)
+    annotations: dict[str, Any] = Field(default_factory=dict)
 
 
 class RecallResponse(BaseModel):
@@ -981,6 +982,7 @@ def _memory_of(result) -> Memory:
         source=str(source) if source else None,
         retrievers=retrievers,
         metadata=payload,
+        annotations=getattr(result, "annotations", {}),
     )
 
 

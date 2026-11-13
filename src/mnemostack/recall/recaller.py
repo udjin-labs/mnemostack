@@ -6,6 +6,7 @@ import logging
 import re
 import threading
 import time
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -219,6 +220,21 @@ class RecallResult:
     #: of a RecallResult is common, so a field inserted above would
     #: silently land someone's `sources` in a float.
     floor_score: float | None = None
+    #: What the ranking stages recorded about this result (freshness,
+    #: dampened, q_value, ...). Kept apart from `payload`, which holds the
+    #: client's stored metadata. Added after `floor_score` for the same
+    #: positional-construction reason.
+    annotations: dict[str, Any] = field(default_factory=dict)
+    #: Payload keys the annotation helper wrote itself, so it may update
+    #: them again without ever replacing a client value.
+    _annotation_payload_keys: tuple[str, ...] = field(
+        default=(), repr=False, compare=False, kw_only=True
+    )
+
+    def __post_init__(self) -> None:
+        # dataclasses.replace must isolate mutable annotation state too.
+        self.annotations = deepcopy(self.annotations)
+
 
 
 _SCHEMA_FIELD_DEFAULTS = (
@@ -1223,7 +1239,7 @@ class Recaller:
                         originals = {memory_key(r.id): r for r in results}
                         for candidate in candidates:
                             original = originals[memory_key(candidate.id)]
-                            original.__dict__.update(candidate.__dict__)
+                            original.__dict__.update(replace(candidate).__dict__)
                         results = [originals.get(memory_key(r.id), r) for r in completed]
             if apply_vector_floor:
                 results = self._apply_vector_floor(results, raw_vector_candidates)
@@ -1774,7 +1790,7 @@ class Recaller:
                         originals = {memory_key(r.id): r for r in results}
                         for candidate in candidates:
                             original = originals[memory_key(candidate.id)]
-                            original.__dict__.update(candidate.__dict__)
+                            original.__dict__.update(replace(candidate).__dict__)
                         results = [originals.get(memory_key(r.id), r) for r in completed]
             if apply_vector_floor:
                 results = self._apply_vector_floor(
@@ -1899,6 +1915,8 @@ class Recaller:
                 "score": candidate.score,
                 "payload": dict(candidate.payload or {}),
                 "sources": list(candidate.sources),
+                "annotations": deepcopy(candidate.annotations),
+                "annotation_payload_keys": list(candidate._annotation_payload_keys),
             }
             for candidate in vector_candidates
         ]
@@ -1919,6 +1937,8 @@ class Recaller:
                     continue
                 payload = raw.get("payload")
                 sources = raw.get("sources")
+                annotations = raw.get("annotations")
+                owned = raw.get("annotation_payload_keys")
                 candidates.append(
                     RecallResult(
                         id=raw["id"],
@@ -1926,6 +1946,8 @@ class Recaller:
                         score=float(raw.get("score", 0.0)),
                         payload=dict(payload) if isinstance(payload, dict) else {},
                         sources=list(sources) if isinstance(sources, list) else ["vector"],
+                        annotations=dict(annotations) if isinstance(annotations, dict) else {},
+                        _annotation_payload_keys=tuple(owned) if isinstance(owned, list) else (),
                     )
                 )
             return candidates

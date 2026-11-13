@@ -2226,6 +2226,7 @@ def cmd_search(args: argparse.Namespace) -> int:
             if snippet_chars is None:
                 # backward-compatible: full text + payload
                 entry["text"] = r.text
+                entry["annotations"] = getattr(r, "annotations", {})
                 entry["payload"] = {
                     key: value
                     for key, value in r.payload.items()
