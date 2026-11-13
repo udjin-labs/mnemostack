@@ -44,7 +44,8 @@ turns the server into a default-deny, multi-tenant surface: `/recall`, `/answer`
 and `/feedback` require a service key (bearer token), which resolves to a
 `Principal(tenant, scopes)` — `read` gates recall/answer, `write` gates feedback.
 The tenant is derived from the key, never asserted by the caller, and scopes every
-result. `/health`, `/healthz`, `/readyz`, `/status`, `/metrics` stay public. With
+result. `/health`, `/healthz`, `/readyz`, `/status`, `/metrics` stay public; under `--auth`, `/metrics` shows tenant labels
+only to an `admin` key. With
 `--auth` off the server is single-tenant and unauthenticated exactly as before —
 this is purely additive. See [Multi-tenancy & authentication](#multi-tenancy--authentication).
 

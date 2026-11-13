@@ -178,13 +178,13 @@ export function createRuntime(pluginConfig = {}, apiLogger = console) {
 
 /** OpenClaw plugin entry point. */
 export const plugin = {
-  id: "auto-recall",
+  id: "mnemostack-auto-recall",
   name: "Auto Recall",
   description: "Triggers recall backends from user questions and injects relevant memory into the prompt.",
   register(api) {
     const runtime = createRuntime(api.pluginConfig || {}, api.logger || console);
     if (!runtime.cfg.enabled) {
-      api.logger?.info?.("auto-recall: disabled");
+      api.logger?.info?.("mnemostack-auto-recall: disabled");
       return () => { void runtime.dispose(); };
     }
     const unsubscribe = api.on("before_prompt_build", createBeforePromptBuildHandler(runtime));

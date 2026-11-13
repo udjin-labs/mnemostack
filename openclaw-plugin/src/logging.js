@@ -44,7 +44,7 @@ export function createLogger({ logPath, consoleLogger = console } = {}) {
       } catch (error) {
         if (!warned) {
           warned = true;
-          consoleLogger?.warn?.("auto-recall: log path unwritable; continuing", error?.message || error);
+          consoleLogger?.warn?.("mnemostack-auto-recall: log path unwritable; continuing", error?.message || error);
         }
       }
     }

@@ -56,7 +56,8 @@ enforced at ingest) and request rate (`--max-rps`, enforced on the authenticated
 HTTP surface, returning `429`). The MCP server has an equivalent process-bound
 `mcp-serve --auth`. Caveats: the operator endpoints (`/health`, `/healthz`,
 `/readyz`, `/status`, `/metrics`) stay unauthenticated **even under `--auth`** and
-expose version/reachability/counters — protect them at your proxy if sensitive;
+expose version/reachability/counters. Under `--auth`, `/metrics` shows tenant labels
+only to an `admin` key. Protect them at your proxy if sensitive;
 and the rate limiter is **per-process** (N workers multiply the effective ceiling
 by N), so use a reverse proxy for a hard global limit. Auth is off by default —
 single-tenant deployments are unaffected.

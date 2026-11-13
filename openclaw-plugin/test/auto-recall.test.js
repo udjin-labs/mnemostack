@@ -26,6 +26,12 @@ import plugin, {
   stripEnvelope
 } from "../index.js";
 
+test("runtime plugin id matches the manifest configuration key", async () => {
+  const manifest = JSON.parse(await fs.readFile(new URL("../openclaw.plugin.json", import.meta.url), "utf8"));
+  assert.equal(plugin.id, "mnemostack-auto-recall");
+  assert.equal(plugin.id, manifest.id);
+});
+
 test("trigger defaults catch recall questions and avoid whitelisted tech false positives", () => {
   for (const text of ["what did we decide?", "что было", "кто был?", "какой был план?", "помнишь что решили"] ) {
     assert.equal(getRecallTrigger(text).match, true, text);

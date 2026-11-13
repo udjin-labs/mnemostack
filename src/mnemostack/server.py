@@ -377,7 +377,8 @@ class InvalidateRequest(BaseModel):
         max_length=64,
         description=(
             "World-time the fact stopped being true (ISO-8601); optional, "
-            "separate from the system-time invalidation stamp."
+            "separate from the system-time invalidation stamp. "
+            "Null preserves the stored value; clearing it is unsupported."
         ),
     )
     index_root: str | None = Field(
@@ -979,7 +980,7 @@ def _memory_of(result) -> Memory:
     )
 
 
-def _prometheus_dump(rec: InMemoryRecorder) -> str:
+def _prometheus_dump(rec: InMemoryRecorder, include_tenant: bool = False) -> str:
     """Render an AggregatingRecorder as Prometheus text exposition format.
 
     We emit one counter per metric name and, for histograms, a count + sum
@@ -1021,8 +1022,20 @@ def _prometheus_dump(rec: InMemoryRecorder) -> str:
 
     # Iterate snapshots — the live dicts are mutated by recall running in the
     # sync threadpool while this scrape runs.
-    counters = rec.snapshot_counters()
-    histograms = rec.snapshot_histograms_with_totals()
+    counters: dict[tuple, float] = {}
+    histograms: dict[tuple, tuple[list[float], int, float]] = {}
+    for key, value in rec.snapshot_counters().items():
+        public_key = (key[0],) + tuple(
+            pair for pair in key[1:] if include_tenant or pair[0] != "tenant"
+        )
+        counters[public_key] = counters.get(public_key, 0.0) + value
+    for key, (obs, count, total) in rec.snapshot_histograms_with_totals().items():
+        public_key = (key[0],) + tuple(
+            pair for pair in key[1:] if include_tenant or pair[0] != "tenant"
+        )
+        samples, prev_count, prev_total = histograms.get(public_key, ([], 0, 0.0))
+        samples.extend(obs)
+        histograms[public_key] = (samples, prev_count + count, prev_total + total)
 
     for key, val in sorted(counters.items()):
         name, labels = _from_key(key)
@@ -1651,9 +1664,22 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         return {"name": "mnemostack", "version": __version__, "docs": "/docs"}
 
     @app.get("/metrics", include_in_schema=False)
-    def metrics():
+    def metrics(
+        authorization: str | None = Header(default=None),
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ):
         from fastapi.responses import PlainTextResponse
 
+        include_tenant = False
+        if cfg.auth_enabled:
+            key = _extract_key(authorization, x_api_key)
+            if key is not None:
+                principal = key_store.verify(key) if key_store else None
+                if principal is None:
+                    raise HTTPException(status_code=401, detail="invalid service key")
+                if not principal.can("admin"):
+                    raise HTTPException(status_code=403, detail="key lacks 'admin' scope")
+                include_tenant = True
         rec = get_recorder()
         if not isinstance(rec, InMemoryRecorder):
             # Can happen if someone swapped in a null recorder externally.
@@ -1661,8 +1687,14 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 "# mnemostack: aggregating recorder not installed\n",
                 media_type="text/plain; version=0.0.4",
             )
-        body = _prometheus_dump(rec)
-        return PlainTextResponse(body, media_type="text/plain; version=0.0.4")
+        body = _prometheus_dump(rec, include_tenant=include_tenant)
+        # The body depends on the presented key, so a shared cache must not
+        # store either view and serve it to a scrape with a different key.
+        return PlainTextResponse(
+            body,
+            media_type="text/plain; version=0.0.4",
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.get("/health", response_model=HealthResponse)
     def health():
