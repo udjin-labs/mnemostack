@@ -256,9 +256,10 @@ def upsert_markdown_chunks(
         """One store round-trip per group where the store supports it."""
         if not points:
             return
-        try:
-            store.upsert_batch(points, **tkw)
-        except AttributeError:
+        upsert_batch = getattr(store, "upsert_batch", None)
+        if upsert_batch is not None:
+            upsert_batch(points, **tkw)
+        else:
             for cid, vec, payload in points:
                 store.upsert(cid, vec, payload, **tkw)
         res.inserted += len(points)

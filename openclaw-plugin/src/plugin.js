@@ -65,7 +65,11 @@ async function runBackendChain({ backends, request, cache, inflight, logger }) {
       continue;
     }
 
-    const { promise, hit } = inflight.run(cacheProbeKey, async () => backend.query(request));
+    const { promise, hit } = inflight.run(
+      cacheProbeKey,
+      async (signal) => backend.query({ ...request, signal }),
+      request.signal
+    );
     if (hit) logger.info({ event: "inflight_hit", backend: backend.name });
     const result = await promise;
     const fullCacheKey = cacheKeyFor({ backend, text: request.normalizedText, session: request.session, suffix: result?.cache?.keySuffix || "" });

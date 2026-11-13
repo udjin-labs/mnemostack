@@ -77,9 +77,10 @@ class TripleExtractor:
         for item in data[: self.max_triples]:
             if not isinstance(item, dict):
                 continue
-            subj = (item.get("subject") or "").strip()
-            pred = (item.get("predicate") or "").strip()
-            obj = (item.get("object") or "").strip()
+            values = [item.get(key) for key in ("subject", "predicate", "object")]
+            if not all(isinstance(value, str) for value in values):
+                continue
+            subj, pred, obj = (value.strip() for value in values)
             if not (subj and pred and obj):
                 continue
             triples.append(

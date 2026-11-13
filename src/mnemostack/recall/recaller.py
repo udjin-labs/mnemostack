@@ -13,6 +13,7 @@ from ..embeddings.base import EmbeddingProvider
 from ..embeddings.roles import EmbeddingSpaceError, SpaceGuard, embed_query_via
 from ..observability import counter, histogram
 from ..observability.recorder import get_recorder
+from ..reranker_cache import RerankerCache
 from ..vector.qdrant import Hit, VectorStore
 from .bm25 import BM25, BM25Doc
 from .filters import payload_matches
@@ -22,7 +23,12 @@ from .mca_prefilter import mca_prefilter as run_mca_prefilter
 from .query_expansion import expand_query
 from .tokens import TokenCounter, apply_token_budget
 from .trace import RecallTrace, RetrieverTrace
-from .validity import filter_by_tenant, filter_by_validity, keep_payload, numeric_unit_for
+from .validity import (
+    filter_by_tenant,
+    filter_by_validity,
+    keep_payload,
+    numeric_unit_for,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -541,6 +547,8 @@ class Recaller:
         self.adaptive_weights = adaptive_weights
         self.query_expansion = query_expansion
         self.expansion_llm = expansion_llm
+        # Retained for constructor/attribute compatibility. Fallback is
+        # triggered by an empty vector arm, not this legacy threshold.
         self.fallback_threshold = fallback_threshold
         self.mca_prefilter_enabled = mca_prefilter
         self.vector_floor = max(0, int(vector_floor))
@@ -587,7 +595,7 @@ class Recaller:
         self.text_key = text_key or derived.get("text_key", "text")
         self.timestamp_key = timestamp_key or derived.get("timestamp_key", "timestamp")
         self.timestamp_format = timestamp_format or derived.get("timestamp_format", "iso")
-        self._query_expansion_cache: dict[str, list[str]] = {}
+        self._query_expansion_cache = RerankerCache()
         # Recall-side embedding-space compatibility: one revalidating guard
         # per distinct (store, provider) pair, built lazily on the first
         # vector recall. A determined incompatibility is re-raised on EVERY
@@ -1204,6 +1212,8 @@ class Recaller:
                     **tkw,
                 )
             except Exception:
+                logger.warning("vector search failed during query expansion", exc_info=True)
+                counter("mnemostack.recall.vector_search_failed", 1)
                 hits = []
             hits = [
                 h
@@ -1240,13 +1250,16 @@ class Recaller:
     def _expanded_queries(self, query: str, n_variants: int = 3) -> list[str]:
         if not self.expansion_llm:
             raise ValueError("query_expansion=True requires expansion_llm")
-        if query not in self._query_expansion_cache:
-            self._query_expansion_cache[query] = expand_query(
-                query, self.expansion_llm, n_variants=n_variants
-            )
+        cache_key = [str(n_variants)]
+        variants = self._query_expansion_cache.get(query, cache_key)
+        if variants is None:
+            variants = expand_query(query, self.expansion_llm, n_variants=n_variants)
+            # Do not turn a transient provider failure into a permanent miss.
+            if variants:
+                self._query_expansion_cache.put(query, cache_key, variants)
         seen = {query.strip()}
         queries = [query]
-        for variant in self._query_expansion_cache[query]:
+        for variant in variants:
             key = variant.strip()
             if key and key not in seen:
                 queries.append(key)
@@ -1896,18 +1909,21 @@ class Recaller:
         by_id: dict[str, RecallResult] = {
             memory_key(result.id): result for result in pipeline_results
         }
-        id_to_index: dict[str, int] = {
-            memory_key(result.id): index for index, result in enumerate(pipeline_results)
-        }
         pipeline_scores = [result.score for result in pipeline_results]
-        fallback_only_penalty_ceiling = min(pipeline_scores) - 0.01 if pipeline_scores else None
+        lowest_score = min(pipeline_scores) if pipeline_scores else None
+        fallback_only_penalty_ceiling = (
+            lowest_score - abs(lowest_score) * 0.5 if lowest_score is not None else None
+        )
         fallback_only: list[RecallResult] = []
 
-        for fallback in fallback_hits:
+        for rank, fallback in enumerate(fallback_hits, start=1):
             existing = by_id.get(memory_key(fallback.id))
             if existing is None:
+                # This merge precedes calibration: all scores must stay in
+                # rank-sum units, never the fallback's cosine units.
+                fallback.score = 1.0 / (self.rrf_k + rank)
                 if fallback_only_penalty_ceiling is not None:
-                    fallback.score = min(fallback.score * 0.5, fallback_only_penalty_ceiling)
+                    fallback.score = min(fallback.score, fallback_only_penalty_ceiling)
                 by_id[memory_key(fallback.id)] = fallback
                 fallback_only.append(fallback)
                 continue
@@ -1916,11 +1932,9 @@ class Recaller:
             for source in fallback.sources:
                 if source not in merged_sources:
                     merged_sources.append(source)
-            if fallback.score > existing.score:
-                fallback.sources = merged_sources
-                by_id[memory_key(fallback.id)] = fallback
-                pipeline_results[id_to_index[memory_key(fallback.id)]] = fallback
-            else:
-                existing.sources = merged_sources
+            if "raw_vector_score" in (fallback.payload or {}):
+                existing.payload = dict(existing.payload or {})
+                existing.payload["raw_vector_score"] = fallback.payload["raw_vector_score"]
+            existing.sources = merged_sources
 
         return (pipeline_results + fallback_only)[:limit]

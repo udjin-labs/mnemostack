@@ -64,6 +64,8 @@ class GeminiProvider(EmbeddingProvider):
 
     def embed(self, text: str) -> list[float]:
         vec, _provider_down = self._embed_one(text)
+        if not vec:
+            raise RuntimeError("Gemini embedding request returned no vector")
         return vec
 
     def _embed_one(self, text: str) -> tuple[list[float], bool]:

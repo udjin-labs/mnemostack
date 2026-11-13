@@ -42,6 +42,10 @@ def recall_flow(
     result is cut to `limit` and vector-floor guarantees are re-applied
     after the cut. Without a pipeline this degrades to plain recall.
 
+    `limit` is an output upper bound, not a guaranteed result count.
+    Retriever candidate budgets remain independent (vector/BM25 default
+    to 20 each); increasing the output limit does not itself widen them.
+
     `reranker=None` means "no reranking requested" and leaves the trace
     untouched. A caller that *wanted* a reranker but could not build one
     should mark `reranker:unavailable` on the trace itself.

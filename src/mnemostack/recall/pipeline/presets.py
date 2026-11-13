@@ -83,6 +83,7 @@ def build_full_pipeline(
     # Calibration precedes the unit-scale source, exploration and age signals.
     stages = [
         ClassifyQuery(),
+        CalibrateRelevance(),
         ExactTokenRescue(boost=rescue_boost),
         GravityDampen(penalty=gravity_penalty),
     ]
@@ -91,7 +92,6 @@ def build_full_pipeline(
         stages.append(HubDampen(hub_degrees=hub_degrees))
 
     # Calibrate rank-score units before mixing source, exploration and age utility.
-    stages.append(CalibrateRelevance())
 
     if enable_q_learning:
         stages.append(QLearningReranker(state_store=store))
@@ -154,12 +154,12 @@ def build_stateless_pipeline(
     """
     stages = [
         ClassifyQuery(),
+        CalibrateRelevance(),
         ExactTokenRescue(boost=rescue_boost),
         GravityDampen(penalty=gravity_penalty),
     ]
     if hub_degrees:
         stages.append(HubDampen(hub_degrees=hub_degrees))
-    stages.append(CalibrateRelevance())
     stages.append(
         FreshnessBlend(
             weight=freshness_weight,

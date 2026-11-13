@@ -11,8 +11,8 @@ Start from the CLI:
 
 Or programmatically:
 
-    from mnemostack.server import build_app
-    app = build_app(provider_name="gemini", collection="memory")
+    from mnemostack.server import ServerConfig, build_app
+    app = build_app(ServerConfig(provider_name="gemini", collection="memory"))
     # pass `app` to uvicorn / gunicorn / etc.
 
 The server is opt-in: install with `pip install 'mnemostack[server]'`.
@@ -25,13 +25,17 @@ import math
 import os
 import threading
 import time
+import weakref
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
+
+from .recall.filters import validate_filters
 
 try:
     from fastapi import Depends, FastAPI, Header, HTTPException, Request
-    from pydantic import BaseModel, Field, StrictInt
+    from fastapi.concurrency import run_in_threadpool
+    from pydantic import AfterValidator, BaseModel, Field, StrictInt
 except ImportError as e:  # pragma: no cover - import guard
     raise ImportError(
         "FastAPI is not installed. Install the optional server extra: "
@@ -120,7 +124,7 @@ log = logging.getLogger(__name__)
 def _env_int(name: str, default: int) -> int:
     """A positive integer from the environment, or the default.
 
-    Env deployment (`uvicorn mnemostack.server:app`) has to be able to
+    Env deployment (`uvicorn mnemostack.server:build_app --factory`) has to be able to
     reach every knob the CLI can, or an operator who cannot run `serve`
     gets a feature they can switch on but not configure. Unparseable and
     non-positive values fall back to the default rather than failing
@@ -168,7 +172,7 @@ class RecallRequest(BaseModel):
         False,
         description="Return the per-retriever recall trace (debug; verbose).",
     )
-    filters: dict[str, Any] | None = Field(
+    filters: Annotated[dict[str, Any] | None, AfterValidator(validate_filters)] = Field(
         None,
         description=(
             "Payload filters applied inside every retriever (exact match, or "
@@ -204,7 +208,7 @@ class AnswerRequest(BaseModel):
     limit: int = Field(10, ge=1, le=100)
     full_pipeline: bool = Field(True)
     include_trace: bool = Field(False)
-    filters: dict[str, Any] | None = Field(None)
+    filters: Annotated[dict[str, Any] | None, AfterValidator(validate_filters)] = Field(None)
     token_budget: int | None = Field(
         None,
         ge=1,
@@ -979,7 +983,8 @@ def _prometheus_dump(rec: InMemoryRecorder) -> str:
     """Render an AggregatingRecorder as Prometheus text exposition format.
 
     We emit one counter per metric name and, for histograms, a count + sum
-    + a small set of summary quantiles (p50/p90/p99/max). No external
+    + summary quantiles (p50/p90/p99). Counts and sums stay cumulative;
+    quantiles use the recorder's retained window when configured. No external
     `prometheus_client` dependency — the exposition format is stable and
     trivial to produce by hand.
     """
@@ -1017,7 +1022,7 @@ def _prometheus_dump(rec: InMemoryRecorder) -> str:
     # Iterate snapshots — the live dicts are mutated by recall running in the
     # sync threadpool while this scrape runs.
     counters = rec.snapshot_counters()
-    histograms = rec.snapshot_histograms()
+    histograms = rec.snapshot_histograms_with_totals()
 
     for key, val in sorted(counters.items()):
         name, labels = _from_key(key)
@@ -1028,7 +1033,7 @@ def _prometheus_dump(rec: InMemoryRecorder) -> str:
             seen_help.add(prom)
         lines.append(f"{prom}{_fmt_labels(labels)} {val}")
 
-    for key, obs in sorted(histograms.items()):
+    for key, (obs, total_count, total_sum) in sorted(histograms.items()):
         name, labels = _from_key(key)
         prom = _safe_name(name)
         if not obs:
@@ -1048,8 +1053,8 @@ def _prometheus_dump(rec: InMemoryRecorder) -> str:
         for quant, label in ((0.5, "0.5"), (0.9, "0.9"), (0.99, "0.99")):
             combined = _fmt_labels({**(labels or {}), "quantile": label})
             lines.append(f"{prom}{combined} {pct(quant)}")
-        lines.append(f"{prom}_sum{base} {sum(obs_sorted)}")
-        lines.append(f"{prom}_count{base} {n}")
+        lines.append(f"{prom}_sum{base} {total_sum}")
+        lines.append(f"{prom}_count{base} {total_count}")
 
     return "\n".join(lines) + "\n"
 
@@ -1063,7 +1068,8 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     # discarded. For multi-worker deployments, pair this with uvicorn --workers
     # 1 or a shared aggregator (Redis/Statsd); Prometheus scrape-then-diff
     # handles single-worker fine.
-    set_recorder(InMemoryRecorder())
+    # Quantiles describe the recent window; count/sum remain cumulative.
+    set_recorder(InMemoryRecorder(max_histogram_samples=1024))
 
     # Fail a schema-key misconfiguration at BOOT, before any provider cost.
     ensure_remote_schema_keys(cfg.text_key, cfg.timestamp_key)
@@ -1095,6 +1101,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
     def _graph_ok() -> bool:
         if not cfg.graph_uri:
             return False
+        d = None
         try:
             from neo4j import GraphDatabase
 
@@ -1106,10 +1113,15 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             )
             with d.session(database=cfg.graph_database) as s:
                 s.run("RETURN 1").single()
-            d.close()
             return True
         except Exception:
             return False
+        finally:
+            if d is not None:
+                try:
+                    d.close()
+                except Exception:
+                    log.debug("graph probe close failed", exc_info=True)
 
     def _qdrant_ok() -> bool:
         # Ping-level reachability: only that the client can reach Qdrant, not
@@ -1873,7 +1885,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         )
 
     @app.post("/feedback", response_model=FeedbackResponse)
-    async def feedback_endpoint(req: FeedbackRequest, principal=Depends(_require("write"))):  # noqa: B008 — FastAPI DI pattern
+    def feedback_endpoint(req: FeedbackRequest, principal=Depends(_require("write"))):  # noqa: B008 — FastAPI DI pattern
         """Record explicit feedback for stateful recall stages.
 
         Q-learning updates require retriever/source labels. Pass the `retrievers`
@@ -1900,8 +1912,11 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=500, detail="feedback failed") from exc
         return FeedbackResponse(**outcome.to_dict())
 
-    @app.post("/memories", response_model=MemoriesResponse)
-    def memories_endpoint(req: MemoriesRequest, principal=Depends(_require("write"))):  # noqa: B008 — FastAPI DI pattern
+    # This gate is used only by async routes on the app's event loop. Waiters
+    # retain their lock; idle tenants do not accumulate entries indefinitely.
+    memory_write_locks: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
+
+    def _store_memories(req: MemoriesRequest, principal):
         """Store memories for the caller's tenant (the remote write surface).
 
         Texts are embedded SERVER-side (clients need no provider key), ids
@@ -1910,9 +1925,9 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         `--auth` everything lands stamped with the key's tenant — a client
         cannot write into another tenant. Work is bounded: request caps
         (items/text/metadata), the tenant's storage quota (507 when
-        exceeded), and the shared per-tenant rate limit. Declared as a sync
-        route on purpose: FastAPI runs it on the threadpool, so the
-        embedding round-trips never block the event loop.
+        exceeded), and the shared per-tenant rate limit. The async route
+        admits one caller per tenant before running this blocking body in
+        the shared worker pool.
 
         """
         # Pydantic enforces shapes/caps; the reserved-namespace rule and
@@ -2022,6 +2037,32 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             duplicates=sum(r.status == "duplicate" for r in results),
             failed=failed_n,
         )
+
+    @app.post("/memories", response_model=MemoriesResponse)
+    async def memories_endpoint(req: MemoriesRequest, principal=Depends(_require("write"))):  # noqa: B008 — FastAPI DI pattern
+        """Store memories without occupying worker threads while queued for a tenant."""
+        tenant = _tenant_of(principal)
+        lock = memory_write_locks.get(tenant)
+        if lock is None:
+            lock = asyncio.Lock()
+            memory_write_locks[tenant] = lock
+        async with lock:
+            work = asyncio.create_task(run_in_threadpool(_store_memories, req, principal))
+            try:
+                return await asyncio.shield(work)
+            except asyncio.CancelledError:
+                # A disconnected caller must not release admission while its
+                # blocking write still owns a worker and may commit.
+                while not work.done():
+                    try:
+                        await asyncio.shield(work)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
+                if not work.cancelled():
+                    work.exception()
+                raise
 
     @app.post("/triples", response_model=TriplesResponse)
     def triples_endpoint(req: TriplesRequest, principal=Depends(_require("write"))):  # noqa: B008 — FastAPI DI pattern

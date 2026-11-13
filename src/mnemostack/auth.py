@@ -187,8 +187,9 @@ class FileKeyStore:
 
     Record shape: ``{id, hash, tenant, scopes, label, created_at}``. The ``id``
     is a public, non-secret handle for listing/revoking; ``hash`` is the SHA-256
-    of the plaintext key. Reads are lazy-cached; writes are atomic (temp +
-    replace). Not a high-throughput store — fine for the key volumes a
+    of the plaintext key. Reads reload the file so revocations take effect
+    on the next lookup; writes are atomic (temp + replace).
+    Not a high-throughput store — fine for the key volumes a
     self-hosted deployment has.
     """
 

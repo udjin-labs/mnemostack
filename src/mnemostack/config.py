@@ -25,7 +25,6 @@ Example config file:
       uri: bolt://localhost:7687
 
     recall:
-      rrf_k: 60
       confidence_threshold: 0.5
 """
 
@@ -33,6 +32,7 @@ from __future__ import annotations
 
 import math
 import os
+import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -210,7 +210,7 @@ class VectorConfig:
     host: str = "http://localhost:6333"
     collection: str = "mnemostack"
     chunk_size: int = 800
-    overlap: int = 100
+    overlap: int = 100  # Legacy config field; built-in index does not apply it.
     window_size: int = 1
     # Short timeout (whole seconds) for the HTTP server's liveness/readiness
     # Qdrant ping — kept separate from recall so a slow Qdrant fails a probe
@@ -291,7 +291,7 @@ def normalize_tenant(value: Any) -> Any:
 
 @dataclass
 class RecallConfig:
-    rrf_k: int = 60
+    rrf_k: int = 60  # Legacy config field; pass rrf_k directly to the SDK Recaller.
     top_k: int = 10
     confidence_threshold: float = 0.5
     bm25_paths: list[str] = field(default_factory=list)
@@ -463,11 +463,22 @@ class Config:
         return cfg
 
     def save(self, path: str | Path) -> None:
-        """Write config to YAML file."""
+        """Atomically write config with owner-only permissions."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
-            yaml.safe_dump(self.to_dict(), f, default_flow_style=False, sort_keys=False)
+        tmp = None
+        try:
+            # NamedTemporaryFile creates mode0600; os.replace also repairs
+            # the mode of a pre-existing world-readable destination.
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=path.parent, delete=False
+            ) as f:
+                tmp = Path(f.name)
+                yaml.safe_dump(self.to_dict(), f, default_flow_style=False, sort_keys=False)
+            os.replace(tmp, path)
+        finally:
+            if tmp is not None and tmp.exists():
+                tmp.unlink()
 
 
 def _resolve_config_path(path: str | Path | None) -> Path | None:
@@ -683,6 +694,7 @@ vector:
   host: http://localhost:6333
   collection: mnemostack
   chunk_size: 800
+  # Legacy compatibility field; built-in index does not apply overlap.
   overlap: 100
   window_size: 1
   health_timeout: 2         # seconds; HTTP server's Qdrant liveness/readiness ping
@@ -708,6 +720,8 @@ graph:
   health_timeout: 1.0
 
 recall:
+  # Legacy config field; built-in entry points use the Recaller default.
+  # SDK callers can pass rrf_k directly to Recaller.
   rrf_k: 60
   top_k: 10
   confidence_threshold: 0.5

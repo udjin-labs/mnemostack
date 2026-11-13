@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import deque
 from contextlib import contextmanager
 from typing import Protocol
 
@@ -67,11 +68,21 @@ class InMemoryRecorder:
     `RuntimeError: dictionary changed size during iteration`. Readers get a
     snapshot (`snapshot_counters` / `snapshot_histograms`); iterate those, never
     the live dicts.
+    ``max_histogram_samples`` bounds recent samples per series. Count and sum
+    remain cumulative. None preserves the unbounded short-script behavior.
     """
 
-    def __init__(self):
+    def __init__(self, *, max_histogram_samples: int | None = None):
+        if max_histogram_samples is not None and (
+            isinstance(max_histogram_samples, bool)
+            or not isinstance(max_histogram_samples, int)
+            or max_histogram_samples < 1
+        ):
+            raise ValueError("max_histogram_samples must be a positive integer or None")
+        self.max_histogram_samples = max_histogram_samples
         self.counters: dict[tuple, float] = {}
-        self.histograms: dict[tuple, list[float]] = {}
+        self.histograms: dict[tuple, list[float] | deque[float]] = {}
+        self._histogram_totals: dict[tuple, tuple[int, float]] = {}
         self._lock = threading.Lock()
 
     @staticmethod
@@ -87,8 +98,17 @@ class InMemoryRecorder:
 
     def record_histogram(self, name, value, labels=None):
         k = self._key(name, labels)
+        observation = float(value)
         with self._lock:
-            self.histograms.setdefault(k, []).append(float(value))
+            if k not in self.histograms:
+                self.histograms[k] = (
+                    deque(maxlen=self.max_histogram_samples)
+                    if self.max_histogram_samples is not None
+                    else []
+                )
+            self.histograms[k].append(observation)
+            count, total = self._histogram_totals.get(k, (0, 0.0))
+            self._histogram_totals[k] = (count + 1, total + observation)
 
     def counter_value(self, name: str, labels: dict[str, str] | None = None) -> float:
         with self._lock:
@@ -112,6 +132,15 @@ class InMemoryRecorder:
         with self._lock:
             self.counters.clear()
             self.histograms.clear()
+            self._histogram_totals.clear()
+
+    def snapshot_histograms_with_totals(self) -> dict[tuple, tuple[list[float], int, float]]:
+        """Recent samples and cumulative count/sum from the same locked snapshot."""
+        with self._lock:
+            return {
+                key: (list(values), *self._histogram_totals.get(key, (len(values), sum(values))))
+                for key, values in self.histograms.items()
+            }
 
 
 # Module-level singleton recorder

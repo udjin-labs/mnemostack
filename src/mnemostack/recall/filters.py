@@ -12,6 +12,30 @@ from __future__ import annotations
 from typing import Any
 
 
+def validate_filters(filters: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Validate the shared HTTP/MCP filter contract before retrieval starts."""
+    if filters is None:
+        return None
+    if not isinstance(filters, dict) or any(not isinstance(key, str) for key in filters):
+        raise ValueError("filters must be an object with string keys")
+    # Validation only: these models perform no I/O. Match the backend's
+    # supported exact values and numeric/datetime inclusive ranges.
+    from qdrant_client.models import DatetimeRange, MatchValue, Range
+
+    for value in filters.values():
+        try:
+            if isinstance(value, dict):
+                if not value or set(value) - {"gte", "lte"}:
+                    raise ValueError("range filters support only gte and lte")
+                range_type = DatetimeRange if any(isinstance(v, str) for v in value.values()) else Range
+                range_type(**value)
+            else:
+                MatchValue(value=value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("unsupported filter condition") from exc
+    return filters
+
+
 def payload_matches(
     payload: dict[str, Any] | None,
     filters: dict[str, Any] | None,
