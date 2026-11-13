@@ -307,7 +307,7 @@ $("#q-rows").addEventListener("click",async e=>{
 async function loadAudit(){
   const d=await j("/api/audit");
   if(!d.enabled){$("#a-status").textContent="auditing is off — set MNEMOSTACK_AUDIT_FILE and restart";$("#a-rows").innerHTML="";return;}
-  $("#a-status").textContent=d.skipped?d.skipped+" unparseable line(s) skipped":"";
+  $("#a-status").textContent=d.skipped+" unparseable line(s) skipped"+(d.complete===false?" in the part read (earlier lines not checked)":"");
   $("#a-rows").innerHTML=d.events.slice().reverse().map(e=>
     `<tr><td>${esc((e.ts||"").replace("T"," ").slice(0,19))}</td><td>${esc(e.action)}</td>`+
     `<td>${esc(e.actor)}</td><td>${esc(e.tenant??"")}</td><td>${esc(e.outcome)}</td>`+
@@ -1016,17 +1016,19 @@ def build_inspector_app(config: ServerConfig | None = None) -> FastAPI:
     def audit_trail(limit: int = Query(200, ge=1, le=1000), _p=_admin) -> dict[str, Any]:
         """The tail of the audit trail (admin-gated). ``enabled=False`` when no
         ``MNEMOSTACK_AUDIT_FILE`` is configured — the UI says how to turn it on.
+        ``skipped`` counts corrupt lines in the tail read; ``complete`` says
+        whether that count covers the whole file.
         Reading the trail is itself a read, not a mutation — not audited."""
         from mnemostack.audit import AuditLogError, FileAuditLog, audit_log_from_env
 
         sink = audit_log_from_env()
         if not isinstance(sink, FileAuditLog):
-            return {"enabled": False, "events": [], "skipped": 0}
+            return {"enabled": False, "events": [], "skipped": 0, "complete": True}
         try:
-            events, skipped = sink.tail(limit)
+            events, skipped, complete = sink.tail_with_status(limit)
         except AuditLogError as e:
             raise HTTPException(status_code=503, detail=str(e)) from e
-        return {"enabled": True, "events": events, "skipped": skipped}
+        return {"enabled": True, "events": events, "skipped": skipped, "complete": complete}
 
     return app
 

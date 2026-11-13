@@ -50,7 +50,6 @@ import os
 import re
 import stat
 import time
-from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
@@ -353,46 +352,64 @@ class FileAuditLog:
         return True
 
     def tail(self, limit: int = 200) -> tuple[list[dict[str, Any]], int]:
-        """The last ``limit`` events (oldest→newest) and how many lines were
-        skipped as unparseable (a truncated line from a copytruncate rotation,
-        or hand-editing). A missing file is an empty log, not an error; an
-        unreadable one raises :class:`AuditLogError` — this is a management
-        read, so it fails loud like the key/quota stores' list operations."""
+        """Return events oldest first and corrupt-line count for the tail read."""
+        events, skipped, _ = self.tail_with_status(limit)
+        return events, skipped
+
+    def tail_with_status(self, limit: int = 200) -> tuple[list[dict[str, Any]], int, bool]:
+        """Read backwards until ``limit`` valid events or the file start.
+
+        The corrupt-line count covers complete lines in the blocks read.
+        ``complete`` is True when it covers the whole file. Missing files are
+        empty logs; unreadable files raise :class:`AuditLogError`.
+        """
         if limit < 1:
             raise ValueError("limit must be >= 1")
-        events: deque[dict[str, Any]] = deque(maxlen=limit)
+        events: list[dict[str, Any]] = []
         skipped = 0
         try:
-            # Same hardened open as record() (symlink-refusing walk + regular
-            # file only): a pre-planted link must not let the Audit tab display
-            # spoofed events from an attacker-chosen file while writes are
-            # (correctly) refused — the read fails loud instead.
+            # Retain the append path's symlink, regular-file, owner and mode checks.
             fd = _open_trail_fd(self.path, write=False)
-            with os.fdopen(fd, encoding="utf-8", errors="replace") as f:
-                for raw in f:
-                    raw = raw.strip()
-                    if not raw:
+            with os.fdopen(fd, "rb", buffering=0) as f:
+                position = f.seek(0, os.SEEK_END)
+                # Blocks of the line whose start is not read yet, newest first.
+                # Only the new block is searched for a separator, so one very
+                # long line costs linear time, not quadratic.
+                pending: list[bytes] = []
+                while position and len(events) < limit:
+                    size = min(position, 8192)
+                    position -= size
+                    f.seek(position)
+                    parts = re.split(b"\r\n|\r|\n", f.read(size))
+                    if len(parts) == 1 and position:
+                        pending.append(parts[0])
                         continue
-                    try:
-                        parsed = json.loads(raw)
-                    except (ValueError, RecursionError):
-                        # ValueError covers JSONDecodeError AND the non-decode
-                        # parse failures (a hand-edited line with an integer
-                        # past sys.get_int_max_str_digits() raises bare
-                        # ValueError on 3.11+); RecursionError covers a crafted
-                        # deeply-nested line. One bad line must count as
-                        # skipped, not 500 the Audit tab until hand-repair.
-                        skipped += 1
-                        continue
-                    if isinstance(parsed, dict):
-                        events.append(parsed)
-                    else:
-                        skipped += 1
+                    # One join for the whole line: no extra copy of a long line.
+                    pending.append(parts[-1])
+                    pending.reverse()
+                    parts[-1] = b"".join(pending)
+                    pending = [parts.pop(0)] if position else []
+                    # Decode complete lines only, preserving split UTF-8 characters.
+                    for line in reversed(parts):
+                        raw = line.decode("utf-8", errors="replace").strip()
+                        if not raw:
+                            continue
+                        try:
+                            parsed = json.loads(raw)
+                        except (ValueError, RecursionError):
+                            skipped += 1
+                            continue
+                        if isinstance(parsed, dict):
+                            if len(events) < limit:
+                                events.append(parsed)
+                        else:
+                            skipped += 1
+                complete = position == 0
         except FileNotFoundError:
-            return [], 0
+            return [], 0, True
         except OSError as e:
             raise AuditLogError(f"audit log {self.path} is unreadable: {e}") from e
-        return list(events), skipped
+        return list(reversed(events)), skipped, complete
 
 
 def audit_log_from_env() -> FileAuditLog | NullAuditLog:
