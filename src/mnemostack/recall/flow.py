@@ -9,8 +9,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from .deadline import get_deadline, start_deadline
 from .tokens import TokenCounter, apply_token_budget
-from .trace import RecallTrace, apply_rerank_safe
+from .trace import ChildTrace, RecallTrace, apply_rerank_safe
 from .validity import filter_by_tenant
 
 if TYPE_CHECKING:
@@ -72,6 +73,9 @@ def recall_flow(
     # guarded, cycle-aware unwrap shared with synthesis).
     from ..synthesis import _innermost_recaller
 
+    caller_traced = trace is not None
+    trace = start_deadline(_innermost_recaller(recaller), trace)
+
     raw_limit = max(limit * 3, 30) if pipeline is not None else limit
     recalled = recaller.recall(
         query,
@@ -85,6 +89,7 @@ def recall_flow(
     results = recalled
     if pipeline is not None:
         from .filters import result_passes_filters
+        from .pipeline import Pipeline
         from .validity import numeric_unit_for
 
         _ts_key = getattr(recaller, "timestamp_key", "timestamp")
@@ -105,22 +110,26 @@ def recall_flow(
         # The per-stage trace keywords go only to a traced call, so a Pipeline
         # subclass whose `apply` predates them keeps working untraced.
         trace_kw: dict[str, Any] = {}
-        if trace is not None:
+        if trace is not None and (caller_traced or type(pipeline).apply is Pipeline.apply):
             trace_kw["trace"] = trace
             if tenant is not None or filters:
                 trace_kw["trace_scope"] = _in_scope
-        results = pipeline.apply(
-            query,
-            results,
-            as_of=as_of,
-            include_invalidated=include_invalidated,
-            tenant=tenant,
-            # Graph stages check their graph together with the stores this
-            # recaller read, under its allow_cross_tenant — the real recaller,
-            # not a QueryExpander wrapping it.
-            recaller=_innermost_recaller(recaller),
-            **trace_kw,
-        )
+        deadline = get_deadline(trace)
+        if deadline is not None and deadline.expired():
+            trace.mark("recall:deadline")
+        else:
+            results = pipeline.apply(
+                query,
+                results,
+                as_of=as_of,
+                include_invalidated=include_invalidated,
+                tenant=tenant,
+                # Graph stages check their graph together with the stores this
+                # recaller read, under its allow_cross_tenant — the real recaller,
+                # not a QueryExpander wrapping it.
+                recaller=_innermost_recaller(recaller),
+                **trace_kw,
+            )
         if filters:
             # Pipeline stages may append candidates that never passed the
             # filtered retrievers (e.g. graph resurrection injects records
@@ -140,7 +149,25 @@ def recall_flow(
         # own backstop ran before the pipeline).
         results = filter_by_tenant(results, tenant)
     if reranker is not None:
-        results = apply_rerank_safe(reranker, query, results, trace)
+        deadline = get_deadline(trace)
+        if deadline is None:
+            results = apply_rerank_safe(reranker, query, results, trace)
+        elif deadline.expired():
+            trace.mark("recall:deadline")
+        else:
+            from dataclasses import replace
+
+            child = ChildTrace(deadline=deadline)
+            candidates = [replace(r, sources=list(r.sources), payload=dict(r.payload)) for r in results]
+            completed = deadline.run(
+                lambda: apply_rerank_safe(reranker, query, candidates, child),
+                None, on_timeout=lambda: trace.mark("recall:deadline"),
+            )
+            if completed is not None:
+                results = completed
+                trace.post_rerank = child.post_rerank
+                for tag in child.degraded:
+                    trace.mark(tag)
     results = results[:limit]
     # Nothing to clear here any more. The floor's claim is the score it
     # stamped (`floor_score`), so a stage that rescores a result retires

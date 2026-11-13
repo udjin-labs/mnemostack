@@ -6,7 +6,7 @@ import logging
 import re
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal
 
 from ..embeddings.base import EmbeddingProvider
@@ -16,6 +16,13 @@ from ..observability.recorder import get_recorder
 from ..reranker_cache import RerankerCache
 from ..vector.qdrant import Hit, VectorStore
 from .bm25 import BM25, BM25Doc
+from .deadline import (
+    abandoned_workers_full,
+    get_deadline,
+    start_deadline,
+    submit_deadline_work,
+    validate_deadline,
+)
 from .filters import payload_matches
 from .fusion import reciprocal_rank_fusion
 from .identity import memory_key
@@ -503,6 +510,7 @@ class Recaller:
         timestamp_format: str | None = None,
         default_tenant: str | None = None,
         allow_cross_tenant: bool = False,
+        overall_deadline: float | None = None,
     ):
         """Two modes:
 
@@ -531,9 +539,15 @@ class Recaller:
         returned list beyond the requested top-K instead of replacing reranked
         winners. The default `vector_floor=0` is a strict no-op.
 
+        `overall_deadline` is an optional positive finite budget in seconds,
+        shared across retrieval and subsequent stages through the request trace.
+        None disables it. Expiry keeps completed results; synchronous work
+        already running may finish in the background.
+
         Static weights win over adaptive when both are given: operators who
         have already tuned their workload shouldn't be overridden implicitly.
         """
+        self.overall_deadline = validate_deadline(overall_deadline)
         self.embedding = embedding_provider
         self.vector = vector_store
         self.bm25 = BM25(bm25_docs) if bm25_docs else None
@@ -902,6 +916,7 @@ class Recaller:
         candidate pool of max(3 * limit, 30), when a pipeline is supplied,
         absorbs this in practice.
         """
+        trace = start_deadline(self, trace)
         counter("mnemostack.recall.calls", 1)
         # Construction-time scope applies whenever the call does not name a
         # tenant itself; an explicit per-call tenant always wins.
@@ -913,6 +928,9 @@ class Recaller:
         # retriever once per variant — state that must span the whole recall
         # (the graph arm's probe budget/circuit breaker: one store failure
         # per recall, not per variant) lives here instead of per-search.
+        if trace is not None and get_deadline(trace) is not None and get_deadline(trace).expired():
+            trace.mark("recall:deadline")
+            return []
         recall_scope: dict[Any, Any] = {}
         if self.query_expansion:
             results = self._recall_with_query_expansion(
@@ -984,7 +1002,18 @@ class Recaller:
         # Legacy-pair guard only when the legacy path will actually run —
         # in retrievers mode the arms guard themselves at their boundaries.
         if not self.retrievers:
-            self._ensure_space_compat(tenant=tenant)
+            deadline = get_deadline(trace)
+            if deadline is None:
+                self._ensure_space_compat(tenant=tenant)
+            else:
+                def check_space():
+                    self._ensure_space_compat(tenant=tenant)
+                    return True
+
+                if not deadline.run(
+                    check_space, False, on_timeout=lambda: trace.mark("recall:deadline")
+                ):
+                    return []
         # Retrievers mode: fuse N arbitrary ranked lists
         if self.retrievers:
             return self._recall_via_retrievers(
@@ -1021,15 +1050,27 @@ class Recaller:
             # Vector search
             vector_hits: list[Hit] = []
             with histogram("mnemostack.recall.embed_latency_ms"):
-                query_vec = embed_query_via(self.embedding, query)
+                deadline = get_deadline(trace)
+
+                def embed():
+                    return embed_query_via(self.embedding, query)
+
+                query_vec = embed() if deadline is None else deadline.run(
+                    embed, [], on_timeout=lambda: trace.mark("recall:deadline")
+                )
             if query_vec:
                 with histogram("mnemostack.recall.vector_latency_ms"):
-                    vector_hits = self.vector.search(
-                        query_vec,
-                        limit=vector_fetch,
-                        filters=self._vector_filters(filters),
-                        hide_invalidated=_push_hide_invalidated(include_invalidated, as_of),
-                        **tkw,
+                    def search():
+                        return self.vector.search(
+                            query_vec,
+                            limit=vector_fetch,
+                            filters=self._vector_filters(filters),
+                            hide_invalidated=_push_hide_invalidated(include_invalidated, as_of),
+                            **tkw,
+                        )
+
+                    vector_hits = search() if deadline is None else deadline.run(
+                        search, [], on_timeout=lambda: trace.mark("recall:deadline")
                     )
                 # Filter, then trim back to the original window: the over-fetch
                 # only backfills dropped hits, so a clean index keeps exactly
@@ -1140,16 +1181,42 @@ class Recaller:
                     item.score = rrf_score
                     results.append(item)
             if not vector_hits:
-                results = self._maybe_apply_fallback(
-                    query,
-                    results,
-                    limit=limit,
-                    vector_limit=vector_limit,
-                    filters=filters,
-                    include_invalidated=include_invalidated,
-                    as_of=as_of,
-                    tenant=tenant,
-                )
+                deadline = get_deadline(trace)
+                if deadline is None:
+                    results = self._maybe_apply_fallback(
+                        query,
+                        results,
+                        limit=limit,
+                        vector_limit=vector_limit,
+                        filters=filters,
+                        include_invalidated=include_invalidated,
+                        as_of=as_of,
+                        tenant=tenant,
+                    )
+                else:
+                    candidates = [replace(r, sources=list(r.sources), payload=dict(r.payload)) for r in results]
+
+                    def fallback():
+                        return self._maybe_apply_fallback(
+                            query,
+                            candidates,
+                            limit=limit,
+                            vector_limit=vector_limit,
+                            filters=filters,
+                            include_invalidated=include_invalidated,
+                            as_of=as_of,
+                            tenant=tenant,
+                        )
+
+                    completed = deadline.run(
+                        fallback, None, on_timeout=lambda: trace.mark("recall:deadline")
+                    )
+                    if completed is not None:
+                        originals = {memory_key(r.id): r for r in results}
+                        for candidate in candidates:
+                            original = originals[memory_key(candidate.id)]
+                            original.__dict__.update(candidate.__dict__)
+                        results = [originals.get(memory_key(r.id), r) for r in completed]
             if apply_vector_floor:
                 results = self._apply_vector_floor(results, raw_vector_candidates)
             self._attach_vector_floor_candidates(results, raw_vector_candidates)
@@ -1285,7 +1352,18 @@ class Recaller:
         ranked_lists: list[list[tuple[Any, float]]] = []
         id_to_result: dict[Any, RecallResult] = {}
         vector_floor_candidates: list[RecallResult] = []
-        for expanded_query in self._expanded_queries(query):
+        deadline = get_deadline(trace)
+        if deadline is None:
+            queries = self._expanded_queries(query)
+        else:
+            queries = deadline.run(
+                lambda: self._expanded_queries(query), [query],
+                on_timeout=lambda: trace.mark("recall:deadline"),
+            )
+        for expanded_query in queries:
+            if deadline is not None and deadline.expired():
+                trace.mark("recall:deadline")
+                break
             trace_mark = len(trace.retrievers) if trace is not None else 0
             results = self._recall_once(
                 expanded_query,
@@ -1526,10 +1604,44 @@ class Recaller:
                         # caller receives — text, payload and all.
                         for hit in mca_hits:
                             id_to_result[memory_key(hit.id)] = hit
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=max(len(self.retrievers), 1)
-            ) as ex:
-                retriever_hits = list(ex.map(_run, self.retrievers))
+            deadline = get_deadline(trace)
+            if deadline is not None and deadline.expired():
+                trace.mark("recall:deadline")
+                retriever_hits = []
+            elif deadline is None or abandoned_workers_full():
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=max(len(self.retrievers), 1)
+                ) as ex:
+                    retriever_hits = list(ex.map(_run, self.retrievers))
+            else:
+                futures = []
+                refused = []
+                for retr in self.retrievers:
+                    future = None if deadline.expired() else submit_deadline_work(
+                        lambda retr=retr: _run(retr)
+                    )
+                    if future is None:
+                        if deadline.expired():
+                            trace.mark("recall:deadline")
+                        else:
+                            refused.append((len(futures), retr))
+                            futures.append(None)
+                    else:
+                        futures.append(future)
+                if refused:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=len(refused)) as ex:
+                        for index, retr in refused:
+                            futures[index] = ex.submit(_run, retr)
+                if futures:
+                    _, pending = concurrent.futures.wait(futures, timeout=deadline.remaining())
+                    retriever_hits = []
+                    for future in futures:
+                        if future in pending and future.abandon():
+                            trace.mark("recall:deadline")
+                        else:
+                            retriever_hits.append(future.result())
+                else:
+                    retriever_hits = []
             for retr, hits, err, elapsed_ms in retriever_hits:
                 counter(f"mnemostack.recall.{_metric_name(retr.name)}_hits", len(hits))
                 if trace is not None:
@@ -1618,16 +1730,42 @@ class Recaller:
                 r.score = rrf_score
                 results.append(r)
             if not has_vector_results:
-                results = self._maybe_apply_fallback(
-                    query,
-                    results,
-                    limit=limit,
-                    vector_limit=per_source_limit,
-                    filters=filters,
-                    include_invalidated=include_invalidated,
-                    as_of=as_of,
-                    tenant=tenant,
-                )
+                deadline = get_deadline(trace)
+                if deadline is None:
+                    results = self._maybe_apply_fallback(
+                        query,
+                        results,
+                        limit=limit,
+                        vector_limit=per_source_limit,
+                        filters=filters,
+                        include_invalidated=include_invalidated,
+                        as_of=as_of,
+                        tenant=tenant,
+                    )
+                else:
+                    candidates = [replace(r, sources=list(r.sources), payload=dict(r.payload)) for r in results]
+
+                    def fallback():
+                        return self._maybe_apply_fallback(
+                            query,
+                            candidates,
+                            limit=limit,
+                            vector_limit=per_source_limit,
+                            filters=filters,
+                            include_invalidated=include_invalidated,
+                            as_of=as_of,
+                            tenant=tenant,
+                        )
+
+                    completed = deadline.run(
+                        fallback, None, on_timeout=lambda: trace.mark("recall:deadline")
+                    )
+                    if completed is not None:
+                        originals = {memory_key(r.id): r for r in results}
+                        for candidate in candidates:
+                            original = originals[memory_key(candidate.id)]
+                            original.__dict__.update(candidate.__dict__)
+                        results = [originals.get(memory_key(r.id), r) for r in completed]
             if apply_vector_floor:
                 results = self._apply_vector_floor(
                     results,

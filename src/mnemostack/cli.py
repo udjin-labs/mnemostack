@@ -2079,7 +2079,9 @@ def _add_validity_recall_flags(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _recall_for_cli(args: argparse.Namespace, recaller, query: str, limit: int):
+def _recall_for_cli(
+    args: argparse.Namespace, recaller, query: str, limit: int, *, trace=None
+):
     """Run the same recall flow as the HTTP and MCP servers.
 
     Applies the configurable pipeline and the fail-open LLM reranker so the CLI
@@ -2103,6 +2105,7 @@ def _recall_for_cli(args: argparse.Namespace, recaller, query: str, limit: int):
             token_budget=token_budget,
             include_invalidated=include_invalidated,
             as_of=as_of,
+            **({"trace": trace} if trace is not None else {}),
         )
     _text_key, _ts_key, _ts_fmt = _payload_schema()
     pipeline = build_full_pipeline(
@@ -2133,7 +2136,8 @@ def _recall_for_cli(args: argparse.Namespace, recaller, query: str, limit: int):
             print("error: --require-rerank: reranker unavailable", file=sys.stderr)
             raise SystemExit(2) from None
         print("warning: reranker unavailable; continuing without LLM reranking", file=sys.stderr)
-    trace = RecallTrace() if require_rerank else None
+    if require_rerank and trace is None:
+        trace = RecallTrace()
     results = recall_flow(
         recaller,
         query,
@@ -2146,7 +2150,10 @@ def _recall_for_cli(args: argparse.Namespace, recaller, query: str, limit: int):
         as_of=as_of,
         trace=trace,
     )
-    if trace is not None and (trace.post_rerank is None or any(tag.startswith("reranker:") for tag in trace.degraded)):
+    if require_rerank and trace is not None and (
+        trace.post_rerank is None
+        or any(tag.startswith("reranker:") for tag in trace.degraded)
+    ):
         print("error: --require-rerank: reranking did not succeed", file=sys.stderr)
         raise SystemExit(2)
     return results
@@ -2319,7 +2326,12 @@ def cmd_answer(args: argparse.Namespace) -> int:
         return 2
 
     recaller = _build_recaller(args, provider, store)
-    results = _recall_for_cli(args, recaller, args.query, args.limit)
+    from .recall.trace import RecallTrace
+
+    trace_kw = {}
+    if getattr(recaller, "overall_deadline", None) is not None:
+        trace_kw["trace"] = RecallTrace()
+    results = _recall_for_cli(args, recaller, args.query, args.limit, **trace_kw)
 
     llm = get_llm(args.llm, **_llm_build_kwargs(args, args.llm))
     answer_generator_kwargs = {
@@ -2347,6 +2359,7 @@ def cmd_answer(args: argparse.Namespace) -> int:
         token_budget=_effective_token_budget(args),
         include_invalidated=bool(getattr(args, "include_invalidated", False)),
         as_of=getattr(args, "as_of", None),
+        **trace_kw,
     )
 
     # Tier caps how many sources we emit (answer text itself is model-sized).
@@ -2631,6 +2644,7 @@ def _build_recaller(
         query_expansion=query_expansion,
         expansion_llm=expansion_llm,
         vector_floor=max(0, int(getattr(args, "vector_floor", 0))),
+        overall_deadline=getattr(args, "_overall_deadline", None),
         text_key=text_key,
         timestamp_key=timestamp_key,
         timestamp_format=timestamp_format,
@@ -3681,6 +3695,7 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         graph_password=cfg.graph.password,
         graph_database=cfg.graph.database,
         secret_policy=cfg.ingest.secret_policy,
+        _overall_deadline=cfg.recall.overall_deadline,
     )
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -4952,6 +4967,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         qdrant_health_timeout=args.qdrant_health_timeout,
         bm25_paths=list(args.bm25_path) if args.bm25_path else None,
         vector_floor=max(0, int(args.vector_floor)),
+        overall_deadline=getattr(args, "_overall_deadline", None),
         rerank_mode=args.rerank_mode,
         token_budget=_effective_token_budget(args),
         state_path=args.state_path,
@@ -5173,6 +5189,7 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
         bm25_paths=list(args.bm25_path) if args.bm25_path else None,
         state_path=args.state_path,
         vector_floor=max(0, int(args.vector_floor)),
+        overall_deadline=getattr(args, "_overall_deadline", None),
         rerank_mode=args.rerank_mode,
         token_budget=_effective_token_budget(args),
         # Honor the env toggles too (parity with serve / the MCP main()).
