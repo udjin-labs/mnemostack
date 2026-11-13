@@ -847,6 +847,7 @@ class ServerConfig:
     hnsw_ef: int | None = None
     secret_policy: str = "off"
     overall_deadline: float | None = None
+    timestamp_index: tuple[str, str] | None = None
 
     def __post_init__(self) -> None:
         SecretPolicy(self.secret_policy)
@@ -910,6 +911,7 @@ class ServerConfig:
             text_key=cfg.recall.text_key,
             timestamp_key=cfg.recall.timestamp_key,
             timestamp_format=cfg.recall.timestamp_format,
+            timestamp_index=cfg.timestamp_index,
             text_search=cfg.recall.text_search,
             resolve_roots=_resolve_roots_env(),
             secret_policy=cfg.ingest.secret_policy,
@@ -1102,6 +1104,9 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         ),
     )
     text_mode = resolve_text_search_mode(cfg.text_search, cfg.bm25_paths)
+    timestamp_kwargs: dict[str, Any] = (
+        {"timestamp_index": cfg.timestamp_index} if cfg.timestamp_index is not None else {}
+    )
     store = VectorStore(
         collection=cfg.collection,
         dimension=provider.dimension,
@@ -1111,6 +1116,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
         # carrying the named sparse vector the lexical arm searches.
         sparse_text=text_mode == "sparse",
         text_key=cfg.text_key,
+        **timestamp_kwargs,
         **quantization_kwargs(cfg.quantization_rescore, cfg.quantization_oversampling, cfg.hnsw_ef),
     )
     # Dedicated short-timeout client for health/readiness pings — never the

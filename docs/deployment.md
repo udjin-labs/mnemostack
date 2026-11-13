@@ -748,8 +748,23 @@ arm; pick by collection size and whether you can re-index:
   tags/ids, `datetime` for `timestamp_format: iso` timestamps,
   `integer`/`float` for epoch timestamps and numerics). `mnemostack
   payload-index` with no field lists the collection's existing indexes, and
-  `doctor` reports them (`tenant_id` is indexed automatically at collection
-  creation).
+  `doctor` reports them. New collections created by the CLI get `keyword` indexes on
+  `tenant_id` and `source` and a `datetime` index on `invalidated_at`.
+  When both `recall.timestamp_key` and `recall.timestamp_format` are present
+  in the config file or the environment, the timestamp key also gets a
+  `datetime` index for `iso`, or a `float` index for `epoch`/`epoch_ms`. A
+  config file written by `mnemostack init` contains both keys. With neither
+  a file nor environment values, and for an unknown format, no timestamp
+  index is created.
+  For existing collections, startup and reads never add these indexes. Run
+  `mnemostack doctor` for missing or wrongly typed validity and configured
+  timestamp index hints, then run the printed `mnemostack payload-index`
+  commands explicitly (for example
+  `mnemostack payload-index invalidated_at --schema datetime`). For a wrong
+  type, explicitly drop the existing index in Qdrant before creating the
+  correct one; the command refuses conflicting types. These hints do not
+  change the diagnostic exit code.
+
 - **Filtered graph recall needs two of them.** The knowledge-graph
   retriever attributes its file hits through their chunks with existence
   probes pinned by `source` and `index_root` — on a real server, index BOTH

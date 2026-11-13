@@ -361,12 +361,21 @@ def build_server(
             # every point, or remembered memories silently drop out of the
             # sparse lexical arm (and demand a backfill later).
             mode = resolve_text_search_mode(text_search, bm25_paths)
+            try:
+                configured = Config.load().timestamp_index
+            except Exception:  # noqa: BLE001
+                configured = None
+            timestamp_kwargs = (
+                {"timestamp_index": configured}
+                if configured == (timestamp_key, timestamp_format) else {}
+            )
             return VectorStore(
                 collection=collection,
                 dimension=_get_embedding().dimension,
                 host=qdrant_host,
                 sparse_text=mode == "sparse",
                 text_key=text_key,
+                **timestamp_kwargs,
                 **quantization_kwargs(quantization_rescore, quantization_oversampling, hnsw_ef),
             )
 

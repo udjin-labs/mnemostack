@@ -79,6 +79,7 @@ from .vector.qdrant import (
     ID_BATCH_SIZE,
     PayloadIndexConflictError,
     payload_index_type_name,
+    timestamp_index_schema,
 )
 
 # -- Progressive tiers --------------------------------------------------------
@@ -354,6 +355,7 @@ def _doctor_qdrant(
     timeout: int,
     expected_dim: int | None,
     text_search: str = "auto",
+    timestamp_index: tuple[str, str] | None = None,
 ) -> None:
     """Read-only Qdrant probe: reachability, collection, count, dimension match.
 
@@ -507,6 +509,25 @@ def _doctor_qdrant(
             "create indexes for the fields recall filters on: "
             "`mnemostack payload-index <field> --schema keyword|datetime|...`",
         )
+    expected_indexes = {"invalidated_at": "datetime"}
+    timestamp_schema = timestamp_index_schema(timestamp_index)
+    if timestamp_schema is not None and timestamp_index is not None:
+        expected_indexes[timestamp_index[0]] = timestamp_schema.value
+    import shlex
+
+    for field, expected in expected_indexes.items():
+        actual = payload_index_type_name(payload_schema[field]) if field in payload_schema else None
+        if actual != expected:
+            command = shlex.join([
+                "mnemostack", "payload-index", field, "--schema", expected,
+                "--collection", collection, "--qdrant", url,
+            ])
+            add(
+                "qdrant.payload_index", "warn",
+                f"{field}: expected {expected} index, found {actual or 'none'}",
+                ("drop the existing index explicitly in Qdrant first; " if actual else "")
+                + f"run `{command}`",
+            )
     if text_search == "native_bm25":
         schema = getattr(info, "payload_schema", None) or {}
         # Every configured gate field needs its own full-text index — a
@@ -1985,6 +2006,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         cfg.vector.health_timeout,
         expected_dim,
         text_search=cfg.recall.text_search,
+        timestamp_index=cfg.timestamp_index,
     )
 
     # LLM (optional — answer only) and graph (optional).
@@ -2524,7 +2546,16 @@ def _indexing_store(args: argparse.Namespace, provider) -> VectorStore:
         host=args.qdrant,
         sparse_text=sparse,
         text_key=text_key,
+        **_timestamp_index_kwargs(),
     )
+
+
+def _timestamp_index_kwargs() -> dict:
+    try:
+        configured = Config.load().timestamp_index
+    except Exception:  # noqa: BLE001
+        return {}
+    return {"timestamp_index": configured} if configured is not None else {}
 
 
 def _quantization_store_kwargs(args: argparse.Namespace) -> dict:
@@ -5045,6 +5076,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         text_key=_schema_text,
         timestamp_key=_schema_ts,
         timestamp_format=_schema_fmt,
+        **_timestamp_index_kwargs(),
         text_search=_text_search_mode(),
         resolve_roots=[
             p for p in os.environ.get("MNEMOSTACK_RESOLVE_ROOTS", "").split(os.pathsep) if p
@@ -5176,6 +5208,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         text_key=_schema_text,
         timestamp_key=_schema_ts,
         timestamp_format=_schema_fmt,
+        **_timestamp_index_kwargs(),
         text_search=_text_search_mode(),
         quantization_rescore=getattr(args, "_quant_rescore", None),
         quantization_oversampling=getattr(args, "_quant_oversampling", None),

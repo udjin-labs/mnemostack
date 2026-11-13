@@ -34,6 +34,7 @@ from .qdrant import (
     _stamp_tenant,
     _tenant_condition,
     quantization_search_params,
+    timestamp_index_schema,
 )
 
 
@@ -62,10 +63,12 @@ class AsyncVectorStore:
         quantization_rescore: bool | None = None,
         quantization_oversampling: float | None = None,
         hnsw_ef: int | None = None,
+        timestamp_index: tuple[str, str] | None = None,
     ):
         self.collection = collection
         self.dimension = dimension
         self.distance = distance
+        self.timestamp_index = timestamp_index
         # Validated before the client exists: a rejected value must not leave
         # an unclosable async client behind.
         self.search_params = quantization_search_params(
@@ -109,6 +112,26 @@ class AsyncVectorStore:
                 )
             except Exception:  # noqa: BLE001
                 pass  # already indexed or local Qdrant (payload indexes are a no-op there)
+            # Index invalidated_at (the default validity filter), as the sync store does.
+            try:
+                await self.client.create_payload_index(
+                    collection_name=self.collection,
+                    field_name="invalidated_at",
+                    field_schema=PayloadSchemaType.DATETIME,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            timestamp_index = getattr(self, "timestamp_index", None)
+            schema = timestamp_index_schema(timestamp_index)
+            if schema is not None and timestamp_index is not None:
+                try:
+                    await self.client.create_payload_index(
+                        collection_name=self.collection,
+                        field_name=timestamp_index[0],
+                        field_schema=schema,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
             return True
         await self._validate_dimension()
         return False
