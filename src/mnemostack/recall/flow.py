@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from .deadline import get_deadline, start_deadline
+from .deadline import get_deadline, isolate_results, start_deadline
 from .tokens import TokenCounter, apply_token_budget
 from .trace import ChildTrace, RecallTrace, apply_rerank_safe
 from .validity import filter_by_tenant
@@ -155,16 +155,24 @@ def recall_flow(
         elif deadline.expired():
             trace.mark("recall:deadline")
         else:
-            from dataclasses import replace
 
             child = ChildTrace(deadline=deadline)
-            candidates = [replace(r, sources=list(r.sources), payload=dict(r.payload)) for r in results]
-            completed = deadline.run(
-                lambda: apply_rerank_safe(reranker, query, candidates, child),
-                None, on_timeout=lambda: trace.mark("recall:deadline"),
-            )
+            memo: dict = {}
+            to_rerank, to_floor = results, recalled
+
+            def rerank():
+                # Both copies are part of the bounded work: a large payload
+                # or a slow `__deepcopy__` must not run outside the deadline.
+                # The floor step below reads `recalled`. It must see the
+                # nested values the reranker changed, as it does without a
+                # deadline, so it gets the same copies through one memo.
+                candidates = isolate_results(to_rerank, memo)
+                floor_pool = isolate_results(to_floor, memo)
+                return apply_rerank_safe(reranker, query, candidates, child), floor_pool
+
+            completed = deadline.run(rerank, None, on_timeout=lambda: trace.mark("recall:deadline"))
             if completed is not None:
-                results = completed
+                results, recalled = completed
                 trace.post_rerank = child.post_rerank
                 for tag in child.degraded:
                     trace.mark(tag)
