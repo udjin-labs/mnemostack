@@ -117,6 +117,56 @@ def test_gravity_dampen_penalizes_no_keyword_match():
     assert out[1].payload.get("dampened") == "gravity"
 
 
+def test_gravity_dampen_matches_long_terms_by_prefix():
+    ctx = PipelineContext(query="серверу decided кот", query_tokens=["серверу", "decided", "кот"])
+    rs = [
+        _mk_result(1, "сервер упал вчера", score=1.0),
+        _mk_result(2, "we decide tomorrow", score=1.0),
+        _mk_result(3, "собака спит", score=1.0),
+    ]
+    out = {r.id: r for r in GravityDampen(penalty=0.5).apply(ctx, rs)}
+    assert out[1].score == 1.0 and "dampened" not in out[1].payload
+    assert out[2].score == 1.0 and "dampened" not in out[2].payload
+    assert out[3].score == 0.5 and out[3].payload["dampened"] == "gravity"
+
+
+def test_gravity_dampen_matches_identifier_terms_exactly():
+    ctx = PipelineContext(
+        query="api_key_backup 1234567", query_tokens=["api_key_backup", "1234567"]
+    )
+    rs = [
+        _mk_result(1, "rotate api_key_prod weekly", score=1.0),
+        _mk_result(2, "order 1234599 shipped", score=1.0),
+        _mk_result(3, "restore api_key_backup first", score=1.0),
+    ]
+    out = {r.id: r for r in GravityDampen(penalty=0.5).apply(ctx, rs)}
+    assert out[1].score == 0.5
+    assert out[2].score == 0.5
+    assert out[3].score == 1.0
+
+
+def test_gravity_dampen_prefix_matches_only_word_starts():
+    ctx = PipelineContext(query="server", query_tokens=["server"])
+    rs = [
+        _mk_result(1, "two seats reserved", score=1.0),
+        _mk_result(2, "serves many requests", score=1.0),
+        _mk_result(3, "the observers left", score=1.0),
+    ]
+    out = {r.id: r for r in GravityDampen(penalty=0.5).apply(ctx, rs)}
+    assert out[1].score == 0.5
+    assert out[2].score == 1.0
+    # The whole term inside another word still counts, as before the prefix rule.
+    assert out[3].score == 1.0
+
+
+def test_gravity_dampen_matches_short_terms_exactly():
+    ctx = PipelineContext(query="johns", query_tokens=["johns"])
+    rs = [_mk_result(1, "john said hello", score=1.0), _mk_result(2, "the johns left", score=1.0)]
+    out = {r.id: r for r in GravityDampen(penalty=0.5).apply(ctx, rs)}
+    assert out[1].score == 0.5
+    assert out[2].score == 1.0
+
+
 def test_gravity_dampen_respects_min_score_guard():
     rs = [_mk_result(1, "cats", score=0.05)]
     ctx = PipelineContext(query="dogs", query_tokens=["dogs"])

@@ -58,7 +58,7 @@ def build_full_pipeline(
         1. ClassifyQuery: determine query_type for downstream stages
         2. CalibrateRelevance: put rank scores on a bounded utility scale
         3. ExactTokenRescue: boost exact-match sources for infra queries
-        4. HubDampen: conditional on nonempty hub_degrees
+        4. HubDampen: SDK-only with nonempty hub_degrees; absent on CLI, HTTP and MCP
         5. QLearningReranker: conditional on stateful and Q-learning toggles
         6. CuriosityBoost: conditional on stateful and curiosity toggles
         7. FreshnessBlend: blend similarity with recency
@@ -149,6 +149,9 @@ def build_stateless_pipeline(
     access_bonus_max: float = DEFAULT_ACCESS_BONUS_MAX,
 ) -> Pipeline:
     """Minimal pipeline with stateless stages only.
+
+    Hub dampening is SDK-only with nonempty hub_degrees; CLI, HTTP and MCP
+    paths do not supply it.
 
     No state persistence, no Q-learning, no IOR. Good for:
     - Short-lived scripts

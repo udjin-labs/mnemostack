@@ -5,6 +5,9 @@ Each Stage transforms a list of RecallResult objects. Stages can be:
 - Stateless (gravity_dampen, freshness_blend, classify_query)
 - Stateful (QLearningReranker, InhibitionOfReturn, CuriosityBoost) — take a StateStore
 
+Hub dampening is SDK-only with nonempty hub_degrees; CLI, HTTP and MCP paths
+do not supply it.
+
 Usage:
     from mnemostack.recall.pipeline import Pipeline, Stage
     from mnemostack.recall.pipeline.stages import (

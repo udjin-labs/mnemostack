@@ -550,7 +550,7 @@ Bearer service key; the server does not bind all clients to one process key.
 See [authenticated HTTP MCP](mcp.md#authenticated-http) for TLS, proxy validation,
 client requirements, and the distinction from OAuth connectors.
 
-For multi-tenant use, `mcp-serve --auth` runs the process as one authenticated tenant: launch it with a service key (`--api-key` / `MNEMOSTACK_API_KEY`) that resolves the tenant + scopes for the whole process (the natural fit for how an MCP client passes secrets in its server config). The key is **re-verified on every tool call**, so revoking it stops the data/graph tools immediately; they are scope-gated (`search`/`answer` need `read`, `invalidate`/`feedback` need `write`) and confined to the key's tenant — including the tenant-scoped graph tools. (`mnemostack_health` is public — a liveness check that still responds after the key is revoked, so it isn't a tenant boundary.)
+For multi-tenant use, `mcp-serve --auth` runs the process as one authenticated tenant: launch it with a service key (`--api-key` / `MNEMOSTACK_API_KEY`) that resolves the tenant + scopes for the whole process (the natural fit for how an MCP client passes secrets in its server config). The key is **re-verified on every tool call**, so revoking it stops the data/graph tools immediately; they are scope-gated (`search`/`answer` need `read`, `invalidate`/`feedback` need `write`) and confined to the key's tenant — including the tenant-scoped graph tools. (`mnemostack_health` requires `read` and reports point counts for the key's tenant; revocation blocks it too.)
 
 ### Web inspector / admin console
 

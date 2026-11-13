@@ -121,7 +121,7 @@ For a multi-tenant deployment, run the server as one authenticated tenant with `
 mnemostack mcp-serve --auth --api-key "$MNEMOSTACK_API_KEY" --collection my-memory
 ```
 
-The key (`--api-key` or `MNEMOSTACK_API_KEY`) resolves the tenant + scopes for the whole process — the natural fit for how an MCP client passes secrets in its server config. It is **re-verified on every tool call**, so revoking it stops the session immediately (fail closed). Tools are scope-gated — `mnemostack_search` / `mnemostack_answer` need `read`; `mnemostack_remember` / `mnemostack_invalidate` / `mnemostack_feedback` / `mnemostack_graph_add_triple` need `write` — and every data/graph tool call is confined to the key's tenant. (`mnemostack_health` stays **public** — a liveness check, not gated by the key, so it still responds after a key is revoked.) Issue keys with `mnemostack keys add --tenant <id> --scopes read,write` (and set per-tenant quotas with `mnemostack quota set`). Auth is **off by default** — an unauthenticated `mcp-serve` behaves exactly as before.
+The key (`--api-key` or `MNEMOSTACK_API_KEY`) resolves the tenant + scopes for the whole process — the natural fit for how an MCP client passes secrets in its server config. It is **re-verified on every tool call**, so revoking it stops the session immediately (fail closed). Tools are scope-gated — `mnemostack_search` / `mnemostack_answer` need `read`; `mnemostack_remember` / `mnemostack_invalidate` / `mnemostack_feedback` / `mnemostack_graph_add_triple` need `write` — and every data/graph tool call is confined to the key's tenant. (`mnemostack_health` requires `read` and reports point counts for the key's tenant; revocation blocks it too.) Issue keys with `mnemostack keys add --tenant <id> --scopes read,write` (and set per-tenant quotas with `mnemostack quota set`). Auth is **off by default** — an unauthenticated `mcp-serve` behaves exactly as before.
 
 ### Library extension hooks (`build_server`)
 
@@ -389,7 +389,7 @@ If the answer generator cannot produce a reliable answer, `ok` may be `false`, `
 
 ### `mnemostack_feedback`
 
-**Purpose:** Record explicit feedback into the configured state store for Q-learning weights and inhibition-of-return tracking. Since 0.5.0 `mnemostack_search` runs the full configurable pipeline against the same state store, so recorded feedback influences subsequent search ranking in the same deployment (Q-learning weights, inhibition-of-return).
+**Purpose:** Record explicit feedback into the configured state store for Q-learning weights and inhibition-of-return tracking. Since 0.5.0 `mnemostack_search` runs the configurable pipeline against the same state store (hub dampening is SDK-only with non-empty `hub_degrees` and does not run on CLI, HTTP or MCP paths), so recorded feedback influences subsequent search ranking in the same deployment (Q-learning weights, inhibition-of-return).
 
 **Input parameters:**
 

@@ -219,7 +219,17 @@ class GravityDampen(Stage):
 
     Counters the "hub memory" problem: a popular memory dominates embedding
     similarity without really containing the information we asked for.
+
+    A key term counts as present when it occurs in the text as written. A
+    key term that is a plain word of PREFIX_MIN_LEN letters or more is also
+    present when a word of the text starts with its first PREFIX_LEN
+    letters, so another form of the same word ("серверу" for "сервер",
+    "decided" for "decide") still counts. Terms with digits or underscores
+    (ids, versions, names such as api_key_backup) match only as written.
     """
+
+    PREFIX_MIN_LEN = 6
+    PREFIX_LEN = 5
 
     def __init__(self, penalty: float = 0.5, min_score: float = 0.1):
         self.penalty = penalty
@@ -229,11 +239,16 @@ class GravityDampen(Stage):
         key_terms = set(context.query_tokens) or (set(context.query.lower().split()) - STOPWORDS)
         if not key_terms:
             return results
+        prefixes = tuple(
+            {t[: self.PREFIX_LEN] for t in key_terms if len(t) >= self.PREFIX_MIN_LEN and t.isalpha()}
+        )
         for r in results:
             if r.score <= self.min_score:
                 continue
             text_lower = r.text.lower()
-            if not any(t in text_lower for t in key_terms):
+            if not any(t in text_lower for t in key_terms) and not (
+                prefixes and any(w.startswith(prefixes) for w in re.findall(r"\w+", text_lower))
+            ):
                 r.score *= self.penalty
                 r.payload["dampened"] = "gravity"
         results.sort(key=lambda x: -x.score)
@@ -243,7 +258,8 @@ class GravityDampen(Stage):
 class HubDampen(Stage):
     """Penalize results whose graph node is in the top 10% by degree.
 
-    Requires `hub_degrees` (dict of id → node degree). If empty, stage is a no-op.
+    SDK-only: requires `hub_degrees` (dict of id to node degree).
+    If empty, stage is a no-op. CLI, HTTP and MCP paths do not supply it.
     """
 
     def __init__(self, hub_degrees: dict[Any, int] | None = None, p90_floor: float = 0.4):

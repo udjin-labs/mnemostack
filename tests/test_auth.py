@@ -237,6 +237,32 @@ def test_cli_keys_add_list_revoke_roundtrip(tmp_path, capsys):
     assert cmd_keys_revoke(_ns(keys_file=kf, id=kid)) == 1  # already gone
 
 
+@pytest.mark.parametrize("scopes", ["read,write", "read,write, admin,admin"])
+def test_cli_keys_add_admin_warning_preserves_stdout(tmp_path, capsys, monkeypatch, scopes):
+    from mnemostack.cli import cmd_keys_add
+
+    monkeypatch.delenv("MNEMOSTACK_KEYSTORE", raising=False)
+    monkeypatch.setattr(FileKeyStore, "issue", lambda *args: ("fixed_id", "msk_fixed"))
+    assert cmd_keys_add(
+        _ns(keys_file=str(tmp_path / "keys.json"), tenant="acme", scopes=scopes, label="app")
+    ) == 0
+    captured = capsys.readouterr()
+    normalized = ",".join(sorted({s.strip() for s in scopes.split(",")}))
+    assert captured.out == (
+        "key id:  fixed_id\ntenant:  acme\n"
+        f"scopes:  {normalized}\n"
+        "\nkey (shown once — store it now, it is not recoverable):\n  msk_fixed\n"
+    )
+    if "admin" in normalized.split(","):
+        assert captured.err == (
+            "warning: this admin key has access to all tenants: key and quota management, "
+            "record browsing in the admin console, and per-tenant metrics. "
+            "Do not give it to a tenant.\n"
+        )
+    else:
+        assert captured.err == ""
+
+
 def test_cli_keys_add_rejects_bad_scope(tmp_path, capsys):
     from mnemostack.cli import cmd_keys_add
 

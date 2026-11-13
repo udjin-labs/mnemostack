@@ -264,7 +264,7 @@ answer, and invalidate. The graph is **tenant-scoped** (see
 pipeline keeps its graph-resurrection stage (confined to the caller's tenant), and
 the graph tools are tenant-scoped rather than fail-closed — `mnemostack_graph_query`
 is confined to the key's tenant, `mnemostack_graph_add_triple` (still `write`-scoped)
-is stamped with it. `mnemostack_health` stays public. Without `--auth` the tools
+is stamped with it. `mnemostack_health` requires `read` and reports point counts for the key's tenant. Without `--auth` the tools
 behave exactly as listed above.
 
 ## Python library
@@ -405,7 +405,8 @@ behave exactly as listed above.
   `build_full_pipeline`, and the individual stages — especially the
   cognitive-science stages (`GravityDampen`, `HubDampen`, `CuriosityBoost`,
   `InhibitionOfReturn`, `QLearningReranker`, `FreshnessBlend`). Behavior and
-  ordering may change as ranking is tuned. Use the `Recaller` / `recall_flow`
+  ordering may change as ranking is tuned. `HubDampen` is SDK-only with non-empty
+  `hub_degrees`; it does not run on CLI, HTTP or MCP paths. Use the `Recaller` / `recall_flow`
   entry points, which are stable, rather than assembling stages yourself.
 - **`HyDERetriever`** — exported but not wired into any serving surface.
 - **`ScoringReranker` / `RelevanceScorer`** — an alternate reranker path not used
