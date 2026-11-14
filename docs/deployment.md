@@ -723,7 +723,7 @@ For Mnemostack, start with normal application logs. Increase verbosity only whil
 
 ### Lexical search beyond the in-process BM25
 
-The default lexical arm (in-process BM25 over `bm25_paths`) holds its corpus
+The in-process lexical arm (BM25 over `bm25_paths`) holds its corpus
 in client memory and scores in Python. Its search time grows with the corpus:
 every document that contains a query word is scored, and common words select
 most documents. In a benchmark with one client the arm took about 30 ms at
@@ -739,6 +739,15 @@ selects the arm; pick by collection size and whether you can re-index:
 | `native_bm25` | Qdrant full-text index | native BM25 | any | no |
 | `sparse` | Qdrant sparse vectors | server tf·idf-like (IDF modifier) | any | **yes** (space written at ingest) |
 
+- `auto` (the default) selects `bm25` when `bm25_paths` is configured.
+  Otherwise it uses native BM25 as soon as the collection has the BM25-scored
+  full-text index, and no lexical arm until then. Collections created by
+  mnemostack get the index at creation (not under `sparse`); for an older
+  collection run
+  `mnemostack text-index` once (no restart: a running service looks for
+  the index during recall, at most every 30 seconds). `mnemostack doctor`
+  shows which case applies. Set `off` to run without a lexical arm; new
+  collections still get the index.
 - `native_bm25` requires Qdrant server and client 1.20 or newer. Run
   `mnemostack text-index` once to enable BM25 scoring on the existing text
   payload. Existing points become searchable without re-uploading data or

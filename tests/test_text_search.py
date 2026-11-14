@@ -10,7 +10,7 @@ import pytest
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance
 
-from mnemostack.config import TEXT_SEARCH_MODES, resolve_text_search_mode
+from mnemostack.config import AUTO_NATIVE_BM25, TEXT_SEARCH_MODES, resolve_text_search_mode
 from mnemostack.recall.retrievers import (
     QdrantNativeBM25Retriever,
     QdrantSparseRetriever,
@@ -174,11 +174,143 @@ def test_retrievers_declare_the_schema():
 
 def test_resolve_text_search_mode():
     assert resolve_text_search_mode("auto", ["/docs"]) == "bm25"
-    assert resolve_text_search_mode("auto", []) == "off"
+    assert resolve_text_search_mode("auto", []) == AUTO_NATIVE_BM25
+    assert resolve_text_search_mode("off", []) == "off"
+    assert AUTO_NATIVE_BM25 not in TEXT_SEARCH_MODES
     assert resolve_text_search_mode("sparse", []) == "sparse"
     with pytest.raises(ValueError, match="text_search"):
         resolve_text_search_mode("fulltext", [])
     assert set(TEXT_SEARCH_MODES) == {"auto", "off", "bm25", "native_bm25", "sparse"}
+
+
+class _IndexProbeStore:
+    """Counts index probes and lexical queries; the index appears on demand."""
+
+    def __init__(self):
+        self.indexed = False
+        self.probes = 0
+        self.queries = 0
+
+    def has_scored_text_index(self, text_key=None):
+        self.probes += 1
+        return self.indexed
+
+    def native_bm25_search(self, query, **kwargs):
+        self.queries += 1
+        return []
+
+
+@requires_native_bm25
+def test_auto_native_arm_stays_silent_until_the_index_exists():
+    store = _IndexProbeStore()
+    arm = QdrantNativeBM25Retriever(vector_store=store, require_index=True)
+    assert arm.search("postgres") == []
+    assert arm.search("postgres") == []
+    # One look per interval, and never a query the server would reject.
+    assert (store.probes, store.queries) == (1, 0)
+
+    store.indexed = True
+    arm.INDEX_PROBE_INTERVAL_S = 0.0
+    arm.search("postgres")
+    arm.search("postgres")
+    # Picked up without a restart, then never looked for again.
+    assert (store.probes, store.queries) == (2, 2)
+
+
+@requires_native_bm25
+def test_explicit_native_arm_does_not_wait_for_the_index():
+    store = _IndexProbeStore()
+    QdrantNativeBM25Retriever(vector_store=store).search("postgres")
+    assert (store.probes, store.queries) == (0, 1)
+
+
+@requires_native_bm25
+def test_auto_native_arm_looks_again_after_a_failed_query():
+    # The index disappears under a running service (collection recreated):
+    # one query fails, then the arm is silent again instead of failing forever.
+    class _LosesIndex(_IndexProbeStore):
+        def native_bm25_search(self, query, **kwargs):
+            self.queries += 1
+            if not self.indexed:
+                raise RuntimeError("a text query needs a text index")
+            return []
+
+    store = _LosesIndex()
+    store.indexed = True
+    arm = QdrantNativeBM25Retriever(vector_store=store, require_index=True)
+    arm.search("postgres")
+    store.indexed = False
+    with pytest.raises(RuntimeError):
+        arm.search("postgres")
+    assert arm.search("postgres") == []
+    assert (store.probes, store.queries) == (2, 2)
+
+
+@pytest.mark.parametrize("schema, expected", [
+    ({"text": ("text", True)}, True),
+    ({"text": ("text", None)}, False),
+    ({"text": ("keyword", None)}, False),
+    ({"title": ("text", True)}, False),
+    ({}, False),
+])
+def test_has_scored_text_index_reads_the_collection_schema(schema, expected):
+    from types import SimpleNamespace
+
+    s = VectorStore.__new__(VectorStore)
+    s.collection = "ts"
+    s.text_key = "text"
+    s.client = SimpleNamespace(get_collection=lambda name: SimpleNamespace(payload_schema={
+        field: SimpleNamespace(data_type=kind, params=SimpleNamespace(scoring=scoring))
+        for field, (kind, scoring) in schema.items()
+    }))
+    assert s.has_scored_text_index() is expected
+
+
+def test_has_scored_text_index_is_false_for_a_missing_collection():
+    from types import SimpleNamespace
+
+    def missing(name):
+        raise RuntimeError("not found")
+
+    s = VectorStore.__new__(VectorStore)
+    s.collection = "ts"
+    s.text_key = "text"
+    s.client = SimpleNamespace(get_collection=missing)
+    assert s.has_scored_text_index() is False
+
+
+@requires_native_bm25
+def test_silent_auto_arm_leaves_recall_as_without_a_lexical_arm():
+    from mnemostack.recall import Recaller
+    from mnemostack.recall.retrievers import VectorRetriever
+
+    s = _store()
+    _seed(s)
+    embedder = _FakeEmbedder()
+    arm = QdrantNativeBM25Retriever(vector_store=_IndexProbeStore(), require_index=True)
+    plain = Recaller(embedding_provider=embedder, vector_store=s, retrievers=[VectorRetriever(embedder, s)])
+    auto = Recaller(embedding_provider=embedder, vector_store=s, retrievers=[VectorRetriever(embedder, s), arm])
+    expected = [(r.id, r.score) for r in plain.recall("postgres backup", limit=5, tenant="acme")]
+    assert expected
+    assert [(r.id, r.score) for r in auto.recall("postgres backup", limit=5, tenant="acme")] == expected
+
+
+def test_sparse_collection_gets_no_scored_text_index():
+    from unittest.mock import Mock
+
+    s = VectorStore.__new__(VectorStore)
+    s.collection = "ts"
+    s.dimension = 4
+    s.distance = Distance.COSINE
+    s.client = QdrantClient(":memory:")
+    s.sparse_text = True
+    s.text_key = "text"
+    s.timestamp_index = None
+    s._sparse_encoder = SparseTextEncoder()
+    create = Mock(wraps=s.client.create_payload_index)
+    s.client.create_payload_index = create
+    s.ensure_collection()
+    assert "text" not in {c.kwargs["field_name"] for c in create.call_args_list}
 
 
 def test_text_search_env_override(monkeypatch):
@@ -257,6 +389,27 @@ def test_synthesize_source_bm25_selects_the_configured_lexical_arm():
     assert _filter_recaller(rec, {"bm25"}).retrievers  # not dropped
     result = synthesize("postgres", sources=["bm25"], recaller=rec)
     assert result.facts  # sparse-arm facts survive the result-source filter
+
+
+def test_synthesize_source_bm25_alone_under_auto_opens_no_store(monkeypatch, capsys):
+    # auto configured nothing explicitly: a lexical-only synthesis stays
+    # independent of Qdrant (no store, no tenant probe), as before.
+    import json
+
+    import mnemostack.cli as cli
+
+    def no_store(**kwargs):
+        raise AssertionError("lexical-only synthesis under auto must not open a store")
+
+    monkeypatch.setattr(cli, "_text_search_mode", lambda: "auto")
+    monkeypatch.setattr(cli, "VectorStore", no_store)
+    cli._payload_schema.cache_clear()
+    args = cli.build_parser().parse_args(
+        ["synthesize", "postgres", "--source", "bm25", "--format", "json"]
+    )
+    assert cli.cmd_synthesize(args) == 0
+    assert json.loads(capsys.readouterr().out)["facts"] == []
+    cli._payload_schema.cache_clear()
 
 
 def test_sparse_enable_on_dense_collection_refuses_loudly():

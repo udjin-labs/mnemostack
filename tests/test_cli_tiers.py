@@ -77,7 +77,9 @@ def test_build_recaller_uses_retriever_mode_by_default():
 
     recaller = _build_recaller(args, provider, store)
 
-    assert [r.name for r in recaller.retrievers] == ["vector", "temporal"]
+    # text_search=auto without a file corpus: the native BM25 arm, gated on the index.
+    assert [r.name for r in recaller.retrievers] == ["vector", "bm25", "temporal"]
+    assert recaller.retrievers[1].require_index is True
     assert recaller.vector_floor == 2
 
 

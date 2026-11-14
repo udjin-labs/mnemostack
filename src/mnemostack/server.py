@@ -46,6 +46,7 @@ except ImportError as e:  # pragma: no cover - import guard
 from mnemostack import __version__
 from mnemostack.access import record_access
 from mnemostack.config import (
+    AUTO_NATIVE_BM25,
     Config,
     llm_kwargs,
     provider_kwargs,
@@ -1279,13 +1280,14 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                     tenant=None if cfg.auth_enabled else cfg.default_tenant,
                 )
             )
-    elif text_mode == "native_bm25":
+    elif text_mode in ("native_bm25", AUTO_NATIVE_BM25):
         lexical_arms.append(
             QdrantNativeBM25Retriever(
                 vector_store=store,
                 text_key=cfg.text_key,
                 timestamp_key=cfg.timestamp_key,
                 timestamp_format=cfg.timestamp_format,
+                require_index=text_mode == AUTO_NATIVE_BM25,
             )
         )
     elif text_mode == "sparse":

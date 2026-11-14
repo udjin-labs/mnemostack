@@ -630,7 +630,20 @@ class QdrantSparseRetriever(Retriever):
 
 
 class QdrantNativeBM25Retriever(Retriever):
-    """Server-side BM25 over a Qdrant 1.20+ scored full-text index."""
+    """Server-side BM25 over a Qdrant 1.20+ scored full-text index.
+
+    ``require_index=True`` is the ``text_search: auto`` behavior: the arm
+    answers only once the collection carries the scored index, and returns
+    nothing until then — a query without the index is a server error, and
+    auto must not turn a collection that was never indexed into a
+    permanently failing arm. The index is looked for again at most every
+    ``INDEX_PROBE_INTERVAL_S``, so a collection created (or indexed with
+    ``mnemostack text-index``) after startup is picked up without a restart;
+    a failed query makes the arm look again, so a lost index costs one query.
+    """
+
+    #: Seconds between looks for a still-missing index (``require_index``).
+    INDEX_PROBE_INTERVAL_S = 30.0
 
     # Keep selectors and result consumers on the existing lexical family.
     name = "bm25"
@@ -646,6 +659,7 @@ class QdrantNativeBM25Retriever(Retriever):
         text_key: str = "text",
         timestamp_key: str = "timestamp",
         timestamp_format: str = "iso",
+        require_index: bool = False,
     ):
         try:
             from qdrant_client.models import TextQuery  # noqa: F401
@@ -655,22 +669,47 @@ class QdrantNativeBM25Retriever(Retriever):
         self.text_key = text_key
         self.timestamp_key = timestamp_key
         self.timestamp_format = timestamp_format
+        self.require_index = require_index
+        self._index_seen = False
+        self._index_probed_at: float | None = None
+
+    def _index_ready(self) -> bool:
+        if self._index_seen:
+            return True
+        now = time.monotonic()
+        if (
+            self._index_probed_at is not None
+            and now - self._index_probed_at < self.INDEX_PROBE_INTERVAL_S
+        ):
+            return False
+        self._index_probed_at = now
+        self._index_seen = self.vector_store.has_scored_text_index(self.text_key)
+        return self._index_seen
 
     def search(
         self, query, limit=20, filters=None, as_of=None, include_invalidated=False, tenant=None
     ):
+        if self.require_index and not self._index_ready():
+            return []
         filters = convert_timestamp_filter(
             filters, timestamp_key=self.timestamp_key, timestamp_format=self.timestamp_format
         )
         tkw = {"tenant": tenant} if tenant is not None else {}
-        hits = self.vector_store.native_bm25_search(
-            query,
-            limit=limit,
-            filters=filters,
-            text_key=self.text_key,
-            hide_invalidated=as_of is None and not include_invalidated,
-            **tkw,
-        )
+        try:
+            hits = self.vector_store.native_bm25_search(
+                query,
+                limit=limit,
+                filters=filters,
+                text_key=self.text_key,
+                hide_invalidated=as_of is None and not include_invalidated,
+                **tkw,
+            )
+        except Exception:
+            # The index may be gone (collection recreated under a running
+            # service): look for it again before the next query.
+            self._index_seen = False
+            self._index_probed_at = None
+            raise
         return [
             RecallResult(
                 id=h.id,

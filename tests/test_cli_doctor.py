@@ -452,6 +452,40 @@ def test_doctor_checks_native_bm25_scoring(patched, capsys, scoring, expected_rc
     cli._payload_schema.cache_clear()
 
 
+@pytest.mark.parametrize("scoring, marker", [
+    (True, "auto uses native BM25"),
+    (False, "without a lexical arm"),
+])
+def test_doctor_reports_what_auto_resolves_to(patched, capsys, scoring, marker):
+    from types import SimpleNamespace
+
+    from qdrant_client.models import PayloadSchemaType
+
+    patched(
+        cfg=Config(),  # text_search=auto, no bm25_paths
+        provider=_FakeProvider(dim=8, healthy=True),
+        qdrant_cls=_fake_qdrant_cls(
+            reachable=True,
+            exists=True,
+            count=5,
+            size=8,
+            payload_schema={
+                "text": SimpleNamespace(
+                    data_type=PayloadSchemaType.TEXT,
+                    params=SimpleNamespace(scoring=scoring),
+                )
+            },
+        ),
+        llm=_FakeLLM(healthy=True),
+    )
+    cli._payload_schema.cache_clear()
+    rc = cli.cmd_doctor(_args())
+    out = capsys.readouterr().out
+    assert rc == 0  # a collection without the index is not a fault under auto
+    assert marker in out
+    cli._payload_schema.cache_clear()
+
+
 @pytest.mark.parametrize("indexes,expected", [
     ({"invalidated_at": "datetime", "captured": "float"}, None),
     ({"captured": "float"}, "invalidated_at --schema datetime"),
