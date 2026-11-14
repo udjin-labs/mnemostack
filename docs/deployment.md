@@ -724,13 +724,18 @@ For Mnemostack, start with normal application logs. Increase verbosity only whil
 ### Lexical search beyond the in-process BM25
 
 The default lexical arm (in-process BM25 over `bm25_paths`) holds its corpus
-in client memory — fine to roughly 100K documents, not for a million-chunk
-collection. `recall.text_search` (env `MNEMOSTACK_TEXT_SEARCH`) selects the
-arm; pick by collection size and whether you can re-index:
+in client memory and scores in Python. Its search time grows with the corpus:
+every document that contains a query word is scored, and common words select
+most documents. In a benchmark with one client the arm took about 30 ms at
+5,000 documents, 90 ms at 20,000 and 450 ms at 100,000, and it was the slowest
+part of a recall from 20,000 documents on. Concurrent clients slow each other
+down, because the scoring holds the interpreter lock. Use the in-process arm
+for small collections. `recall.text_search` (env `MNEMOSTACK_TEXT_SEARCH`)
+selects the arm; pick by collection size and whether you can re-index:
 
 | Mode | Corpus lives | Scoring | Scale | Reindex needed |
 |---|---|---|---|---|
-| `bm25` (auto-default with `bm25_paths`) | client RAM, from files | true BM25 | <~100K | — |
+| `bm25` (auto-default with `bm25_paths`) | client RAM, from files | true BM25 | small; latency grows with size | — |
 | `native_bm25` | Qdrant full-text index | native BM25 | any | no |
 | `sparse` | Qdrant sparse vectors | server tf·idf-like (IDF modifier) | any | **yes** (space written at ingest) |
 
@@ -738,6 +743,10 @@ arm; pick by collection size and whether you can re-index:
   `mnemostack text-index` once to enable BM25 scoring on the existing text
   payload. Existing points become searchable without re-uploading data or
   creating sparse vectors. New writes are visible immediately.
+  In the same benchmark the lexical arm took 12 to 18 ms from 5,000 to
+  100,000 documents, a whole recall at 100,000 documents took 56 ms against
+  444 ms, and more client threads raised the throughput. Retrieval tests on
+  LoCoMo and LongMemEval gave the same ranking quality as the in-process arm.
 - The same trap applies to **payload filters** (`filters={...}` on
   `/recall`, the MCP tools, or library calls): a real server evaluates a
   filter on an unindexed field by scanning candidate payloads — a
