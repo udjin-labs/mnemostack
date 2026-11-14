@@ -6,6 +6,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- `recall.text_search: auto` (the default) now uses native BM25 when no
+  `bm25_paths` corpus is configured and the collection has the BM25-scored
+  full-text index. New collections get that index when they are created, so a
+  default install has a lexical arm with no extra setting. Without the index
+  `auto` runs without a lexical arm, as before; an existing collection gains
+  the arm after `mnemostack text-index`, with no restart. With `bm25_paths`
+  set, `auto` still selects the in-process BM25 arm. Set `text_search: off` to
+  keep recall without a lexical arm; new collections still get the index
+  under `off`, `bm25` and `native_bm25`, at the cost of index memory and
+  write time. Collections created under `sparse` do not get it. On a Qdrant
+  server without BM25 scoring `auto` stays without a lexical arm.
+  `mnemostack synthesize` with only the lexical source selected is unchanged
+  under `auto`; set `native_bm25` for a lexical-only synthesis.
+  `AsyncVectorStore` accepts `text_key` for the field that gets the index.
+- `mnemostack doctor` reports whether `auto` runs with native BM25 on the
+  collection.
+
 ## [3.3.0] - 2026-11-13
 
 ### Added

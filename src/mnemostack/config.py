@@ -256,16 +256,23 @@ class GraphConfig:
 TEXT_SEARCH_MODES = ("auto", "off", "bm25", "native_bm25", "sparse")
 
 
+#: What ``auto`` resolves to without ``bm25_paths``: the native BM25 arm,
+#: active only while the collection carries the scored full-text index.
+#: A resolved value, not a configurable mode.
+AUTO_NATIVE_BM25 = "auto_native_bm25"
+
+
 def resolve_text_search_mode(mode: str, bm25_paths: list[str] | None) -> str:
-    """Concrete lexical-arm choice: ``auto`` keeps historical behavior
-    (file-corpus BM25 when ``bm25_paths`` is configured, else no lexical arm);
+    """Concrete lexical-arm choice: ``auto`` is file-corpus BM25 when
+    ``bm25_paths`` is configured, else :data:`AUTO_NATIVE_BM25` (native BM25
+    when the collection has the scored index, no lexical arm otherwise);
     anything else passes through. Unknown modes fail loud at build time."""
     if mode not in TEXT_SEARCH_MODES:
         raise ValueError(
             f"text_search must be one of {TEXT_SEARCH_MODES}, got {mode!r}"
         )
     if mode == "auto":
-        return "bm25" if bm25_paths else "off"
+        return "bm25" if bm25_paths else AUTO_NATIVE_BM25
     return mode
 
 
@@ -308,9 +315,10 @@ class RecallConfig:
     text_key: str = "text"
     timestamp_key: str = "timestamp"
     timestamp_format: str = "iso"
-    #: Which lexical arm joins the recall fleet. "auto" (default) keeps the
-    #: historical behavior: in-process BM25 over bm25_paths when set, else no
-    #: lexical arm. "bm25" = markdown-file corpus;
+    #: Which lexical arm joins the recall fleet. "auto" (default): in-process
+    #: BM25 over bm25_paths when set; else native BM25 when the collection
+    #: has the BM25-scored full-text index (new collections get it), and no
+    #: lexical arm without it. "bm25" = markdown-file corpus;
     #: "native_bm25" = Qdrant 1.20+ BM25 scoring directly over a full-text
     #: payload index (any size, no extra vectors or client-side corpus);
     #: "sparse" = server-side sparse tf·idf scoring (any

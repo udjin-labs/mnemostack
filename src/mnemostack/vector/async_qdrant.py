@@ -34,6 +34,7 @@ from .qdrant import (
     _stamp_tenant,
     _tenant_condition,
     quantization_search_params,
+    text_index_params,
     timestamp_index_schema,
 )
 
@@ -64,11 +65,15 @@ class AsyncVectorStore:
         quantization_oversampling: float | None = None,
         hnsw_ef: int | None = None,
         timestamp_index: tuple[str, str] | None = None,
+        text_key: str = "text",
     ):
         self.collection = collection
         self.dimension = dimension
         self.distance = distance
         self.timestamp_index = timestamp_index
+        #: Payload field that gets the scored full-text index on a new
+        #: collection — the field `recall.text_key` names, as in the sync store.
+        self.text_key = text_key
         # Validated before the client exists: a rejected value must not leave
         # an unclosable async client behind.
         self.search_params = quantization_search_params(
@@ -132,6 +137,17 @@ class AsyncVectorStore:
                     )
                 except Exception:  # noqa: BLE001
                     pass
+            # The scored full-text index `text_search: auto` looks for, as the
+            # sync store creates it. Best effort: a server without BM25
+            # scoring must still get a working collection.
+            try:
+                await self.client.create_payload_index(
+                    collection_name=self.collection,
+                    field_name=getattr(self, "text_key", "text"),
+                    field_schema=text_index_params(scoring=True),
+                )
+            except Exception:  # noqa: BLE001
+                pass
             return True
         await self._validate_dimension()
         return False

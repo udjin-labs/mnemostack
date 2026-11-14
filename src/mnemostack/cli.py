@@ -356,6 +356,7 @@ def _doctor_qdrant(
     expected_dim: int | None,
     text_search: str = "auto",
     timestamp_index: tuple[str, str] | None = None,
+    auto_without_corpus: bool = False,
 ) -> None:
     """Read-only Qdrant probe: reachability, collection, count, dimension match.
 
@@ -528,7 +529,8 @@ def _doctor_qdrant(
                 ("drop the existing index explicitly in Qdrant first; " if actual else "")
                 + f"run `{command}`",
             )
-    if text_search == "native_bm25":
+    auto_native = text_search == "auto" and auto_without_corpus
+    if text_search == "native_bm25" or auto_native:
         schema = getattr(info, "payload_schema", None) or {}
         # Every configured gate field needs its own full-text index — a
         # multi-field layout with only the body field indexed would leave
@@ -545,10 +547,24 @@ def _doctor_qdrant(
             if is_text and has_scoring:
                 detail = f"full-text index on '{gate_field}'"
                 detail += " with BM25 scoring"
+                if auto_native:
+                    detail += " (text_search=auto uses native BM25)"
                 add("qdrant.text_index", "ok", detail)
             else:
                 missing.append(gate_field)
         for gate_field in missing:
+            if auto_native:
+                # Not a fault: auto simply runs without a lexical arm on a
+                # collection that was never indexed for it.
+                add(
+                    "qdrant.text_index",
+                    "disabled",
+                    f"text_search=auto and no BM25-scored full-text index on "
+                    f"'{gate_field}' — recall runs without a lexical arm",
+                    "run `mnemostack text-index` once to enable native BM25 "
+                    "(Qdrant 1.20 or newer)",
+                )
+                continue
             add(
                 "qdrant.text_index",
                 "misconfig",
@@ -2007,6 +2023,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         expected_dim,
         text_search=cfg.recall.text_search,
         timestamp_index=cfg.timestamp_index,
+        auto_without_corpus=not cfg.recall.bm25_paths,
     )
 
     # LLM (optional — answer only) and graph (optional).
@@ -2305,6 +2322,10 @@ def cmd_synthesize(args: argparse.Namespace) -> int:
         _source_enabled_for_cli("vector", source_filter)
         or _source_enabled_for_cli("temporal", source_filter)
     )
+    # Only an explicitly configured Qdrant mode opens a store for a
+    # lexical-only synthesis. Under auto the native arm rides on the store
+    # the vector or temporal source already needs; alone it would make a
+    # run that never touched Qdrant depend on it (tenant probe, network).
     _needs_store_only = _lexical_selected and _lexical_mode in ("native_bm25", "sparse")
     if _needs_provider:
         provider = get_provider(args.provider, **_provider_kwargs_from_args(args))
@@ -2585,7 +2606,7 @@ def _build_recaller(
     source_filter: set[str] | None = None,
 ) -> Recaller:
     """Build the same retriever-mode Recaller used by the service surfaces."""
-    from mnemostack.config import resolve_text_search_mode
+    from mnemostack.config import AUTO_NATIVE_BM25, resolve_text_search_mode
     from mnemostack.recall import (
         QdrantNativeBM25Retriever,
         QdrantSparseRetriever,
@@ -2626,9 +2647,11 @@ def _build_recaller(
                         tenant=normalize_tenant(getattr(args, "tenant", None)),
                     )
                 )
-        elif mode == "native_bm25" and store is not None:
+        elif mode in ("native_bm25", AUTO_NATIVE_BM25) and store is not None:
             retrievers.append(
-                QdrantNativeBM25Retriever(vector_store=store, **schema_kw)
+                QdrantNativeBM25Retriever(
+                    vector_store=store, require_index=mode == AUTO_NATIVE_BM25, **schema_kw
+                )
             )
         elif mode == "sparse":
             sparse_store = VectorStore(

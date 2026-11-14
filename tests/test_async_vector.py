@@ -113,9 +113,26 @@ async def test_async_new_collection_indexes_invalidated_at_and_existing_one_is_u
     store.client.create_payload_index = record
     assert await store.ensure_collection(recreate=True) is True
     assert ("invalidated_at", PayloadSchemaType.DATETIME) in calls
+    # The scored full-text index `text_search: auto` looks for, as in the sync store.
+    assert [bool(schema.scoring) for field, schema in calls if field == "text"] == [True]
     calls.clear()
     assert await store.ensure_collection() is False
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_async_new_collection_indexes_the_configured_text_key(store):
+    fields = []
+    original = store.client.create_payload_index
+
+    async def record(**kwargs):
+        fields.append(kwargs["field_name"])
+        return await original(**kwargs)
+
+    store.client.create_payload_index = record
+    store.text_key = "body"
+    assert await store.ensure_collection(recreate=True) is True
+    assert "body" in fields and "text" not in fields
 
 
 @pytest.mark.asyncio

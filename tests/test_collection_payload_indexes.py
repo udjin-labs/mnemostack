@@ -40,9 +40,15 @@ def test_new_collection_indexes(config, expected):
         create = Mock(wraps=store.client.create_payload_index)
         store.client.create_payload_index = create
         assert store.ensure_collection()
-        assert {c.kwargs["field_name"]: c.kwargs["field_schema"].value
+        def kind(schema):
+            if hasattr(schema, "value"):
+                return schema.value
+            return "scored text" if schema.scoring else "text"
+
+        assert {c.kwargs["field_name"]: kind(c.kwargs["field_schema"])
                 for c in create.call_args_list} == {
-            "tenant_id": "keyword", "source": "keyword", "invalidated_at": "datetime", **expected,
+            "tenant_id": "keyword", "source": "keyword", "invalidated_at": "datetime",
+            "text": "scored text", **expected,
         }
     finally:
         store.client.close()
@@ -74,7 +80,7 @@ def test_new_index_failures_match_keyword_index_failures():
     try:
         store.client.create_payload_index = Mock(side_effect=RuntimeError("unavailable"))
         assert store.ensure_collection()
-        assert store.client.create_payload_index.call_count == 4
+        assert store.client.create_payload_index.call_count == 5
         assert store.collection_exists()
     finally:
         store.client.close()

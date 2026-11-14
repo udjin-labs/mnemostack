@@ -392,7 +392,7 @@ def build_server(
         )
 
     def _build_recaller():
-        from mnemostack.config import resolve_text_search_mode
+        from mnemostack.config import AUTO_NATIVE_BM25, resolve_text_search_mode
         from mnemostack.recall import (
             QdrantNativeBM25Retriever,
             QdrantSparseRetriever,
@@ -420,9 +420,11 @@ def build_server(
                         tenant=None if auth_enabled else default_tenant,
                     )
                 )
-        elif mode == "native_bm25":
+        elif mode in ("native_bm25", AUTO_NATIVE_BM25):
             lexical_arms.append(
-                QdrantNativeBM25Retriever(vector_store=vec, **schema_kw)
+                QdrantNativeBM25Retriever(
+                    vector_store=vec, require_index=mode == AUTO_NATIVE_BM25, **schema_kw
+                )
             )
         elif mode == "sparse":
             sparse_store = VectorStore(

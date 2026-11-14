@@ -242,6 +242,24 @@ class Hit:
     vector: list[float] | None = None
 
 
+def text_index_params(*, scoring: bool = False) -> TextIndexParams:
+    """Schema of the full-text payload index; ``scoring`` adds the BM25
+    statistics native BM25 queries need (Qdrant 1.20+)."""
+    schema_kwargs: dict[str, Any] = {
+        "type": TextIndexType.TEXT,
+        "tokenizer": TokenizerType.WORD,
+        "lowercase": True,
+    }
+    if scoring:
+        fields = getattr(TextIndexParams, "model_fields", None)
+        if fields is None:  # Pydantic v1
+            fields = getattr(TextIndexParams, "__fields__", {})
+        if "scoring" not in fields:
+            raise RuntimeError("native_bm25 requires qdrant-client>=1.20.0")
+        schema_kwargs["scoring"] = True
+    return TextIndexParams(**schema_kwargs)
+
+
 def timestamp_index_schema(config: tuple[str, str] | None) -> PayloadSchemaType | None:
     """Index type for an explicitly configured timestamp payload.
 
@@ -375,6 +393,16 @@ class VectorStore:
             schema = timestamp_index_schema(self.timestamp_index)
             if schema is not None and self.timestamp_index is not None:
                 self.index_payload_field(self.timestamp_index[0], schema)
+            if sparse_cfg is None:
+                # The scored full-text index is what `text_search: auto`
+                # looks for: a collection born here gets its lexical arm
+                # with no operator command. Best effort — a server without
+                # BM25 scoring must still get a usable collection (auto then
+                # stays without the arm).
+                try:
+                    self.ensure_text_index(scoring=True)
+                except Exception:  # noqa: BLE001
+                    pass
             return True
         self._validate_dimension()
         if sparse_cfg is not None:
@@ -511,23 +539,27 @@ class VectorStore:
         it's safe to run against a pre-existing (mounted) collection. The local
         in-memory client matches text without an index, hence tests pass either
         way — production servers do not."""
-        schema_kwargs: dict[str, Any] = {
-            "type": TextIndexType.TEXT,
-            "tokenizer": TokenizerType.WORD,
-            "lowercase": True,
-        }
-        if scoring:
-            fields = getattr(TextIndexParams, "model_fields", None)
-            if fields is None:  # Pydantic v1
-                fields = getattr(TextIndexParams, "__fields__", {})
-            if "scoring" not in fields:
-                raise RuntimeError("native_bm25 requires qdrant-client>=1.20.0")
-            schema_kwargs["scoring"] = True
         self.client.create_payload_index(
             collection_name=self.collection,
             field_name=text_key or self.text_key,
-            field_schema=TextIndexParams(**schema_kwargs),
+            field_schema=text_index_params(scoring=scoring),
         )
+
+    def has_scored_text_index(self, text_key: str | None = None) -> bool:
+        """Whether the collection carries the BM25-scored full-text index
+        native BM25 queries need. Read-only. False for a missing collection
+        and for the local in-memory client, which records no indexes."""
+        try:
+            info = self.client.get_collection(self.collection)
+        except Exception:  # noqa: BLE001 — absent collection / unreachable store
+            return False
+        schema = getattr(info, "payload_schema", None) or {}
+        field_info = schema.get(text_key or self.text_key)
+        if field_info is None:
+            return False
+        is_text = "text" in str(getattr(field_info, "data_type", field_info)).lower()
+        params = getattr(field_info, "params", None)
+        return is_text and bool(getattr(params, "scoring", None))
 
     def index_payload_field(self, field: str, schema: PayloadSchemaType) -> None:
         """Create a payload index for filtering (e.g. timestamp as DATETIME)."""
