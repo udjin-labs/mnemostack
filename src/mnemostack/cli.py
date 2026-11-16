@@ -1880,6 +1880,119 @@ def cmd_sparse_backfill(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rebuild_windows(args: argparse.Namespace) -> int:
+    """Rebuild the window chunks of API-written memories (idempotent).
+
+    The repair and backfill path of `ingest.remote_window_size`: for every
+    selected source it deletes the window chunks that are no longer valid or
+    have another size, and writes the missing ones. It reads only stored
+    memories, so retracted or deleted text never comes back. Window chunks
+    written by `mnemostack index` or `Ingestor` are not touched. A stored
+    memory does not record which surface wrote it: the command covers every
+    memory of the selected sources that has no `index_root`.
+    """
+    from .remote_windows import WindowSync, sync_source_windows
+
+    size = args.window_size
+    if size < 1:
+        print("error: --window-size must be >= 1", file=sys.stderr)
+        return 2
+    # No implicit sweep: stored memories do not record which surface wrote
+    # them, so the command would also build windows over the sources of an
+    # SDK `Ingestor`. The operator names the scope.
+    if bool(args.source) == bool(getattr(args, "all_sources", False)):
+        print("error: pass exactly one of --source (repeatable) and --all-sources", file=sys.stderr)
+        return 2
+    tenant = getattr(args, "tenant", None) or None
+    text_key = _payload_schema()[0]
+    details: dict[str, Any] = {"collection": args.collection, "window_size": size}
+    try:
+        # A dry run and a removal-only run (size 1) embed nothing, so they
+        # need no provider.
+        provider = (
+            None
+            if args.dry_run or size == 1
+            else get_provider(args.provider, **_provider_kwargs_from_args(args))
+        )
+        store = VectorStore(
+            collection=args.collection,
+            dimension=provider.dimension if provider is not None else 1,
+            host=args.qdrant,
+        )
+        if not store.collection_exists():
+            print(f"error: collection '{args.collection}' does not exist", file=sys.stderr)
+            return 2
+        tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
+        no_source = 0
+        if args.source:
+            sources = list(dict.fromkeys(args.source))
+        else:
+            found: dict[str, None] = {}
+            for hit in store.scroll(payload_keys=["source", "chunk_kind", "tenant_id"], **tkw):
+                payload = hit.payload or {}
+                if payload.get("tenant_id") != tenant:
+                    continue
+                source = payload.get("source")
+                # Window chunks name their source too: a source whose
+                # memories are all gone still has to be visited.
+                if isinstance(source, str) and source:
+                    found[source] = None
+                elif payload.get("chunk_kind") != "sliding_window":
+                    no_source += 1
+            sources = list(found)
+        total = WindowSync()
+        for source in sources:
+            total.add(
+                sync_source_windows(
+                    store, source, tenant=tenant, window_size=size, mode="rebuild",
+                    embedding=provider, max_points=_resolve_max_points(args, tenant),
+                    text_key=text_key, dry_run=args.dry_run,
+                )
+            )
+    except Exception as e:  # noqa: BLE001
+        if not args.dry_run:
+            _audit(
+                "collection.rebuild_windows", tenant=tenant, outcome="error",
+                error=type(e).__name__, **details,
+            )
+        print(f"error: rebuild-windows failed: {e}", file=sys.stderr)
+        return 1
+    report = {
+        "dry_run": bool(args.dry_run),
+        "sources": len(sources),
+        "created": total.created,
+        "removed": total.removed,
+        "kept": total.kept,
+        "skipped_ambiguous_offsets": total.ambiguous_offsets,
+        "skipped_restricted": total.restricted,
+        "skipped_without_source": no_source,
+        "skipped_sources_with_other_windows": total.foreign_sources,
+        "complete": total.complete,
+        "reason": total.reason,
+    }
+    if not args.dry_run:
+        _audit(
+            "collection.rebuild_windows", tenant=tenant,
+            outcome="success" if total.complete else "partial",
+            created=total.created, removed=total.removed, **details,
+        )
+    if args.json:
+        print(json.dumps(report))
+    else:
+        verb = "would be" if args.dry_run else "were"
+        print(
+            f"{len(sources)} source(s): {total.created} window(s) {verb} written, "
+            f"{total.removed} removed, {total.kept} kept; skipped: "
+            f"{total.ambiguous_offsets} ambiguous offset(s), {total.restricted} "
+            f"memories with a validity bound or an index_root, {no_source} "
+            f"memories without a source, {total.foreign_sources} source(s) with "
+            "window chunks of `index` or `Ingestor`"
+        )
+        if not total.complete:
+            print(f"incomplete: {total.reason}; run the command again", file=sys.stderr)
+    return 0 if total.complete else 1
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """Diagnose a mnemostack deployment: config, dependencies, versions.
 
@@ -2224,12 +2337,19 @@ def cmd_invalidate(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    updated = store.invalidate(
-        ids,
-        invalidated_at=args.invalidated_at,
-        valid_until=args.valid_until,
-        index_root=args.index_root,
-    )
+    from .remote_windows import member_retraction
+
+    # Retracted text must not stay readable through a window chunk built for
+    # API-written memories (ingest.remote_window_size).
+    with member_retraction(
+        store, ids, tenant=None, active=getattr(args, "_remote_window_size", 1) > 1
+    ):
+        updated = store.invalidate(
+            ids,
+            invalidated_at=args.invalidated_at,
+            valid_until=args.valid_until,
+            index_root=args.index_root,
+        )
     if args.json:
         print(json.dumps({"invalidated": updated, "requested": len(args.ids)}))
     else:
@@ -3798,6 +3918,7 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         graph_database=cfg.graph.database,
         secret_policy=cfg.ingest.secret_policy,
         _overall_deadline=cfg.recall.overall_deadline,
+        _remote_window_size=cfg.ingest.remote_window_size,
     )
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -3928,6 +4049,49 @@ def build_parser(config_light: bool = False) -> argparse.ArgumentParser:
         "collection (idempotent, nothing re-embedded)",
     )
     p_sparse_backfill.set_defaults(func=cmd_sparse_backfill)
+
+    p_rebuild_windows = sub.add_parser(
+        "rebuild-windows",
+        parents=[common],
+        help="Rebuild the window chunks of API-written memories from the "
+        "stored memories (backfill and repair for ingest.remote_window_size; "
+        "idempotent)",
+    )
+    p_rebuild_windows.add_argument(
+        "--tenant",
+        default=cfg.recall.tenant,
+        help="Tenant whose memories are rebuilt (default: recall.tenant / "
+        "MNEMOSTACK_TENANT; unset = the unscoped memories)",
+    )
+    p_rebuild_windows.add_argument(
+        "--source",
+        action="append",
+        default=None,
+        help="Source to rebuild; repeatable",
+    )
+    p_rebuild_windows.add_argument(
+        "--all-sources",
+        action="store_true",
+        help="Rebuild every source of the tenant: all memories that have a "
+        "source and no index_root, whichever surface wrote them",
+    )
+    p_rebuild_windows.add_argument(
+        "--window-size",
+        type=int,
+        default=cfg.ingest.remote_window_size,
+        help="Window size (default: ingest.remote_window_size). 1 removes the "
+        "API-built windows",
+    )
+    p_rebuild_windows.add_argument(
+        "--quotas-file",
+        default=None,
+        help="Tenant quotas file; window chunks count against max_points",
+    )
+    p_rebuild_windows.add_argument(
+        "--dry-run", action="store_true", help="Report the counts without writing"
+    )
+    p_rebuild_windows.add_argument("--json", action="store_true", help="JSON output")
+    p_rebuild_windows.set_defaults(func=cmd_rebuild_windows)
 
     p_tenant_migrate = sub.add_parser(
         "tenant-migrate",
@@ -5074,6 +5238,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         bm25_paths=list(args.bm25_path) if args.bm25_path else None,
         vector_floor=max(0, int(args.vector_floor)),
         overall_deadline=getattr(args, "_overall_deadline", None),
+        remote_window_size=getattr(args, "_remote_window_size", 1),
         rerank_mode=args.rerank_mode,
         token_budget=_effective_token_budget(args),
         state_path=args.state_path,
@@ -5303,6 +5468,7 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
         state_path=args.state_path,
         vector_floor=max(0, int(args.vector_floor)),
         overall_deadline=getattr(args, "_overall_deadline", None),
+        remote_window_size=getattr(args, "_remote_window_size", 1),
         rerank_mode=args.rerank_mode,
         token_budget=_effective_token_budget(args),
         # Honor the env toggles too (parity with serve / the MCP main()).

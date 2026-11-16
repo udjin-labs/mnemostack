@@ -258,3 +258,63 @@ def test_any_matching_point_views_against_a_real_server(collection_name):
     assert store.any_matching_point(pins, as_of="2026-02-01") is False
     # A wrong pin never matches — the exact isolation the graph probe pins on.
     assert store.any_matching_point({**pins, "index_root": "/corpus/b"}) is False
+
+
+# ---------- window chunks for remote writes (ingest.remote_window_size) ----------
+
+
+@pytest.mark.parametrize("indexed", [True, False])
+def test_remote_windows_against_a_real_server(collection_name, indexed):
+    """The window step reads neighbours with a `source` filter and a payload
+    projection, never an ordered query on `offset`. It must work on a new
+    collection (keyword index on `source`) and on one created elsewhere
+    with no payload index at all: shuffled writes converge, and a by-id
+    retraction removes the windows."""
+    from mnemostack.ingest import IngestItem, ingest_remote_items
+    from mnemostack.remote_windows import member_retraction
+
+    class _Embedding:
+        dimension = 4
+
+        def embed(self, text: str) -> list[float]:
+            return [float(len(text) % 7 + 1), 1.0, 0.5, 0.25]
+
+        def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            return [self.embed(t) for t in texts]
+
+    store = VectorStore(collection=collection_name, dimension=4, host=SERVER_URL)
+    if indexed:
+        store.ensure_collection()
+        assert store.payload_indexes().get("source") == "keyword"
+    else:
+        from qdrant_client.models import Distance, VectorParams
+
+        store.client.create_collection(
+            collection_name=collection_name,
+            vectors_config=VectorParams(size=4, distance=Distance.COSINE),
+        )
+        assert store.payload_indexes() == {}
+    ids = {}
+    for offset in (3, 0, 4, 1, 2):
+        item = IngestItem(text=f"message {offset}", source="chat/a", offset=offset)
+        (result,) = ingest_remote_items(_Embedding(), store, [item], tenant="acme", window_size=3)
+        ids[offset] = result.id
+    ingest_remote_items(
+        _Embedding(), store, [IngestItem(text="other", source="chat/b")], tenant="acme", window_size=3
+    )
+
+    def windows():
+        return sorted(
+            hit.payload["text"]
+            for hit in store.scroll(tenant="acme")
+            if hit.payload.get("chunk_kind") == "sliding_window"
+        )
+
+    assert windows() == [
+        "message 0\nmessage 1\nmessage 2",
+        "message 1\nmessage 2\nmessage 3",
+        "message 2\nmessage 3\nmessage 4",
+    ]
+    with member_retraction(store, [ids[1]], tenant="acme"):
+        store.invalidate([ids[1]], tenant="acme")
+    assert windows() == ["message 2\nmessage 3\nmessage 4"]

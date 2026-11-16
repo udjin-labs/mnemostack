@@ -119,6 +119,7 @@ from mnemostack.recall import (
 from mnemostack.recall.deadline import get_deadline
 from mnemostack.recall.pipeline import FileStateStore, default_state_path
 from mnemostack.recall.retry import retry_weak_recall
+from mnemostack.remote_windows import member_retraction, source_retraction
 from mnemostack.vector import VectorStore
 
 log = logging.getLogger(__name__)
@@ -323,6 +324,49 @@ class MemoryResultOut(BaseModel):
     offset: int = Field(0, description="Character offset within the item's source.")
 
 
+class MemoryWindowsOut(BaseModel):
+    created: int = Field(description="Window chunks written by this request.")
+    removed: int = Field(
+        description="Window chunks deleted because their members are no longer neighbours."
+    )
+    ambiguous_offsets: int = Field(
+        description=(
+            "Offsets of the written sources that more than one live memory "
+            "holds. No window is built over such an offset."
+        )
+    )
+    skipped_sources: int = Field(
+        0,
+        description=(
+            "Sources of this request left without window maintenance because "
+            "they hold window chunks written by `mnemostack index` or `Ingestor`."
+        ),
+    )
+    complete: bool = Field(
+        description=(
+            "False when a window that should exist was not written; the "
+            "memories themselves are stored. Repeat the request or run "
+            "`mnemostack rebuild-windows`."
+        )
+    )
+    reason: str | None = Field(
+        None, description="Why `complete` is false: quota, embedding, unsupported or error."
+    )
+
+
+def _windows_out(windows: Any) -> MemoryWindowsOut | None:
+    if windows is None:
+        return None
+    return MemoryWindowsOut(
+        created=windows.created,
+        removed=windows.removed,
+        ambiguous_offsets=windows.ambiguous_offsets,
+        skipped_sources=windows.foreign_sources,
+        complete=windows.complete,
+        reason=windows.reason,
+    )
+
+
 class MemoriesResponse(BaseModel):
     results: list[MemoryResultOut] = Field(
         description="Per-chunk outcome, in request order."
@@ -330,6 +374,13 @@ class MemoriesResponse(BaseModel):
     stored: int
     duplicates: int
     failed: int
+    windows: MemoryWindowsOut | None = Field(
+        None,
+        description=(
+            "Outcome of the window step; null unless the deployment sets "
+            "`ingest.remote_window_size` above 1."
+        ),
+    )
 
 
 class TripleIn(BaseModel):
@@ -849,9 +900,14 @@ class ServerConfig:
     secret_policy: str = "off"
     overall_deadline: float | None = None
     timestamp_index: tuple[str, str] | None = None
+    #: Sliding-window chunks for memories written through POST /memories
+    #: (ingest.remote_window_size). 1 = none.
+    remote_window_size: int = 1
 
     def __post_init__(self) -> None:
         SecretPolicy(self.secret_policy)
+        if self.remote_window_size < 1:
+            raise ValueError("remote_window_size must be >= 1")
         # A blank tenant is no tenant: "" would stamp writes with an empty
         # tenant_id, match nothing on reads, and slip past the startup gate.
         from mnemostack.config import normalize_tenant
@@ -916,6 +972,7 @@ class ServerConfig:
             text_search=cfg.recall.text_search,
             resolve_roots=_resolve_roots_env(),
             secret_policy=cfg.ingest.secret_policy,
+            remote_window_size=cfg.ingest.remote_window_size,
         )
 
 
@@ -2112,6 +2169,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 timestamp_key=cfg.timestamp_key,
                 timestamp_format=cfg.timestamp_format,
                 secret_policy=cfg.secret_policy,
+                window_size=cfg.remote_window_size,
             )
         except IngestPolicyError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
@@ -2149,6 +2207,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
             stored=sum(r.status == "stored" for r in results),
             duplicates=sum(r.status == "duplicate" for r in results),
             failed=failed_n,
+            windows=_windows_out(results.windows),
         )
 
     @app.post("/memories", response_model=MemoriesResponse)
@@ -2411,42 +2470,53 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 return InvalidateResponse(
                     requested=len(req.ids or []), invalidated=0, complete=True
                 )
-            if req.source is not None:
-                ids, _payloads, more = find_source_points(
-                    store,
-                    req.source,
-                    tenant=tenant,
+            windows_on = cfg.remote_window_size > 1
+
+            def _invalidate(point_ids: list[Any]) -> int:
+                if not point_ids:
+                    return 0
+                return store.invalidate(
+                    point_ids,
+                    invalidated_at=req.invalidated_at,
+                    valid_until=req.valid_until,
                     index_root=req.index_root,
-                    limit=REMOTE_SOURCE_BATCH,
-                    # Without this the next call re-selects the same first
-                    # batch forever: an invalidated point keeps its source.
-                    # Consequence, documented rather than papered over:
-                    # source retraction is FIRST-RETRACTION-WINS. A point
-                    # already invalidated keeps the `invalidated_at` and
-                    # `valid_until` of the call that retracted it — a later
-                    # source-scoped call does not restamp it, because
-                    # `invalidated_at` records WHEN the memory was actually
-                    # retracted and rewriting it would falsify that. To
-                    # change an existing retraction's world-time bound, name
-                    # the point by id.
-                    skip_invalidated=True,
+                    **tkw,
                 )
-                complete = not more
-                requested = len(ids)
-                if not ids:
-                    return InvalidateResponse(
-                        requested=0, invalidated=0, complete=complete
+
+            if req.source is not None:
+                with source_retraction(
+                    store, req.source, tenant=tenant, active=windows_on
+                ) as selection:
+                    ids, payloads, more = find_source_points(
+                        store,
+                        req.source,
+                        tenant=tenant,
+                        index_root=req.index_root,
+                        limit=REMOTE_SOURCE_BATCH,
+                        # Without this the next call re-selects the same first
+                        # batch forever: an invalidated point keeps its source.
+                        # Consequence, documented rather than papered over:
+                        # source retraction is FIRST-RETRACTION-WINS. A point
+                        # already invalidated keeps the `invalidated_at` and
+                        # `valid_until` of the call that retracted it — a later
+                        # source-scoped call does not restamp it, because
+                        # `invalidated_at` records WHEN the memory was actually
+                        # retracted and rewriting it would falsify that. To
+                        # change an existing retraction's world-time bound, name
+                        # the point by id.
+                        skip_invalidated=True,
                     )
+                    complete = not more
+                    # Window chunks built for API-written memories are
+                    # derived data: deleted, not retracted, as by id.
+                    ids = selection.take_windows(ids, payloads)
+                    requested = len(ids)
+                    updated = _invalidate(ids)
             else:
                 ids = list(dict.fromkeys(coerce_point_ids(req.ids or [])))
                 requested = len(req.ids or [])
-            updated = store.invalidate(
-                ids,
-                invalidated_at=req.invalidated_at,
-                valid_until=req.valid_until,
-                index_root=req.index_root,
-                **tkw,
-            )
+                with member_retraction(store, ids, tenant=tenant, active=windows_on):
+                    updated = _invalidate(ids)
         except Exception as exc:
             log.exception("invalidate endpoint failed")
             raise HTTPException(status_code=500, detail="invalidate failed") from exc
@@ -2498,19 +2568,31 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                 return DeleteMemoriesResponse(
                     requested=requested, deleted=0, complete=True
                 )
+            windows_on = cfg.remote_window_size > 1
             if source_scoped:
-                # The finder already re-validated payload ownership and the
-                # index_root guard, so no second precheck is needed here.
-                ids, _payloads, more = find_source_points(
-                    store,
-                    req.source or "",
-                    tenant=tenant,
-                    index_root=req.index_root,
-                    limit=REMOTE_SOURCE_BATCH,
+                # See /invalidate. The windows of the selection are deleted
+                # with it; the block also covers those of a later batch.
+                with source_retraction(
+                    store, req.source or "", tenant=tenant, active=windows_on
+                ) as selection:
+                    # The finder already re-validated payload ownership and the
+                    # index_root guard, so no second precheck is needed here.
+                    ids, payloads, more = find_source_points(
+                        store,
+                        req.source or "",
+                        tenant=tenant,
+                        index_root=req.index_root,
+                        limit=REMOTE_SOURCE_BATCH,
+                    )
+                    complete = not more
+                    requested = len(ids)
+                    selection.note(payloads)
+                    deleted = store.delete_points(ids, **tkw) if ids else 0
+                counter("mnemostack.server.deleted", deleted)
+                return DeleteMemoriesResponse(
+                    requested=requested, deleted=deleted, complete=complete
                 )
-                complete = not more
-                requested = len(ids)
-            elif req.index_root is not None or tenant is None:
+            if req.index_root is not None or tenant is None:
                 # One retrieve serves two jobs. (1) The index_root owner
                 # guard, matching /invalidate: points owned by a DIFFERENT
                 # root are skipped; untagged points pass (documented). (2)
@@ -2528,7 +2610,10 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                     in (None, req.index_root)
                 }
                 ids = [pid for pid in ids if str(pid) in keep]
-            deleted = store.delete_points(ids, **tkw) if ids else 0
+            # See /invalidate: erased text must not stay readable through a
+            # window chunk that holds it.
+            with member_retraction(store, ids, tenant=tenant, active=windows_on):
+                deleted = store.delete_points(ids, **tkw) if ids else 0
         except Exception as exc:
             log.exception("delete memories endpoint failed")
             raise HTTPException(status_code=500, detail="delete failed") from exc

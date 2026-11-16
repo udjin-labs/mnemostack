@@ -67,6 +67,7 @@ from ..recall import (
 from ..recall.deadline import get_deadline
 from ..recall.filters import validate_filters
 from ..recall.pipeline import FileStateStore, default_state_path
+from ..remote_windows import member_retraction
 from ..vector import VectorStore
 
 log = logging.getLogger(__name__)
@@ -170,6 +171,7 @@ def build_server(
     transport: str = "stdio",
     secret_policy: str = "off",
     overall_deadline: float | None = None,
+    remote_window_size: int = 1,
 ) -> Any:
     """Build and return a configured FastMCP server.
 
@@ -191,6 +193,8 @@ def build_server(
         token_budget: default token budget applied to search/answer recall when
             the tool call does not pass one (None = no budget)
         transport: stdio binds one process key; http requires each request's Bearer key
+        remote_window_size: sliding-window chunks for memories written by
+            ``mnemostack_remember`` (``ingest.remote_window_size``); 1 = none
         reranker: a ready reranker instance used as-is (any object with
             ``rerank(query, results)``). When provided, the server does NOT
             resolve an answer LLM for reranking purposes, so a scoring
@@ -232,6 +236,8 @@ def build_server(
     from ..ingest_policy import IngestPolicyError, SecretPolicy
 
     ingest_policy = SecretPolicy(secret_policy)
+    if remote_window_size < 1:
+        raise ValueError("remote_window_size must be >= 1")
     if timestamp_format not in ("iso", "epoch", "epoch_ms"):
         # HTTP fails a typo'd format loud at boot (eager TemporalRetriever);
         # MCP builds retrievers lazily, so an unvalidated format could reach
@@ -1007,13 +1013,18 @@ def build_server(
             if callable(exists_fn) and not exists_fn():
                 return {"ok": True, "requested": len(ids), "invalidated": 0}
             # Dedup after coercion — duplicates would inflate `invalidated`.
-            updated = payload_store.invalidate(
-                list(dict.fromkeys(coerce_point_ids(ids))),
-                invalidated_at=invalidated_at,
-                valid_until=valid_until,
-                index_root=index_root,
-                **tkw,
-            )
+            point_ids = list(dict.fromkeys(coerce_point_ids(ids)))
+            # Retracted text must not stay readable through a window chunk.
+            with member_retraction(
+                payload_store, point_ids, tenant=tenant, active=remote_window_size > 1
+            ):
+                updated = payload_store.invalidate(
+                    point_ids,
+                    invalidated_at=invalidated_at,
+                    valid_until=valid_until,
+                    index_root=index_root,
+                    **tkw,
+                )
             return {
                 "ok": True,
                 "requested": len(ids),
@@ -1177,6 +1188,7 @@ def build_server(
                     timestamp_key=timestamp_key,
                     timestamp_format=timestamp_format,
                     secret_policy=secret_policy,
+                    window_size=remote_window_size,
                 )
             except IngestPolicyError as e:
                 return {"ok": False, "error": _error_text(e, transport), "error_kind": "ingest_policy"}
@@ -1193,7 +1205,7 @@ def build_server(
                     "error": f"embedding failed for all {failed_n} item(s)",
                     "error_kind": "embedding_failed",
                 }
-            return {
+            out: dict[str, Any] = {
                 "ok": True,
                 "results": [
                     {"id": r.id, "status": r.status, "offset": it.offset}
@@ -1203,6 +1215,17 @@ def build_server(
                 "duplicates": sum(r.status == "duplicate" for r in results),
                 "failed": failed_n,
             }
+            if results.windows is not None:
+                # Same fields as the HTTP response's `windows`.
+                out["windows"] = {
+                    "created": results.windows.created,
+                    "removed": results.windows.removed,
+                    "ambiguous_offsets": results.windows.ambiguous_offsets,
+                    "skipped_sources": results.windows.foreign_sources,
+                    "complete": results.windows.complete,
+                    "reason": results.windows.reason,
+                }
+            return out
         except Exception as e:  # noqa: BLE001
             # error_kind is present on EVERY failure shape of this tool;
             # "error" is the generic backend bucket (do not retry blindly).
@@ -1489,6 +1512,7 @@ def main() -> None:
         timestamp_key=cfg.recall.timestamp_key,
         timestamp_format=cfg.recall.timestamp_format,
         secret_policy=cfg.ingest.secret_policy,
+        remote_window_size=cfg.ingest.remote_window_size,
         text_search=cfg.recall.text_search,
         resolve_roots=[
             p for p in os.environ.get("MNEMOSTACK_RESOLVE_ROOTS", "").split(os.pathsep) if p

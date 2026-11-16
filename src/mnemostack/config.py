@@ -338,6 +338,11 @@ class RecallConfig:
 @dataclass
 class IngestConfig:
     secret_policy: str = "off"
+    # Sliding-window chunks for memories written through POST /memories and
+    # mnemostack_remember. 1 = none. Separate from vector.window_size (file
+    # indexing) so that enabling windows there does not multiply the storage
+    # of API writes.
+    remote_window_size: int = 1
 
 
 @dataclass
@@ -424,6 +429,9 @@ class Config:
         from .ingest_policy import SecretPolicy
 
         SecretPolicy(cfg.ingest.secret_policy)
+        size = cfg.ingest.remote_window_size
+        if not isinstance(size, int) or isinstance(size, bool) or size < 1:
+            raise ValueError("ingest.remote_window_size must be an integer >= 1")
 
         # A configured budget of 0 or less means "no budget", not a broken
         # deployment: apply_token_budget requires >= 1, so passing a bad
@@ -572,6 +580,7 @@ def _apply_env_overrides(cfg: Config) -> Config:
         MNEMOSTACK_TIMESTAMP_FORMAT (iso | epoch | epoch_ms)
         MNEMOSTACK_TEXT_SEARCH      (auto | off | bm25 | native_bm25 | sparse)
         MNEMOSTACK_SECRET_POLICY    (off | block; ingest secret-format checks)
+        MNEMOSTACK_REMOTE_WINDOW_SIZE (window chunks for API-written memories; 1 = none)
         MNEMOSTACK_QDRANT_HOST  (alias for VECTOR_HOST)
         MNEMOSTACK_COLLECTION   (alias for VECTOR_COLLECTION)
         MNEMOSTACK_MEMGRAPH_URI (alias for GRAPH_URI)
@@ -579,6 +588,11 @@ def _apply_env_overrides(cfg: Config) -> Config:
     env = os.environ
     if "MNEMOSTACK_SECRET_POLICY" in env:
         cfg.ingest.secret_policy = env["MNEMOSTACK_SECRET_POLICY"]
+    if "MNEMOSTACK_REMOTE_WINDOW_SIZE" in env:
+        try:
+            cfg.ingest.remote_window_size = int(env["MNEMOSTACK_REMOTE_WINDOW_SIZE"])
+        except ValueError:
+            raise ValueError("MNEMOSTACK_REMOTE_WINDOW_SIZE must be an integer >= 1") from None
 
     # Embedding
     embedding_provider = (
@@ -743,6 +757,7 @@ llm:
 
 ingest:
   secret_policy: "off"     # opt-in format checks before ingest: off | block
+  remote_window_size: 1    # window chunks for memories written through the API; 1 = none
 
 graph:
   uri: null               # e.g. bolt://localhost:7687 to enable graph

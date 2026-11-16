@@ -160,6 +160,10 @@ _PROTECTED_PAYLOAD_KEYS = frozenset(
         "chunk_window",
         "chunk_start_offset",
         "chunk_end_offset",
+        # Remote window bookkeeping (see mnemostack.remote_windows): the
+        # member list decides which windows a retraction removes.
+        "_window_members",
+        "_windowed",
         "synthetic_prefix_len",
         # Code-metadata ownership record: names the keys a --code refresh
         # deletes when the chunk stops being code — a planted list would
@@ -515,6 +519,15 @@ class RemoteMemoryResult:
     #: point reuses the stored vector — status "stored", zero embed cost),
     #: so metering can attribute actual provider spend, not statuses.
     embed_attempted: bool = False
+
+
+class RemoteIngestResults(list[RemoteMemoryResult]):
+    """Per-item outcomes plus the outcome of the window step.
+
+    ``windows`` is None when the deployment builds no windows for remote
+    writes (``window_size=1``)."""
+
+    windows: Any = None
 
 
 class RemoteRequestTooLarge(ValueError):
@@ -1031,7 +1044,8 @@ def ingest_remote_items(
     timestamp_key: str = "timestamp",
     timestamp_format: str = "iso",
     secret_policy: str = "off",
-) -> list[RemoteMemoryResult]:
+    window_size: int = 1,
+) -> RemoteIngestResults:
     """Ingest client-supplied items with store-backed duplicate detection.
 
     The deterministic id of every item is computed up front; ids already in
@@ -1056,9 +1070,16 @@ def ingest_remote_items(
 
     Validation (`validate_remote_item`) is the CALLER's obligation — this
     function trusts its items are within caps and clean of reserved keys.
+
+    ``window_size`` above 1 also builds sliding-window chunks over the
+    stored neighbours of each item (same tenant, same ``source``, adjacent
+    by ``offset``) — see :mod:`mnemostack.remote_windows`. The outcome is on
+    the result's ``windows``; a failure there never fails the items.
     """
     from .ingest_policy import SecretPolicy
 
+    if not isinstance(window_size, int) or isinstance(window_size, bool) or window_size < 1:
+        raise ValueError("window_size must be an integer >= 1")
     policy = SecretPolicy(secret_policy)
     for item in items:
         policy.check_item(item)
@@ -1112,16 +1133,32 @@ def ingest_remote_items(
         except AttributeError:
             pass
     with _tenant_write_lock(tenant):
-        return _ingest_remote_items_locked(
-            embedding,
-            store,
-            items,
-            tenant=tenant,
-            max_points=max_points,
-            text_key=text_key,
-            timestamp_key=timestamp_key,
-            timestamp_format=timestamp_format,
+        results = RemoteIngestResults(
+            _ingest_remote_items_locked(
+                embedding,
+                store,
+                items,
+                tenant=tenant,
+                max_points=max_points,
+                text_key=text_key,
+                timestamp_key=timestamp_key,
+                timestamp_format=timestamp_format,
+            )
         )
+        if window_size > 1:
+            from .remote_windows import sync_written
+
+            results.windows = sync_written(
+                embedding,
+                store,
+                items,
+                results,
+                tenant=tenant,
+                window_size=window_size,
+                max_points=max_points,
+                text_key=text_key,
+            )
+        return results
 
 
 def _apply_timestamp_domain(

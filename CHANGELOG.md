@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- Add opt-in sliding-window chunks for memories written through
+  `POST /memories` and `mnemostack_remember` (`ingest.remote_window_size`,
+  `MNEMOSTACK_REMOTE_WINDOW_SIZE`; default 1 = off). The service builds the
+  chunks that `Ingestor(window_size=N)` builds, from the stored neighbours of a
+  memory (same tenant, same `source`, adjacent by `offset`). The write
+  response reports the step in `windows`. Retracting or deleting a memory by
+  id deletes the windows that hold it. `mnemostack rebuild-windows` backfills
+  and repairs them. See `docs/remote-windows.md`.
+
 ### Changed
 - `recall.text_search: auto` (the default) now uses native BM25 when no
   `bm25_paths` corpus is configured and the collection has the BM25-scored
