@@ -986,6 +986,9 @@ Notes for this mode:
   text and timestamp keys. `mnemostack index`, `index-markdown` and the SDK
   `Ingestor` keep writing the standard schema (`text`/`timestamp`) — don't point
   them at a foreign-schema collection.
+- Remote ingest can also build sliding-window chunks
+  (`ingest.remote_window_size`, off by default); see
+  [remote-windows.md](remote-windows.md) for the rules and the costs.
 - The embedding-consistency rule above still applies: query with the same
   model that produced the collection's vectors.
 

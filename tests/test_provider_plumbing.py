@@ -271,7 +271,7 @@ def test_new_knobs_stay_at_the_positional_tail():
     from mnemostack.mcp import build_server
 
     params = list(inspect.signature(build_server).parameters)
-    assert params[-16:] == [
+    assert params[-17:] == [
         "ollama_host",
         "embedding_timeout",
         "reranker",
@@ -288,6 +288,7 @@ def test_new_knobs_stay_at_the_positional_tail():
         "transport",
         "secret_policy",
         "overall_deadline",
+        "remote_window_size",
     ]
 
 

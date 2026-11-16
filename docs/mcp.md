@@ -492,6 +492,8 @@ Each result's `status` is `stored`, `duplicate` (content already present — not
 
 The tenant's storage quota is enforced before any write — the tool reads the quota store configured via `mcp-serve --quotas-file` / `MNEMOSTACK_QUOTAS_FILE` / `build_server(quotas_file=…)`. **Point it at the same file `serve --quotas-file` uses**: a deployment with quotas at a non-default path that starts `mcp-serve` without this setting gets HTTP writes capped but MCP writes unbounded.
 
+With `ingest.remote_window_size` above 1 the response also carries `windows` (`created`, `removed`, `ambiguous_offsets`, `skipped_sources`, `blocked_by_secret_policy`, `complete`, `reason`): the service builds sliding-window chunks over the stored neighbours of the memory, which needs a distinct, increasing `offset` per message of one `source`. `mnemostack_invalidate` deletes the windows that hold a retracted memory. See [remote-windows.md](remote-windows.md).
+
 **Example usage scenario:** The user states a durable fact ("we deploy Fridays at 15:00") — call `mnemostack_remember` with the fact and a `source` like `chat/<date>`; a later `mnemostack_search` for "deploy schedule" returns it. To retract, use `mnemostack_invalidate` with the stored id.
 
 ### `mnemostack_graph_query`
