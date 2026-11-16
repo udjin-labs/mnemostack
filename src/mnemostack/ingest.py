@@ -1157,6 +1157,7 @@ def ingest_remote_items(
                 window_size=window_size,
                 max_points=max_points,
                 text_key=text_key,
+                secret_policy=secret_policy,
             )
         return results
 

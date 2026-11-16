@@ -1947,6 +1947,7 @@ def cmd_rebuild_windows(args: argparse.Namespace) -> int:
                     store, source, tenant=tenant, window_size=size, mode="rebuild",
                     embedding=provider, max_points=_resolve_max_points(args, tenant),
                     text_key=text_key, dry_run=args.dry_run,
+                    secret_policy=getattr(args, "secret_policy", "off"),
                 )
             )
     except Exception as e:  # noqa: BLE001
@@ -1967,6 +1968,7 @@ def cmd_rebuild_windows(args: argparse.Namespace) -> int:
         "skipped_restricted": total.restricted,
         "skipped_without_source": no_source,
         "skipped_sources_with_other_windows": total.foreign_sources,
+        "blocked_by_secret_policy": total.policy_blocked,
         "complete": total.complete,
         "reason": total.reason,
     }
@@ -1986,7 +1988,8 @@ def cmd_rebuild_windows(args: argparse.Namespace) -> int:
             f"{total.ambiguous_offsets} ambiguous offset(s), {total.restricted} "
             f"memories with a validity bound or an index_root, {no_source} "
             f"memories without a source, {total.foreign_sources} source(s) with "
-            "window chunks of `index` or `Ingestor`"
+            f"window chunks of `index` or `Ingestor`; {total.policy_blocked} "
+            "window(s) blocked by the secret policy"
         )
         if not total.complete:
             print(f"incomplete: {total.reason}; run the command again", file=sys.stderr)

@@ -17,11 +17,12 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 from test_remote_ingest import _CountingEmbedding, _ingest_app, _mem_store
 
-from mnemostack.ingest import IngestItem, Ingestor, ingest_remote_items
+from mnemostack.ingest import IngestItem, Ingestor, ingest_remote_items, stable_chunk_id
 from mnemostack.remote_windows import (
     WINDOW_MEMBERS_KEY,
     WINDOWED_KEY,
     sync_source_windows,
+    window_chunk_id,
 )
 
 _VOLATILE = ("indexed_at", WINDOW_MEMBERS_KEY, WINDOWED_KEY)
@@ -45,10 +46,17 @@ def _records(store, tenant=None):
     """Every retrievable record, minus the write stamp and the bookkeeping
     keys that only the remote path adds."""
     kw = {"tenant": tenant} if tenant is not None else {}
-    return {
-        str(hit.id): {k: v for k, v in hit.payload.items() if k not in _VOLATILE}
-        for hit in store.scroll(**kw)
-    }
+    records = {}
+    for hit in store.scroll(**kw):
+        payload = {k: v for k, v in hit.payload.items() if k not in _VOLATILE}
+        # Memories keep their ids on both paths. Window chunks are compared
+        # by position: API-built windows have their own id space.
+        key = str(hit.id)
+        if payload.get("chunk_kind") == "sliding_window":
+            key = f"window:{payload['source']}:{payload['chunk_start_offset']}:{payload['chunk_window']}"
+        assert key not in records
+        records[key] = payload
+    return records
 
 
 def _windows(store, source=None):
@@ -71,8 +79,9 @@ def _write(store, emb, items, size=3, **kw):
 @pytest.mark.parametrize("tenant", [None, "acme"])
 @pytest.mark.parametrize("batching", ["one", "each", "pairs"])
 def test_remote_writes_store_the_records_the_ingestor_stores(size, tenant, batching):
-    """Complete records, not only ids: text, member order, timestamps,
-    metadata, tags and visibility keys must match the measured path."""
+    """Complete records: text, member order, timestamps, metadata, tags and
+    visibility keys must match the measured path. Memory ids match too;
+    window ids are compared separately."""
     reference = _mem_store("ref")
     Ingestor(_CountingEmbedding(), reference, window_size=size, tenant=tenant).ingest(_items())
     store, emb = _mem_store("api"), _CountingEmbedding()
@@ -82,6 +91,9 @@ def test_remote_writes_store_the_records_the_ingestor_stores(size, tenant, batch
     assert _records(store, tenant) == _records(reference, tenant)
     for hit in _windows(store):
         assert len(hit.payload[WINDOW_MEMBERS_KEY]) == size
+        args = (hit.payload["source"], hit.payload["offset"], hit.payload["text"])
+        assert str(hit.id) == window_chunk_id(*args, tenant=tenant)
+        assert str(hit.id) != stable_chunk_id(*args, tenant=tenant)
         assert hit.payload["text"].split("\n") == [
             f"chat/a message {i}"
             for i in range(hit.payload["chunk_start_offset"], hit.payload["chunk_end_offset"] + 1)
@@ -283,9 +295,23 @@ def test_http_write_reports_the_window_step(monkeypatch, tmp_path):
     out = _post(client, headers, _items())
     assert out["windows"] == {
         "created": 3, "removed": 0, "ambiguous_offsets": 0, "skipped_sources": 0,
-        "complete": True, "reason": None,
+        "blocked_by_secret_policy": 0, "complete": True, "reason": None,
     }
     assert len(_windows(store)) == 3
+
+
+def test_http_write_reports_a_window_blocked_by_the_secret_policy(monkeypatch, tmp_path):
+    app, store, _emb, keys = _ingest_app(
+        monkeypatch, tmp_path, cfg_extra={"remote_window_size": 2, "secret_policy": "block"}
+    )
+    body = [{"text": i.text, "source": i.source, "offset": i.offset} for i in _split_key()]
+    response = TestClient(app).post(
+        "/memories", headers={"X-API-Key": keys["write"]}, json={"items": body}
+    )
+    assert response.status_code == 200 and response.json()["stored"] == 2
+    windows = response.json()["windows"]
+    assert (windows["blocked_by_secret_policy"], windows["created"], windows["complete"]) == (1, 0, True)
+    assert _windows(store) == [] and "PRIVATE KEY" not in response.text
 
 
 def test_http_response_has_null_windows_when_off(monkeypatch, tmp_path):
@@ -391,14 +417,168 @@ def test_by_id_calls_survive_an_unhashable_legacy_tenant_value():
         assert store.invalidate(["11111111-1111-1111-1111-111111111111"]) == 1
 
 
-def test_window_is_not_built_over_a_memory_that_holds_its_id():
+def test_a_window_never_shares_an_id_with_a_memory():
+    """A memory with the source, the middle offset and the joined text of a
+    window is an independent record: neither write touches the other."""
     store, emb = _mem_store(), _CountingEmbedding()
-    joined = "\n".join(i.text for i in _items(n=3))
-    clash = ingest_remote_items(emb, store, [IngestItem(text=joined, source="chat/a", offset=1)])
-    store.invalidate([clash[0].id])
-    result = _write(store, emb, _items(n=3))
-    assert result.windows.created == 0 and _windows(store) == []
-    assert store.retrieve_payload(clash[0].id)["invalidated_at"]
+    _write(store, emb, _items("chat/a", 3))
+    (window,) = _windows(store)
+    joined = "\n".join(i.text for i in _items("chat/a", 3))
+    assert str(window.id) != stable_chunk_id("chat/a", 1, joined)
+    # The same text as a memory of another source position set: stored, and
+    # the window keeps its record.
+    before = dict(window.payload)
+    twin = IngestItem(text=joined, source="chat/a", offset=1, metadata={"kind": "summary"})
+    result = ingest_remote_items(emb, store, [twin])  # setting off: no window pass
+    assert result[0].status == "stored" and result[0].id == stable_chunk_id("chat/a", 1, joined)
+    assert store.retrieve_payload(result[0].id)["kind"] == "summary"
+    assert store.retrieve_payload(str(window.id)) == before
+    # And the reverse order: a memory first, the window after it.
+    other, emb2 = _mem_store("other"), _CountingEmbedding()
+    first = ingest_remote_items(emb2, other, [IngestItem(text=joined, source="chat/a", offset=1)])
+    other.invalidate([first[0].id])  # retracted, so offset 1 has one live memory
+    _write(other, emb2, _items("chat/a", 3))
+    assert other.retrieve_payload(first[0].id)["invalidated_at"] and len(_windows(other)) == 1
+    # A tenant name cannot steer a memory onto the id of an unscoped window.
+    for tenant in ("mnemostack-window", "window", ""):
+        assert stable_chunk_id("chat/a", 1, joined, tenant=tenant) != str(window.id)
+
+
+def test_refused_or_failed_request_leaves_memories_and_windows_unchanged():
+    from mnemostack.quotas import QuotaExceededError
+
+    store, emb = _mem_store(), _CountingEmbedding()
+    _write(store, emb, _items(n=3), tenant="acme", max_points=4)
+    before = _records(store, "acme")
+    assert len(before) == 4
+    late = [IngestItem(text=f"late {i}", source="chat/a", offset=i) for i in (3, 4)]
+    with pytest.raises(QuotaExceededError):
+        _write(store, emb, late, tenant="acme", max_points=4)
+    assert _records(store, "acme") == before
+    poisoned = [IngestItem(text="bad |POISON|", source="chat/a", offset=3)]
+    result = _write(store, emb, poisoned, tenant="acme", max_points=10)
+    assert [r.status for r in result] == ["failed"]
+    assert _records(store, "acme") == before and result.windows.created == 0
+
+
+def test_complete_is_false_whenever_a_wanted_window_is_missing():
+    """Every way a wanted window can stay unwritten sets `complete: false`."""
+    for fault, reason in (("embedding", "embedding"), ("quota", "quota")):
+        store = _mem_store(fault)
+        emb = _WindowFailingEmbedding() if fault == "embedding" else _CountingEmbedding()
+        kw = {"tenant": "acme", "max_points": 3} if fault == "quota" else {}
+        result = _write(store, emb, _items(n=3), **kw)
+        assert [r.status for r in result] == ["stored"] * 3
+        assert (result.windows.complete, result.windows.reason) == (False, reason)
+        assert result.windows.created == 0 and _windows(store) == []
+
+
+def test_secret_policy_checks_the_joined_text_of_a_window():
+    import base64
+
+    label = "RSA " + "PRIVATE KEY"
+    body = base64.b64encode(bytes(range(128))).decode()
+    halves = [
+        IngestItem(text=f"-----BEGIN {label}-----\n{body}", source="chat/a", offset=0),
+        IngestItem(text=f"-----END {label}-----", source="chat/a", offset=1),
+    ]
+    store, emb = _mem_store(), _CountingEmbedding()
+    result = _write(store, emb, halves, size=2, secret_policy="block")
+    assert [r.status for r in result] == ["stored", "stored"]
+    assert result.windows.policy_blocked == 1 and result.windows.created == 0
+    # A blocked window is not a window that should exist.
+    assert result.windows.complete and result.windows.reason is None
+    assert _windows(store) == [] and all("-----END" not in t or "BEGIN" not in t for t in emb.embedded)
+    # Without the policy the same messages get their window.
+    plain_store, plain_emb = _mem_store("plain"), _CountingEmbedding()
+    assert _write(plain_store, plain_emb, halves, size=2).windows.created == 1
+
+
+def _split_key():
+    import base64
+
+    label = "RSA " + "PRIVATE KEY"
+    body = base64.b64encode(bytes(range(128))).decode()
+    return [
+        IngestItem(text=f"-----BEGIN {label}-----\n{body}", source="chat/key", offset=0),
+        IngestItem(text=f"-----END {label}-----", source="chat/key", offset=1),
+    ]
+
+
+def test_rebuild_applies_the_current_policy_to_stored_windows(cli_store, capsys):
+    """A window built while the policy was off: the dry run reports it, the
+    rebuild removes it, neither prints its text, and it is not built again."""
+    cli, store, emb = cli_store
+    ingest_remote_items(emb, store, _split_key() + _items(n=2), window_size=2)
+    assert len(_windows(store)) == 2
+    before = _records(store)
+    args = {"window_size": 2, "secret_policy": "block"}
+    assert cli.cmd_rebuild_windows(_cli_args(dry_run=True, **args)) == 0
+    out = capsys.readouterr()
+    dry = json.loads(out.out)
+    assert (dry["blocked_by_secret_policy"], dry["removed"], dry["created"], dry["kept"]) == (1, 1, 0, 1)
+    assert _records(store) == before and "PRIVATE KEY" not in out.out + out.err
+    assert cli.cmd_rebuild_windows(_cli_args(**args)) == 0
+    out = capsys.readouterr()
+    real = json.loads(out.out)
+    assert (real["blocked_by_secret_policy"], real["removed"], real["created"]) == (1, 1, 0)
+    assert [h.payload["source"] for h in _windows(store)] == ["chat/a"]
+    assert "PRIVATE KEY" not in out.out + out.err
+    # Without the policy nothing is removed: the cleanup belongs to the policy.
+    again = _mem_store("again")
+    ingest_remote_items(emb, again, _split_key(), window_size=2)
+    assert sync_source_windows(
+        again, "chat/key", tenant=None, window_size=2, mode="rebuild", embedding=emb
+    ).removed == 0
+
+
+def test_dry_run_counts_what_the_policy_would_block(cli_store, capsys):
+    cli, store, emb = cli_store
+    ingest_remote_items(emb, store, _split_key() + _items(n=2))
+    assert cli.cmd_rebuild_windows(
+        _cli_args(dry_run=True, window_size=2, secret_policy="block")
+    ) == 0
+    dry = json.loads(capsys.readouterr().out)
+    assert (dry["created"], dry["blocked_by_secret_policy"]) == (1, 1)
+    assert _windows(store) == []
+    assert not any("BEGIN" in t and "-----END" in t for t in emb.embedded)
+
+
+def test_failing_policy_check_is_reported_not_passed(monkeypatch):
+    from mnemostack.ingest_policy import SecretPolicy
+
+    store, emb = _mem_store(), _CountingEmbedding()
+
+    real = SecretPolicy.check_item
+
+    def broken(self, item):
+        if WINDOW_MEMBERS_KEY in item.metadata:  # the check of a joined text
+            raise RuntimeError("policy engine down")
+        return real(self, item)
+
+    monkeypatch.setattr(SecretPolicy, "check_item", broken)
+    result = ingest_remote_items(emb, store, _items(n=3), window_size=3)
+    assert [r.status for r in result] == ["stored"] * 3
+    assert (result.windows.complete, result.windows.reason) == (False, "error")
+    assert _windows(store) == []
+
+
+def test_retraction_covers_an_owner_found_only_under_the_locks(monkeypatch):
+    """An unscoped retraction whose first read ran before a tenant's write."""
+    import mnemostack.remote_windows as rw
+
+    store, emb = _mem_store(), _CountingEmbedding()
+    written = _write(store, emb, _items(), tenant="acme")
+    real, calls = rw._member_scopes, []
+
+    def late(*a, **k):
+        calls.append(1)
+        return {} if len(calls) == 1 else real(*a, **k)
+
+    monkeypatch.setattr(rw, "_member_scopes", late)
+    with rw.member_retraction(store, [written[2].id], tenant=None):
+        store.invalidate([written[2].id])
+    assert _windows(store) == [] and len(calls) >= 3
 
 
 def test_re_remembering_a_retracted_memory_brings_its_windows_back(monkeypatch, tmp_path):
@@ -490,6 +670,7 @@ def _cli_args(**kw):
     base = {
         "collection": "mem", "qdrant": None, "provider": "fake", "tenant": None,
         "source": None, "window_size": 3, "dry_run": False, "json": True, "quotas_file": None,
+        "secret_policy": "off",
     }
     args = {**base, **kw}
     args.setdefault("all_sources", not args["source"])
@@ -577,6 +758,28 @@ def test_rebuild_leaves_operator_built_windows_alone(cli_store, capsys):
     step = ingest_remote_items(emb, store, [late], window_size=3).windows
     assert step.created == 0 and step.foreign_sources == 1 and step.complete
     assert all(WINDOW_MEMBERS_KEY not in h.payload for h in _windows(store))
+
+
+def test_windows_of_another_writer_replace_the_ones_built_here(cli_store, capsys):
+    """The API built windows first, then `Ingestor` wrote its own over the
+    same conversation: the two sets must not stay side by side."""
+    cli, store, emb = cli_store
+    ingest_remote_items(emb, store, _items(), window_size=3)
+    Ingestor(emb, store, window_size=3).ingest(_items())
+    assert len(_windows(store)) == 6
+    assert cli.cmd_rebuild_windows(_cli_args(dry_run=True)) == 0
+    assert json.loads(capsys.readouterr().out)["removed"] == 3 and len(_windows(store)) == 6
+    assert cli.cmd_rebuild_windows(_cli_args()) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert (out["removed"], out["created"], out["kept"]) == (3, 0, 0)
+    assert len(_windows(store)) == 3
+    assert all(WINDOW_MEMBERS_KEY not in h.payload for h in _windows(store))
+    # A write does the same, without a rebuild.
+    ingest_remote_items(emb, store, _items("chat/z"), window_size=3)
+    Ingestor(emb, store, window_size=3).ingest(_items("chat/z"))
+    late = IngestItem(text="late", source="chat/z", offset=9)
+    assert ingest_remote_items(emb, store, [late], window_size=3).windows.removed == 3
+    assert len(_windows(store, "chat/z")) == 3
 
 
 def test_rebuild_visits_a_source_whose_memories_are_all_gone(cli_store, capsys):

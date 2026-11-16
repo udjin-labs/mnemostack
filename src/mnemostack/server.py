@@ -342,6 +342,13 @@ class MemoryWindowsOut(BaseModel):
             "they hold window chunks written by `mnemostack index` or `Ingestor`."
         ),
     )
+    blocked_by_secret_policy: int = Field(
+        0,
+        description=(
+            "Windows not built because their joined text trips "
+            "`ingest.secret_policy`. The memories are stored."
+        ),
+    )
     complete: bool = Field(
         description=(
             "False when a window that should exist was not written; the "
@@ -362,6 +369,7 @@ def _windows_out(windows: Any) -> MemoryWindowsOut | None:
         removed=windows.removed,
         ambiguous_offsets=windows.ambiguous_offsets,
         skipped_sources=windows.foreign_sources,
+        blocked_by_secret_policy=windows.policy_blocked,
         complete=windows.complete,
         reason=windows.reason,
     )

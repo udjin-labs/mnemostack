@@ -1222,6 +1222,7 @@ def build_server(
                     "removed": results.windows.removed,
                     "ambiguous_offsets": results.windows.ambiguous_offsets,
                     "skipped_sources": results.windows.foreign_sources,
+                    "blocked_by_secret_policy": results.windows.policy_blocked,
                     "complete": results.windows.complete,
                     "reason": results.windows.reason,
                 }

@@ -31,7 +31,9 @@ window that such a race leaves MISSING is restored by ``rebuild-windows``.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import uuid
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
@@ -42,12 +44,13 @@ from mnemostack.ingest import (
     DEFAULT_WINDOW_SEPARATOR,
     IngestItem,
     Ingestor,
+    IngestStats,
     RemoteMemoryResult,
     _make_window_item,
     _scroll_keywords,
     _tenant_write_lock,
-    stable_chunk_id,
 )
+from mnemostack.ingest_policy import IngestPolicyError, SecretPolicy
 from mnemostack.observability.recorder import counter
 from mnemostack.quotas import QuotaExceededError, enforce_points_quota
 from mnemostack.vector.patch import PayloadPatch
@@ -109,6 +112,9 @@ class WindowSync:
     #: Sources left alone because they hold window chunks that another
     #: writer (``Ingestor`` / ``mnemostack index``) built.
     foreign_sources: int = 0
+    #: Windows not built, or removed by a rebuild, because the joined text
+    #: trips the secret policy.
+    policy_blocked: int = 0
     #: False when a window that should exist was not written. The reason is
     #: "quota", "embedding", "unsupported" or "error"; ``rebuild-windows``
     #: (or a repeat of the write) repairs it.
@@ -122,6 +128,7 @@ class WindowSync:
         self.ambiguous_offsets += other.ambiguous_offsets
         self.restricted += other.restricted
         self.foreign_sources += other.foreign_sources
+        self.policy_blocked += other.policy_blocked
         if not other.complete and self.complete:
             self.complete = False
             self.reason = other.reason
@@ -280,6 +287,7 @@ def sync_source_windows(
     text_key: str = "text",
     separator: str = DEFAULT_WINDOW_SEPARATOR,
     dry_run: bool = False,
+    secret_policy: str = "off",
 ) -> WindowSync:
     """Bring the remote-built windows of one source in line with its memories.
 
@@ -300,10 +308,13 @@ def sync_source_windows(
     stale = [w for w in state.windows if not state.valid(w)]
     kept = [w for w in state.windows if state.valid(w)]
     wanted: set[tuple[str, ...]] = set()
-    if state.foreign and mode != "prune":
-        # Building here would write over the other writer's windows: the ids
-        # are the same for the same members. Such a source is left to it.
-        result.foreign_sources = 1
+    if state.foreign:
+        # Another writer keeps window chunks in this source. A remote-built
+        # window next to them would be a second chunk over the same members,
+        # so none is built, and those already stored give way.
+        stale, kept = list(state.windows), []
+        if mode != "prune":
+            result.foreign_sources = 1
     elif mode != "prune" and window_size > 1:
         wanted = state.runs(window_size)
         if mode == "write":
@@ -312,36 +323,91 @@ def sync_source_windows(
     if mode == "rebuild":
         stale += [w for w in kept if len(w.members) != window_size]
         kept = [w for w in kept if len(w.members) == window_size]
+    policy = SecretPolicy(secret_policy)
+    blocked: set[tuple[str, ...]] = set()
+    if mode == "rebuild" and secret_policy != "off" and kept:
+        # A window built under another policy setting: the rebuild is where
+        # the current policy is applied to what is already stored.
+        blocked = _blocked_by_policy(store, kept, policy)
+        stale += [w for w in kept if w.members in blocked]
+        kept = [w for w in kept if w.members not in blocked]
+        result.policy_blocked += len(blocked)
     bases = state.bases()
-    missing = sorted(wanted - {w.members for w in kept}, key=lambda run: bases[run[0]].offset)
+    missing = sorted(
+        wanted - {w.members for w in kept} - blocked, key=lambda run: bases[run[0]].offset
+    )
     result.kept = len(kept)
     result.removed = len(stale)
+    # Planning reads the member texts and applies the policy. It writes
+    # nothing, so a dry run reports what the real run would do.
+    planned = (
+        _plan(store, bases, missing, result, tenant=tenant, text_key=text_key,
+              separator=separator, policy=policy)
+        if missing
+        else []
+    )
     if dry_run:
-        result.created = len(missing)
+        result.created = len(planned)
         return result
     _delete(store, [w.id for w in stale], tenant)
-    if missing:
+    if planned:
         _create(
-            store, embedding, source, bases, missing, result,
-            tenant=tenant, max_points=max_points, text_key=text_key, separator=separator,
+            store, embedding, source, bases, planned, result,
+            tenant=tenant, max_points=max_points, secret_policy=secret_policy,
         )
     return result
 
 
-def _create(
+def window_chunk_id(source: str, offset: int, text: str, *, tenant: str | None = None) -> str:
+    """Deterministic id of a remote-built window chunk.
+
+    The same inputs as :func:`stable_chunk_id`, and the same digest, but the
+    OTHER half of it. A memory with the source, the middle offset and the
+    joined text of a window would otherwise get the id of that window, and
+    one of the two would replace the other. No choice of tenant, source or
+    text maps a memory onto a window id, short of a hash coincidence.
+    """
+    base = f"{source}|{offset}|{text}"
+    if tenant is not None:
+        base = f"{tenant}\x00{base}"
+    digest = hashlib.sha256(base.encode()).hexdigest()
+    return str(uuid.UUID(digest[32:]))
+
+
+def _blocked_by_policy(
+    store: Any, windows: list[_Window], policy: SecretPolicy
+) -> set[tuple[str, ...]]:
+    """Member tuples of the stored windows that the policy refuses. A failure
+    of the check itself propagates: it must not read as a pass."""
+    by_id = {str(w.id): w for w in windows}
+    blocked: set[tuple[str, ...]] = set()
+    ids = [w.id for w in windows]
+    for start in range(0, len(ids), _STATE_PAGE):
+        for point in store.client.retrieve(
+            collection_name=store.collection,
+            ids=ids[start : start + _STATE_PAGE],
+            with_payload=True,
+            with_vectors=False,
+        ):
+            try:
+                policy.check(dict(point.payload or {}))
+            except IngestPolicyError:
+                blocked.add(by_id[str(point.id)].members)
+    return blocked
+
+
+def _plan(
     store: Any,
-    embedding: Any,
-    source: str,
     bases: dict[str, _Base],
     missing: list[tuple[str, ...]],
     result: WindowSync,
     *,
     tenant: str | None,
-    max_points: int | None,
     text_key: str,
     separator: str,
-) -> None:
-    tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
+    policy: SecretPolicy,
+) -> list[tuple[str, IngestItem]]:
+    """The window chunks to write for ``missing``, with their ids. Reads only."""
     wanted_ids = list(dict.fromkeys(mid for run in missing for mid in run))
     payloads = {
         str(point.id): dict(point.payload or {})
@@ -352,10 +418,10 @@ def _create(
             with_vectors=False,
         )
     }
-    items: list[IngestItem] = []
+    planned: list[tuple[str, IngestItem]] = []
     for run in missing:
         members = [payloads.get(mid) for mid in run]
-        # Re-checked on the full payload: the scan above is a snapshot, and a
+        # Re-checked on the full payload: the scan is a snapshot, and a
         # member may have been retracted or restricted since. Such a window
         # is no longer wanted, so skipping it is not a failure.
         if any(
@@ -368,21 +434,33 @@ def _create(
             for m, mid in zip(members, run, strict=True)
         ):
             continue
-        items.append(_window_item([m for m in members if m is not None], run, text_key, separator))
-    # A memory can hold the id a window would get (same source, the middle
-    # offset, text equal to the joined text). The upsert would replace it,
-    # with its lifecycle marks, so that window is not built.
-    ids_of = {id(i): stable_chunk_id(i.source, i.offset, i.text, tenant=tenant) for i in items}
-    taken = store.retrieve_payload_fields(list(ids_of.values()), ["chunk_kind"], **tkw)
-    items = [
-        i
-        for i in items
-        if taken.get(ids_of[id(i)], {"chunk_kind": "sliding_window"}).get("chunk_kind")
-        == "sliding_window"
-    ]
-    if not items:
-        return
-    window_ids = [ids_of[id(i)] for i in items]
+        item = _window_item([m for m in members if m is not None], run, text_key, separator)
+        try:
+            # Members pass the policy one by one; the joined text can still
+            # complete a blocked format (a key split over two messages).
+            policy.check_item(item)
+        except IngestPolicyError:
+            result.policy_blocked += 1
+            continue
+        planned.append((window_chunk_id(item.source, item.offset, item.text, tenant=tenant), item))
+    return planned
+
+
+def _create(
+    store: Any,
+    embedding: Any,
+    source: str,
+    bases: dict[str, _Base],
+    planned: list[tuple[str, IngestItem]],
+    result: WindowSync,
+    *,
+    tenant: str | None,
+    max_points: int | None,
+    secret_policy: str,
+) -> None:
+    tkw: dict[str, Any] = {"tenant": tenant} if tenant is not None else {}
+    items = [item for _wid, item in planned]
+    window_ids = [wid for wid, _item in planned]
     if tenant is not None and max_points is not None:
         existing = store.retrieve_existing_ids(list(window_ids), tenant=tenant)
         try:
@@ -403,9 +481,15 @@ def _create(
         store.apply_payload_patches(
             [PayloadPatch(id=pid, set_values={WINDOWED_KEY: True}) for pid in unflagged], **tkw
         )
-    ingestor = Ingestor(embedding, store, skip_seen=False, tenant=tenant, max_points=max_points)
+    ingestor = Ingestor(
+        embedding, store, skip_seen=False, tenant=tenant, max_points=max_points,
+        secret_policy=secret_policy,
+    )
+    stats = IngestStats()
     try:
-        stats = ingestor.ingest(items)
+        # `_flush`, not `ingest`: the ids are those of the window id space.
+        for start in range(0, len(planned), ingestor.batch_size):
+            ingestor._flush(list(planned[start : start + ingestor.batch_size]), stats)
     except QuotaExceededError:
         result.complete, result.reason = False, "quota"
         _meter(tenant, items)
@@ -445,6 +529,7 @@ def sync_written(
     window_size: int,
     max_points: int | None,
     text_key: str,
+    secret_policy: str = "off",
 ) -> WindowSync:
     """Window step of one remote write. Never raises: the memories of the
     request are already stored, and a window failure must not report them
@@ -462,6 +547,7 @@ def sync_written(
                 sync_source_windows(
                     store, source, tenant=tenant, window_size=window_size, mode="write",
                     embedding=embedding, focus_ids=ids, max_points=max_points, text_key=text_key,
+                    secret_policy=secret_policy,
                 )
             )
         except Exception:  # noqa: BLE001 — see docstring
@@ -521,16 +607,27 @@ def member_retraction(
     so a deployment that never used the feature pays one read by id.
     """
     scopes = _member_scopes(store, ids, tenant)
-    owners = sorted({owner for owner, _ in scopes} | {tenant}, key=lambda t: (t is not None, str(t)))
     wanted = {str(pid) for pid in ids}
     with ExitStack() as stack:
-        for owner in owners:
-            stack.enter_context(_tenant_write_lock(owner))
-        # Read again under the locks: a writer of this process may have
-        # flagged a member, and stored its window, since the first read.
-        for key, flagged in _member_scopes(store, ids, tenant).items():
-            if key[0] in owners:
+        for attempt in range(3):
+            owners = sorted(
+                {owner for owner, _ in scopes} | {tenant}, key=lambda t: (t is not None, str(t))
+            )
+            for owner in owners:
+                stack.enter_context(_tenant_write_lock(owner))
+            # Read again under the locks: a writer of this process may have
+            # stored a named memory, flagged it, and stored its window, since
+            # the read before.
+            fresh = _member_scopes(store, ids, tenant)
+            for key, flagged in fresh.items():
                 scopes[key] = scopes.get(key, False) or flagged
+            if {owner for owner, _ in fresh} <= set(owners) or attempt == 2:
+                # After the last attempt a new owner stays unlocked. Its
+                # sources are still visited below, like those of a writer in
+                # another process.
+                break
+            # A new owner: its lock must be taken in the common order.
+            stack.close()
         for (owner, source), flagged in scopes.items():
             state = _read_source(store, source, owner) if flagged else None
             if state is not None:
@@ -610,4 +707,5 @@ __all__ = [
     "source_retraction",
     "sync_source_windows",
     "sync_written",
+    "window_chunk_id",
 ]

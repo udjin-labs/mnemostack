@@ -31,10 +31,12 @@ run `mnemostack rebuild-windows` (below).
   default `0` gets no windows.
 - `chunk: true` documents get windows over their chunks by the same rule.
 
-For the same messages in the same order, the stored window chunks are the ones
-`Ingestor(window_size=N)` stores: same ids, text, timestamps, tags and
-metadata. One difference: with a custom `recall.text_key` the window chunk
-carries its own text under that key. A window chunk carries the metadata, tags and timestamp of its middle
+For eligible memories (see Rules) in the same order, the stored window chunks
+have the content of the ones `Ingestor(window_size=N)` stores: text, member
+order, timestamps, tags and metadata. Two differences. The point id is
+another one: API-built windows have their own id space, so a window and a
+memory can never share an id. And with a custom `recall.text_key` the window
+chunk carries its own text under that key. A window chunk carries the metadata, tags and timestamp of its middle
 member, plus `window_start_ts` / `window_end_ts`.
 
 ## Rules
@@ -50,9 +52,12 @@ member, plus `window_start_ts` / `window_end_ts`.
 - A retraction or deletion only removes windows. The windows across the gap
   it leaves are built by a later write of a neighbour, or by
   `mnemostack rebuild-windows`.
-- A memory whose text equals the text a window would have, at the offset of
-  the window's middle member, has the id of that window. The window is then
-  not built. A dry run of `rebuild-windows` still counts it.
+- With `ingest.secret_policy: block` the joined text of a window is checked
+  too: a window that trips the policy is not built, and the memories stay.
+  The write response counts it in `windows.blocked_by_secret_policy`.
+  `rebuild-windows` also removes stored windows that trip the current policy,
+  and its report counts them. Changing the policy alone removes nothing; the
+  cleanup happens on a rebuild.
 - A memory with `valid_from` / `valid_until`, or one that belongs to an
   `index_root`, stays out of windows and is not bridged either. Its text must
   not stay readable through a chunk with another validity period.
@@ -71,7 +76,8 @@ member, plus `window_start_ts` / `window_end_ts`.
   retraction set a `valid_until`: that bound stays, and it keeps the memory
   out of windows.
 - A source that holds window chunks written by `mnemostack index` or
-  `Ingestor` is left to that writer: the service builds no windows there, and
+  `Ingestor` is left to that writer: the service builds no windows there,
+  removes the ones it built there before, and
   the write response counts it in `windows.skipped_sources`. Such a source is
   recognised by a window chunk without the member list that every API-built
   window carries. The service writes a window chunk and its member list in
@@ -91,7 +97,7 @@ member, plus `window_start_ts` / `window_end_ts`.
 
 ```json
 {"created": 1, "removed": 0, "ambiguous_offsets": 0, "skipped_sources": 0,
- "complete": true, "reason": null}
+ "blocked_by_secret_policy": 0, "complete": true, "reason": null}
 ```
 
 The memories of a request are stored first, under the existing rules. The
@@ -158,7 +164,9 @@ written by `mnemostack index` or `Ingestor` are not touched.
 
 The report counts what was skipped: ambiguous offsets, memories with a validity
 bound or an `index_root`, memories without a `source`, and sources with window
-chunks of `index` or `Ingestor`.
+chunks of `index` or `Ingestor`. It also counts the windows that the secret
+policy blocks, without their text. A dry run applies the policy too: it reads
+the member texts and writes nothing.
 
 ## Concurrency
 
