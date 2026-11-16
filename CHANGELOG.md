@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.4.0] - 2026-11-16
+
 ### Added
 - Add opt-in sliding-window chunks for memories written through
   `POST /memories` and `mnemostack_remember` (`ingest.remote_window_size`,
@@ -34,6 +36,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `AsyncVectorStore` accepts `text_key` for the field that gets the index.
 - `mnemostack doctor` reports whether `auto` runs with native BM25 on the
   collection.
+
+### Upgrade notes
+- API windows remain disabled by default. Set `ingest.remote_window_size`
+  (`MNEMOSTACK_REMOTE_WINDOW_SIZE`) above 1 to enable them; callers must send
+  a non-empty conversation `source` and distinct message `offset` values.
+  Existing data is not backfilled automatically: use the explicitly scoped
+  `mnemostack rebuild-windows` command. Windows add about one derived point
+  per message once full windows exist, plus embedding and source-scan costs.
+  Size 3 reduced update ordering from 21/24 to 17/24 on a development subset
+  of LongMemEval; size 2's update-order effect is unmeasured. API-path
+  retrieval gains have not been separately measured.
+- Changing the secret policy does not purge stored windows automatically;
+  rebuild them to remove windows blocked by the current policy.
+- Native BM25 under `auto` can change retrieval results for collections with
+  the scored text index. Set `recall.text_search: off` to disable the lexical
+  arm. Existing collections are not automatically migrated; `mnemostack
+  text-index` explicitly adds the index. See `docs/remote-windows.md` and the
+  deployment guide for storage, concurrency and latency limitations.
 
 ## [3.3.0] - 2026-11-13
 
