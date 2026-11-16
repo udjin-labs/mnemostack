@@ -1914,10 +1914,13 @@ def cmd_rebuild_windows(args: argparse.Namespace) -> int:
             if args.dry_run or size == 1
             else get_provider(args.provider, **_provider_kwargs_from_args(args))
         )
-        store = VectorStore(
-            collection=args.collection,
-            dimension=provider.dimension if provider is not None else 1,
-            host=args.qdrant,
+        # The write-side store when windows are embedded: under
+        # `recall.text_search: sparse` every written point must carry the
+        # sparse encoding, like the points of the index commands.
+        store = (
+            _indexing_store(args, provider)
+            if provider is not None
+            else VectorStore(collection=args.collection, dimension=1, host=args.qdrant)
         )
         if not store.collection_exists():
             print(f"error: collection '{args.collection}' does not exist", file=sys.stderr)

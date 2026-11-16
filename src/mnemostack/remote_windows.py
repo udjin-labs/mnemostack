@@ -647,10 +647,17 @@ class _SourceRetraction:
         self.needed = active
         self.owners: set[str | None] = set()
 
-    def note(self, payloads: Sequence[dict[str, Any]]) -> list[bool]:
-        """Record the selected points; True for each remote-built window."""
+    def note(self, ids: Sequence[Any], payloads: Sequence[dict[str, Any]]) -> list[bool]:
+        """Record the selected points; True for each remote-built window.
+
+        A selected memory can be a member of a window that this batch does
+        not hold. Those windows are deleted here, BEFORE the caller's effect,
+        so a failure of the pass after it cannot leave the retracted text
+        readable through them.
+        """
         marks: list[bool] = []
-        for payload in payloads:
+        members: dict[str | None, set[str]] = {}
+        for pid, payload in zip(ids, payloads, strict=True):
             owner = payload.get(TENANT_ID_KEY)
             window = (
                 (owner is None or isinstance(owner, str))
@@ -660,13 +667,28 @@ class _SourceRetraction:
             if owner is None or isinstance(owner, str):
                 self.owners.add(owner)
                 self.needed = self.needed or window or bool(payload.get(WINDOWED_KEY))
+                if payload.get(WINDOWED_KEY) and not window:
+                    members.setdefault(owner, set()).add(str(pid))
             marks.append(window)
+        selected = {str(pid) for pid in ids}
+        for owner, wanted in members.items():
+            state = _read_source(self._store, self._source, owner)
+            if state is not None:
+                _delete(
+                    self._store,
+                    [
+                        w.id
+                        for w in state.windows
+                        if wanted.intersection(w.members) and str(w.id) not in selected
+                    ],
+                    owner,
+                )
         return marks
 
     def take_windows(self, ids: Sequence[Any], payloads: Sequence[dict[str, Any]]) -> list[Any]:
         """Delete the remote-built windows among the selected points and
         return the ids of the other points, in order."""
-        marks = self.note(payloads)
+        marks = self.note(ids, payloads)
         windows: dict[str | None, list[Any]] = {}
         for pid, payload, window in zip(ids, payloads, marks, strict=True):
             if window:

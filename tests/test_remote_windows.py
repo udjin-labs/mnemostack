@@ -384,6 +384,54 @@ def test_source_scoped_calls_in_batches_leave_no_window_over_retracted_text(monk
         assert r.json()["complete"] and _windows(store) == []
 
 
+def test_source_scoped_batch_removes_outside_windows_before_its_effect(monkeypatch, tmp_path):
+    """A batch of one memory: the windows that hold it are in later batches.
+    They go before the retraction, so a failing check after it leaks nothing."""
+    import mnemostack.remote_windows as rw
+    import mnemostack.server as srv
+
+    monkeypatch.setattr(srv, "REMOTE_SOURCE_BATCH", 1)
+    monkeypatch.setattr(rw, "_check_after", lambda *_a, **_k: None)  # the pass after fails
+    for call in ("invalidate", "delete"):
+        client, store, _emb, headers = _app(monkeypatch, tmp_path)
+        _post(client, headers, _items())
+        if call == "invalidate":
+            r = client.post("/invalidate", headers=headers, json={"source": "chat/a"})
+        else:
+            r = client.request("DELETE", "/memories", headers=headers, json={"source": "chat/a"})
+        assert r.status_code == 200 and not r.json()["complete"]
+        live = [h.payload["text"] for h in store.scroll() if not h.payload.get("invalidated_at")]
+        singles = {t for t in live if "\n" not in t}
+        assert all(set(t.split("\n")) <= singles for t in live)
+
+
+def test_rebuild_writes_sparse_encodings_under_sparse_text_search(monkeypatch, capsys):
+    from qdrant_client import QdrantClient
+
+    import mnemostack.cli as cli
+    from mnemostack.vector import VectorStore
+
+    client = QdrantClient(":memory:")
+    emb = _CountingEmbedding()
+
+    def make_store(**kw):
+        made = VectorStore(**{**kw, "dimension": 3})
+        made.client = client
+        return made
+
+    monkeypatch.setattr(cli, "VectorStore", make_store)
+    monkeypatch.setattr(cli, "get_provider", lambda _n, **_k: emb)
+    monkeypatch.setattr(cli, "_provider_kwargs_from_args", lambda _a: {})
+    monkeypatch.setattr(cli, "_text_search_mode", lambda: "sparse")
+    store = make_store(collection="mem", sparse_text=True)
+    store.ensure_collection()
+    ingest_remote_items(emb, store, _items(n=3))
+    assert store.sparse_coverage_gap() == 0
+    assert cli.cmd_rebuild_windows(_cli_args()) == 0
+    assert json.loads(capsys.readouterr().out)["created"] == 1
+    assert store.sparse_coverage_gap() == 0 and store.count() == 4
+
+
 def test_write_during_a_source_scoped_call_leaves_no_window_over_its_text(monkeypatch, tmp_path):
     """A write that lands between the selection and the effect of a
     source-scoped call (another process: no shared lock)."""

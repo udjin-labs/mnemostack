@@ -2594,7 +2594,7 @@ def build_app(config: ServerConfig | None = None) -> FastAPI:
                     )
                     complete = not more
                     requested = len(ids)
-                    selection.note(payloads)
+                    selection.note(ids, payloads)
                     deleted = store.delete_points(ids, **tkw) if ids else 0
                 counter("mnemostack.server.deleted", deleted)
                 return DeleteMemoriesResponse(
