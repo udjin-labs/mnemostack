@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- Use absolute GitHub documentation and image URLs in the package README so
+  links work when the description is rendered on PyPI.
+
 ## [3.4.0] - 2026-11-16
 
 ### Added

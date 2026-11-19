@@ -17,16 +17,16 @@ The Python SDK, CLI, HTTP API, and MCP server are interfaces to the same memory 
 | --- | --- | --- |
 | Keep context across sessions | File indexing and streaming ingestion, deterministic chunk IDs, structured markdown, and enrichment hooks | [Ingestion](#streaming-ingest-api) |
 | Find evidence that fits the question | Vector, lexical, temporal, and optional graph retrieval; fusion, ranking, reranking, and token budgets | [Retrieval design](#architecture) |
-| Maintain facts as they change | Invalidation, validity intervals and `as_of` reads, source metadata, and citation resolution against current files | [Memory lifecycle](docs/memory-model.md#maintain-facts-and-their-evidence) |
-| Understand a missed result | Per-retriever and per-stage traces, explicit fallback tags, and `RecallTrace.loss_report(expected_ids)` | [Diagnosis and feedback](docs/memory-model.md#inspect-retrieval-before-tuning-it) |
-| Operate memory for different consumers | Service-key scopes, tenant isolation across vector/graph/learning state, quotas, metering, export, and offboarding | [Service operations](docs/deployment.md#security) |
+| Maintain facts as they change | Invalidation, validity intervals and `as_of` reads, source metadata, and citation resolution against current files | [Memory lifecycle](https://github.com/udjin-labs/mnemostack/blob/main/docs/memory-model.md#maintain-facts-and-their-evidence) |
+| Understand a missed result | Per-retriever and per-stage traces, explicit fallback tags, and `RecallTrace.loss_report(expected_ids)` | [Diagnosis and feedback](https://github.com/udjin-labs/mnemostack/blob/main/docs/memory-model.md#inspect-retrieval-before-tuning-it) |
+| Operate memory for different consumers | Service-key scopes, tenant isolation across vector/graph/learning state, quotas, metering, export, and offboarding | [Service operations](https://github.com/udjin-labs/mnemostack/blob/main/docs/deployment.md#security) |
 
-These capabilities have different activation points. The [memory model and boundaries](docs/memory-model.md) distinguish shipped interfaces, optional settings, and SDK components that your application assembles.
+These capabilities have different activation points. The [memory model and boundaries](https://github.com/udjin-labs/mnemostack/blob/main/docs/memory-model.md) distinguish shipped interfaces, optional settings, and SDK components that your application assembles.
 
 ## Start with your own context
 
 - **OpenClaw memory:** retain existing notes and connect recall through the [companion plugin](#openclaw-auto-recall-companion-plugin) or an [existing recall entry point](#install-for-an-openclaw-style-agent). The companion adds retrieved context to the agent prompt; ingestion remains a separate operation.
-- **One personal archive, several agents:** index a messenger export once and let your authorized agents query the same backend. The [two-local-client walkthrough](examples/two-local-clients-demo.md) rehearses shared reads; access from different PCs needs a protected connection to that backend. It does not configure automatic messenger capture or synchronization.
+- **One personal archive, several agents:** index a messenger export once and let your authorized agents query the same backend. The [two-local-client walkthrough](https://github.com/udjin-labs/mnemostack/blob/main/examples/two-local-clients-demo.md) rehearses shared reads; access from different PCs needs a protected connection to that backend. It does not configure automatic messenger capture or synchronization.
 - **Local memory for a Hermes agent:** use a local mnemostack backend through the agent's memory integration. The separate `hermes-mnemostack` provider is listed in the [integration roadmap](#roadmap); its installation and capture behavior belong to that integration, not to the core quickstart.
 - **Workplace infrastructure:** serve multiple applications or agents from one deployment, with **a separate tenant for each consumer**. Use [service-key authentication](#http-server-optional) to enforce ownership. Sharing the infrastructure does not imply sharing their context.
 
@@ -36,17 +36,17 @@ The same interfaces also support document RAG, code search, personal knowledge b
 
 ## Quickstart: index, retrieve, inspect
 
-Follow the [local quickstart](examples/quickstart.md) to index one synthetic message with Ollama and Qdrant, retrieve its fact and filename, and optionally generate an answer or connect an MCP client. It keeps one collection and embedding model throughout. The explicitly tested `full_reorder` setting is a configuration workaround for the selected LLM, not a change to the default reranker.
+Follow the [local quickstart](https://github.com/udjin-labs/mnemostack/blob/main/examples/quickstart.md) to index one synthetic message with Ollama and Qdrant, retrieve its fact and filename, and optionally generate an answer or connect an MCP client. It keeps one collection and embedding model throughout. The explicitly tested `full_reorder` setting is a configuration workaround for the selected LLM, not a change to the default reranker.
 
 Choose the [interface](#interfaces) your application needs after the first retrieval works. Connecting tools alone does not make an agent capture messages or query memory automatically.
 
-**Status:** Actively developed. See the [API stability guide](docs/api-stability.md) for stable contracts versus experimental components, and [CHANGELOG.md](CHANGELOG.md) for release changes.
+**Status:** Actively developed. See the [API stability guide](https://github.com/udjin-labs/mnemostack/blob/main/docs/api-stability.md) for stable contracts versus experimental components, and [CHANGELOG.md](https://github.com/udjin-labs/mnemostack/blob/main/CHANGELOG.md) for release changes.
 
 **Upgrading to 3.0:** Qdrant 1.20+ is required. The `lexical` and
 `qdrant_bm25` text-search modes and `recall.text_search_fields` were removed.
 For server-side BM25, upgrade Qdrant, run `mnemostack text-index` with your
 collection configuration, and set `recall.text_search: native_bm25`.
-See [the 3.0.0 changelog](CHANGELOG.md#300---2026-10-28) for Python API removals
+See [the 3.0.0 changelog](https://github.com/udjin-labs/mnemostack/blob/main/CHANGELOG.md#300---2026-10-28) for Python API removals
 and the new LLM options environment variable.
 
 ## Why hybrid memory?
@@ -55,7 +55,7 @@ A useful memory query may depend on an exact identifier, a paraphrased decision,
 
 ## Use cases
 
-Use mnemostack when retaining context also requires retrieving, updating, or operating it: agent memory across restarts, a personal archive queried by several clients, grounded answers over documents, or a service with isolated consumers. Choose the corpus, ownership boundary, and ingestion path explicitly. The [memory model](docs/memory-model.md) explains how those choices relate.
+Use mnemostack when retaining context also requires retrieving, updating, or operating it: agent memory across restarts, a personal archive queried by several clients, grounded answers over documents, or a service with isolated consumers. Choose the corpus, ownership boundary, and ingestion path explicitly. The [memory model](https://github.com/udjin-labs/mnemostack/blob/main/docs/memory-model.md) explains how those choices relate.
 
 <a id="three-ways-to-use-mnemostack"></a>
 
@@ -64,11 +64,11 @@ Use mnemostack when retaining context also requires retrieving, updating, or ope
 | Interface | Use it when | Entry point |
 | --- | --- | --- |
 | Python SDK | Your application owns ingestion and composes retrieval components | [Python API](#python-api), [streaming ingest](#streaming-ingest-api) |
-| CLI | You import, query, inspect, or maintain a corpus from scripts or a terminal | [Local quickstart](examples/quickstart.md), [CLI reference](docs/api-stability.md#cli) |
-| HTTP API | Applications in any language need a running memory service | [HTTP server](#http-server-optional), [deployment](docs/deployment.md) |
-| MCP | An agent client needs memory tools in its existing tool protocol | [MCP guide](docs/mcp.md), [host integrations](integrations/README.md) |
+| CLI | You import, query, inspect, or maintain a corpus from scripts or a terminal | [Local quickstart](https://github.com/udjin-labs/mnemostack/blob/main/examples/quickstart.md), [CLI reference](https://github.com/udjin-labs/mnemostack/blob/main/docs/api-stability.md#cli) |
+| HTTP API | Applications in any language need a running memory service | [HTTP server](#http-server-optional), [deployment](https://github.com/udjin-labs/mnemostack/blob/main/docs/deployment.md) |
+| MCP | An agent client needs memory tools in its existing tool protocol | [MCP guide](https://github.com/udjin-labs/mnemostack/blob/main/docs/mcp.md), [host integrations](https://github.com/udjin-labs/mnemostack/blob/main/integrations/README.md) |
 
-SDK composition is explicit: `Recaller.recall()` does not automatically build the serving surfaces' full ranking pipeline. CLI search/answer, HTTP, and MCP use the shared `recall_flow()` chain with their configured components. See [defaults and composition](docs/memory-model.md#choose-the-interface-and-components).
+SDK composition is explicit: `Recaller.recall()` does not automatically build the serving surfaces' full ranking pipeline. CLI search/answer, HTTP, and MCP use the shared `recall_flow()` chain with their configured components. See [defaults and composition](https://github.com/udjin-labs/mnemostack/blob/main/docs/memory-model.md#choose-the-interface-and-components).
 
 ## Architecture
 
@@ -80,9 +80,9 @@ Retention, retrieval, and correction are separate actions: storing a fact does n
 
 ### How it works, in one paragraph
 
-Configured retrievers collect candidates from vector, lexical, temporal, and optional graph sources. Reciprocal Rank Fusion combines their ranked lists. The ranking pipeline can adjust the result using exact tokens, freshness, and feedback state; graph resurrection and LLM reranking add further configured steps. The serving chain cuts the final result to the requested limit and optional text-token budget. Answers are an additional LLM synthesis step over retrieved evidence. The response order is authoritative: `score` is not calibrated confidence and need not sort the response. See [the score contract](docs/api-stability.md#what-score-is-not).
+Configured retrievers collect candidates from vector, lexical, temporal, and optional graph sources. Reciprocal Rank Fusion combines their ranked lists. The ranking pipeline can adjust the result using exact tokens, freshness, and feedback state; graph resurrection and LLM reranking add further configured steps. The serving chain cuts the final result to the requested limit and optional text-token budget. Answers are an additional LLM synthesis step over retrieved evidence. The response order is authoritative: `score` is not calibrated confidence and need not sort the response. See [the score contract](https://github.com/udjin-labs/mnemostack/blob/main/docs/api-stability.md#what-score-is-not).
 
-![mnemostack architecture](docs/images/mnemostack-architecture.jpg)
+![mnemostack architecture](https://raw.githubusercontent.com/udjin-labs/mnemostack/main/docs/images/mnemostack-architecture.jpg)
 
 ### Where mnemostack fits
 
@@ -90,7 +90,7 @@ mnemostack is an independent memory and retrieval layer. You can embed its compo
 
 ### Design
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for module behavior and the recall chain, [the memory model](docs/memory-model.md) for capabilities and boundaries, and [deployment](docs/deployment.md) for persistence and operations.
+See [ARCHITECTURE.md](https://github.com/udjin-labs/mnemostack/blob/main/ARCHITECTURE.md) for module behavior and the recall chain, [the memory model](https://github.com/udjin-labs/mnemostack/blob/main/docs/memory-model.md) for capabilities and boundaries, and [deployment](https://github.com/udjin-labs/mnemostack/blob/main/docs/deployment.md) for persistence and operations.
 
 ### Storage, index, and retrieval layers
 
@@ -101,13 +101,13 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for module behavior and the recall chain,
 
 ### Pipeline state
 
-Explicit feedback updates Q-learning and exposure state. HTTP exposure/access recording are opt-in; access reinforcement is a bounded bonus, not automatic forgetting. CLI and MCP can use existing state and accept explicit feedback. `FileStateStore` uses `flock` so processes on the same host can share a local POSIX state file. Multi-host deployments, network filesystems, and high-write workloads need a suitable shared store or restricted stateful writes; see [state persistence](docs/deployment.md#state-store).
+Explicit feedback updates Q-learning and exposure state. HTTP exposure/access recording are opt-in; access reinforcement is a bounded bonus, not automatic forgetting. CLI and MCP can use existing state and accept explicit feedback. `FileStateStore` uses `flock` so processes on the same host can share a local POSIX state file. Multi-host deployments, network filesystems, and high-write workloads need a suitable shared store or restricted stateful writes; see [state persistence](https://github.com/udjin-labs/mnemostack/blob/main/docs/deployment.md#state-store).
 
 ### Graceful degradation
 
 A failed retriever can leave results from other sources, and a failing LLM reranker can leave the pre-rerank order. Inspect `degraded` together with `notes`: entries present only in `degraded` identify actual faults. Request `include_trace` on HTTP/MCP to inspect the stages. A plausible answer alone does not demonstrate that every component worked.
 
-Query expansion is an exception: misconfiguration or a provider failure before retrieval surfaces as an error. The [architecture guide](ARCHITECTURE.md#recall-pipeline-hybrid) describes the contract.
+Query expansion is an exception: misconfiguration or a provider failure before retrieval surfaces as an error. The [architecture guide](https://github.com/udjin-labs/mnemostack/blob/main/ARCHITECTURE.md#recall-pipeline-hybrid) describes the contract.
 
 ## Comparison and benchmarks
 
@@ -205,7 +205,7 @@ export GEMINI_API_KEY=...
 bash benchmarks/run_locomo.sh        # full 10-sample run, writes results/ts.{json,log}
 ```
 
-Details, category definitions, and notes on the judge protocol: [benchmarks/README.md](benchmarks/README.md).
+Details, category definitions, and notes on the judge protocol: [benchmarks/README.md](https://github.com/udjin-labs/mnemostack/blob/main/benchmarks/README.md).
 
 ## Who is this for?
 
@@ -223,10 +223,10 @@ Not the best fit if you only need a single call to `text-embedding-3-small` + co
 - ⚖️ **Weighted & adaptive RRF fusion** — `reciprocal_rank_fusion(weights=[...])` lets you lift sources you trust more; `Recaller(adaptive_weights=True)` picks a per-query-shape profile (exact-token / person / temporal / general). See the honest write-up below for where this helps and where it doesn't.
 - 🧪 **HyDE retriever (opt-in)** — embeds a hypothetical answer instead of the query. Useful for query↔document vocabulary gaps in documentation-style corpora; does **not** reliably help on dialogue-backed memory and always costs one extra LLM roundtrip per `search()`. Not included in the default `Recaller`.
 - 🪜 **Configurable recall pipeline** — ClassifyQuery, CalibrateRelevance, ExactTokenRescue, HubDampen (SDK-only with non-empty `hub_degrees`, absent on CLI, HTTP and MCP paths), QLearningReranker (when enabled), CuriosityBoost (when enabled), FreshnessBlend, GravityDampen, InhibitionOfReturn (when enabled), ExactTokenProtection, and GraphResurrection (when a graph URI is supplied). Used by CLI search/answer and the HTTP/MCP serving paths; SDK users compose it explicitly. Feedback updates are explicit, and HTTP recall exposure logging is off unless `--auto-record-ior` is enabled.
-- 🔁 **Reranking** — Gemini Flash (or any LLM) reorders top-K by relevance, or plug a cross-encoder / hosted rerank service through the score-based `ScoringReranker`. See [docs/recipes.md](docs/recipes.md) for a runnable `bge-reranker-v2-m3` example.
-- 🔤 **Pluggable BM25 analyzer** — the default is lowercase + Unicode word split (great for exact tokens); pass `BM25Retriever(tokenizer=...)` for stemming / lemmatization / language routing. Core stays dependency-free; [docs/recipes.md](docs/recipes.md) has per-language recipes.
+- 🔁 **Reranking** — Gemini Flash (or any LLM) reorders top-K by relevance, or plug a cross-encoder / hosted rerank service through the score-based `ScoringReranker`. See [docs/recipes.md](https://github.com/udjin-labs/mnemostack/blob/main/docs/recipes.md) for a runnable `bge-reranker-v2-m3` example.
+- 🔤 **Pluggable BM25 analyzer** — the default is lowercase + Unicode word split (great for exact tokens); pass `BM25Retriever(tokenizer=...)` for stemming / lemmatization / language routing. Core stays dependency-free; [docs/recipes.md](https://github.com/udjin-labs/mnemostack/blob/main/docs/recipes.md) has per-language recipes.
 - ⚡ **Async API** — every blocking surface has a signature-stable async mirror: `Recaller.recall_async`, `recall_flow_async`, `Ingestor.ingest_async` / `ingest_one_async`, `AnswerGenerator.generate_async`, `synthesize_async`, plus `AsyncVectorStore` over the native async Qdrant client. Retrievers dispatch in parallel; five concurrent HTTP recalls finish in roughly one single-recall wall-clock.
-- 🕰️ **Stale-fact invalidation** — mark superseded memories stale without deleting or re-embedding them: `store.invalidate(ids, valid_until=...)` sets bi-temporal payload keys (`invalidated_at` system-time, `valid_until`/`valid_from` world-time) via a cheap merge write. Recall hides invalidated facts by default; `include_invalidated=True` shows them and `as_of="<iso>"` reconstructs what was valid at a past instant from `valid_from`/`valid_until` — each optional, and `invalidated_at` is not read there at all, so a point-in-time view can be a superset of the default one ([contract](docs/api-stability.md#on-disk--payload-contracts)). The vector-side twin of the graph's `valid_until` model. CLI `mnemostack invalidate <id>...`, MCP `mnemostack_invalidate`, and — since 2.2 — HTTP `POST /invalidate` (with `DELETE /memories` for irreversible erasure), selecting either an id list or a whole `source`.
+- 🕰️ **Stale-fact invalidation** — mark superseded memories stale without deleting or re-embedding them: `store.invalidate(ids, valid_until=...)` sets bi-temporal payload keys (`invalidated_at` system-time, `valid_until`/`valid_from` world-time) via a cheap merge write. Recall hides invalidated facts by default; `include_invalidated=True` shows them and `as_of="<iso>"` reconstructs what was valid at a past instant from `valid_from`/`valid_until` — each optional, and `invalidated_at` is not read there at all, so a point-in-time view can be a superset of the default one ([contract](https://github.com/udjin-labs/mnemostack/blob/main/docs/api-stability.md#on-disk--payload-contracts)). The vector-side twin of the graph's `valid_until` model. CLI `mnemostack invalidate <id>...`, MCP `mnemostack_invalidate`, and — since 2.2 — HTTP `POST /invalidate` (with `DELETE /memories` for irreversible erasure), selecting either an id list or a whole `source`.
 - 🌍 **Unicode-aware entity resolution** — Memgraph retriever probes by `telegram_id`, handle, and precomputed `name_lower` so non-ASCII names match correctly (Memgraph's `toLower()` lower-cases ASCII only).
 - 📥 **Streaming `Ingestor` API** — batched, idempotent, LRU-cached ingest from any Python code. Lazy iterator means large corpora ingest with bounded memory. Same `(source, offset, text)` → same deterministic UUID-shaped content id, so re-runs are no-ops.
 - 📝 **Markdown indexer** — `mnemostack index-markdown <dir>` indexes a folder of markdown with structure: YAML frontmatter → payload filters, header-aware chunking with heading paths, and `[[wikilinks]]` / `[text](note.md)` → `File -[LINKS_TO]-> File` graph edges (with a Memgraph URI). Generic for any markdown folder; Obsidian vaults work as a side effect. Depends only on the already-present `pyyaml`.
@@ -237,9 +237,9 @@ Not the best fit if you only need a single call to `text-embedding-3-small` + co
 - 💬 **Answer mode** — inference layer synthesizes concise factual answers with source citations and confidence. Category-aware prompts (lists / temporal / multi-hop / inference / adversarial), specificity resolver, and `cat_3` inference retry with query decomposition are on by default.
 - 📋 **Knowledge synthesis** — `synthesize(entity)` rolls up everything memory knows about a person, project, or topic into a structured profile (`SynthesisFact` / `SynthesisResult`, markdown or JSON). CLI: `mnemostack synthesize <entity>`. Optional related-entities expansion via graph and LLM summarization pass.
 - 📏 **Progressive Tiers API** — `search --tier {1,2,3}` and `answer --tier {1,2,3}` bound output size (~50 / ~200 / ~500 tokens) so agents can pay only for the detail they actually need. Omit `--tier` for unchanged full output.
-- ✂️ **Chunkers + sliding window** — plain, fixed-size, and `MessagePairChunker` for chat transcripts (keeps user↔assistant pairs together). The new `vector.window_size` config carries adjacent-turn context inside each chunk; `window_size=3` was worth **+5.8pp strict / +4.1pp combined** on LoCoMo (v0.4.0). Memories written through the HTTP API or MCP get the same chunks with the opt-in `ingest.remote_window_size` ([docs/remote-windows.md](docs/remote-windows.md)).
+- ✂️ **Chunkers + sliding window** — plain, fixed-size, and `MessagePairChunker` for chat transcripts (keeps user↔assistant pairs together). The new `vector.window_size` config carries adjacent-turn context inside each chunk; `window_size=3` was worth **+5.8pp strict / +4.1pp combined** on LoCoMo (v0.4.0). Memories written through the HTTP API or MCP get the same chunks with the opt-in `ingest.remote_window_size` ([docs/remote-windows.md](https://github.com/udjin-labs/mnemostack/blob/main/docs/remote-windows.md)).
 - 🔎 **Query expansion + smart retry** — `Recaller(query_expansion=True, expansion_llm=...)` widens recall with reformulated queries; `AnswerGenerator(retry_with_expansion=True)` retries low-confidence answers with the expanded query and a HyDE-style hypothetical before giving up. Opt-in via `--query-expansion` on `mnemostack answer`.
-- ⚙ **Consolidation runtime** — phase orchestrator with built-in health checks and application-supplied phases; scheduling, semantic consolidation, and forgetting policies are supplied by the application ([scope](ARCHITECTURE.md#consolidation--decay))
+- ⚙ **Consolidation runtime** — phase orchestrator with built-in health checks and application-supplied phases; scheduling, semantic consolidation, and forgetting policies are supplied by the application ([scope](https://github.com/udjin-labs/mnemostack/blob/main/ARCHITECTURE.md#consolidation--decay))
 - 🔌 **MCP server** — expose memory tools to Claude Desktop, ChatGPT, Cursor, etc.
 - 🛡 **Graceful degradation** — retrieval keeps working if graph or any retriever is down
 - 🔐 **Multi-tenancy — soft filters or a hard auth boundary** — `filters={"tenant": "a"}` applies inside *every* retriever (exact match + ranges) on HTTP/MCP/CLI/library; results never include points outside the scope, verified by adversarial isolation tests. Filters are **caller-supplied**, so for a real trust boundary run the server with **service-key auth** (`serve --auth` / `mcp-serve --auth`): the tenant is resolved from the key (a client can't assert another's), enforced across the vector store, the knowledge graph, and per-tenant learning state. Optional per-tenant **storage quotas** apply at ingest, and **request-rate quotas** on the authenticated **HTTP** surface (`serve --auth`). Off by default. See the HTTP API section.
@@ -286,7 +286,7 @@ Built-in profiles cover OpenClaw webchat and Telegram envelopes; pass `profiles=
 | `MNEMOSTACK_GRAPH_URI` / `MNEMOSTACK_MEMGRAPH_URI` | Memgraph bolt URI | Graph retriever / GraphStore |
 | `MNEMOSTACK_TENANT` | Tenant every recall is scoped to when the call names none (`recall.tenant` in the config, `--tenant` on the CLI) | Recall on every surface |
 | `MNEMOSTACK_ALLOW_CROSS_TENANT` | Deliberately allow tenantless recall over a multi-tenant collection (tooling inside the trust boundary; not a security control) | Recall / `serve` startup |
-| `MNEMOSTACK_QUANTIZATION_RESCORE` / `MNEMOSTACK_QUANTIZATION_OVERSAMPLING` | Qdrant quantization search parameters for dense queries (`vector.quantization_*` in the config); unset = not sent. See [the recipe](docs/recipes.md#quantizing-a-collection-without-losing-recall-quality) | Dense search on a quantized collection |
+| `MNEMOSTACK_QUANTIZATION_RESCORE` / `MNEMOSTACK_QUANTIZATION_OVERSAMPLING` | Qdrant quantization search parameters for dense queries (`vector.quantization_*` in the config); unset = not sent. See [the recipe](https://github.com/udjin-labs/mnemostack/blob/main/docs/recipes.md#quantizing-a-collection-without-losing-recall-quality) | Dense search on a quantized collection |
 | `MNEMOSTACK_LLM_HOST` / `MNEMOSTACK_LLM_TIMEOUT` | LLM endpoint (ollama: default inherits the embedding `--ollama-host`; openai: required base URL) and LLM request timeout | Answer / reranker / expansion LLM |
 | `MNEMOSTACK_LLM_API_KEY` | Bearer token for the `openai` LLM provider; unset or `none` = no auth header (keyless vLLM / llama.cpp) | Answer / reranker / expansion LLM |
 | `MNEMOSTACK_LLM_OPTIONS` | JSON payload options for the `openai` provider, e.g. `{"reasoning_effort":"none","chat_template_kwargs":{"enable_thinking":false}}`; explicit constructor options override the environment | Answer / reranker / expansion LLM |
@@ -741,7 +741,7 @@ Response shape (abridged):
 
 Ranking `annotations` contains `flags`, `dampened`, `echo_penalty`, `access_boost`, `freshness`, `ior_penalty`, `curiosity_boosted`, and `q_value` when the corresponding stages act on that result. A payload copy of an annotation is written only when stored metadata has no key of that name; payload copies are deprecated in favour of `annotations`. For stored metadata using any of these eight names, the payload keeps the client value, and client-stored `flags` is no longer appended to.
 
-The order of `results` is authoritative — do not re-sort by `score`: many stages and fallback paths write that number on different scales, and a rerank changes the order without rewriting it. See [what `score` is not](docs/api-stability.md#what-score-is-not).
+The order of `results` is authoritative — do not re-sort by `score`: many stages and fallback paths write that number on different scales, and a rerank changes the order without rewriting it. See [what `score` is not](https://github.com/udjin-labs/mnemostack/blob/main/docs/api-stability.md#what-score-is-not).
 
 Pass `"include_trace": true` in the request body to additionally get a `trace` object with per-retriever ranked lists, the fused order, the order after each ranking-pipeline stage (`stages`), and the post-rerank order — useful when debugging why a memory did or didn't surface. In Python, `RecallTrace.loss_report(expected_ids)` turns a trace into the position of each expected id at every step and the steps where it entered or left the top 1/5/10/20/30.
 
@@ -751,7 +751,7 @@ Pass `"filters": {...}` to scope recall by payload fields — exact match (`{"te
 
 The `/answer` endpoint adds `{ answer, confidence, sources }` alongside the memories and carries the same `degraded` / `notes` / opt-in `trace` fields, plus `tokens_used` — the LLM provider's reported token usage for answer generation plus a specificity rewrite when it changes the answer (provider-specific semantics; `null` when the provider reports nothing). If the LLM isn't configured, `/answer` returns `503` and `/recall` still works — graceful degradation applies at the HTTP layer too.
 
-Start the server with `--retry-on-weak` if you want a recall that comes back nearly empty to be paraphrased by the answer LLM and asked again, fusing the rounds by reciprocal rank — so a memory that two phrasings both find outranks one that only a single phrasing did, and a later paraphrase can beat an earlier one. What counts as "weak" is a COUNT (`--retry-weak-below`, default 1 — only a recall that returned nothing), not a score: fused scores are RRF values encoding rank, not confidence, so a threshold on them would measure nothing. One extra round, at most two paraphrases, and every retry carries the caller's tenant, filters, validity view and budget unchanged. Budget for it accordingly: each variant repeats your recall in full, reranker included, so a weak recall costs up to three LLM calls (one paraphrase plus one rerank per variant) and two extra retrieval rounds — not the single call the name suggests. Two consequences worth knowing before you switch it on: a retried response fuses over several rounds where an unretried one fuses over a single one, so the rank basis behind `score` differs and the two are never comparable — threshold on rank, not on the number, and see [what `score` is not](docs/api-stability.md#what-score-is-not) for what the number holds on each path; and a retry never returns fewer memories than it was given — if the fused list plus your token budget would hand back less than the recall already had, the original results come back untouched. That is a guarantee about the size of the response, not its membership: at a fixed `limit` a hit that a paraphrase ranks first will take the slot of one your original phrasing ranked last, which is what asking again is for. Off by default, and a request can only opt *out* of it — the server pays for the LLM call, so enabling it is the operator's call.
+Start the server with `--retry-on-weak` if you want a recall that comes back nearly empty to be paraphrased by the answer LLM and asked again, fusing the rounds by reciprocal rank — so a memory that two phrasings both find outranks one that only a single phrasing did, and a later paraphrase can beat an earlier one. What counts as "weak" is a COUNT (`--retry-weak-below`, default 1 — only a recall that returned nothing), not a score: fused scores are RRF values encoding rank, not confidence, so a threshold on them would measure nothing. One extra round, at most two paraphrases, and every retry carries the caller's tenant, filters, validity view and budget unchanged. Budget for it accordingly: each variant repeats your recall in full, reranker included, so a weak recall costs up to three LLM calls (one paraphrase plus one rerank per variant) and two extra retrieval rounds — not the single call the name suggests. Two consequences worth knowing before you switch it on: a retried response fuses over several rounds where an unretried one fuses over a single one, so the rank basis behind `score` differs and the two are never comparable — threshold on rank, not on the number, and see [what `score` is not](https://github.com/udjin-labs/mnemostack/blob/main/docs/api-stability.md#what-score-is-not) for what the number holds on each path; and a retry never returns fewer memories than it was given — if the fused list plus your token budget would hand back less than the recall already had, the original results come back untouched. That is a guarantee about the size of the response, not its membership: at a fixed `limit` a hit that a paraphrase ranks first will take the slot of one your original phrasing ranked last, which is what asking again is for. Off by default, and a request can only opt *out* of it — the server pays for the LLM call, so enabling it is the operator's call.
 
 Stateful learning is explicit. Start the server with `--auto-record-ior` if you want `/recall` and `/answer` responses to update inhibition-of-return state, and with `--record-access` (or `MNEMOSTACK_RECORD_ACCESS`) if you want them to stamp `access_count`/`last_accessed` on every point they return — the reinforcement the freshness stage reads, recorded where the retrieval actually happens instead of in each client. Both are **off by default**: they turn reads into writes. Access recording is fail-open (a failed write is logged and counted, never raised), best-effort on the count (no atomic increment exists; concurrent recalls of one point can record one increment, and the reader clamps reinforcement at 10 anyway), and scoped to the caller's tenant.
 
@@ -778,7 +778,7 @@ curl -s http://localhost:8000/recall \
     -d '{"query":"..."}'                                  # or: Authorization: Bearer msk_...
 ```
 
-The **tenant is resolved from the key** (a client can't assert another's), enforced across the vector store, the tenant-scoped knowledge graph, and per-tenant learning state — so it's a real authorization boundary, unlike the caller-supplied `filters` above. `/recall`, `/answer` and `GET /memories` require `read`; `/feedback`, `POST`/`DELETE /memories`, `/invalidate` and `/triples` require `write`; a missing/invalid key is `401`, insufficient scope `403`. Cap each tenant with `mnemostack quota set --tenant <id> --max-points N --max-rps R` (storage enforced at ingest, rate on the HTTP surface → `429`). The operator endpoints (`/health`, `/healthz`, `/readyz`, `/status`, `/metrics`) stay reachable without a key; under `--auth`, `/metrics` shows tenant labels only to an `admin` key. Protect them at your proxy if sensitive. Auth is **off by default**; you can still front the server with your own reverse proxy (nginx, Caddy, Traefik) either way. See [`docs/deployment.md`](docs/deployment.md) and [`docs/api-stability.md`](docs/api-stability.md).
+The **tenant is resolved from the key** (a client can't assert another's), enforced across the vector store, the tenant-scoped knowledge graph, and per-tenant learning state — so it's a real authorization boundary, unlike the caller-supplied `filters` above. `/recall`, `/answer` and `GET /memories` require `read`; `/feedback`, `POST`/`DELETE /memories`, `/invalidate` and `/triples` require `write`; a missing/invalid key is `401`, insufficient scope `403`. Cap each tenant with `mnemostack quota set --tenant <id> --max-points N --max-rps R` (storage enforced at ingest, rate on the HTTP surface → `429`). The operator endpoints (`/health`, `/healthz`, `/readyz`, `/status`, `/metrics`) stay reachable without a key; under `--auth`, `/metrics` shows tenant labels only to an `admin` key. Protect them at your proxy if sensitive. Auth is **off by default**; you can still front the server with your own reverse proxy (nginx, Caddy, Traefik) either way. See [`docs/deployment.md`](https://github.com/udjin-labs/mnemostack/blob/main/docs/deployment.md) and [`docs/api-stability.md`](https://github.com/udjin-labs/mnemostack/blob/main/docs/api-stability.md).
 
 ### Knowledge graph (optional)
 
@@ -869,7 +869,7 @@ register_embedding_profile("ollama", EmbeddingProfile(
 Indexed points are stamped with a document-space fingerprint (provider +
 model + document transform + dimension + provider inference knobs —
 profile name/version are metadata and never hashed; upgrading from 1.x? see
-[docs/migration-1.x-to-2.0.md](docs/migration-1.x-to-2.0.md)); `mnemostack index` /
+[docs/migration-1.x-to-2.0.md](https://github.com/udjin-labs/mnemostack/blob/main/docs/migration-1.x-to-2.0.md)); `mnemostack index` /
 `index-markdown` refuse a collection embedded under a different space, and
 `doctor` reports the active profile and fingerprint.
 
@@ -936,7 +936,7 @@ If you're a human operator and you'd rather do this yourself, the same steps app
 
 ## OpenClaw auto-recall companion plugin
 
-This repository also includes a self-contained OpenClaw companion plugin in [`openclaw-plugin/`](openclaw-plugin/). mnemostack remains the recall backend — vector + BM25 + graph + temporal retrieval, fusion, reranking, and answer synthesis — while the plugin connects that backend to OpenClaw's `before_prompt_build` hook.
+This repository also includes a self-contained OpenClaw companion plugin in [`openclaw-plugin/`](https://github.com/udjin-labs/mnemostack/tree/main/openclaw-plugin/). mnemostack remains the recall backend — vector + BM25 + graph + temporal retrieval, fusion, reranking, and answer synthesis — while the plugin connects that backend to OpenClaw's `before_prompt_build` hook.
 
 Zero-config path: install mnemostack, run the daemon on the default local port, install/enable the plugin, and OpenClaw will automatically inject bounded recall answers for recall-style questions:
 
@@ -999,4 +999,4 @@ Issues and PRs are welcome. Public APIs are intended to remain stable; new funct
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE).
+Apache 2.0 — see [LICENSE](https://github.com/udjin-labs/mnemostack/blob/main/LICENSE).
