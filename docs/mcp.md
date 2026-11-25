@@ -78,11 +78,11 @@ Useful flags:
 ```bash
 mnemostack mcp-serve \
   --provider gemini \
-  --embedding-model text-embedding-004 \
+  --embedding-model gemini-embedding-001 \
   --collection my-memory \
   --qdrant http://localhost:6333 \
   --llm gemini \
-  --llm-model gemini-2.5-flash \
+  --llm-model gemini-2.5-flash-lite \
   --bm25-path ./notes \
   --rerank-mode relevant_only \
   --state-path ~/.local/state/mnemostack/server-state.json
@@ -97,14 +97,20 @@ mnemostack mcp-serve \
   --memgraph-uri bolt://localhost:7687
 ```
 
+### Gemini model compatibility
+
+The Gemini examples use `gemini-embedding-001` for a new collection. For an existing collection, keep the embedding model and settings used to build its index.
+
+These examples use `gemini-2.5-flash-lite`, which Google lists separately from `gemini-2.5-flash`. Do not switch to `gemini-3.5-flash-lite` by changing only the model ID. Update the request to use `thinkingLevel` instead of `thinkingBudget` and omit deprecated sampling parameters. See the [Google migration guide](https://aistudio.google.com/docs/whats-new-gemini-3.6#migrate-to-gemini-3-5-flash-lite).
+
 The underlying server also reads these environment variables:
 
 ```bash
 export MNEMOSTACK_COLLECTION=my-memory
 export MNEMOSTACK_EMBEDDING=gemini
-export MNEMOSTACK_EMBEDDING_MODEL=text-embedding-004
+export MNEMOSTACK_EMBEDDING_MODEL=gemini-embedding-001
 export MNEMOSTACK_LLM=gemini
-export MNEMOSTACK_LLM_MODEL=gemini-2.5-flash
+export MNEMOSTACK_LLM_MODEL=gemini-2.5-flash-lite
 export MNEMOSTACK_QDRANT_HOST=http://localhost:6333
 export MNEMOSTACK_MEMGRAPH_URI=bolt://localhost:7687
 export MNEMOSTACK_GRAPH_TIMEOUT=5.0
@@ -823,13 +829,13 @@ Fix: serve with the same provider/model used for indexing, or recreate the colle
 ```bash
 mnemostack index ./notes \
   --provider gemini \
-  --embedding-model text-embedding-004 \
+  --embedding-model gemini-embedding-001 \
   --collection my-memory \
   --recreate
 
 mnemostack mcp-serve \
   --provider gemini \
-  --embedding-model text-embedding-004 \
+  --embedding-model gemini-embedding-001 \
   --collection my-memory
 ```
 

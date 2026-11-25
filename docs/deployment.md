@@ -137,11 +137,11 @@ services:
       - --provider
       - gemini
       - --embedding-model
-      - text-embedding-004
+      - gemini-embedding-001
       - --llm
       - gemini
       - --llm-model
-      - gemini-2.5-flash
+      - gemini-2.5-flash-lite
       - --collection
       - production-memory
       - --qdrant
@@ -232,12 +232,12 @@ If this volume is missing, removed, or mounted to the wrong path, the collection
 collection exists=false, points=0
 ```
 
-Use one collection per memory namespace, for example:
+Use one collection per memory namespace. This example creates an index with `gemini-embedding-001`. For an existing collection, use the same embedding model and settings for indexing and recall. See the [MCP Gemini notes](mcp.md#gemini-model-compatibility) before changing the generation model.
 
 ```bash
 mnemostack index ./corpus \
   --provider gemini \
-  --embedding-model text-embedding-004 \
+  --embedding-model gemini-embedding-001 \
   --collection production-memory \
   --qdrant http://localhost:6333
 ```
@@ -588,7 +588,7 @@ CLI:
 ```bash
 mnemostack health \
   --provider gemini \
-  --embedding-model text-embedding-004 \
+  --embedding-model gemini-embedding-001 \
   --collection production-memory \
   --qdrant http://localhost:6333
 ```
@@ -893,7 +893,7 @@ Example:
 ```bash
 mnemostack index ./corpus \
   --provider gemini \
-  --embedding-model text-embedding-004 \
+  --embedding-model gemini-embedding-001 \
   --collection production-memory-v2 \
   --qdrant http://localhost:6333
 ```
@@ -920,12 +920,12 @@ Example consistent setup:
 ```bash
 mnemostack index ./corpus \
   --provider gemini \
-  --embedding-model text-embedding-004 \
+  --embedding-model gemini-embedding-001 \
   --collection production-memory
 
 mnemostack serve \
   --provider gemini \
-  --embedding-model text-embedding-004 \
+  --embedding-model gemini-embedding-001 \
   --collection production-memory
 ```
 
@@ -938,7 +938,7 @@ Do not rely on provider defaults for production unless you pin the package versi
 
 ```bash
 export MNEMOSTACK_PROVIDER=gemini
-export MNEMOSTACK_EMBEDDING_MODEL=text-embedding-004
+export MNEMOSTACK_EMBEDDING_MODEL=gemini-embedding-001
 export MNEMOSTACK_COLLECTION=production-memory
 # Ollama deployments: the endpoint and the embedding timeout are first-class
 # (flag > MNEMOSTACK_* env/config > native OLLAMA_HOST > localhost); the
@@ -1001,7 +1001,7 @@ Run these after first deploy, after every upgrade, and after restore.
 ```bash
 mnemostack health \
   --provider gemini \
-  --embedding-model text-embedding-004 \
+  --embedding-model gemini-embedding-001 \
   --collection production-memory \
   --qdrant http://localhost:6333
 ```
@@ -1018,7 +1018,7 @@ printf 'smoke-memory: the deployment color is blue.\n' > /tmp/mnemostack-smoke/s
 
 mnemostack index /tmp/mnemostack-smoke \
   --provider gemini \
-  --embedding-model text-embedding-004 \
+  --embedding-model gemini-embedding-001 \
   --collection production-memory \
   --qdrant http://localhost:6333
 ```
@@ -1028,7 +1028,7 @@ Search:
 ```bash
 mnemostack search "deployment color" \
   --provider gemini \
-  --embedding-model text-embedding-004 \
+  --embedding-model gemini-embedding-001 \
   --collection production-memory \
   --qdrant http://localhost:6333 \
   --limit 5
