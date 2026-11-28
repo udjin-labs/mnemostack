@@ -146,6 +146,65 @@ mcp = build_server(
 
 Both hooks are **build-time, operator-supplied code — a trust boundary**, not request-derived input. In particular, under `--auth` the tenant confinement holds only for a middleware that forwards `tenant` and `trace` unchanged into the passed `recall_flow` (as documented above): one that drops them, or queries `recaller` directly instead of calling the flow it was given, bypasses the tenant backstops and the trace scrub. Treat a middleware with the same review rigor as the server configuration itself.
 
+### Existing collection with a custom embedding provider
+
+`mnemostack mcp-serve` can only name the built-in providers (`gemini`, `ollama`, `huggingface`). A collection that was built with a provider you registered yourself needs a small launcher: it registers the provider, builds the same server, and runs it. The tools and their schemas are the native ones; nothing is reimplemented.
+
+```python
+# mnemostack_mcp.py
+from mnemostack.embeddings import EmbeddingProvider, register_provider
+from mnemostack.mcp import build_server
+
+
+class MyProvider(EmbeddingProvider):
+    def __init__(self, model: str | None = None):  # `model` arrives when embedding_model is set
+        self.model = model or "my-model"
+
+    @property
+    def name(self) -> str:
+        return "my-provider"
+
+    @property
+    def dimension(self) -> int:
+        return 512  # the dimension of the existing collection
+
+    def embed(self, text: str) -> list[float]: ...
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]: ...
+
+
+register_provider("my-provider", MyProvider)
+
+mcp = build_server(
+    collection="my-memory",              # the existing collection
+    embedding_provider="my-provider",    # the name registered above
+    qdrant_host="http://localhost:6333",
+)
+
+if __name__ == "__main__":
+    mcp.run()  # stdio
+```
+
+Point the client at the launcher instead of the `mnemostack` command, with the Python of the environment where mnemostack is installed:
+
+```bash
+claude mcp add mnemostack -- /path/to/venv/bin/python /path/to/mnemostack_mcp.py
+codex mcp add mnemostack -- /path/to/venv/bin/python /path/to/mnemostack_mcp.py
+```
+
+- **Registration is process-local.** `register_provider` fills a registry inside one Python process. An MCP server that a client launches is a new process, so the launcher must register the provider itself, even when the HTTP service (`mnemostack serve` or your own wrapper) already runs with the same provider. An unregistered name fails with `Unknown embedding provider`.
+- **Use the provider and model that built the collection.** Another model, or another dimension, gives poor recall or dimension errors; see [Embedding provider mismatch](#embedding-provider-mismatch).
+- **A collection with its own payload schema** also needs `text_key=`, `timestamp_key=` and `timestamp_format=` in `build_server`, with the values of `recall.*` in the deployment's config.
+- **Shared remote access** uses the same launcher with the HTTP transport. Build with `auth_enabled=True, transport="http"` (and `keys_file=` if the keys are not at the default path) and run `mcp.run(transport="http", host="127.0.0.1", port=8001, stateless_http=True, json_response=True)`. The rules of [Authenticated HTTP](#authenticated-http) apply unchanged.
+
+Check the connection from a fresh client session before relying on it:
+
+1. The tool list holds `mnemostack_search` and `mnemostack_remember`.
+2. `mnemostack_health` reports the expected collection and a point count above zero.
+3. `mnemostack_search` returns a record that you know is in the collection.
+4. `mnemostack_remember` stores a test fact with `"stored": 1`.
+5. A second, new session finds that fact with `mnemostack_search`.
+
 ## Client configuration
 
 ### Claude Desktop
@@ -199,6 +258,45 @@ If the provider needs credentials, make sure they are available in the environme
 export GEMINI_API_KEY=your-key-here
 claude
 ```
+
+For a deployment on another host, connect to its [authenticated HTTP](#authenticated-http) endpoint instead of starting a local process:
+
+```bash
+claude mcp add --transport http mnemostack https://memory.example.com/mcp \
+  --header "Authorization: Bearer $MNEMOSTACK_API_KEY"
+```
+
+### Codex
+
+Add Mnemostack as a stdio MCP server:
+
+```bash
+codex mcp add mnemostack --env GEMINI_API_KEY=your-key-here -- \
+  mnemostack mcp-serve \
+    --provider gemini \
+    --collection my-memory \
+    --qdrant http://localhost:6333
+```
+
+The command writes this entry to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.mnemostack]
+command = "mnemostack"
+args = ["mcp-serve", "--provider", "gemini", "--collection", "my-memory", "--qdrant", "http://localhost:6333"]
+
+[mcp_servers.mnemostack.env]
+GEMINI_API_KEY = "your-key-here"
+```
+
+For a deployment on another host, use its authenticated HTTP endpoint. Codex reads the service key from the named environment variable:
+
+```bash
+codex mcp add mnemostack --url https://memory.example.com/mcp \
+  --bearer-token-env-var MNEMOSTACK_API_KEY
+```
+
+`codex mcp list` shows the entry. For a custom embedding provider, see [Existing collection with a custom embedding provider](#existing-collection-with-a-custom-embedding-provider).
 
 ### Cursor
 

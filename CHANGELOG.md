@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- Document how to connect Claude Code and Codex to an existing deployment
+  with the built-in MCP server: a launcher example for a collection with a
+  custom embedding provider (`docs/mcp.md`), a setup decision table and a
+  Codex integration (`integrations/`), and a root `AGENTS.md`.
+
 ### Fixed
 - Use absolute GitHub documentation and image URLs in the package README so
   links work when the description is rendered on PyPI.
