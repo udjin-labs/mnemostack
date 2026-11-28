@@ -12,8 +12,8 @@ has to be written.
 
 | Your deployment | Use |
 |---|---|
-| Built-in embedding provider (`gemini`, `ollama`, `huggingface`), client on a host that reaches Qdrant | `mnemostack mcp-serve` over stdio, see the host table below |
-| Collection built with a custom embedding provider | The launcher in [docs/mcp.md: Existing collection with a custom embedding provider](../docs/mcp.md#existing-collection-with-a-custom-embedding-provider). Provider registration is process-local: the MCP process must register the provider itself, even when the HTTP service already uses it |
+| Built-in embedding provider (`gemini`, `ollama`, `huggingface`, `openai`), client on a host that reaches Qdrant | `mnemostack mcp-serve` over stdio. See the host table below |
+| Collection that still requires a custom embedding provider | The launcher in [Existing collection with a custom embedding provider](../docs/mcp.md#existing-collection-with-a-custom-embedding-provider). The MCP process registers the provider even when the HTTP service already uses it |
 | Deployment on another host, several clients | `mnemostack mcp-serve --transport http --auth` next to the stores, and each client connects to `/mcp` with its own service key, see [docs/mcp.md: Authenticated HTTP](../docs/mcp.md#authenticated-http) |
 
 ### Remote deployments: keep the native tools
@@ -61,11 +61,12 @@ where the host's MCP config lives and how it discovers servers.
 
 ```bash
 pip install 'mnemostack[mcp]'
-mnemostack health --provider gemini  # or ollama, huggingface
+mnemostack health --provider gemini  # or ollama, huggingface, openai
 ```
 
 If `health` passes and you have indexed content (`mnemostack index ./notes/`),
 the integration only wires the host up to the existing server process.
+For OpenAI embeddings, set `OPENAI_API_KEY` in the MCP server's environment.
 
 ## Verify from a fresh session
 

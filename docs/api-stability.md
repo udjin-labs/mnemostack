@@ -147,6 +147,10 @@ localhost), `embedding.timeout` / `MNEMOSTACK_EMBEDDING_TIMEOUT` /
 `--embedding-batch-size` (chunks per provider batch call and per commit
 group during indexing; positive integer, validated at startup).
 
+For OpenAI embeddings, set `embedding.provider` or
+`MNEMOSTACK_EMBEDDING_PROVIDER` to `openai` and supply `OPENAI_API_KEY` in
+the process environment. The default model is `text-embedding-3-small`.
+
 🟡 **Experimental — embedding profiles** (`mnemostack.embeddings.profiles`):
 `EmbeddingProfile`, `register_embedding_profile`, `resolve_profile`, the
 declarative transform specs (`identity` / `prefix` / `instruct`, the latter

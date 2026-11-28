@@ -8,7 +8,6 @@ security, backups, monitoring) see [deployment.md](deployment.md).
 > server needs the extra `pip install 'mnemostack[server]'`. All commands read
 > config from a YAML file / `MNEMOSTACK_*` env vars — run `mnemostack init` to
 > generate an example and `mnemostack config` to print the effective config.
-> Nothing here needs a cloud account.
 
 ---
 
@@ -73,6 +72,38 @@ the [HTTP server section of the README](../README.md#http-server-optional) for r
 > it, `serve` falls back to the default `bolt://localhost:7687` and failed graph connections
 > trigger a 60-second cooldown before another attempt — enable it
 > deliberately in step 3.
+
+### Share a collection with the MCP server using OpenAI embeddings
+
+Install both server extras with `pip install 'mnemostack[server,mcp]'`. Put
+these settings in the mnemostack config file used by both processes:
+
+```yaml
+embedding:
+  provider: openai
+  model: text-embedding-3-small
+vector:
+  collection: shared-memory
+```
+
+Set `OPENAI_API_KEY` in the environment that runs the HTTP server.
+
+```bash
+export OPENAI_API_KEY=your-key-here
+mnemostack serve --memgraph-uri ""
+```
+
+The MCP client starts `mnemostack mcp-serve` itself as a stdio server. Put
+the same `OPENAI_API_KEY` in the client's MCP server entry using its `env`
+block or `--env` option. The HTTP server shell's export only covers the
+HTTP process.
+
+Search and remember work with the embedding key alone. This example keeps
+the default Gemini LLM, so HTTP `/answer` and MCP `mnemostack_answer` both
+require `GEMINI_API_KEY` in their respective environments.
+
+Both servers use the same Qdrant collection and 1536-dimensional embedding
+model. Use the same config when indexing content for either server.
 
 ## 3. Add Memgraph (optional — graph recall)
 

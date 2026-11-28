@@ -280,6 +280,7 @@ Built-in profiles cover OpenClaw webchat and Telegram envelopes; pass `profiles=
 | Variable | Purpose | Required for |
 | --- | --- | --- |
 | `GEMINI_API_KEY` | Google Generative AI key | Gemini embedding + Gemini Flash LLM |
+| `OPENAI_API_KEY` | OpenAI API key | OpenAI embeddings |
 | `OLLAMA_HOST` | Ollama server URL (default `http://localhost:11434`) | Ollama embeddings / LLM |
 | `MNEMOSTACK_COLLECTION` | Qdrant collection name (default `mnemostack`) | CLI convenience |
 | `MNEMOSTACK_QDRANT_URL` | Qdrant URL (default `http://localhost:6333`) | Remote Qdrant |
@@ -305,6 +306,15 @@ Built-in profiles cover OpenClaw webchat and Telegram envelopes; pass `profiles=
 | `MNEMOSTACK_CONFIG` | Path to the YAML config file | All entry points |
 
 Only the providers you actually use need their keys. HuggingFace local-GPU embeddings need no keys at all. `mnemostack init` writes the same settings as YAML; explicit CLI flags override config/env defaults.
+
+The built-in `openai` embedding provider uses `OPENAI_API_KEY` and defaults to
+`text-embedding-3-small` (1536 dimensions). Select it with `--provider openai`,
+`embedding.provider: openai` in YAML, or `MNEMOSTACK_EMBEDDING_PROVIDER=openai`.
+A rate-limited request (HTTP 429) is retried and then counted as a provider-wide
+failure, so the rest of that batch is not embedded. The index commands send up
+to `embedding.batch_size` texts (64 by default) in one request, and that request
+must fit the OpenAI project's tokens-per-minute limit; lower the batch size if
+it does not.
 
 ## Setup and usage details
 

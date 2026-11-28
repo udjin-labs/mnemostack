@@ -24,6 +24,7 @@ from . import __version__
 from .config import (
     DEFAULT_CONFIG_PATHS,
     Config,
+    _builtin_openai_registered,
     generate_example_config,
     llm_kwargs,
     model_kwargs,  # noqa: F401 — re-exported: tests patch cli.model_kwargs as a construction seam
@@ -698,10 +699,16 @@ def _doctor_graph(add, cfg) -> None:
                 pass
 
 
-def _api_key_hint(cfg) -> str | None:
+def _api_key_hint(cfg: Config, provider_name: str) -> str | None:
+    name = provider_name.lower()
     key_env = getattr(cfg.embedding, "api_key_env", None)
-    if key_env and cfg.embedding.provider == "gemini" and not os.environ.get(key_env):
+    if key_env and name == "gemini" and not os.environ.get(key_env):
         return f"set {key_env} (required for the gemini provider)"
+    if name == "openai" and _builtin_openai_registered():
+        from .embeddings.openai import API_KEY_ENV
+
+        if not os.environ.get(API_KEY_ENV, "").strip():
+            return f"set {API_KEY_ENV} (required for the openai provider)"
     return None
 
 
@@ -2077,7 +2084,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         try:
             provider = get_provider(provider_name, **_provider_kwargs_from_args(args))
         except ValueError as e:
-            add("embedding", "misconfig", str(e), _api_key_hint(cfg))
+            add("embedding", "misconfig", str(e), _api_key_hint(cfg, provider_name))
         except Exception as e:  # noqa: BLE001
             add("embedding", "down", str(e))
         if provider is not None:

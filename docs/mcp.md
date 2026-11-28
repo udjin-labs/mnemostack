@@ -148,7 +148,42 @@ Both hooks are **build-time, operator-supplied code — a trust boundary**, not 
 
 ### Existing collection with a custom embedding provider
 
-`mnemostack mcp-serve` can only name the built-in providers (`gemini`, `ollama`, `huggingface`). A collection that was built with a provider you registered yourself needs a small launcher: it registers the provider, builds the same server, and runs it. The tools and their schemas are the native ones; nothing is reimplemented.
+`mnemostack mcp-serve` includes `gemini`, `ollama`, `huggingface`, and
+`openai`. You can switch an existing collection to the built-in `openai`
+provider without reindexing if the custom provider met all of these conditions.
+
+- It reported the name `openai:text-embedding-3-small` and dimension 1536.
+- It sent the text unchanged to `text-embedding-3-small`, with no prefixes
+  and no `dimensions` parameter.
+- It stored the vectors exactly as the OpenAI API returned them, with no
+  normalisation, centering or other post-processing in `embed` or
+  `embed_batch`. The embedding-space check cannot detect such changes.
+- It used the inherited `embed_document`, `embed_documents`, `embed_query`,
+  and `embed_queries` methods and added no fingerprint extras.
+
+Before switching the MCP client, review the old provider against these
+conditions, set `OPENAI_API_KEY`, and run
+`mnemostack search "<query for a known record>" --provider openai --embedding-model text-embedding-3-small --collection <collection> --json`
+with your existing collection settings. Use a query that matches the known
+record and verify that the record ranks at or near the top of the JSON
+results and that its `sources` array includes `"vector"`. That entry shows
+only that vector search ran with the new provider. A zero exit code alone is
+insufficient. For example, a rejected API key can cause the search to skip
+vector retrieval and still return lexical matches.
+
+This check writes no collection data. It samples up to 16 stored points. If
+any sampled point has a different embedding-space fingerprint, the command
+prints an error and exits with code 2. A missing collection also produces an
+error and exit code 2, with no collection created. Points outside the
+sample can still have a different fingerprint. If the points carry no
+fingerprint because an older mnemostack indexed them, the check cannot
+verify their embedding space. You must know
+which provider and model built those vectors before switching. After verifying
+compatibility, run `mnemostack mcp-serve --provider openai --embedding-model text-embedding-3-small`
+with the same collection settings.
+
+For other custom providers, use a small launcher to register the provider,
+build the server, and run it. The server exposes the native tools and schemas.
 
 ```python
 # mnemostack_mcp.py
@@ -866,6 +901,7 @@ Common provider variables:
 | Variable | Used for |
 | --- | --- |
 | `GEMINI_API_KEY` | Gemini embeddings and Gemini LLM. |
+| `OPENAI_API_KEY` | OpenAI embeddings. |
 | `OLLAMA_HOST` | Ollama embeddings or LLM, defaulting to `http://localhost:11434` in typical Ollama setups. |
 
 ## Troubleshooting

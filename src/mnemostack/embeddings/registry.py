@@ -48,6 +48,13 @@ def _lazy_register_builtins() -> None:
         register_provider("ollama", OllamaProvider)
     except ImportError:
         pass
+    # A deployment may already register its own provider under this name
+    # (the built-in arrived later than the others). That registration wins:
+    # the late lookup of another built-in must not replace it.
+    if "openai" not in _REGISTRY:
+        from .openai import OpenAIProvider
+
+        register_provider("openai", OpenAIProvider)
     try:
         from .huggingface import HuggingFaceProvider
 
