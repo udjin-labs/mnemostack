@@ -76,7 +76,19 @@ def provider_kwargs(
             kw["timeout"] = timeout
     elif name == "gemini" and timeout is not None:
         kw["timeout"] = timeout
+    elif name == "openai" and timeout is not None and _builtin_openai_registered():
+        kw["timeout"] = timeout
     return kw
+
+
+def _builtin_openai_registered() -> bool:
+    """Whether ``openai`` names the built-in provider. A deployment may have
+    registered its own class under that name before the built-in existed;
+    such a class keeps the model-only construction contract."""
+    from mnemostack.embeddings import registry
+    from mnemostack.embeddings.openai import OpenAIProvider
+
+    return registry._REGISTRY.get("openai") is OpenAIProvider
 
 
 def quantization_kwargs(
@@ -730,7 +742,7 @@ def generate_example_config() -> str:
 # See https://github.com/udjin-labs/mnemostack/blob/main/docs/config.md
 
 embedding:
-  provider: gemini        # gemini | ollama | huggingface
+  provider: gemini        # gemini | ollama | huggingface | openai
   model: null             # null = provider default
   api_key_env: GEMINI_API_KEY
   ollama_host: null          # null = native OLLAMA_HOST env, then localhost

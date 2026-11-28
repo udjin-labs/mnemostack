@@ -7,6 +7,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Add the built-in `openai` embedding provider for CLI indexing and search,
+  HTTP, and MCP. It reads `OPENAI_API_KEY` and defaults to
+  `text-embedding-3-small` with 1536 dimensions.
 - Document how to connect Claude Code and Codex to an existing deployment
   with the built-in MCP server: a launcher example for a collection with a
   custom embedding provider (`docs/mcp.md`), a setup decision table and a
